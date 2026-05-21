@@ -1,4 +1,4 @@
-import type { CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
+import type { AgentFlavor, CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
 import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 
@@ -150,7 +150,7 @@ export class RpcGateway {
     async spawnSession(
         machineId: string,
         directory: string,
-        agent: 'claude' | 'codex' | 'cursor' | 'gemini' | 'opencode' = 'claude',
+        agent: AgentFlavor = 'claude',
         model?: string,
         modelReasoningEffort?: string,
         yolo?: boolean,

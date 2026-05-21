@@ -1,3 +1,4 @@
+import { AgentFlavorSchema } from '@hapi/protocol'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { SyncEngine } from '../../sync/syncEngine'
@@ -6,7 +7,7 @@ import { requireMachine } from './guards'
 
 const spawnBodySchema = z.object({
     directory: z.string().min(1),
-    agent: z.enum(['claude', 'codex', 'cursor', 'gemini', 'opencode']).optional(),
+    agent: AgentFlavorSchema.optional(),
     model: z.string().optional(),
     effort: z.string().optional(),
     modelReasoningEffort: z.string().optional(),

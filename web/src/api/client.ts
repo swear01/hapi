@@ -25,6 +25,7 @@ import type {
     SessionResponse,
     SessionsResponse
 } from '@/types/api'
+import type { AgentFlavor } from '@hapi/protocol'
 import type { CancelMessageResponse } from '@hapi/protocol/schemas'
 
 type ApiClientOptions = {
@@ -459,7 +460,7 @@ export class ApiClient {
     async spawnSession(
         machineId: string,
         directory: string,
-        agent?: 'claude' | 'codex' | 'cursor' | 'gemini' | 'opencode',
+        agent?: AgentFlavor,
         model?: string,
         modelReasoningEffort?: string,
         yolo?: boolean,

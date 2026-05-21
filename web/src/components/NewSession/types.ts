@@ -1,6 +1,7 @@
 import { GEMINI_MODEL_PRESETS, GEMINI_MODEL_LABELS } from '@hapi/protocol'
+import type { AgentFlavor } from '@hapi/protocol'
 
-export type AgentType = 'claude' | 'codex' | 'cursor' | 'gemini' | 'opencode'
+export type AgentType = AgentFlavor
 export type SessionType = 'simple' | 'worktree'
 export type CodexReasoningEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh'
 export type ClaudeEffort = 'auto' | 'medium' | 'high' | 'max'

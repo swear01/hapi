@@ -1,9 +1,15 @@
+import { z } from 'zod'
+
 /**
  * @description The legacy payload type identifier used for all generic agent messages.
  * Changing this value will affect the communication schema between CLI, Hub, and Web.
  * A migration plan is required if this literal is ever modified.
  */
 export const AGENT_MESSAGE_PAYLOAD_TYPE = 'codex' as const
+
+export const AGENT_FLAVORS = ['claude', 'codex', 'cursor', 'gemini', 'opencode'] as const
+export type AgentFlavor = typeof AGENT_FLAVORS[number]
+export const AgentFlavorSchema = z.enum(AGENT_FLAVORS)
 
 export const CLAUDE_PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'] as const
 export type ClaudePermissionMode = typeof CLAUDE_PERMISSION_MODES[number]
@@ -34,8 +40,6 @@ export const PERMISSION_MODES = [
     'yolo'
 ] as const
 export type PermissionMode = typeof PERMISSION_MODES[number]
-
-export type AgentFlavor = 'claude' | 'codex' | 'gemini' | 'opencode' | 'cursor'
 
 export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
     default: 'Default',
