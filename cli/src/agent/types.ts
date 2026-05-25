@@ -33,6 +33,16 @@ export type AgentMessage =
     | { type: 'reasoning'; text: string; id?: string; live?: boolean }
     | { type: 'tool_call'; id: string; name: string; input: unknown; status: 'pending' | 'in_progress' | 'completed' | 'failed' }
     | { type: 'tool_result'; id: string; output: unknown; status: 'completed' | 'failed' }
+    | {
+        type: 'usage';
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens?: number;
+        thoughtTokens?: number;
+        cacheReadTokens?: number;
+        contextTokens?: number;
+        contextWindow?: number;
+    }
     | { type: 'plan'; items: PlanItem[] }
     | { type: 'turn_complete'; stopReason: string }
     | { type: 'error'; message: string };

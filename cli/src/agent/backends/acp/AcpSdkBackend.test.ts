@@ -345,4 +345,65 @@ describe('AcpSdkBackend', () => {
             'turn_complete'
         ]);
     });
+
+    it('combines OpenCode usage_update and prompt usage into a usage message', async () => {
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+
+        const messages: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => {
+                setTimeout(() => {
+                    backendInternal.handleSessionUpdate({
+                        sessionId: 'session-1',
+                        update: {
+                            sessionUpdate: 'usage_update',
+                            used: 13_879,
+                            size: 65_536,
+                        }
+                    });
+                }, 0);
+
+                await sleep(5);
+
+                return {
+                    stopReason: 'end_turn',
+                    usage: {
+                        totalTokens: 13_892,
+                        inputTokens: 8_119,
+                        outputTokens: 2,
+                        thoughtTokens: 11,
+                        cachedReadTokens: 5_760
+                    }
+                };
+            },
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hello' }], (message) => {
+            messages.push(message);
+        });
+
+        expect(messages).toContainEqual({
+            type: 'usage',
+            inputTokens: 8_119,
+            outputTokens: 2,
+            cacheReadTokens: 5_760,
+            thoughtTokens: 11,
+            totalTokens: 13_892,
+            contextTokens: 13_879,
+            contextWindow: 65_536
+        });
+    });
 });

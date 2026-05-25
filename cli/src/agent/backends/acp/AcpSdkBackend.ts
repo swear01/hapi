@@ -3,12 +3,26 @@ import type { AgentBackend, AgentMessage, AgentSessionConfig, PermissionRequest,
 import { asString, isObject } from '@hapi/protocol';
 import { AcpStdioTransport, type AcpStderrError } from './AcpStdioTransport';
 import { AcpMessageHandler } from './AcpMessageHandler';
+import { ACP_SESSION_UPDATE_TYPES } from './constants';
 import { logger } from '@/ui/logger';
 import { withRetry } from '@/utils/time';
 import packageJson from '../../../../package.json';
 
 type PendingPermission = {
     resolve: (result: { outcome: { outcome: string; optionId?: string } }) => void;
+};
+
+type AcpPromptUsage = {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens?: number;
+    thoughtTokens?: number;
+    cacheReadTokens?: number;
+};
+
+type AcpUsageUpdate = {
+    contextTokens: number | undefined;
+    contextWindow: number | undefined;
 };
 
 export type AcpModelDescriptor = {
@@ -40,6 +54,7 @@ export class AcpSdkBackend implements AgentBackend {
     private isProcessingMessage = false;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
+    private latestUsageUpdate: AcpUsageUpdate | null = null;
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -250,7 +265,9 @@ export class AcpSdkBackend implements AgentBackend {
         this.messageHandler = new AcpMessageHandler(onUpdate);
         this.isProcessingMessage = true;
         this.lastSessionUpdateAt = Date.now();
+        this.latestUsageUpdate = null;
         let stopReason: string | null = null;
+        let promptUsage: AcpPromptUsage | null = null;
 
         try {
             // No timeout for prompt requests - they can run for extended periods
@@ -261,6 +278,7 @@ export class AcpSdkBackend implements AgentBackend {
             }, { timeoutMs: Infinity });
 
             stopReason = isObject(response) ? asString(response.stopReason) : null;
+            promptUsage = this.extractPromptUsage(response);
         } finally {
             await this.waitForSessionUpdateQuiet(
                 AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
@@ -268,6 +286,19 @@ export class AcpSdkBackend implements AgentBackend {
             );
             this.messageHandler?.drainBuffers();
             try {
+                const latestUsageUpdate = this.readLatestUsageUpdate();
+                if (promptUsage) {
+                    onUpdate({
+                        type: 'usage',
+                        inputTokens: promptUsage.inputTokens,
+                        outputTokens: promptUsage.outputTokens,
+                        totalTokens: promptUsage.totalTokens,
+                        thoughtTokens: promptUsage.thoughtTokens,
+                        cacheReadTokens: promptUsage.cacheReadTokens,
+                        contextTokens: latestUsageUpdate ? latestUsageUpdate.contextTokens : undefined,
+                        contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined
+                    });
+                }
                 if (stopReason) {
                     onUpdate({ type: 'turn_complete', stopReason });
                 }
@@ -367,7 +398,24 @@ export class AcpSdkBackend implements AgentBackend {
         }
         this.lastSessionUpdateAt = Date.now();
         const update = params.update;
+        this.captureUsageUpdate(update);
         this.messageHandler?.handleUpdate(update);
+    }
+
+    private captureUsageUpdate(update: unknown): void {
+        if (!isObject(update)) return;
+        if (asString(update.sessionUpdate) !== ACP_SESSION_UPDATE_TYPES.usageUpdate) return;
+
+        const contextTokens = this.asFiniteNumber(update.used);
+        const contextWindow = this.asFiniteNumber(update.size);
+        this.latestUsageUpdate = {
+            contextTokens: contextTokens ?? undefined,
+            contextWindow: contextWindow ?? undefined
+        };
+    }
+
+    private readLatestUsageUpdate(): AcpUsageUpdate | null {
+        return this.latestUsageUpdate;
     }
 
     private async waitForSessionUpdateQuiet(quietMs: number, timeoutMs: number): Promise<void> {
@@ -463,6 +511,31 @@ export class AcpSdkBackend implements AgentBackend {
             availableModels: existing?.availableModels ?? [],
             currentModelId: modelId
         });
+    }
+
+    private extractPromptUsage(response: unknown): AcpPromptUsage | null {
+        if (!isObject(response) || !isObject(response.usage)) return null;
+        const usage = response.usage;
+        const inputTokens = this.asFiniteNumber(usage.inputTokens ?? usage.input_tokens);
+        const outputTokens = this.asFiniteNumber(usage.outputTokens ?? usage.output_tokens);
+        if (inputTokens === null || outputTokens === null) return null;
+
+        return {
+            inputTokens,
+            outputTokens,
+            totalTokens: this.asFiniteNumber(usage.totalTokens ?? usage.total_tokens) ?? undefined,
+            thoughtTokens: this.asFiniteNumber(usage.thoughtTokens ?? usage.thought_tokens) ?? undefined,
+            cacheReadTokens: this.asFiniteNumber(
+                usage.cachedReadTokens
+                ?? usage.cached_read_tokens
+                ?? usage.cachedInputTokens
+                ?? usage.cached_input_tokens
+            ) ?? undefined
+        };
+    }
+
+    private asFiniteNumber(value: unknown): number | null {
+        return typeof value === 'number' && Number.isFinite(value) ? value : null;
     }
 
 
