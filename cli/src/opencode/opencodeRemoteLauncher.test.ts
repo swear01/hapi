@@ -4,10 +4,12 @@ import type { OpencodeMode, PermissionMode } from './types';
 
 const harness = vi.hoisted(() => ({
     setModelArgs: [] as Array<{ sessionId: string; modelId: string; flavor?: string }>,
+    setConfigOptionArgs: [] as Array<{ sessionId: string; configId: string; value: string }>,
     promptCount: 0,
     promptContents: [] as unknown[],
     events: [] as string[],
-    setModelImpl: null as null | ((sessionId: string, modelId: string) => Promise<void>)
+    setModelImpl: null as null | ((sessionId: string, modelId: string) => Promise<void>),
+    thoughtLevelOption: null as null | { id: string; currentValue?: string; options: Array<{ value: string; name?: string }> }
 }));
 
 vi.mock('./utils/opencodeBackend', () => ({
@@ -22,6 +24,13 @@ vi.mock('./utils/opencodeBackend', () => ({
                 await harness.setModelImpl(sessionId, modelId);
             }
         }),
+        setConfigOption: vi.fn(async (sessionId: string, configId: string, value: string) => {
+            harness.events.push(`setConfigOption:${value}`);
+            harness.setConfigOptionArgs.push({ sessionId, configId, value });
+            if (harness.thoughtLevelOption) {
+                harness.thoughtLevelOption = { ...harness.thoughtLevelOption, currentValue: value };
+            }
+        }),
         prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
             harness.promptContents.push(content);
             harness.events.push('prompt:start');
@@ -34,7 +43,8 @@ vi.mock('./utils/opencodeBackend', () => ({
         onStderrError: vi.fn(),
         onPermissionRequest: vi.fn(),
         disconnect: vi.fn(async () => {}),
-        getSessionModelsMetadata: vi.fn(() => undefined)
+        getSessionModelsMetadata: vi.fn(() => undefined),
+        getThoughtLevelConfigOption: vi.fn(() => harness.thoughtLevelOption ?? undefined)
     }))
 }));
 
@@ -76,6 +86,14 @@ function createPlanMode(model?: string): OpencodeMode {
     return {
         permissionMode: 'plan' as PermissionMode,
         model
+    };
+}
+
+function createModeWithEffort(model: string | undefined, modelReasoningEffort: string | null): OpencodeMode {
+    return {
+        permissionMode: 'default' as PermissionMode,
+        model,
+        modelReasoningEffort
     };
 }
 
@@ -136,10 +154,12 @@ function createSessionStub(items: Array<{ message: string; mode: OpencodeMode }>
 describe('opencodeRemoteLauncher inline model switch', () => {
     afterEach(() => {
         harness.setModelArgs = [];
+        harness.setConfigOptionArgs = [];
         harness.promptCount = 0;
         harness.promptContents = [];
         harness.events = [];
         harness.setModelImpl = null;
+        harness.thoughtLevelOption = null;
     });
 
     it('calls setModel with opencode flavor between turns when the queued model differs', async () => {
@@ -217,6 +237,29 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(failureMessages.length).toBe(1);
         expect(failureMessages[0]?.message).toContain('ollama/b');
         expect(harness.promptCount).toBe(2);
+    });
+
+
+
+    it('calls setConfigOption for OpenCode reasoning effort changes', async () => {
+        harness.thoughtLevelOption = {
+            id: 'effort',
+            currentValue: 'low',
+            options: [
+                { value: 'low', name: 'Low' },
+                { value: 'high', name: 'High' }
+            ]
+        };
+        const { session } = createSessionStub([
+            { message: 'first', mode: createModeWithEffort(undefined, 'high') }
+        ]);
+
+        await opencodeRemoteLauncher(session as never);
+
+        expect(harness.setConfigOptionArgs).toEqual([
+            { sessionId: 'acp-session-1', configId: 'effort', value: 'high' }
+        ]);
+        expect(harness.promptCount).toBe(1);
     });
 
     it('injects plan-mode instructions into plan turns', async () => {

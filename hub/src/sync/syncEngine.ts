@@ -454,6 +454,13 @@ export class SyncEngine {
             throw new Error('Missing applied session config')
         }
 
+        const requestedKeys = Object.keys(config) as Array<keyof typeof config>
+        for (const key of requestedKeys) {
+            if (!(key in applied)) {
+                throw new Error(`Session did not apply ${key}`)
+            }
+        }
+
         this.sessionCache.applySessionConfig(sessionId, applied)
     }
 

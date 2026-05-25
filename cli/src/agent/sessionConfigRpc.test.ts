@@ -72,6 +72,25 @@ describe('sessionConfigRpc', () => {
         expect(onApply).toHaveBeenCalledWith({})
     })
 
+
+
+    it('applies nullable model reasoning effort when supported', async () => {
+        const harness = createRpcHarness()
+        const onApply = vi.fn()
+
+        registerSessionConfigRpc({
+            rpcHandlerManager: harness.rpcHandlerManager,
+            flavor: 'opencode',
+            modelReasoningEffortMode: 'nullable',
+            onApply
+        })
+
+        const result = await harness.getHandler()({ modelReasoningEffort: 'high' }) as { applied: Record<string, unknown> }
+
+        expect(result.applied.modelReasoningEffort).toBe('high')
+        expect(onApply).toHaveBeenCalledWith({ modelReasoningEffort: 'high' })
+    })
+
     it('rejects model config for agents configured to reject model changes', async () => {
         const harness = createRpcHarness()
 

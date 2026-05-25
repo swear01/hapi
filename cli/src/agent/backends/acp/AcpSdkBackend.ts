@@ -21,12 +21,20 @@ export type AcpSessionModelsMetadata = {
     currentModelId: string | null;
 };
 
+export type AcpConfigOptionDescriptor = {
+    id: string;
+    category?: string;
+    currentValue?: string;
+    options: Array<{ value: string; name?: string }>;
+};
+
 export class AcpSdkBackend implements AgentBackend {
     private transport: AcpStdioTransport | null = null;
     private permissionHandler: ((request: PermissionRequest) => void) | null = null;
     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
     private readonly pendingPermissions = new Map<string, PendingPermission>();
     private readonly sessionModelsMetadata = new Map<string, AcpSessionModelsMetadata>();
+    private readonly sessionConfigOptions = new Map<string, AcpConfigOptionDescriptor[]>();
     private messageHandler: AcpMessageHandler | null = null;
     private activeSessionId: string | null = null;
     private isProcessingMessage = false;
@@ -120,7 +128,7 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         this.activeSessionId = sessionId;
-        this.captureSessionModelsMetadata(sessionId, response);
+        this.captureSessionMetadata(sessionId, response);
         return sessionId;
     }
 
@@ -146,7 +154,7 @@ export class AcpSdkBackend implements AgentBackend {
         const loadedSessionId = isObject(response) ? asString(response.sessionId) : null;
         const sessionId = loadedSessionId ?? config.sessionId;
         this.activeSessionId = sessionId;
-        this.captureSessionModelsMetadata(sessionId, response);
+        this.captureSessionMetadata(sessionId, response);
         return sessionId;
     }
 
@@ -183,8 +191,27 @@ export class AcpSdkBackend implements AgentBackend {
         } else {
             // For other flavors (e.g. Gemini), if the response carries metadata,
             // capture it. Missing fields are silently ignored.
-            this.captureSessionModelsMetadata(sessionId, response);
+            this.captureSessionMetadata(sessionId, response);
         }
+    }
+
+    async setConfigOption(
+        sessionId: string,
+        configId: string,
+        value: string
+    ): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+
+        await this.waitForResponseComplete();
+
+        const response = await this.transport.sendRequest('session/set_config_option', {
+            sessionId,
+            configId,
+            value
+        });
+        this.captureSessionMetadata(sessionId, response);
     }
 
     /**
@@ -194,6 +221,10 @@ export class AcpSdkBackend implements AgentBackend {
      */
     getSessionModelsMetadata(sessionId: string): AcpSessionModelsMetadata | undefined {
         return this.sessionModelsMetadata.get(sessionId);
+    }
+
+    getThoughtLevelConfigOption(sessionId: string): AcpConfigOptionDescriptor | undefined {
+        return this.sessionConfigOptions.get(sessionId)?.find((option) => option.category === 'thought_level');
     }
 
     async prompt(
@@ -432,6 +463,39 @@ export class AcpSdkBackend implements AgentBackend {
             availableModels: existing?.availableModels ?? [],
             currentModelId: modelId
         });
+    }
+
+
+    private captureSessionMetadata(sessionId: string, response: unknown): void {
+        this.captureSessionModelsMetadata(sessionId, response);
+        this.captureSessionConfigOptions(sessionId, response);
+    }
+
+    private captureSessionConfigOptions(sessionId: string, response: unknown): void {
+        if (!isObject(response) || !Array.isArray(response.configOptions)) return;
+
+        const options = response.configOptions
+            .filter((entry): entry is Record<string, unknown> => isObject(entry))
+            .map((entry): AcpConfigOptionDescriptor | null => {
+                const id = asString(entry.id);
+                if (!id) return null;
+                const rawOptions = Array.isArray(entry.options) ? entry.options : [];
+                return {
+                    id,
+                    category: asString(entry.category) ?? undefined,
+                    currentValue: asString(entry.currentValue) ?? undefined,
+                    options: rawOptions
+                        .filter((option): option is Record<string, unknown> => isObject(option))
+                        .map((option) => ({
+                            value: asString(option.value) ?? '',
+                            name: asString(option.name) ?? undefined
+                        }))
+                        .filter((option) => option.value.length > 0)
+                };
+            })
+            .filter((entry): entry is AcpConfigOptionDescriptor => entry !== null);
+
+        this.sessionConfigOptions.set(sessionId, options);
     }
 
     /**

@@ -213,6 +213,67 @@ describe('AcpSdkBackend', () => {
         });
     });
 
+
+
+    it('captures and sets OpenCode thought-level config option', async () => {
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method, params) => {
+                calls.push({ method, params });
+                if (method === 'session/new') {
+                    return {
+                        sessionId: 's1',
+                        configOptions: [{
+                            id: 'effort',
+                            name: 'Effort',
+                            category: 'thought_level',
+                            type: 'select',
+                            currentValue: 'low',
+                            options: [
+                                { value: 'low', name: 'Low' },
+                                { value: 'high', name: 'High' }
+                            ]
+                        }]
+                    };
+                }
+                if (method === 'session/set_config_option') {
+                    return {
+                        configOptions: [{
+                            id: 'effort',
+                            category: 'thought_level',
+                            currentValue: 'high',
+                            options: [{ value: 'high', name: 'High' }]
+                        }]
+                    };
+                }
+                return null;
+            },
+            close: async () => {}
+        };
+
+        await backend.newSession({ cwd: '/tmp/x', mcpServers: [] });
+        expect(backend.getThoughtLevelConfigOption('s1')).toMatchObject({
+            id: 'effort',
+            currentValue: 'low',
+            options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }]
+        });
+
+        await backend.setConfigOption('s1', 'effort', 'high');
+
+        expect(calls).toContainEqual({
+            method: 'session/set_config_option',
+            params: { sessionId: 's1', configId: 'effort', value: 'high' }
+        });
+        expect(backend.getThoughtLevelConfigOption('s1')).toMatchObject({
+            id: 'effort',
+            currentValue: 'high'
+        });
+    });
+
     it('emits turn_complete after trailing tool updates from the same turn', async () => {
         backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
         backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;

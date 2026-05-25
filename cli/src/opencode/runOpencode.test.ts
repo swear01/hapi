@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockOpencodeSession = vi.hoisted(() => ({
     setModel: vi.fn(),
     setPermissionMode: vi.fn(),
+    setModelReasoningEffort: vi.fn(),
     pushKeepAlive: vi.fn(),
     thinking: false,
     stopKeepAlive: vi.fn()
@@ -89,6 +90,7 @@ describe('runOpencode set-session-config handler', () => {
         harness.opencodeLoopError = null;
         mockOpencodeSession.setModel.mockReset();
         mockOpencodeSession.setPermissionMode.mockReset();
+        mockOpencodeSession.setModelReasoningEffort.mockReset();
         mockOpencodeSession.pushKeepAlive.mockReset();
         harness.session.onUserMessage.mockReset();
         harness.session.rpcHandlerManager.registerHandler.mockReset();
@@ -187,6 +189,19 @@ describe('runOpencode set-session-config handler', () => {
 
         expect(applied.permissionMode).toBe('plan');
         expect(mockOpencodeSession.setPermissionMode).toHaveBeenLastCalledWith('plan');
+    });
+
+
+
+    it('accepts model reasoning effort via set-session-config RPC', async () => {
+        await runOpencode({});
+
+        const handler = getConfigHandler();
+        const result = await handler({ modelReasoningEffort: 'high' }) as Record<string, unknown>;
+        const applied = result.applied as Record<string, unknown>;
+
+        expect(applied.modelReasoningEffort).toBe('high');
+        expect(mockOpencodeSession.setModelReasoningEffort).toHaveBeenLastCalledWith('high');
     });
 
     it('passes initial model from opts through to the loop', async () => {
