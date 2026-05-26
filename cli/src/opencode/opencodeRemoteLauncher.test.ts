@@ -9,6 +9,7 @@ const harness = vi.hoisted(() => ({
     promptContents: [] as unknown[],
     events: [] as string[],
     setModelImpl: null as null | ((sessionId: string, modelId: string) => Promise<void>),
+    setConfigOptionImpl: null as null | ((sessionId: string, configId: string, value: string) => Promise<void>),
     thoughtLevelOption: null as null | { id: string; currentValue?: string; options: Array<{ value: string; name?: string }> }
 }));
 
@@ -27,6 +28,9 @@ vi.mock('./utils/opencodeBackend', () => ({
         setConfigOption: vi.fn(async (sessionId: string, configId: string, value: string) => {
             harness.events.push(`setConfigOption:${value}`);
             harness.setConfigOptionArgs.push({ sessionId, configId, value });
+            if (harness.setConfigOptionImpl) {
+                await harness.setConfigOptionImpl(sessionId, configId, value);
+            }
             if (harness.thoughtLevelOption) {
                 harness.thoughtLevelOption = { ...harness.thoughtLevelOption, currentValue: value };
             }
@@ -110,6 +114,8 @@ function createSessionStub(items: Array<{ message: string; mode: OpencodeMode }>
 
     const sessionEvents: Array<{ type: string; [key: string]: unknown }> = [];
     const rpcHandlers = new Map<string, (params: unknown) => unknown>();
+    const setModelReasoningEffort = vi.fn();
+    const pushKeepAlive = vi.fn();
 
     const client = {
         rpcHandlerManager: {
@@ -135,6 +141,8 @@ function createSessionStub(items: Array<{ message: string; mode: OpencodeMode }>
             return 'default' as const;
         },
         setModel(_model: string | null) {},
+        setModelReasoningEffort,
+        pushKeepAlive,
         onThinkingChange(thinking: boolean) {
             session.thinking = thinking;
         },
@@ -148,7 +156,7 @@ function createSessionStub(items: Array<{ message: string; mode: OpencodeMode }>
         sendUserMessage(_text: string) {}
     };
 
-    return { session, sessionEvents, rpcHandlers };
+    return { session, sessionEvents, rpcHandlers, setModelReasoningEffort, pushKeepAlive };
 }
 
 describe('opencodeRemoteLauncher inline model switch', () => {
@@ -159,6 +167,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         harness.promptContents = [];
         harness.events = [];
         harness.setModelImpl = null;
+        harness.setConfigOptionImpl = null;
         harness.thoughtLevelOption = null;
     });
 
@@ -259,6 +268,41 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(harness.setConfigOptionArgs).toEqual([
             { sessionId: 'acp-session-1', configId: 'effort', value: 'high' }
         ]);
+        expect(harness.promptCount).toBe(1);
+    });
+
+    it('rolls back session reasoning effort when OpenCode rejects the switch', async () => {
+        harness.thoughtLevelOption = {
+            id: 'effort',
+            currentValue: 'low',
+            options: [
+                { value: 'low', name: 'Low' },
+                { value: 'high', name: 'High' }
+            ]
+        };
+        harness.setConfigOptionImpl = async () => {
+            throw new Error('Transient backend failure');
+        };
+        const { session, sessionEvents, setModelReasoningEffort, pushKeepAlive } = createSessionStub([
+            { message: 'first', mode: createModeWithEffort(undefined, 'high') }
+        ]);
+        const rollbacks: Array<string | null> = [];
+
+        await opencodeRemoteLauncher(session as never, {
+            onReasoningEffortRollback: (effort) => rollbacks.push(effort)
+        });
+
+        expect(harness.setConfigOptionArgs).toEqual([
+            { sessionId: 'acp-session-1', configId: 'effort', value: 'high' }
+        ]);
+        expect(setModelReasoningEffort).toHaveBeenCalledWith('low');
+        expect(pushKeepAlive).toHaveBeenCalledTimes(1);
+        expect(rollbacks).toEqual(['low']);
+        expect(sessionEvents.some(
+            (event) => event.type === 'message'
+                && typeof event.message === 'string'
+                && event.message.includes('Failed to switch reasoning effort')
+        )).toBe(true);
         expect(harness.promptCount).toBe(1);
     });
 

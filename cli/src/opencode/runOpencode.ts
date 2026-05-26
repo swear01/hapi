@@ -34,6 +34,13 @@ export async function runOpencode(opts: {
         opts.startingMode = 'remote';
     }
 
+    const startingMode: 'local' | 'remote' = opts.startingMode
+        ?? (startedBy === 'runner' ? 'remote' : 'local');
+
+    if (opts.permissionMode === 'plan' && startingMode !== 'remote') {
+        throw new Error('OpenCode plan mode is only supported in remote mode');
+    }
+
     const initialState: AgentState = {
         controlledByUser: false
     };
@@ -60,9 +67,6 @@ export async function runOpencode(opts: {
             modelReasoningEffort: initialModelReasoningEffort ?? undefined
         });
     const { api, session } = bootstrap;
-
-    const startingMode: 'local' | 'remote' = opts.startingMode
-        ?? (startedBy === 'runner' ? 'remote' : 'local');
 
     setControlledByUser(session, startingMode);
 
@@ -168,6 +172,9 @@ export async function runOpencode(opts: {
             hookServer,
             hookUrl,
             onModeChange: createModeChangeHandler(session),
+            onReasoningEffortRollback: (effort) => {
+                sessionModelReasoningEffort = effort;
+            },
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();

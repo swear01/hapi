@@ -111,6 +111,20 @@ describe('runOpencode set-session-config handler', () => {
         return configHandler![1] as (payload: unknown) => Promise<unknown>;
     }
 
+    it('rejects plan mode for local OpenCode startup', async () => {
+        await expect(runOpencode({ permissionMode: 'plan' })).rejects.toThrow(
+            'OpenCode plan mode is only supported in remote mode'
+        );
+        expect(harness.opencodeLoopArgs).toEqual([]);
+    });
+
+    it('allows plan mode for remote OpenCode startup', async () => {
+        await runOpencode({ permissionMode: 'plan', startingMode: 'remote' });
+
+        expect(harness.opencodeLoopArgs[0]?.permissionMode).toBe('plan');
+        expect(harness.opencodeLoopArgs[0]?.startingMode).toBe('remote');
+    });
+
     it('applies model change via set-session-config RPC', async () => {
         await runOpencode({});
 

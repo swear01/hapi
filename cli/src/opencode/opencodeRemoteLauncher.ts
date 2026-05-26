@@ -6,11 +6,15 @@ import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types'
 import { RemoteLauncherBase, type RemoteLauncherDisplayContext, type RemoteLauncherExitReason } from '@/modules/common/remote/RemoteLauncherBase';
 import { OpencodeDisplay } from '@/ui/ink/OpencodeDisplay';
 import type { OpencodeSession } from './session';
-import type { PermissionMode } from './types';
+import type { OpencodeMode, PermissionMode } from './types';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { createOpencodeBackend } from './utils/opencodeBackend';
 import { OpencodePermissionHandler } from './utils/permissionHandler';
 import { PLAN_MODE_INSTRUCTION, TITLE_INSTRUCTION } from './utils/systemPrompt';
+
+type OpencodeRemoteLauncherOptions = {
+    onReasoningEffortRollback?: (effort: string | null) => void;
+};
 
 class OpencodeRemoteLauncher extends RemoteLauncherBase {
     private readonly session: OpencodeSession;
@@ -26,7 +30,10 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
     private setModelSupported: boolean | undefined = undefined;
     private setEffortSupported: boolean | undefined = undefined;
 
-    constructor(session: OpencodeSession) {
+    constructor(
+        session: OpencodeSession,
+        private readonly options: OpencodeRemoteLauncherOptions = {}
+    ) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
     }
@@ -185,7 +192,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
             if (requestedEffort && requestedEffort !== this.currentBackendEffort) {
                 const thoughtLevelOption = backend.getThoughtLevelConfigOption?.(acpSessionId);
                 if (!backend.setConfigOption || !thoughtLevelOption || this.setEffortSupported === false) {
-                    batch.mode.modelReasoningEffort = this.currentBackendEffort;
+                    this.rollbackReasoningEffort(batch, this.currentBackendEffort);
                 } else {
                     logger.debug(`[opencode-remote] Switching effort inline: ${this.currentBackendEffort ?? '(default)'} -> ${requestedEffort}`);
                     try {
@@ -209,7 +216,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                                 message: `Failed to switch reasoning effort to ${requestedEffort}. Continuing with ${this.currentBackendEffort ?? '(default)'}.`
                             });
                         }
-                        batch.mode.modelReasoningEffort = this.currentBackendEffort;
+                        this.rollbackReasoningEffort(batch, this.currentBackendEffort);
                     }
                 }
             }
@@ -272,6 +279,13 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
             this.happyServer.stop();
             this.happyServer = null;
         }
+    }
+
+    private rollbackReasoningEffort(batch: { mode: OpencodeMode }, effort: string | null): void {
+        batch.mode.modelReasoningEffort = effort;
+        this.session.setModelReasoningEffort(effort);
+        this.session.pushKeepAlive();
+        this.options.onReasoningEffortRollback?.(effort);
     }
 
     private handleAgentMessage(message: AgentMessage): void {
@@ -357,8 +371,9 @@ function toAcpMcpServers(config: Record<string, { command: string; args: string[
 }
 
 export async function opencodeRemoteLauncher(
-    session: OpencodeSession
+    session: OpencodeSession,
+    options: OpencodeRemoteLauncherOptions = {}
 ): Promise<'switch' | 'exit'> {
-    const launcher = new OpencodeRemoteLauncher(session);
+    const launcher = new OpencodeRemoteLauncher(session, options);
     return launcher.launch();
 }
