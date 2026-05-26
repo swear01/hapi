@@ -155,6 +155,45 @@ describe('AcpSdkBackend', () => {
         });
     });
 
+    it('captures model metadata from configOptions when models block is missing', async () => {
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method) => {
+                if (method === 'session/new') {
+                    return {
+                        sessionId: 'opencode-session-config-options',
+                        configOptions: [
+                            {
+                                id: 'model',
+                                category: 'model',
+                                currentValue: 'opencode/big-pickle',
+                                options: [
+                                    { value: 'opencode/big-pickle', name: 'OpenCode Zen/Big Pickle' },
+                                    { value: 'deepseek/deepseek-chat', name: 'DeepSeek/DeepSeek Chat' }
+                                ]
+                            }
+                        ]
+                    };
+                }
+                return null;
+            },
+            close: async () => {}
+        };
+
+        const sessionId = await backend.newSession({ cwd: '/tmp/x', mcpServers: [] });
+
+        expect(backend.getSessionModelsMetadata(sessionId)).toEqual({
+            availableModels: [
+                { modelId: 'opencode/big-pickle', name: 'OpenCode Zen/Big Pickle' },
+                { modelId: 'deepseek/deepseek-chat', name: 'DeepSeek/DeepSeek Chat' }
+            ],
+            currentModelId: 'opencode/big-pickle'
+        });
+    });
+
     it('returns undefined session metadata when session/new omits models', async () => {
         const backend = new AcpSdkBackend({ command: 'gemini' });
         const backendInternal = backend as unknown as {

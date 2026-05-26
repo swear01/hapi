@@ -9,9 +9,9 @@ describe('useOpencodeModels retry policy', () => {
     })
 
     it('polls briefly until OpenCode session models are discovered', () => {
-        expect(getOpencodeModelsRefetchInterval(true, undefined)).toBe(1000)
-        expect(getOpencodeModelsRefetchInterval(true, { success: true, availableModels: [] })).toBe(1000)
-        expect(getOpencodeModelsRefetchInterval(true, { success: false, error: 'not ready' })).toBe(1000)
+        expect(getOpencodeModelsRefetchInterval(true, undefined, 0)).toBe(1000)
+        expect(getOpencodeModelsRefetchInterval(true, { success: true, availableModels: [] }, 1)).toBe(1000)
+        expect(getOpencodeModelsRefetchInterval(true, { success: false, error: 'not ready' }, 2)).toBe(1000)
     })
 
     it('stops polling once model options are available or the query is disabled', () => {
@@ -19,7 +19,13 @@ describe('useOpencodeModels retry policy', () => {
             success: true,
             availableModels: [{ modelId: 'provider/model', name: 'Provider Model' }],
             currentModelId: 'provider/model'
-        })).toBe(false)
-        expect(getOpencodeModelsRefetchInterval(false, undefined)).toBe(false)
+        }, 1)).toBe(false)
+        expect(getOpencodeModelsRefetchInterval(false, undefined, 0)).toBe(false)
+    })
+
+    it('stops polling after the discovery poll cap', () => {
+        expect(getOpencodeModelsRefetchInterval(true, undefined, 10)).toBe(false)
+        expect(getOpencodeModelsRefetchInterval(true, { success: true, availableModels: [] }, 10)).toBe(false)
+        expect(getOpencodeModelsRefetchInterval(true, { success: false, error: 'not ready' }, 10)).toBe(false)
     })
 })

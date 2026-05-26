@@ -8,11 +8,14 @@ export function shouldRetryOpencodeModelsQuery(failureCount: number): boolean {
     return failureCount < 3
 }
 
+const MAX_OPENCODE_MODEL_DISCOVERY_POLLS = 10
+
 export function getOpencodeModelsRefetchInterval(
     enabled: boolean,
-    data?: OpencodeModelsResponse
+    data: OpencodeModelsResponse | undefined,
+    pollCount: number
 ): 1000 | false {
-    if (!enabled) {
+    if (!enabled || pollCount >= MAX_OPENCODE_MODEL_DISCOVERY_POLLS) {
         return false
     }
     if (!data) {
@@ -55,7 +58,8 @@ export function useOpencodeModels(args: {
         retry: (failureCount) => shouldRetryOpencodeModelsQuery(failureCount),
         refetchInterval: (query) => getOpencodeModelsRefetchInterval(
             enabled,
-            query.state.data as OpencodeModelsResponse | undefined
+            query.state.data as OpencodeModelsResponse | undefined,
+            query.state.dataUpdateCount + query.state.errorUpdateCount
         ),
     })
 

@@ -579,6 +579,24 @@ export class AcpSdkBackend implements AgentBackend {
      * expose model metadata (e.g. current Gemini ACP build) simply leave the
      * cache untouched.
      */
+    private extractModelConfigOption(response: Record<string, unknown>): {
+        currentValue: string | null;
+        options: unknown[];
+    } | null {
+        if (!Array.isArray(response.configOptions)) return null;
+
+        for (const entry of response.configOptions) {
+            if (!isObject(entry)) continue;
+            if (asString(entry.category) !== 'model') continue;
+            return {
+                currentValue: asString(entry.currentValue),
+                options: Array.isArray(entry.options) ? entry.options : []
+            };
+        }
+
+        return null;
+    }
+
     private captureSessionModelsMetadata(sessionId: string, response: unknown): void {
         if (!isObject(response)) return;
 
@@ -588,16 +606,17 @@ export class AcpSdkBackend implements AgentBackend {
         const nestedList = nested?.availableModels;
         const nestedCurrent = nested?.currentModelId;
 
+        const configModelOption = this.extractModelConfigOption(response);
         const rawModels = Array.isArray(directList)
             ? directList
             : Array.isArray(nestedList)
                 ? nestedList
-                : null;
+                : configModelOption?.options ?? null;
         const rawCurrent = typeof directCurrent === 'string'
             ? directCurrent
             : typeof nestedCurrent === 'string'
                 ? nestedCurrent
-                : null;
+                : configModelOption?.currentValue ?? null;
 
         if (rawModels === null && rawCurrent === null) {
             return;
@@ -607,7 +626,7 @@ export class AcpSdkBackend implements AgentBackend {
         if (Array.isArray(rawModels)) {
             for (const entry of rawModels) {
                 if (!isObject(entry)) continue;
-                const modelId = asString(entry.modelId);
+                const modelId = asString(entry.modelId) ?? asString(entry.value);
                 if (!modelId) continue;
                 const name = asString(entry.name) ?? undefined;
                 availableModels.push(name ? { modelId, name } : { modelId });

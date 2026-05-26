@@ -361,7 +361,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         });
     });
 
-    it('listOpencodeModels handler returns empty cache when backend has no metadata', async () => {
+    it('listOpencodeModels handler returns unavailable when backend has no metadata', async () => {
         const { session, rpcHandlers } = createSessionStub([
             { message: 'first', mode: createMode() }
         ]);
@@ -371,9 +371,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(handler).toBeDefined();
         const result = await handler!(undefined) as Record<string, unknown>;
         expect(result).toEqual({
-            success: true,
-            availableModels: [],
-            currentModelId: null
+            success: false,
+            error: 'OpenCode model metadata is not available'
         });
     });
 

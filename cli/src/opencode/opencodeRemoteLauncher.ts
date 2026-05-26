@@ -112,7 +112,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListOpencodeModels, async () => {
             const metadata = backend.getSessionModelsMetadata?.(acpSessionId);
             if (!metadata) {
-                return { success: true, availableModels: [], currentModelId: null };
+                return { success: false, error: 'OpenCode model metadata is not available' };
             }
             return {
                 success: true,
