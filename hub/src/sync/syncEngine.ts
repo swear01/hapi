@@ -26,7 +26,9 @@ import {
     type RpcGeneratedImageResponse,
     type RpcListDirectoryResponse,
     type RpcListCodexModelsResponse,
+    type RpcListCursorModelsResponse,
     type RpcListOpencodeModelsResponse,
+    type RpcCursorModel,
     type RpcOpencodeModel,
     type RpcPathExistsResponse,
     type RpcReadFileResponse,
@@ -44,7 +46,9 @@ export type {
     RpcGeneratedImageResponse,
     RpcListDirectoryResponse,
     RpcListCodexModelsResponse,
+    RpcListCursorModelsResponse,
     RpcListOpencodeModelsResponse,
+    RpcCursorModel,
     RpcOpencodeModel,
     RpcPathExistsResponse,
     RpcReadFileResponse,
@@ -364,6 +368,7 @@ export class SyncEngine {
     ): Promise<void> {
         await this.messageService.sendMessage(sessionId, payload)
         this.sessionCache.markMessageQueued(sessionId)
+        this.sessionCache.recordSessionActivity(sessionId, Date.now())
     }
 
     async cancelQueuedMessage(
@@ -646,7 +651,9 @@ export class SyncEngine {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
         }
 
-        const effectivePermissionMode = opts?.permissionMode ?? session.permissionMode ?? undefined
+        const preferredPermissionMode = opts?.permissionMode
+            ?? session.permissionMode
+            ?? session.metadata?.preferredPermissionMode
         const spawnResult = await this.rpcGateway.spawnSession(
             targetMachine.id,
             target.directory,
@@ -658,7 +665,7 @@ export class SyncEngine {
             undefined,
             resumeToken,
             session.effort ?? undefined,
-            effectivePermissionMode
+            preferredPermissionMode
         )
 
         if (spawnResult.type !== 'success') {
@@ -668,6 +675,15 @@ export class SyncEngine {
         const becameActive = await this.waitForSessionActive(spawnResult.sessionId)
         if (!becameActive) {
             return { type: 'error', message: 'Session failed to become active', code: 'resume_failed' }
+        }
+
+        if (preferredPermissionMode !== undefined) {
+            try {
+                await this.applySessionConfig(spawnResult.sessionId, { permissionMode: preferredPermissionMode })
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Failed to restore permission mode'
+                return { type: 'error', message, code: 'resume_failed' }
+            }
         }
 
         if (spawnResult.sessionId !== access.sessionId) {
@@ -910,6 +926,14 @@ export class SyncEngine {
 
     async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {
         return await this.rpcGateway.listCodexModelsForMachine(machineId)
+    }
+
+    async listCursorModelsForSession(sessionId: string): Promise<RpcListCursorModelsResponse> {
+        return await this.rpcGateway.listCursorModelsForSession(sessionId)
+    }
+
+    async listCursorModelsForMachine(machineId: string): Promise<RpcListCursorModelsResponse> {
+        return await this.rpcGateway.listCursorModelsForMachine(machineId)
     }
 
     async listOpencodeModelsForSession(sessionId: string): Promise<RpcListOpencodeModelsResponse> {
