@@ -7,9 +7,12 @@ import { z } from 'zod'
  */
 export const AGENT_MESSAGE_PAYLOAD_TYPE = 'codex' as const
 
-export const AGENT_FLAVORS = ['claude', 'codex', 'cursor', 'gemini', 'kimi', 'opencode'] as const
+export const AGENT_FLAVORS = ['antigravity', 'claude', 'codex', 'cursor', 'gemini', 'kimi', 'opencode'] as const
 export type AgentFlavor = typeof AGENT_FLAVORS[number]
 export const AgentFlavorSchema = z.enum(AGENT_FLAVORS)
+
+export const ANTIGRAVITY_PERMISSION_MODES = ['default', 'yolo', 'sandbox'] as const
+export type AntigravityPermissionMode = typeof ANTIGRAVITY_PERMISSION_MODES[number]
 
 export const CLAUDE_PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'] as const
 export type ClaudePermissionMode = typeof CLAUDE_PERMISSION_MODES[number]
@@ -40,6 +43,7 @@ export const PERMISSION_MODES = [
     'ask',
     'read-only',
     'safe-yolo',
+    'sandbox',
     'yolo'
 ] as const
 export type PermissionMode = typeof PERMISSION_MODES[number]
@@ -53,6 +57,7 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
     bypassPermissions: 'Yolo',
     'read-only': 'Read Only',
     'safe-yolo': 'Safe Yolo',
+    sandbox: 'Sandbox',
     yolo: 'Yolo'
 }
 
@@ -66,6 +71,7 @@ export const PERMISSION_MODE_TONES: Record<PermissionMode, PermissionModeTone> =
     bypassPermissions: 'danger',
     'read-only': 'warning',
     'safe-yolo': 'warning',
+    sandbox: 'warning',
     yolo: 'danger'
 }
 
@@ -98,6 +104,9 @@ export function getCodexCollaborationModeLabel(mode: CodexCollaborationMode): st
 }
 
 export function getPermissionModesForFlavor(flavor?: string | null): readonly PermissionMode[] {
+    if (flavor === 'antigravity') {
+        return ANTIGRAVITY_PERMISSION_MODES
+    }
     if (flavor === 'codex') {
         return CODEX_PERMISSION_MODES
     }

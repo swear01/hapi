@@ -513,6 +513,7 @@ export class SyncEngine {
         }
 
         const flavor = this.resolveFlavor(session)
+        if (flavor === 'antigravity') return metadata.antigravitySessionId ?? null
         if (flavor === 'codex') return metadata.codexSessionId ?? null
         if (flavor === 'gemini') return metadata.geminiSessionId ?? null
         if (flavor === 'opencode') return metadata.opencodeSessionId ?? null

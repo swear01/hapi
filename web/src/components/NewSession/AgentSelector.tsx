@@ -1,4 +1,4 @@
-import { AGENT_FLAVORS } from '@hapi/protocol'
+import { AGENT_FLAVORS, DEPRECATED_FLAVORS } from '@hapi/protocol'
 import type { AgentType } from './types'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -8,6 +8,7 @@ export function AgentSelector(props: {
     onAgentChange: (value: AgentType) => void
 }) {
     const { t } = useTranslation()
+    const isDeprecated = (DEPRECATED_FLAVORS as readonly string[]).includes(props.agent)
 
     return (
         <div className="flex flex-col gap-1.5 px-3 py-3">
@@ -33,6 +34,11 @@ export function AgentSelector(props: {
                     </label>
                 ))}
             </div>
+            {isDeprecated && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                    Gemini CLI ends service June 18 — consider switching to Antigravity.
+                </p>
+            )}
         </div>
     )
 }

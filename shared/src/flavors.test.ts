@@ -1,14 +1,21 @@
 import { describe, expect, test } from 'bun:test'
 import {
     Capabilities,
+    DEPRECATED_FLAVORS,
     getFlavorLabel,
     hasCapability,
+    isCodexFamilyFlavor,
     isKnownFlavor,
     supportsEffort,
     supportsModelChange,
 } from './flavors'
 
 describe('hasCapability', () => {
+    test('antigravity supports model-change but not effort', () => {
+        expect(hasCapability('antigravity', Capabilities.ModelChange)).toBe(true)
+        expect(hasCapability('antigravity', Capabilities.Effort)).toBe(false)
+    })
+
     test('claude supports model-change', () => {
         expect(hasCapability('claude', Capabilities.ModelChange)).toBe(true)
     })
@@ -49,8 +56,9 @@ describe('hasCapability', () => {
 
 describe('getFlavorLabel', () => {
     test('known flavors return display names', () => {
+        expect(getFlavorLabel('antigravity')).toBe('Antigravity')
         expect(getFlavorLabel('claude')).toBe('Claude')
-        expect(getFlavorLabel('gemini')).toBe('Gemini')
+        expect(getFlavorLabel('gemini')).toBe('Gemini (deprecated)')
         expect(getFlavorLabel('codex')).toBe('Codex')
         expect(getFlavorLabel('cursor')).toBe('Cursor')
         expect(getFlavorLabel('opencode')).toBe('OpenCode')
@@ -68,6 +76,7 @@ describe('getFlavorLabel', () => {
 
 describe('isKnownFlavor', () => {
     test('returns true for registered flavors', () => {
+        expect(isKnownFlavor('antigravity')).toBe(true)
         expect(isKnownFlavor('claude')).toBe(true)
         expect(isKnownFlavor('gemini')).toBe(true)
         expect(isKnownFlavor('codex')).toBe(true)
@@ -84,6 +93,7 @@ describe('isKnownFlavor', () => {
 
 describe('convenience functions', () => {
     test('supportsModelChange matches hasCapability', () => {
+        expect(supportsModelChange('antigravity')).toBe(true)
         expect(supportsModelChange('claude')).toBe(true)
         expect(supportsModelChange('gemini')).toBe(true)
         expect(supportsModelChange('codex')).toBe(true)
@@ -94,8 +104,29 @@ describe('convenience functions', () => {
 
     test('supportsEffort matches hasCapability', () => {
         expect(supportsEffort('claude')).toBe(true)
+        expect(supportsEffort('antigravity')).toBe(false)
         expect(supportsEffort('codex')).toBe(false)
         expect(supportsEffort('gemini')).toBe(false)
         expect(supportsEffort(null)).toBe(false)
+    })
+})
+
+describe('DEPRECATED_FLAVORS', () => {
+    test('gemini is deprecated', () => {
+        expect(DEPRECATED_FLAVORS).toContain('gemini')
+    })
+
+    test('antigravity is not deprecated', () => {
+        expect(DEPRECATED_FLAVORS).not.toContain('antigravity')
+    })
+})
+
+describe('isCodexFamilyFlavor', () => {
+    test('antigravity is codex family', () => {
+        expect(isCodexFamilyFlavor('antigravity')).toBe(true)
+    })
+
+    test('claude is not codex family', () => {
+        expect(isCodexFamilyFlavor('claude')).toBe(false)
     })
 })

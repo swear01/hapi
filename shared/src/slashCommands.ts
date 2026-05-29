@@ -1,6 +1,20 @@
 import type { SlashCommand } from './apiTypes'
 
 export const BUILTIN_SLASH_COMMANDS = {
+    antigravity: [
+        { name: 'about',    description: 'Show version info',                          source: 'builtin' },
+        { name: 'clear',    description: 'Clear screen and conversation history',      source: 'builtin' },
+        { name: 'compress', description: 'Compress context by replacing with summary', source: 'builtin' },
+        { name: 'feedback', description: 'Submit feedback',                            source: 'builtin' },
+        { name: 'help',     description: 'Show available slash commands',              source: 'builtin' },
+        { name: 'history',  description: 'Show conversation history',                  source: 'builtin' },
+        { name: 'memory',   description: 'Manage memory/context',                      source: 'builtin' },
+        { name: 'model',    description: 'Show or change the active model',            source: 'builtin' },
+        { name: 'quit',     description: 'Exit the session',                           source: 'builtin' },
+        { name: 'reset',    description: 'Reset the conversation',                     source: 'builtin' },
+        { name: 'stats',    description: 'Show session statistics',                    source: 'builtin' },
+        { name: 'tools',    description: 'List available tools',                       source: 'builtin' },
+    ],
     claude: [
         { name: 'clear', description: 'Clear conversation history and free up context', source: 'builtin' },
         { name: 'compact', description: 'Clear conversation history but keep a summary in context', source: 'builtin' },

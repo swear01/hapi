@@ -905,17 +905,19 @@ export function buildCliArgs(
   options: SpawnSessionOptions,
   yolo?: boolean
 ): string[] {
-  const agentCommand = agent === 'codex'
-    ? 'codex'
-    : agent === 'cursor'
-      ? 'cursor'
-      : agent === 'gemini'
-        ? 'gemini'
-        : agent === 'kimi'
-          ? 'kimi'
-          : agent === 'opencode'
-            ? 'opencode'
-            : 'claude';
+  const agentCommand = agent === 'antigravity'
+    ? 'antigravity'
+    : agent === 'codex'
+      ? 'codex'
+      : agent === 'cursor'
+        ? 'cursor'
+        : agent === 'gemini'
+          ? 'gemini'
+          : agent === 'kimi'
+            ? 'kimi'
+            : agent === 'opencode'
+              ? 'opencode'
+              : 'claude';
   const args = [agentCommand];
   if (options.resumeSessionId) {
     if (agent === 'codex') {

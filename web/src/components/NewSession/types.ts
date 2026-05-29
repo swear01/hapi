@@ -19,6 +19,7 @@ function modelPresetOptions<TModel extends string>(
 }
 
 export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]> = {
+    antigravity: [],
     claude: [
         { value: 'auto', label: 'Default' },
         ...modelPresetOptions(CLAUDE_MODEL_PRESETS, CLAUDE_MODEL_LABELS),

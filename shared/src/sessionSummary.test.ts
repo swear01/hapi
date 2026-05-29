@@ -74,4 +74,44 @@ describe('toSessionSummary', () => {
         expect(summary.backgroundTaskCount).toBe(2)
         expect(summary.futureScheduledMessageCount).toBe(0)
     })
+
+    it('surfaces antigravitySessionId as agentSessionId', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                antigravitySessionId: 'agy-uuid-1234'
+            }
+        }))
+        expect(summary.metadata?.agentSessionId).toBe('agy-uuid-1234')
+    })
+
+    it('antigravitySessionId takes priority over other session IDs', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                antigravitySessionId: 'agy-uuid',
+                codexSessionId: 'codex-thread',
+                claudeSessionId: 'claude-session'
+            }
+        }))
+        expect(summary.metadata?.agentSessionId).toBe('agy-uuid')
+    })
+
+    it('falls back to codexSessionId when antigravitySessionId is absent', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                codexSessionId: 'codex-thread'
+            }
+        }))
+        expect(summary.metadata?.agentSessionId).toBe('codex-thread')
+    })
+
+    it('returns undefined agentSessionId when no session IDs present', () => {
+        const summary = toSessionSummary(makeSession())
+        expect(summary.metadata?.agentSessionId).toBeUndefined()
+    })
 })

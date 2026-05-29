@@ -10,6 +10,7 @@ export type Capability = typeof Capabilities[keyof typeof Capabilities]
 
 // --- Per-flavor capability sets ---
 const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
+    antigravity: new Set([Capabilities.ModelChange]),
     claude: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     gemini: new Set([Capabilities.ModelChange]),
     kimi: new Set([Capabilities.ModelChange]),
@@ -20,13 +21,16 @@ const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
 
 // --- Flavor display names ---
 const FLAVOR_LABELS: Record<AgentFlavor, string> = {
+    antigravity: 'Antigravity',
     claude: 'Claude',
-    gemini: 'Gemini',
+    gemini: 'Gemini (deprecated)',
     kimi: 'Kimi',
     codex: 'Codex',
     cursor: 'Cursor',
     opencode: 'OpenCode',
 }
+
+export const DEPRECATED_FLAVORS: readonly AgentFlavor[] = ['gemini']
 
 // --- Query functions ---
 export function isKnownFlavor(flavor: string | null | undefined): flavor is AgentFlavor {
@@ -53,5 +57,5 @@ export function supportsEffort(flavor: string | null | undefined): boolean {
 }
 
 export function isCodexFamilyFlavor(flavor: string | null | undefined): boolean {
-    return flavor === 'codex' || flavor === 'gemini' || flavor === 'kimi' || flavor === 'opencode'
+    return flavor === 'antigravity' || flavor === 'codex' || flavor === 'gemini' || flavor === 'kimi' || flavor === 'opencode'
 }

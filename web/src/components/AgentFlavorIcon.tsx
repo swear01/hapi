@@ -1,4 +1,8 @@
 const FLAVOR_BADGES: Record<string, { label: string; colors: string }> = {
+    antigravity: {
+        label: 'Ag',
+        colors: 'bg-[#4f46e5] text-white',
+    },
     claude: {
         label: 'Cl',
         colors: 'bg-[#d97706] text-white',

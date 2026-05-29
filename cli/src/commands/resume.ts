@@ -4,6 +4,7 @@ import { render } from 'ink'
 import { existsSync } from 'node:fs'
 import type { LocalResumeTarget, ResumableSession } from '@hapi/protocol'
 import type {
+    AntigravityPermissionMode,
     ClaudePermissionMode,
     CodexPermissionMode,
     CursorPermissionMode,
@@ -70,6 +71,19 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
         resumeSessionId: target.agentSessionId,
         startedBy: 'terminal' as const,
         permissionMode: target.permissionMode
+    }
+
+    if (target.flavor === 'antigravity') {
+        const { runAntigravity } = await import('@/antigravity/runAntigravity')
+        await runAntigravity({
+            existingSessionId: base.existingSessionId,
+            workingDirectory: base.workingDirectory,
+            resumeSessionId: base.resumeSessionId,
+            startedBy: base.startedBy,
+            permissionMode: base.permissionMode as AntigravityPermissionMode | undefined,
+            startingMode: 'local'
+        })
+        return
     }
 
     if (target.flavor === 'claude') {

@@ -1,3 +1,4 @@
+import { antigravityCommand } from './antigravity'
 import { authCommand } from './auth'
 import { claudeCommand } from './claude'
 import { codexCommand } from './codex'
@@ -16,6 +17,7 @@ import { hubCommand } from './hub'
 import type { CommandContext, CommandDefinition } from './types'
 
 const COMMANDS: CommandDefinition[] = [
+    antigravityCommand,
     authCommand,
     connectCommand,
     codexCommand,

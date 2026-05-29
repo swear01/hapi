@@ -81,4 +81,37 @@ describe('buildCliArgs', () => {
             expect(args).toContain(mode)
         }
     })
+
+    it('uses antigravity subcommand for antigravity agent', () => {
+        const args = buildCliArgs('antigravity', { directory: '/tmp' })
+        expect(args[0]).toBe('antigravity')
+    })
+
+    it('passes sandbox permission mode for antigravity', () => {
+        const args = buildCliArgs('antigravity', {
+            directory: '/tmp',
+            permissionMode: 'sandbox',
+        })
+        expect(args).toContain('--permission-mode')
+        expect(args).toContain('sandbox')
+    })
+
+    it('passes yolo permission mode for antigravity', () => {
+        const args = buildCliArgs('antigravity', {
+            directory: '/tmp',
+            permissionMode: 'yolo',
+        })
+        expect(args).toContain('--permission-mode')
+        expect(args).toContain('yolo')
+        expect(args).not.toContain('--yolo')
+    })
+
+    it('passes --resume for antigravity resume', () => {
+        const args = buildCliArgs('antigravity', {
+            directory: '/tmp',
+            resumeSessionId: 'agy-uuid-1234',
+        })
+        expect(args).toContain('--resume')
+        expect(args).toContain('agy-uuid-1234')
+    })
 })

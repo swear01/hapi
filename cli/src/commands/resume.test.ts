@@ -10,6 +10,7 @@ const {
     renderMock,
     runCodexMock,
     runClaudeMock,
+    runAntigravityMock,
     assertCodexLocalSupportedMock,
     existsSyncMock
 } = vi.hoisted(() => ({
@@ -22,6 +23,7 @@ const {
     renderMock: vi.fn(),
     runCodexMock: vi.fn(async () => {}),
     runClaudeMock: vi.fn(async () => {}),
+    runAntigravityMock: vi.fn(async () => {}),
     assertCodexLocalSupportedMock: vi.fn(),
     existsSyncMock: vi.fn(() => true)
 }))
@@ -44,6 +46,7 @@ vi.mock('@/ui/ink/ResumeSessionPicker', () => ({
 }))
 vi.mock('@/codex/runCodex', () => ({ runCodex: runCodexMock }))
 vi.mock('@/claude/runClaude', () => ({ runClaude: runClaudeMock }))
+vi.mock('@/antigravity/runAntigravity', () => ({ runAntigravity: runAntigravityMock }))
 vi.mock('@/codex/utils/codexVersion', () => ({ assertCodexLocalSupported: assertCodexLocalSupportedMock }))
 vi.mock('node:fs', () => ({ existsSync: existsSyncMock }))
 
@@ -72,6 +75,7 @@ describe('resumeCommand', () => {
         })
         runCodexMock.mockClear()
         runClaudeMock.mockClear()
+        runAntigravityMock.mockClear()
         assertCodexLocalSupportedMock.mockClear()
         existsSyncMock.mockReturnValue(true)
     })
@@ -286,5 +290,50 @@ describe('resumeCommand', () => {
             consoleErrorSpy.mockRestore()
             exitSpy.mockRestore()
         }
+    })
+
+    it('resumes an antigravity target by HAPI session id', async () => {
+        getLocalResumeTargetMock.mockResolvedValue({
+            sessionId: 'hapi-session-ag',
+            flavor: 'antigravity',
+            directory: '/tmp/project',
+            machineId: 'machine-1',
+            active: false,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'agy-uuid-1234',
+            permissionMode: 'yolo'
+        })
+
+        await resumeCommand.run(createContext(['hapi-session-ag']))
+
+        expect(handoffSessionToLocalMock).not.toHaveBeenCalled()
+        expect(runAntigravityMock).toHaveBeenCalledWith({
+            existingSessionId: 'hapi-session-ag',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'agy-uuid-1234',
+            startedBy: 'terminal',
+            permissionMode: 'yolo',
+            startingMode: 'local'
+        })
+    })
+
+    it('hands off an active remote antigravity session before resuming', async () => {
+        getLocalResumeTargetMock.mockResolvedValue({
+            sessionId: 'hapi-session-ag2',
+            flavor: 'antigravity',
+            directory: '/tmp/project',
+            machineId: 'machine-1',
+            active: true,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'agy-uuid-5678',
+            permissionMode: 'default'
+        })
+
+        await resumeCommand.run(createContext(['hapi-session-ag2']))
+
+        expect(handoffSessionToLocalMock).toHaveBeenCalledWith('hapi-session-ag2')
+        expect(runAntigravityMock).toHaveBeenCalledOnce()
     })
 })

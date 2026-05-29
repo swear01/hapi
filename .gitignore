@@ -42,3 +42,6 @@ execplan/
 # Generated npm bundle output (local)
 cli/npm/main/
 .ace-tool/
+
+# Antigravity CLI project directory (created by agy on first run)
+.antigravitycli/
