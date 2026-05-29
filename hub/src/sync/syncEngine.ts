@@ -829,9 +829,11 @@ export class SyncEngine {
         prev: Session['metadata'] | null,
         next: NonNullable<Session['metadata']>
     ): boolean {
-        return (prev?.codexSessionId ?? null) === (next.codexSessionId ?? null)
+        return (prev?.antigravitySessionId ?? null) === (next.antigravitySessionId ?? null)
+            && (prev?.codexSessionId ?? null) === (next.codexSessionId ?? null)
             && (prev?.claudeSessionId ?? null) === (next.claudeSessionId ?? null)
             && (prev?.geminiSessionId ?? null) === (next.geminiSessionId ?? null)
+            && (prev?.kimiSessionId ?? null) === (next.kimiSessionId ?? null)
             && (prev?.opencodeSessionId ?? null) === (next.opencodeSessionId ?? null)
             && (prev?.cursorSessionId ?? null) === (next.cursorSessionId ?? null)
     }

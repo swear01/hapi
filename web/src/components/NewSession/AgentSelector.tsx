@@ -1,4 +1,4 @@
-import { AGENT_FLAVORS, DEPRECATED_FLAVORS } from '@hapi/protocol'
+import { AGENT_FLAVORS, DEPRECATED_FLAVORS, getFlavorLabel } from '@hapi/protocol'
 import type { AgentType } from './types'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -30,7 +30,7 @@ export function AgentSelector(props: {
                             disabled={props.isDisabled}
                             className="accent-[var(--app-link)]"
                         />
-                        <span className="text-sm capitalize">{agentType}</span>
+                        <span className="text-sm">{getFlavorLabel(agentType)}</span>
                     </label>
                 ))}
             </div>
