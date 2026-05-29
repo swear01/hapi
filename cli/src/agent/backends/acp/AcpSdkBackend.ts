@@ -55,6 +55,7 @@ export class AcpSdkBackend implements AgentBackend {
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
+    private lateFlushTimer: ReturnType<typeof setInterval> | null = null;
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -66,6 +67,11 @@ export class AcpSdkBackend implements AgentBackend {
     private static readonly UPDATE_DRAIN_TIMEOUT_MS = 2000;
     private static readonly PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 200;
     private static readonly PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 1200;
+    // After the post-prompt drain, poll for straggler chunks from slow-tailing
+    // models (e.g. DeepSeek, GPT-5.5) that keep sending agentMessageChunk
+    // notifications after session/prompt returns.
+    private static readonly LATE_FLUSH_INTERVAL_MS = 50;
+    private static readonly LATE_FLUSH_WINDOW_MS = 6000;
 
     constructor(private readonly options: { command: string; args?: string[]; env?: Record<string, string> }) {}
 
@@ -252,6 +258,7 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         this.activeSessionId = sessionId;
+        this.stopLateFlushTimer();
         await this.waitForSessionUpdateQuiet(
             AcpSdkBackend.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
             AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
@@ -285,6 +292,7 @@ export class AcpSdkBackend implements AgentBackend {
                 AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
             );
             this.messageHandler?.drainBuffers();
+            this.startLateFlushTimer();
             try {
                 const latestUsageUpdate = this.readLatestUsageUpdate();
                 if (promptUsage) {
@@ -380,6 +388,7 @@ export class AcpSdkBackend implements AgentBackend {
 
     async disconnect(): Promise<void> {
         if (!this.transport) return;
+        this.stopLateFlushTimer();
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
@@ -416,6 +425,25 @@ export class AcpSdkBackend implements AgentBackend {
 
     private readLatestUsageUpdate(): AcpUsageUpdate | null {
         return this.latestUsageUpdate;
+    }
+
+    private startLateFlushTimer(): void {
+        this.stopLateFlushTimer();
+        const deadline = Date.now() + AcpSdkBackend.LATE_FLUSH_WINDOW_MS;
+        this.lateFlushTimer = setInterval(() => {
+            if (Date.now() > deadline) {
+                this.stopLateFlushTimer();
+                return;
+            }
+            this.messageHandler?.drainBuffers();
+        }, AcpSdkBackend.LATE_FLUSH_INTERVAL_MS);
+    }
+
+    private stopLateFlushTimer(): void {
+        if (this.lateFlushTimer !== null) {
+            clearInterval(this.lateFlushTimer);
+            this.lateFlushTimer = null;
+        }
     }
 
     private async waitForSessionUpdateQuiet(quietMs: number, timeoutMs: number): Promise<void> {
