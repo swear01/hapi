@@ -446,11 +446,19 @@ export class AcpSdkBackend implements AgentBackend {
      * keeps the UI streaming smoothly while we wait; the quiet-window check
      * lets fast models exit almost immediately (Claude tail typically < 100ms)
      * while still bounding slow-tailing models (GPT-5.5, DeepSeek V4 Pro).
+     *
+     * The quiet measurement is anchored to entry time, not just
+     * lastSessionUpdateAt: if session/prompt paused mid-turn (chunks → pause
+     * → stopReason), lastSessionUpdateAt is already stale on entry and we
+     * would otherwise exit immediately, missing any straggler that arrives
+     * just after session/prompt resolves.
      */
     private async drainLateBuffers(): Promise<void> {
-        const deadline = Date.now() + AcpSdkBackend.LATE_FLUSH_WINDOW_MS;
+        const quietBaseline = Date.now();
+        const deadline = quietBaseline + AcpSdkBackend.LATE_FLUSH_WINDOW_MS;
         while (Date.now() < deadline) {
-            const elapsedSinceUpdate = Date.now() - this.lastSessionUpdateAt;
+            const latestActivityAt = Math.max(this.lastSessionUpdateAt, quietBaseline);
+            const elapsedSinceUpdate = Date.now() - latestActivityAt;
             if (elapsedSinceUpdate >= AcpSdkBackend.LATE_FLUSH_QUIET_PERIOD_MS) {
                 return;
             }

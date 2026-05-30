@@ -585,4 +585,63 @@ describe('AcpSdkBackend', () => {
         // proves we're not blocking on the full window.
         expect(elapsed).toBeLessThan(500);
     });
+
+    it('catches stragglers when session/prompt paused before resolving', async () => {
+        // Regression: if the model emitted chunks early in the turn, paused,
+        // then sent stopReason, lastSessionUpdateAt is already stale when
+        // drainLateBuffers starts. It must anchor the quiet window to entry
+        // time, not just lastSessionUpdateAt, otherwise a chunk arriving just
+        // after session/prompt resolves is missed.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 50;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 500;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+
+        const messages: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => {
+                // Chunk arrives early, then a long pause stales lastSessionUpdateAt.
+                backendInternal.handleSessionUpdate({
+                    sessionId: 'session-1',
+                    update: {
+                        sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                        content: { type: 'text', text: 'early' }
+                    }
+                });
+                await sleep(200);
+                // After sendRequest resolves, schedule a straggler.
+                setTimeout(() => {
+                    backendInternal.handleSessionUpdate({
+                        sessionId: 'session-1',
+                        update: {
+                            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                            content: { type: 'text', text: 'post-pause straggler' }
+                        }
+                    });
+                }, 10);
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
+
+        const stragglerIdx = messages.findIndex((m) => m.type === 'text' && m.text === 'post-pause straggler');
+        const turnCompleteIdx = messages.findIndex((m) => m.type === 'turn_complete');
+
+        expect(stragglerIdx).toBeGreaterThanOrEqual(0);
+        expect(turnCompleteIdx).toBeGreaterThan(stragglerIdx);
+    });
 });
