@@ -1,4 +1,5 @@
 import { logger } from '@/ui/logger';
+import { randomUUID } from 'node:crypto';
 import { opencodeLoop } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -13,6 +14,8 @@ import { registerSessionConfigRpc } from '@/agent/sessionConfigRpc';
 import { startOpencodeHookServer } from './utils/startOpencodeHookServer';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
+import { listSlashCommands } from '@/modules/common/slashCommands';
+import { resolveOpencodeSlashCommand } from './utils/slashCommands';
 
 export async function runOpencode(opts: {
     startedBy?: 'runner' | 'terminal';
@@ -120,14 +123,66 @@ export async function runOpencode(opts: {
         logger.debug(`[opencode] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${sessionModel ?? '(default)'}, modelReasoningEffort=${sessionModelReasoningEffort ?? '(default)'}`);
     };
 
+    let userMessageChain: Promise<void> = Promise.resolve();
     session.onUserMessage((message, localId) => {
-        const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
-        const mode: OpencodeMode = {
-            permissionMode: currentPermissionMode,
-            model: sessionModel ?? undefined,
-            modelReasoningEffort: sessionModelReasoningEffort
-        };
-        messageQueue.push(formattedText, mode, localId);
+        userMessageChain = userMessageChain.then(async () => {
+            const buildMode = (): OpencodeMode => ({
+                permissionMode: currentPermissionMode,
+                model: sessionModel ?? undefined,
+                modelReasoningEffort: sessionModelReasoningEffort
+            });
+            const pushPlain = () => {
+                const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
+                messageQueue.push(formattedText, buildMode(), localId);
+            };
+            try {
+                let text = message.content.text;
+                const commands = await listSlashCommands('opencode', workingDirectory).catch(() => []);
+                const slash = resolveOpencodeSlashCommand(text, {
+                    commands,
+                    permissionMode: currentPermissionMode,
+                    model: sessionModel,
+                    modelReasoningEffort: sessionModelReasoningEffort
+                });
+
+                if (slash.kind !== 'passthrough') {
+                    if (slash.updates) {
+                        if (slash.updates.permissionMode !== undefined) {
+                            currentPermissionMode = slash.updates.permissionMode;
+                        }
+                        if (slash.updates.model !== undefined) {
+                            sessionModel = slash.updates.model;
+                        }
+                        if (slash.updates.modelReasoningEffort !== undefined) {
+                            sessionModelReasoningEffort = slash.updates.modelReasoningEffort;
+                        }
+                        syncSessionMode();
+                    }
+                    if (slash.message) {
+                        session.sendAgentMessage({
+                            type: 'message',
+                            message: slash.message,
+                            id: randomUUID()
+                        });
+                    }
+                    if (slash.kind === 'handled') {
+                        if (localId) {
+                            session.emitMessagesConsumed([localId]);
+                        }
+                        return;
+                    }
+                    text = slash.text;
+                }
+
+                const formattedText = formatMessageWithAttachments(text, message.content.attachments);
+                messageQueue.push(formattedText, buildMode(), localId);
+            } catch (error) {
+                logger.debug('[opencode] Failed to handle user message', error);
+                pushPlain();
+            }
+        }).catch((error) => {
+            logger.debug('[opencode] User message handler chain failed', error);
+        });
     });
 
     session.onCancelQueuedMessage((localId) => {
