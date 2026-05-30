@@ -11,7 +11,9 @@ type BackendStatics = {
     UPDATE_QUIET_PERIOD_MS: number;
     UPDATE_DRAIN_TIMEOUT_MS: number;
     PRE_PROMPT_UPDATE_QUIET_PERIOD_MS: number;
+    PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS: number;
     LATE_FLUSH_INTERVAL_MS: number;
+    LATE_FLUSH_QUIET_PERIOD_MS: number;
     LATE_FLUSH_WINDOW_MS: number;
 };
 
@@ -20,7 +22,9 @@ const originalStatics = {
     updateQuietPeriodMs: backendStatics.UPDATE_QUIET_PERIOD_MS,
     updateDrainTimeoutMs: backendStatics.UPDATE_DRAIN_TIMEOUT_MS,
     prePromptUpdateQuietPeriodMs: backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
+    prePromptUpdateDrainTimeoutMs: backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS,
     lateFlushIntervalMs: backendStatics.LATE_FLUSH_INTERVAL_MS,
+    lateFlushQuietPeriodMs: backendStatics.LATE_FLUSH_QUIET_PERIOD_MS,
     lateFlushWindowMs: backendStatics.LATE_FLUSH_WINDOW_MS
 };
 
@@ -28,7 +32,9 @@ afterEach(() => {
     backendStatics.UPDATE_QUIET_PERIOD_MS = originalStatics.updateQuietPeriodMs;
     backendStatics.UPDATE_DRAIN_TIMEOUT_MS = originalStatics.updateDrainTimeoutMs;
     backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = originalStatics.prePromptUpdateQuietPeriodMs;
+    backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = originalStatics.prePromptUpdateDrainTimeoutMs;
     backendStatics.LATE_FLUSH_INTERVAL_MS = originalStatics.lateFlushIntervalMs;
+    backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = originalStatics.lateFlushQuietPeriodMs;
     backendStatics.LATE_FLUSH_WINDOW_MS = originalStatics.lateFlushWindowMs;
 });
 
@@ -320,7 +326,9 @@ describe('AcpSdkBackend', () => {
         backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
         backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
         backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
         backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
         backendStatics.LATE_FLUSH_WINDOW_MS = 50;
 
         const backend = new AcpSdkBackend({ command: 'opencode' });
@@ -393,7 +401,9 @@ describe('AcpSdkBackend', () => {
         backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
         backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
         backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
         backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
         backendStatics.LATE_FLUSH_WINDOW_MS = 50;
 
         const backend = new AcpSdkBackend({ command: 'opencode' });
@@ -451,12 +461,14 @@ describe('AcpSdkBackend', () => {
         });
     });
 
-    it('flushes late chunks that arrive after session/prompt returns', async () => {
-        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
-        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
+    it('emits straggler chunks before turn_complete', async () => {
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
         backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
         backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
-        backendStatics.LATE_FLUSH_WINDOW_MS = 200;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 30;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 500;
 
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const backendInternal = backend as unknown as {
@@ -469,34 +481,41 @@ describe('AcpSdkBackend', () => {
 
         const messages: AgentMessage[] = [];
         backendInternal.transport = {
-            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            sendRequest: async () => {
+                // Schedule a late chunk to arrive *after* session/prompt returns,
+                // simulating a slow-tailing model that keeps emitting past the
+                // initial post-prompt drain.
+                setTimeout(() => {
+                    backendInternal.handleSessionUpdate({
+                        sessionId: 'session-1',
+                        update: {
+                            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                            content: { type: 'text', text: 'late tail' }
+                        }
+                    });
+                }, 20);
+                return { stopReason: 'end_turn' };
+            },
             close: async () => {}
         };
 
-        await backend.prompt('session-1', [{ type: 'text', text: 'hello' }], (m) => {
-            messages.push(m);
-        });
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
 
-        backendInternal.handleSessionUpdate({
-            sessionId: 'session-1',
-            update: {
-                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
-                content: { type: 'text', text: 'late tail' }
-            }
-        });
+        const lateIdx = messages.findIndex((m) => m.type === 'text' && m.text === 'late tail');
+        const turnCompleteIdx = messages.findIndex((m) => m.type === 'turn_complete');
 
-        await sleep(40);
-
-        const textMessages = messages.filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text');
-        expect(textMessages.map((m) => m.text)).toContain('late tail');
+        expect(lateIdx).toBeGreaterThanOrEqual(0);
+        expect(turnCompleteIdx).toBeGreaterThan(lateIdx);
     });
 
     it('attributes pre-prompt straggler chunks to the previous turn\'s onUpdate', async () => {
         backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
         backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
         backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 20;
-        backendStatics.LATE_FLUSH_INTERVAL_MS = 1000;
-        backendStatics.LATE_FLUSH_WINDOW_MS = 200;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 200;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 30;
 
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const backendInternal = backend as unknown as {
@@ -516,6 +535,8 @@ describe('AcpSdkBackend', () => {
 
         await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
 
+        // Straggler arrives after turn 1 fully resolved but before turn 2 starts.
+        // Pre-prompt drain in turn 2 should route it via turn 1's handler.
         backendInternal.handleSessionUpdate({
             sessionId: 'session-1',
             update: {
@@ -533,12 +554,14 @@ describe('AcpSdkBackend', () => {
         expect(turn2Text).not.toContain('straggler from turn 1');
     });
 
-    it('cancels the late-flush timer on disconnect', async () => {
-        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
-        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
+    it('exits the late-flush wait once the model is quiet', async () => {
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
         backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
         backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
-        backendStatics.LATE_FLUSH_WINDOW_MS = 1000;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 20;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 5000;
 
         const backend = new AcpSdkBackend({ command: 'opencode' });
         const backendInternal = backend as unknown as {
@@ -546,7 +569,6 @@ describe('AcpSdkBackend', () => {
                 sendRequest: (...args: unknown[]) => Promise<unknown>;
                 close: () => Promise<void>;
             } | null;
-            lateFlushTimer: ReturnType<typeof setInterval> | null;
         };
 
         backendInternal.transport = {
@@ -554,10 +576,13 @@ describe('AcpSdkBackend', () => {
             close: async () => {}
         };
 
+        const started = Date.now();
         await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], () => {});
-        expect(backendInternal.lateFlushTimer).not.toBeNull();
+        const elapsed = Date.now() - started;
 
-        await backend.disconnect();
-        expect(backendInternal.lateFlushTimer).toBeNull();
+        // With no late chunks arriving, drainLateBuffers should exit on the
+        // first quiet check well before the 5s window. Anything under ~500ms
+        // proves we're not blocking on the full window.
+        expect(elapsed).toBeLessThan(500);
     });
 });
