@@ -75,10 +75,13 @@ export class AcpSdkBackend implements AgentBackend {
     // LATE_FLUSH_WINDOW_MS so a stuck stream never wedges the session.
     //
     // 6000ms covers tails up to ~5s observed against GPT-5.5 / DeepSeek V4 Pro
-    // with 1s headroom. 250ms quiet exits early for fast models (Claude tail
-    // is typically <100ms, adding negligible latency). 50ms polling keeps the
-    // UI responsive without measurable CPU cost (drainBuffers is a no-op on
-    // empty buffers). All three can be tightened once we have telemetry.
+    // with 1s headroom. 250ms quiet is anchored to drainLateBuffers entry
+    // time, so every turn pays at least one quiet period before resolving —
+    // that minimum is what catches stragglers arriving just after
+    // session/prompt resolves when the model paused mid-turn. 50ms polling
+    // keeps the UI responsive without measurable CPU cost (drainBuffers is a
+    // no-op on empty buffers). All three can be tightened once we have
+    // telemetry on real-world tail distributions.
     private static readonly LATE_FLUSH_INTERVAL_MS = 50;
     private static readonly LATE_FLUSH_QUIET_PERIOD_MS = 250;
     private static readonly LATE_FLUSH_WINDOW_MS = 6000;
