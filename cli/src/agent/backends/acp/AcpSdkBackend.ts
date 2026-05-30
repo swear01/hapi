@@ -66,10 +66,17 @@ export class AcpSdkBackend implements AgentBackend {
     private static readonly UPDATE_QUIET_PERIOD_MS = 120;
     private static readonly UPDATE_DRAIN_TIMEOUT_MS = 2000;
     private static readonly PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 200;
-    private static readonly PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 1200;
     // After the post-prompt drain, poll for straggler chunks from slow-tailing
     // models (e.g. DeepSeek, GPT-5.5) that keep sending agentMessageChunk
-    // notifications after session/prompt returns.
+    // notifications after session/prompt returns. The same window also bounds
+    // the pre-prompt wait that gates the next turn's handler swap, so late
+    // chunks from the previous turn are routed to that turn's onUpdate rather
+    // than leaking into the new handler.
+    //
+    // 6000ms covers tails up to ~5s observed against GPT-5.5 / DeepSeek V4 Pro
+    // with 1s headroom. 50ms keeps the UI responsive without measurable CPU
+    // cost (drainBuffers is a no-op on empty buffers). Both can be tightened
+    // once we have telemetry.
     private static readonly LATE_FLUSH_INTERVAL_MS = 50;
     private static readonly LATE_FLUSH_WINDOW_MS = 6000;
 
@@ -259,16 +266,18 @@ export class AcpSdkBackend implements AgentBackend {
 
         this.activeSessionId = sessionId;
         this.stopLateFlushTimer();
+        // Keep the previous turn's handler alive across the quiet wait so any
+        // straggler chunks routed via handleSessionUpdate land in that turn's
+        // onUpdate. We use LATE_FLUSH_WINDOW_MS as the upper bound because
+        // slow-tailing models can take several seconds to stop emitting after
+        // session/prompt returns. Replacing the handler is a single-phase swap
+        // immediately before we send the new session/prompt, so there is no
+        // gap where late chunks are dropped or misattributed.
         await this.waitForSessionUpdateQuiet(
             AcpSdkBackend.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
-            AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
+            AcpSdkBackend.LATE_FLUSH_WINDOW_MS
         );
         this.messageHandler?.drainBuffers();
-        this.messageHandler = null;
-        await this.waitForSessionUpdateQuiet(
-            AcpSdkBackend.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
-            AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
-        );
         this.messageHandler = new AcpMessageHandler(onUpdate);
         this.isProcessingMessage = true;
         this.lastSessionUpdateAt = Date.now();
