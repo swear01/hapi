@@ -123,9 +123,23 @@ export async function runOpencode(opts: {
         logger.debug(`[opencode] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${sessionModel ?? '(default)'}, modelReasoningEffort=${sessionModelReasoningEffort ?? '(default)'}`);
     };
 
+    // Slash-command resolution now runs inside an async chain on
+    // `session.onUserMessage`, so there is a window between the message
+    // arriving and `messageQueue.push` / `sendAgentMessage` where
+    // `cancelByLocalId` would find nothing. Track in-flight localIds so the
+    // cancel RPC can ack the cancel during that window and the chain can
+    // short-circuit when it resumes.
+    const preparingLocalIds = new Set<string>();
+    const cancelledBeforeEnqueue = new Set<string>();
+
     let userMessageChain: Promise<void> = Promise.resolve();
     session.onUserMessage((message, localId) => {
+        if (localId) preparingLocalIds.add(localId);
         userMessageChain = userMessageChain.then(async () => {
+            const wasCancelled = (): boolean => {
+                if (!localId) return false;
+                return cancelledBeforeEnqueue.delete(localId);
+            };
             const buildMode = (): OpencodeMode => ({
                 permissionMode: currentPermissionMode,
                 model: sessionModel ?? undefined,
@@ -136,8 +150,10 @@ export async function runOpencode(opts: {
                 messageQueue.push(formattedText, buildMode(), localId);
             };
             try {
+                if (wasCancelled()) return;
                 let text = message.content.text;
                 const commands = await listSlashCommands('opencode', workingDirectory).catch(() => []);
+                if (wasCancelled()) return;
                 const slash = resolveOpencodeSlashCommand(text, {
                     commands,
                     permissionMode: currentPermissionMode,
@@ -195,7 +211,14 @@ export async function runOpencode(opts: {
                 messageQueue.push(formattedText, buildMode(), localId);
             } catch (error) {
                 logger.debug('[opencode] Failed to handle user message', error);
-                pushPlain();
+                if (!wasCancelled()) {
+                    pushPlain();
+                }
+            } finally {
+                if (localId) {
+                    preparingLocalIds.delete(localId);
+                    cancelledBeforeEnqueue.delete(localId);
+                }
             }
         }).catch((error) => {
             logger.debug('[opencode] User message handler chain failed', error);
@@ -203,9 +226,18 @@ export async function runOpencode(opts: {
     });
 
     session.onCancelQueuedMessage((localId) => {
-        const removed = messageQueue.cancelByLocalId(localId);
-        logger.debug(`[opencode] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
-        return removed;
+        const removedFromQueue = messageQueue.cancelByLocalId(localId);
+        if (removedFromQueue) {
+            logger.debug(`[opencode] cancelByLocalId(${localId}): removed from queue`);
+            return true;
+        }
+        if (preparingLocalIds.has(localId)) {
+            cancelledBeforeEnqueue.add(localId);
+            logger.debug(`[opencode] cancelByLocalId(${localId}): marked for cancellation before enqueue`);
+            return true;
+        }
+        logger.debug(`[opencode] cancelByLocalId(${localId}): not found (best-effort)`);
+        return false;
     });
 
     registerSessionConfigRpc<PermissionMode>({
