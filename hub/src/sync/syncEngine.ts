@@ -291,6 +291,10 @@ export class SyncEngine {
         this.triggerDedupIfNeeded(payload.sid)
     }
 
+    clearQueuedThinkingGrace(sessionId: string): void {
+        this.sessionCache.clearQueuedThinkingGrace(sessionId)
+    }
+
     handleSessionEnd(payload: { sid: string; time: number; reason?: 'completed' | 'terminated' | 'error' }): void {
         this.sessionCache.handleSessionEnd(payload)
         this.eventPublisher.emit({

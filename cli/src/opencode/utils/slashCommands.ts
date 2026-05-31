@@ -2,6 +2,20 @@ import { OPENCODE_PERMISSION_MODES } from '@hapi/protocol/modes';
 import type { OpencodePermissionMode } from '@hapi/protocol/types';
 import type { SlashCommand } from '@/modules/common/slashCommands';
 
+const OPENCODE_INIT_PROMPT = [
+    'Please analyze this codebase and create (or update) an `AGENTS.md` file at the repo root so future coding agents have what they need.',
+    '',
+    'Cover:',
+    '1. **Build / lint / test commands** — including how to run a *single* test, not just the whole suite.',
+    '2. **Code style** — imports, formatting, types, naming, error handling, anything non-obvious.',
+    '3. **Project layout** — only what is not derivable from a quick `ls`; highlight unusual boundaries or generated code.',
+    '',
+    'Guidelines:',
+    '- If `AGENTS.md` already exists, refine it rather than rewriting from scratch.',
+    '- If `.cursor/rules/`, `.cursorrules`, `.github/copilot-instructions.md`, or similar conventions exist, fold their substance in (do not duplicate verbatim).',
+    '- Keep it concise (~20–40 lines). Skip the obvious.'
+].join('\n');
+
 export type OpencodeSlashResolution =
     | { kind: 'passthrough' }
     | {
@@ -87,10 +101,11 @@ export function resolveOpencodeSlashCommand(
         return {
             kind: 'handled',
             message: [
-                'OpenCode status',
-                `permission: ${state.permissionMode}`,
-                `model: ${state.model ?? 'default'}`,
-                `reasoning: ${state.modelReasoningEffort ?? 'default'}`
+                '**OpenCode status**',
+                '',
+                `- permission: \`${state.permissionMode}\``,
+                `- model: \`${state.model ?? 'default'}\``,
+                `- reasoning: \`${state.modelReasoningEffort ?? 'default'}\``
             ].join('\n')
         };
     }
@@ -155,20 +170,36 @@ export function resolveOpencodeSlashCommand(
         };
     }
 
+    if (command === 'init') {
+        const prompt = rest
+            ? `${OPENCODE_INIT_PROMPT}\n\nAdditional instructions: ${rest}`
+            : OPENCODE_INIT_PROMPT;
+        return {
+            kind: 'replace',
+            text: prompt,
+            message: 'Initializing AGENTS.md…'
+        };
+    }
+
     if (command === 'help') {
         return {
             kind: 'handled',
             message: [
-                'Supported OpenCode slash commands:',
-                '/plan [prompt] — enable plan mode, optionally send prompt',
-                '/plan off — return to default permission mode',
-                '/default — return to default permission mode',
-                '/status — show current OpenCode session config',
-                '/model [name|default] — show or set model',
-                '/reasoning [effort|default] — show or set reasoning effort',
-                '/permissions [' + OPENCODE_PERMISSION_MODES.join('|') + '] — show or set permission mode',
-                '/clear, /compact — not yet supported in HAPI OpenCode sessions',
-                'Custom /commands from ~/.config/opencode/command or .opencode/command are expanded before sending.'
+                '**Supported OpenCode slash commands**',
+                '',
+                '- `/help` — show this list',
+                '- `/status` — show current OpenCode session config',
+                '- `/plan [prompt]` — enable plan mode, optionally send prompt',
+                '- `/plan off` — return to default permission mode',
+                '- `/default` — return to default permission mode',
+                '- `/init [extra]` — generate or refresh AGENTS.md for this project',
+                '',
+                'Model, reasoning effort, and permission mode have dedicated buttons in the composer. ' +
+                'You can still type `/model`, `/reasoning`, or `/permissions` if you prefer.',
+                '',
+                '`/clear` and `/compact` are not yet supported in HAPI OpenCode sessions.',
+                '',
+                'Custom commands from `~/.config/opencode/command` or `.opencode/command` are expanded before sending.'
             ].join('\n')
         };
     }

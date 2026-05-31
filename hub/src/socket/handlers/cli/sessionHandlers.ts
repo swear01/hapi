@@ -67,10 +67,13 @@ export type SessionHandlersDeps = {
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
     /** Delegates session-end immediate-queue sweep to the MessageService layer. */
     onSweepImmediateQueued?: (sessionId: string, now: number) => void
+    /** Drops the queued-thinking grace so synchronous CLI handlers (e.g. slash
+     *  commands) don't leave the spinner stuck for the full grace window. */
+    onMessagesConsumed?: (sessionId: string) => void
 }
 
 export function registerSessionHandlers(socket: CliSocketWithData, deps: SessionHandlersDeps): void {
-    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued } = deps
+    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed } = deps
 
     socket.on('message', (data: unknown) => {
         const parsed = messageSchema.safeParse(data)
@@ -286,6 +289,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         try {
             store.messages.markMessagesInvoked(data.sid, localIds, invokedAt)
             onSessionActivity?.(data.sid, invokedAt)
+            onMessagesConsumed?.(data.sid)
             // Emit only after the DB write succeeds. Otherwise a transient SQLite
             // failure would broadcast an `invokedAt` that was never persisted —
             // live clients would hide the queued rows while a refresh / secondary

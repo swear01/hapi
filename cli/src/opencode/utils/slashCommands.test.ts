@@ -91,9 +91,31 @@ describe('resolveOpencodeSlashCommand', () => {
             message: expect.stringContaining('OpenCode status')
         });
         if (status.kind === 'handled') {
-            expect(status.message).toContain('permission: default');
-            expect(status.message).toContain('model: anthropic/claude-sonnet-4-5');
-            expect(status.message).toContain('reasoning: high');
+            expect(status.message).toContain('permission: `default`');
+            expect(status.message).toContain('model: `anthropic/claude-sonnet-4-5`');
+            expect(status.message).toContain('reasoning: `high`');
+        }
+    });
+
+    it('expands /init into a project-analysis prompt', () => {
+        const result = resolveOpencodeSlashCommand('/init', state);
+        expect(result).toMatchObject({
+            kind: 'replace',
+            message: 'Initializing AGENTS.md…'
+        });
+        if (result.kind === 'replace') {
+            expect(result.text).toContain('AGENTS.md');
+            expect(result.text).toContain('Build / lint / test');
+        }
+    });
+
+    it('appends extra instructions when /init has arguments', () => {
+        const result = resolveOpencodeSlashCommand('/init focus on the cli/ workspace', state);
+        if (result.kind === 'replace') {
+            expect(result.text).toContain('AGENTS.md');
+            expect(result.text).toContain('Additional instructions: focus on the cli/ workspace');
+        } else {
+            throw new Error(`expected replace, got ${result.kind}`);
         }
     });
 

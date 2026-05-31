@@ -180,17 +180,20 @@ describe('listSlashCommands', () => {
     it('exposes HAPI-supported OpenCode built-ins', async () => {
         const commands = await listSlashCommands('opencode', projectDir)
 
-        expect(commands.map((command) => command.name)).toEqual(expect.arrayContaining([
+        const names = commands.map((command) => command.name)
+        expect(names).toEqual(expect.arrayContaining([
+            'help',
+            'status',
             'plan',
             'default',
-            'status',
-            'model',
-            'reasoning',
-            'permissions',
-            'clear',
-            'compact',
-            'help',
+            'init',
         ]))
+        // Anything covered by composer buttons, plus aliases and unsupported
+        // placeholders, must stay out of the autocomplete menu — the resolver
+        // still accepts them when typed manually.
+        for (const hidden of ['model', 'reasoning', 'effort', 'permissions', 'permission', 'clear', 'compact']) {
+            expect(names).not.toContain(hidden)
+        }
     })
 
     it('loads OpenCode user and project commands', async () => {

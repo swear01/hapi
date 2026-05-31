@@ -158,18 +158,35 @@ export async function runOpencode(opts: {
                         }
                         syncSessionMode();
                     }
+                    if (slash.kind === 'handled') {
+                        // Ack the user's slash-command message before sending the
+                        // agent reply. The web sorts the conversation by
+                        // `invokedAt ?? createdAt` (web/src/lib/messages.ts), so
+                        // stamping invokedAt first keeps the user prompt above
+                        // the reply instead of below it.
+                        if (localId) {
+                            session.emitMessagesConsumed([localId]);
+                        }
+                        if (slash.message) {
+                            session.sendAgentMessage({
+                                type: 'message',
+                                message: slash.message,
+                                id: randomUUID()
+                            });
+                        }
+                        // Push a thinking=false keepalive immediately so the
+                        // spinner clears without waiting for the next 2s tick.
+                        // (The hub-side queued-thinking grace is dropped on
+                        // messages-consumed above, so this keepalive is honored.)
+                        sessionWrapperRef.current?.onThinkingChange(false);
+                        return;
+                    }
                     if (slash.message) {
                         session.sendAgentMessage({
                             type: 'message',
                             message: slash.message,
                             id: randomUUID()
                         });
-                    }
-                    if (slash.kind === 'handled') {
-                        if (localId) {
-                            session.emitMessagesConsumed([localId]);
-                        }
-                        return;
                     }
                     text = slash.text;
                 }
