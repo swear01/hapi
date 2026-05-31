@@ -55,6 +55,7 @@ export class AcpSdkBackend implements AgentBackend {
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
+    private activeOnUpdate: ((msg: AgentMessage) => void) | null = null;
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -283,6 +284,7 @@ export class AcpSdkBackend implements AgentBackend {
         );
         this.messageHandler?.drainBuffers();
         this.messageHandler = new AcpMessageHandler(onUpdate);
+        this.activeOnUpdate = onUpdate;
         this.isProcessingMessage = true;
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
@@ -323,11 +325,27 @@ export class AcpSdkBackend implements AgentBackend {
                         contextTokens: latestUsageUpdate ? latestUsageUpdate.contextTokens : undefined,
                         contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined
                     });
+                } else if (
+                    latestUsageUpdate
+                    && (latestUsageUpdate.contextTokens !== undefined || latestUsageUpdate.contextWindow !== undefined)
+                ) {
+                    // Agent did not return prompt usage (slash-handled turns,
+                    // errored turns), but we did see ACP usage updates during
+                    // the turn. Emit a context-only usage so the status bar
+                    // reflects the current context size.
+                    onUpdate({
+                        type: 'usage',
+                        inputTokens: 0,
+                        outputTokens: 0,
+                        contextTokens: latestUsageUpdate.contextTokens,
+                        contextWindow: latestUsageUpdate.contextWindow
+                    });
                 }
                 if (stopReason) {
                     onUpdate({ type: 'turn_complete', stopReason });
                 }
             } finally {
+                this.activeOnUpdate = null;
                 this.isProcessingMessage = false;
                 this.notifyResponseComplete();
             }
@@ -407,6 +425,7 @@ export class AcpSdkBackend implements AgentBackend {
         if (!this.transport) return;
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
+        this.activeOnUpdate = null;
         this.activeSessionId = null;
         this.isProcessingMessage = false;
         this.sessionModelsMetadata.clear();
@@ -431,12 +450,32 @@ export class AcpSdkBackend implements AgentBackend {
         if (!isObject(update)) return;
         if (asString(update.sessionUpdate) !== ACP_SESSION_UPDATE_TYPES.usageUpdate) return;
 
-        const contextTokens = this.asFiniteNumber(update.used);
-        const contextWindow = this.asFiniteNumber(update.size);
-        this.latestUsageUpdate = {
-            contextTokens: contextTokens ?? undefined,
-            contextWindow: contextWindow ?? undefined
-        };
+        const contextTokens = this.asFiniteNumber(update.used) ?? undefined;
+        const contextWindow = this.asFiniteNumber(update.size) ?? undefined;
+        const prev = this.latestUsageUpdate;
+        const changed = !prev
+            || prev.contextTokens !== contextTokens
+            || prev.contextWindow !== contextWindow;
+        this.latestUsageUpdate = { contextTokens, contextWindow };
+
+        // Surface context updates mid-turn so the web status bar shows live
+        // ctx N/M (X%) instead of staying blank until the final prompt usage
+        // arrives. ACP usage_update only carries context tokens, so I/O is
+        // sent as 0; the final prompt-finalize emit overwrites with the real
+        // input/output totals.
+        if (
+            changed
+            && this.activeOnUpdate
+            && (contextTokens !== undefined || contextWindow !== undefined)
+        ) {
+            this.activeOnUpdate({
+                type: 'usage',
+                inputTokens: 0,
+                outputTokens: 0,
+                contextTokens,
+                contextWindow
+            });
+        }
     }
 
     private readLatestUsageUpdate(): AcpUsageUpdate | null {
