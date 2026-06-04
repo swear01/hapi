@@ -69,7 +69,7 @@ describe('listCursorModels machine RPC handler', () => {
 
     it('returns shared on-disk ACP catalog while cross-process ACP lock is held', async () => {
         mkdirSync(join(testHome, 'locks', 'agent-acp-active'), { recursive: true });
-        writeFileSync(join(testHome, 'locks', 'agent-acp-active', 'pid'), '99999');
+        writeFileSync(join(testHome, 'locks', 'agent-acp-active', 'pid'), String(process.pid));
 
         seedCursorModelsCache({
             success: true,
@@ -93,6 +93,7 @@ describe('listCursorModels machine RPC handler', () => {
 
     it('returns empty list when ACP lock is held but no shared cache exists yet', async () => {
         mkdirSync(join(testHome, 'locks', 'agent-acp-active'), { recursive: true });
+        writeFileSync(join(testHome, 'locks', 'agent-acp-active', 'pid'), String(process.pid));
 
         const result = await listViaRpc();
 
