@@ -1,4 +1,5 @@
 import type { CursorPermissionMode } from '@hapi/protocol/types';
+import { matchCliSkuToAcpWireId } from '@hapi/protocol';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import { logger } from '@/ui/logger';
 
@@ -79,13 +80,9 @@ export function wireIdForCursorSessionState(requested: string, resolved: string)
     return resolved;
 }
 
-function cursorWireBaseId(modelId: string): string {
-    const bracket = modelId.indexOf('[');
-    return bracket === -1 ? modelId : modelId.slice(0, bracket);
-}
-
 /**
- * Map a spawn / hub wire id onto a live ACP configOptions entry (exact id, or sole variant for base).
+ * Map a spawn / hub wire id onto a live ACP configOptions entry.
+ * Exact wire ids only — no legacy alias, base-only, or nearest-variant fallback.
  */
 export function resolveCursorAcpWireId(
     requested: string,
@@ -101,24 +98,7 @@ export function resolveCursorAcpWireId(
         return exact.modelId;
     }
 
-    const base = cursorWireBaseId(trimmed);
-    const sameBase = available.filter((entry) => cursorWireBaseId(entry.modelId) === base);
-    if (sameBase.length === 0) {
-        return null;
-    }
-    if (sameBase.length === 1) {
-        return sameBase[0].modelId;
-    }
-
-    const paramPrefix = trimmed.includes('[') ? trimmed.slice(trimmed.indexOf('[')) : null;
-    if (paramPrefix) {
-        const paramMatch = sameBase.find((entry) => entry.modelId.endsWith(paramPrefix));
-        if (paramMatch) {
-            return paramMatch.modelId;
-        }
-    }
-
-    return sameBase[0]?.modelId ?? null;
+    return matchCliSkuToAcpWireId(trimmed, available);
 }
 
 /**
@@ -159,19 +139,6 @@ export async function applyCursorAcpModel(
         }
     };
 
-    const trySetModel = async (): Promise<boolean> => {
-        if (!backend.setModel) {
-            return false;
-        }
-        try {
-            await backend.setModel(sessionId, resolved);
-            return true;
-        } catch (error) {
-            logger.warn(`[cursor-acp] Failed to set model ${resolved}`, error);
-            return false;
-        }
-    };
-
     for (let attempt = 0; attempt < 2; attempt += 1) {
         if (await trySetConfigOption()) {
             backend.pinSessionModelWireId(sessionId, resolved);
@@ -180,11 +147,6 @@ export async function applyCursorAcpModel(
         if (attempt === 0) {
             await new Promise((resolve) => setTimeout(resolve, 150));
         }
-    }
-
-    if (await trySetModel()) {
-        backend.pinSessionModelWireId(sessionId, resolved);
-        return { applied: true, resolvedWireId: resolved, requestedWireId: trimmed };
     }
 
     return { applied: false };

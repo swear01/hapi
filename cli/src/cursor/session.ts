@@ -10,12 +10,15 @@ type LocalLaunchFailure = {
     exitReason: LocalLaunchExitReason;
 };
 
+type CursorModelApplyHandler = (model: string | null | undefined) => Promise<string | null>;
+
 export class CursorSession extends AgentSessionBase<EnhancedMode> {
     readonly cursorArgs?: string[];
     model?: string;
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     localLaunchFailure: LocalLaunchFailure | null = null;
+    private modelApplyHandler: CursorModelApplyHandler | null = null;
 
     constructor(opts: {
         api: ApiClient;
@@ -64,6 +67,24 @@ export class CursorSession extends AgentSessionBase<EnhancedMode> {
 
     setModel = (model: string | null | undefined): void => {
         this.model = model ?? undefined;
+    };
+
+    registerModelApplyHandler = (handler: CursorModelApplyHandler): (() => void) => {
+        this.modelApplyHandler = handler;
+        return () => {
+            if (this.modelApplyHandler === handler) {
+                this.modelApplyHandler = null;
+            }
+        };
+    };
+
+    canApplyModelConfig = (): boolean => this.modelApplyHandler !== null;
+
+    applyModelConfig = async (model: string | null | undefined): Promise<string | null> => {
+        if (!this.modelApplyHandler) {
+            throw new Error('Cursor ACP session is not ready to apply model changes');
+        }
+        return await this.modelApplyHandler(model);
     };
 
     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {

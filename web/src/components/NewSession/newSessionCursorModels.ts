@@ -19,16 +19,18 @@ export function shouldShowCursorModelsUnavailable(args: {
     return args.agent === 'cursor'
         && !args.isLoading
         && !args.error
-        && args.availableModels.length === 0
+        && pickCursorModelsForPicker(args.availableModels).length === 0
 }
 
 export function buildNewSessionCursorModelCatalog(
     availableModels: readonly CursorModelSummary[],
-    currentModel: string
+    currentModel: string,
+    cliModelSkus?: readonly CursorModelSummary[]
 ): CursorModelCatalog {
     return buildCursorCatalogFromSources({
         sessionModels: [],
         machineModels: availableModels,
+        cliModelSkus,
         sessionModelFromHub: currentModel !== 'auto' ? currentModel : null,
         defaultValue: 'auto'
     })
@@ -36,9 +38,10 @@ export function buildNewSessionCursorModelCatalog(
 
 export function buildNewSessionCursorPickerState(
     machineModels: readonly CursorModelSummary[],
-    currentModel: string
+    currentModel: string,
+    cliModelSkus?: readonly CursorModelSummary[]
 ): CursorPickerState {
-    const catalog = buildNewSessionCursorModelCatalog(machineModels, currentModel)
+    const catalog = buildNewSessionCursorModelCatalog(machineModels, currentModel, cliModelSkus)
     return buildCursorPickerState({
         catalog,
         currentWireId: currentModel,
@@ -59,7 +62,7 @@ export function buildNewSessionCursorEffortOptions(
 }
 
 export function shouldShowNewSessionCursorVariantPicker(picker: CursorPickerState): boolean {
-    return picker.showEffortPicker && picker.effortOptions.length > 1
+    return picker.mode === 'dual' && picker.showEffortPicker && picker.effortOptions.length > 1
 }
 
 /** Base row value in dual mode — use explicit base state, not derived catalog baseKey. */
@@ -73,7 +76,7 @@ export function resolveNewSessionCursorBaseSelectValue(
     if (cursorSelectedBase !== 'auto') {
         return cursorSelectedBase
     }
-    return picker.baseKey ?? 'auto'
+    return 'auto'
 }
 
 /** Keep Effort <select> controlled when catalog reloads after Browse remount. */
@@ -87,7 +90,7 @@ export function resolveNewSessionCursorEffortSelectValue(
     if (model !== 'auto' && effortOptions.some((row) => row.value === model)) {
         return model
     }
-    return effortOptions[0]?.value ?? 'auto'
+    return 'auto'
 }
 
 export function isCursorEffortWireAllowed(

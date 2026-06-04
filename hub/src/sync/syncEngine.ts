@@ -454,6 +454,7 @@ export class SyncEngine {
             throw new Error('Invalid response from session config RPC')
         }
         const obj = result as {
+            error?: string
             applied?: {
                 permissionMode?: Session['permissionMode']
                 model?: Session['model']
@@ -461,6 +462,9 @@ export class SyncEngine {
                 effort?: Session['effort']
                 collaborationMode?: Session['collaborationMode']
             }
+        }
+        if (typeof obj.error === 'string' && obj.error.trim().length > 0) {
+            throw new Error(obj.error)
         }
         const applied = obj.applied
         if (!applied || typeof applied !== 'object') {

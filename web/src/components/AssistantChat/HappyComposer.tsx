@@ -64,6 +64,8 @@ export function HappyComposer(props: {
     availableModelOptions?: Array<{ value: string | null; label: string }>
     /** Cursor: selected base model key (not wire id). */
     selectedModelBase?: string | null
+    /** Cursor: selected variant sku/wire for highlight when session stores an ACP wire id. */
+    selectedModelVariant?: string | null
     /** Cursor: effort/variant wire ids for the selected base model. */
     modelEffortOptions?: Array<{ value: string; label: string }>
     onCollaborationModeChange?: (mode: CodexCollaborationMode) => void
@@ -110,6 +112,7 @@ export function HappyComposer(props: {
         agentFlavor,
         availableModelOptions,
         selectedModelBase,
+        selectedModelVariant,
         modelEffortOptions,
         onCollaborationModeChange,
         onPermissionModeChange,
@@ -534,7 +537,7 @@ export function HappyComposer(props: {
     const showModelEffortSettings = Boolean(
         (onModelEffortChange ?? onModelChange)
         && modelEffortOptions
-        && modelEffortOptions.length > 1
+        && modelEffortOptions.length > 0
     )
     const showModelReasoningEffortSettings = Boolean(onModelReasoningEffortChange && codexReasoningEffortOptions.length > 0)
     const showEffortSettings = Boolean(onEffortChange && supportsEffort(agentFlavor))
@@ -694,7 +697,7 @@ export function HappyComposer(props: {
                         {showModelEffortSettings ? (
                             <div className="py-2">
                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
-                                    {t('misc.effort')}
+                                    {agentFlavor === 'cursor' ? t('misc.variant') : t('misc.effort')}
                                 </div>
                                 {modelEffortOptions!.map((option) => (
                                     <button
@@ -711,16 +714,16 @@ export function HappyComposer(props: {
                                     >
                                         <div
                                             className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                model === option.value
+                                                (selectedModelVariant ?? model) === option.value
                                                     ? 'border-[var(--app-link)]'
                                                     : 'border-[var(--app-hint)]'
                                             }`}
                                         >
-                                            {model === option.value && (
+                                            {(selectedModelVariant ?? model) === option.value && (
                                                 <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
                                             )}
                                         </div>
-                                        <span className={model === option.value ? 'text-[var(--app-link)]' : ''}>
+                                        <span className={(selectedModelVariant ?? model) === option.value ? 'text-[var(--app-link)]' : ''}>
                                             {option.label}
                                         </span>
                                     </button>
@@ -837,6 +840,7 @@ export function HappyComposer(props: {
         showModelEffortSettings,
         modelEffortOptions,
         selectedModelBase,
+        selectedModelVariant,
         showModelReasoningEffortSettings,
         showEffortSettings,
         modelOptions,

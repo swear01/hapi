@@ -119,6 +119,51 @@ describe('session model', () => {
         expect(store.sessions.getSession(session.id)?.model).toBeNull()
     })
 
+    it('ignores stale keepalive model values after an applied config update', () => {
+        const originalDateNow = Date.now
+        let now = 1_780_000_000_000
+        Date.now = () => now
+        try {
+            const store = new Store(':memory:')
+            const events: SyncEvent[] = []
+            const cache = new SessionCache(store, createPublisher(events))
+
+            const session = cache.getOrCreateSession(
+                'session-model-stale-heartbeat',
+                { path: '/tmp/project', host: 'localhost', flavor: 'cursor' },
+                null,
+                'default',
+                'composer-2.5[fast=true]'
+            )
+
+            const staleKeepAliveTime = now
+            now += 1_000
+            cache.applySessionConfig(session.id, { model: 'gpt-5.5[reasoning=medium]' })
+
+            cache.handleSessionAlive({
+                sid: session.id,
+                time: staleKeepAliveTime,
+                thinking: false,
+                model: 'composer-2.5[fast=true]'
+            })
+
+            expect(cache.getSession(session.id)?.model).toBe('gpt-5.5[reasoning=medium]')
+            expect(store.sessions.getSession(session.id)?.model).toBe('gpt-5.5[reasoning=medium]')
+
+            now += 1_000
+            cache.handleSessionAlive({
+                sid: session.id,
+                time: now,
+                thinking: false,
+                model: 'claude-opus-4-8[effort=high]'
+            })
+
+            expect(cache.getSession(session.id)?.model).toBe('claude-opus-4-8[effort=high]')
+        } finally {
+            Date.now = originalDateNow
+        }
+    })
+
     it('syncs cursor spawn model to resolved ACP wire id via keepalive', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []

@@ -15,6 +15,17 @@ vi.mock('@/agent/backends/acp/agentCliGuard', () => ({
     _resetAgentCliGuardForTests: vi.fn()
 }));
 
+const acpProbeMock = vi.hoisted(() => ({
+    runCursorAcpModelProbe: vi.fn()
+}));
+
+vi.mock('./cursorAcpModelProbe', () => ({
+    runCursorAcpModelProbe: acpProbeMock.runCursorAcpModelProbe,
+    cursorProbeResponseHasWireCatalog: (response: { success?: boolean; availableModels?: Array<{ modelId: string }> }) =>
+        response.success === true
+        && (response.availableModels ?? []).some((model) => model.modelId.includes('['))
+}));
+
 import { isAgentAcpTransportActive } from '@/agent/backends/acp/agentCliGuard';
 import {
     readSharedCursorModelsCache,
@@ -34,6 +45,7 @@ afterEach(() => {
     setCursorAcpModelsSnapshot(null)
     vi.mocked(isAgentAcpTransportActive).mockReturnValue(false)
     spawnMock.mockReset()
+    acpProbeMock.runCursorAcpModelProbe.mockReset()
 })
 
 describe('parseCursorModelsOutput', () => {
@@ -74,18 +86,18 @@ composer-2.5 - Composer 2.5
 describe('listCursorModels', () => {
     test('does not spawn agent --list-models while ACP transport is active', async () => {
         vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)
-        seedCursorModelsCache({
+        writeSharedCursorModelsCache({
             success: true,
-            availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }],
-            currentModelId: 'composer-2.5'
+            availableModels: [{ modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' }],
+            currentModelId: 'composer-2.5[fast=true]'
         })
 
         const result = await listCursorModels()
 
         expect(result).toEqual({
             success: true,
-            availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }],
-            currentModelId: 'composer-2.5'
+            availableModels: [{ modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' }],
+            currentModelId: 'composer-2.5[fast=true]'
         })
         expect(spawnMock).not.toHaveBeenCalled()
     })
@@ -140,6 +152,69 @@ describe('listCursorModels', () => {
         expect(spawnMock).not.toHaveBeenCalled()
         expect(readSharedCursorModelsCache()?.currentModelId).toBe('composer-2.5[fast=true]')
     })
+
+    test('prefers ACP wire probe over CLI slug probe when cache is empty', async () => {
+        acpProbeMock.runCursorAcpModelProbe.mockResolvedValue({
+            success: true,
+            availableModels: [{ modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' }],
+            currentModelId: 'composer-2.5[fast=true]'
+        });
+        spawnMock.mockImplementation(() => ({
+            stdout: {
+                on: vi.fn((event: string, handler: (chunk: Buffer) => void) => {
+                    if (event === 'data') {
+                        handler(Buffer.from('composer-2.5-fast - Composer 2.5 Fast\n'));
+                    }
+                })
+            },
+            stderr: { on: vi.fn() },
+            on: vi.fn((event: string, handler: (code: number) => void) => {
+                if (event === 'exit') {
+                    setTimeout(() => handler(0), 0);
+                }
+            }),
+            kill: vi.fn()
+        }));
+
+        const result = await listCursorModels();
+
+        expect(acpProbeMock.runCursorAcpModelProbe).toHaveBeenCalled();
+        expect(result.availableModels).toEqual([
+            { modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' }
+        ]);
+        expect(result.cliModelSkus?.some((row) => row.modelId === 'composer-2.5-fast')).toBe(true);
+    });
+
+    test('does not cache CLI slug probe when ACP probe returns no wires', async () => {
+        acpProbeMock.runCursorAcpModelProbe.mockResolvedValue({
+            success: false,
+            error: 'no acp'
+        });
+        spawnMock.mockImplementation(() => ({
+            stdout: {
+                on: vi.fn((event: string, handler: (chunk: Buffer) => void) => {
+                    if (event === 'data') {
+                        handler(Buffer.from('composer-2.5 - Composer 2.5 (current)\n'));
+                    }
+                })
+            },
+            stderr: { on: vi.fn() },
+            on: vi.fn((event: string, handler: (code: number) => void) => {
+                if (event === 'exit') {
+                    setTimeout(() => handler(0), 0);
+                }
+            }),
+            kill: vi.fn()
+        }));
+
+        const result = await listCursorModels();
+
+        expect(result).toEqual({
+            success: true,
+            availableModels: [],
+            currentModelId: null
+        });
+    });
 
     test('prefers live ACP snapshot over cache while ACP transport is active', async () => {
         vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)

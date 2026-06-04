@@ -30,6 +30,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private displayPermissionMode: PermissionMode | null = null;
     private currentBackendModel: string | null = null;
     private defaultBackendModel: string | null = null;
+    private unregisterModelApplyHandler: (() => void) | null = null;
+    private modelApplySeq = 0;
 
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -128,19 +130,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
         await applyCursorAcpMode(backend, acpSessionId, session.getPermissionMode() as PermissionMode);
         if (session.model) {
-            const initialModel = await applyCursorAcpModel(backend, acpSessionId, session.model);
-            const resolvedWireId = initialModel.resolvedWireId
-                ?? (this.currentBackendModel && !isSpawnDefaultModel(this.currentBackendModel)
-                    ? this.currentBackendModel
-                    : undefined);
-            if (resolvedWireId) {
-                const sessionWire = wireIdForCursorSessionState(session.model ?? resolvedWireId, resolvedWireId);
-                this.currentBackendModel = sessionWire;
-                previousSetModel(sessionWire);
-                this.pushModelStatusLine(sessionWire);
-                session.pushKeepAlive();
-                syncCursorModelsFromAcp(backend, acpSessionId);
-            }
+            await this.applyLiveModel(backend, acpSessionId, session.model, previousSetModel, {
+                optimistic: false,
+                throwOnFailure: false
+            });
         } else if (this.currentBackendModel && !isSpawnDefaultModel(this.currentBackendModel)) {
             this.pushModelStatusLine(this.currentBackendModel);
         }
@@ -176,21 +169,14 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 requestedModel && requestedModel !== this.currentBackendModel
             );
             if (modelChanged) {
-                const modelResult = await applyCursorAcpModel(backend, acpSessionId, requestedModel);
-                if (modelResult.applied && modelResult.resolvedWireId) {
-                    const sessionWire = wireIdForCursorSessionState(
-                        requestedModel ?? modelResult.resolvedWireId,
-                        modelResult.resolvedWireId
-                    );
-                    this.currentBackendModel = sessionWire;
-                    batch.mode.model = sessionWire;
-                    previousSetModel(sessionWire);
-                    this.pushModelStatusLine(sessionWire);
-                    session.pushKeepAlive();
-                    syncCursorModelsFromAcp(backend, acpSessionId);
-                } else {
-                    batch.mode.model = this.currentBackendModel ?? undefined;
-                }
+                const appliedModel = await this.applyLiveModel(
+                    backend,
+                    acpSessionId,
+                    requestedModel,
+                    previousSetModel,
+                    { optimistic: false, throwOnFailure: false }
+                );
+                batch.mode.model = appliedModel ?? this.currentBackendModel ?? undefined;
             }
 
             await applyCursorAcpMode(backend, acpSessionId, batch.mode.permissionMode as PermissionMode);
@@ -229,6 +215,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+        this.unregisterModelApplyHandler?.();
+        this.unregisterModelApplyHandler = null;
 
         if (this.permissionAdapter) {
             await this.permissionAdapter.cancelAll('Session ended');
@@ -297,39 +285,89 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             });
         };
 
-        session.setModel = (model: string | null | undefined) => {
-            const requested = model?.trim();
-            if (!requested || isSpawnDefaultModel(requested)) {
-                this.currentBackendModel = null;
-                previousSetModel(undefined);
-                session.pushKeepAlive();
-                return;
-            }
+        this.unregisterModelApplyHandler = session.registerModelApplyHandler(async (model) => (
+            await this.applyLiveModel(backend, acpSessionId, model, previousSetModel, {
+                optimistic: false,
+                throwOnFailure: true
+            })
+        ));
 
+        session.setModel = (model: string | null | undefined) => {
+            void this.applyLiveModel(backend, acpSessionId, model, previousSetModel, {
+                optimistic: true,
+                throwOnFailure: false
+            }).catch((error) => {
+                logger.warn('[cursor-acp] Failed to apply model from session sync', error);
+            });
+        };
+    }
+
+    private async applyLiveModel(
+        backend: AcpSdkBackend,
+        acpSessionId: string,
+        model: string | null | undefined,
+        previousSetModel: CursorSession['setModel'],
+        options: { optimistic: boolean; throwOnFailure: boolean }
+    ): Promise<string | null> {
+        const requested = model?.trim();
+        const previousModel = this.currentBackendModel ?? this.session.model ?? null;
+        const applySeq = ++this.modelApplySeq;
+
+        if (!requested || isSpawnDefaultModel(requested)) {
+            this.currentBackendModel = null;
+            previousSetModel(undefined);
+            this.session.pushKeepAlive();
+            syncCursorModelsFromAcp(backend, acpSessionId);
+            return null;
+        }
+
+        if (options.optimistic) {
             const optimisticWire = wireIdForCursorSessionState(requested, requested);
             this.currentBackendModel = optimisticWire;
             previousSetModel(optimisticWire);
-            session.pushKeepAlive();
+            this.session.pushKeepAlive();
+        }
 
-            void applyCursorAcpModel(backend, acpSessionId, requested).then((result) => {
-                if (!result.applied || !result.resolvedWireId) {
-                    return;
-                }
-                const sessionWire = wireIdForCursorSessionState(
-                    result.requestedWireId ?? requested,
-                    result.resolvedWireId
-                );
-                if (sessionWire === this.currentBackendModel) {
-                    syncCursorModelsFromAcp(backend, acpSessionId);
-                    return;
-                }
-                this.currentBackendModel = sessionWire;
-                previousSetModel(sessionWire);
-                this.pushModelStatusLine(sessionWire);
-                session.pushKeepAlive();
-                syncCursorModelsFromAcp(backend, acpSessionId);
-            });
-        };
+        const result = await applyCursorAcpModel(backend, acpSessionId, requested);
+        if (!result.applied || !result.resolvedWireId) {
+            const message = `Cursor model is not available via ACP: ${requested}`;
+            logger.warn(`[cursor-acp] ${message}`);
+
+            if (options.optimistic && applySeq === this.modelApplySeq) {
+                this.currentBackendModel = previousModel;
+                previousSetModel(previousModel ?? undefined);
+                this.session.pushKeepAlive();
+            } else if (!options.throwOnFailure && previousModel && !isSpawnDefaultModel(previousModel)) {
+                this.currentBackendModel = previousModel;
+                previousSetModel(previousModel);
+                this.session.pushKeepAlive();
+            }
+            syncCursorModelsFromAcp(backend, acpSessionId);
+
+            if (options.throwOnFailure) {
+                throw new Error(message);
+            }
+            return previousModel;
+        }
+
+        const sessionWire = wireIdForCursorSessionState(
+            result.requestedWireId ?? requested,
+            result.resolvedWireId
+        );
+
+        if (applySeq !== this.modelApplySeq) {
+            return this.currentBackendModel;
+        }
+
+        const changed = sessionWire !== this.currentBackendModel || this.session.model !== sessionWire;
+        this.currentBackendModel = sessionWire;
+        previousSetModel(sessionWire);
+        if (changed) {
+            this.pushModelStatusLine(sessionWire);
+        }
+        this.session.pushKeepAlive();
+        syncCursorModelsFromAcp(backend, acpSessionId);
+        return sessionWire;
     }
 
     private pushModelStatusLine(model: string | null | undefined): void {

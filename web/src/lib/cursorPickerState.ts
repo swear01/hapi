@@ -1,11 +1,11 @@
 import type { CursorModelSummary } from '@/types/api'
 import {
+    appendCliSkusToCatalog,
     buildCursorEffortPickerOptions,
     buildCursorModelCatalog,
     buildFlatCursorModelPickerOptions,
-    cursorBaseHasMultipleVariants,
     cursorModelDedupeKey,
-    parseCursorWireParams,
+    isCursorAcpWireModelId,
     resolveCursorBaseKey,
     resolveCursorVariantOptions,
     shouldUseCursorDualPickers,
@@ -27,12 +27,11 @@ export type CursorPickerState = {
     showEffortPicker: boolean
 }
 
-/** Prefer ACP wire ids when present; fall back to full machine/probe list. */
+/** Only ACP wire ids (and default[]); never CLI probe slugs without bracket params. */
 export function pickCursorModelsForPicker(
     availableModels: readonly CursorModelSummary[]
 ): CursorModelSummary[] {
-    const acpWire = availableModels.filter((model) => model.modelId.includes('['))
-    return acpWire.length > 0 ? acpWire : [...availableModels]
+    return availableModels.filter((model) => isCursorAcpWireModelId(model.modelId))
 }
 
 /**
@@ -46,35 +45,25 @@ export function mergeCursorModelSummaries(
 ): CursorModelSummary[] {
     const merged = new Map<string, CursorModelSummary>()
 
-    const add = (model: CursorModelSummary, preferName: boolean) => {
+    const add = (model: CursorModelSummary) => {
         const modelId = model.modelId.trim()
-        if (!modelId) {
+        if (!modelId || !isCursorAcpWireModelId(modelId)) {
             return
         }
-        const existing = merged.get(modelId)
-        if (!existing) {
+        if (!merged.has(modelId)) {
             merged.set(modelId, { ...model, modelId })
-            return
-        }
-        const name = model.name?.trim()
-        if (
-            name
-            && name !== modelId
-            && (preferName || !existing.name || existing.name === existing.modelId)
-        ) {
-            merged.set(modelId, { modelId, name })
         }
     }
 
-    for (const model of secondary) {
-        add(model, false)
-    }
     for (const model of primary) {
-        add(model, true)
+        add(model)
+    }
+    for (const model of secondary) {
+        add(model)
     }
 
     const trimmedCurrent = currentWireId?.trim()
-    if (trimmedCurrent && !merged.has(trimmedCurrent)) {
+    if (trimmedCurrent && isCursorAcpWireModelId(trimmedCurrent) && !merged.has(trimmedCurrent)) {
         merged.set(trimmedCurrent, { modelId: trimmedCurrent })
     }
 
@@ -84,6 +73,7 @@ export function mergeCursorModelSummaries(
 export function buildCursorCatalogFromSources(args: {
     sessionModels: readonly CursorModelSummary[]
     machineModels?: readonly CursorModelSummary[]
+    cliModelSkus?: readonly CursorModelSummary[]
     currentWireId?: string | null
     sessionModelFromHub?: string | null
     defaultValue?: null | 'auto'
@@ -96,10 +86,12 @@ export function buildCursorCatalogFromSources(args: {
         args.machineModels ?? [],
         wireHint
     )
-    return buildCursorModelCatalog(pickCursorModelsForPicker(merged), {
-        currentModel: wireHint ?? args.sessionModelFromHub,
+    const injectCurrent = wireHint && isCursorAcpWireModelId(wireHint) ? wireHint : null
+    const catalog = buildCursorModelCatalog(pickCursorModelsForPicker(merged), {
+        currentModel: injectCurrent,
         defaultValue: args.defaultValue
     })
+    return appendCliSkusToCatalog(catalog, args.cliModelSkus ?? [])
 }
 
 export function normalizeCursorPickerWireId(
@@ -125,25 +117,24 @@ export function buildCursorPickerState(args: {
         : null
 
     const useDual = shouldUseCursorDualPickers(args.catalog, wireId === 'auto' ? null : wireId)
-    const showEffortPicker = Boolean(
-        baseKey
-        && baseKey !== 'auto'
-        && cursorBaseHasMultipleVariants(args.catalog, baseKey)
-    )
+    const variantBaseKey = baseKey && baseKey !== 'auto' ? baseKey : null
+    const variantsForBase = resolveCursorVariantOptions(variantBaseKey, args.catalog)
+    const showEffortPicker = Boolean(variantBaseKey && variantsForBase.length > 1)
 
     const modelOptions: CursorPickerOption[] = useDual
         ? args.catalog.baseOptions.map((option) => ({
             value: option.value ?? 'auto',
             label: option.label
         }))
-        : buildFlatCursorModelPickerOptions(args.catalog, { defaultValue: args.defaultValue })
-            .map((option) => ({
-                value: option.value ?? 'auto',
-                label: option.label
-            }))
+        : buildFlatCursorModelPickerOptions(args.catalog, {
+            defaultValue: args.defaultValue === 'auto' ? 'auto' : undefined
+        }).map((option) => ({
+            value: option.value ?? 'auto',
+            label: option.label
+        }))
 
     const effortOptions: CursorPickerOption[] = showEffortPicker
-        ? buildCursorEffortPickerOptions(resolveCursorVariantOptions(baseKey, args.catalog))
+        ? buildCursorEffortPickerOptions(variantsForBase)
         : []
 
     return {
@@ -157,56 +148,23 @@ export function buildCursorPickerState(args: {
     }
 }
 
-function scoreVariantForBaseChange(
-    currentParams: Record<string, string>,
-    candidateParams: Record<string, string>
-): number {
-    let score = 0
-    for (const key of ['effort', 'reasoning', 'fast', 'thinking', 'context'] as const) {
-        const current = currentParams[key]
-        if (current === undefined) {
-            continue
-        }
-        if (candidateParams[key] === current) {
-            score += 10
-        }
-    }
-    return score
-}
-
 /**
- * When switching base in dual picker, keep effort/fast/context tier when the new base offers a matching wire.
+ * When switching base in dual picker, only apply when the base maps to exactly one wire.
+ * Multi-variant bases require an explicit variant click; no "closest" matching.
  */
 export function resolveWireIdForBaseChange(
     baseKey: string,
     catalog: CursorModelCatalog,
-    currentWireId?: string | null
-): string {
+    _currentWireId?: string | null
+): string | null {
     if (baseKey === 'auto') {
         return 'auto'
     }
     const variants = resolveCursorVariantOptions(baseKey, catalog)
-    if (variants.length === 0) {
-        return 'auto'
-    }
-    if (!currentWireId || currentWireId === 'auto') {
+    if (variants.length === 1) {
         return variants[0].wireId
     }
-    const exact = variants.find((entry) => entry.wireId === currentWireId)
-    if (exact) {
-        return exact.wireId
-    }
-    const currentParams = parseCursorWireParams(currentWireId)
-    let best = variants[0]
-    let bestScore = -1
-    for (const variant of variants) {
-        const score = scoreVariantForBaseChange(currentParams, parseCursorWireParams(variant.wireId))
-        if (score > bestScore) {
-            bestScore = score
-            best = variant
-        }
-    }
-    return best.wireId
+    return null
 }
 
 export function resolveCursorBaseFromWire(

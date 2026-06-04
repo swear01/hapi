@@ -8,6 +8,76 @@ import {
     writeSharedCursorModelsCache,
     _resetSharedCursorModelsCacheForTests
 } from './cursorModelsSharedCache';
+import {
+    cursorCliSkuBaseId,
+    cursorModelBaseId,
+    isCursorAcpWireModelId
+} from '@hapi/protocol';
+import {
+    cursorProbeResponseHasWireCatalog,
+    runCursorAcpModelProbe
+} from './cursorAcpModelProbe';
+
+function filterCliSkusForWireBases(
+    cliSkus: CursorModelSummary[],
+    wires: CursorModelSummary[]
+): CursorModelSummary[] {
+    const wireBases = new Set(
+        wires.map((entry) => cursorModelBaseId(entry.modelId)).filter((base) => base.length > 0)
+    );
+
+    return cliSkus.filter((entry) => {
+        const modelId = entry.modelId.trim();
+        if (!modelId || modelId === 'auto' || isCursorAcpWireModelId(modelId)) {
+            return false;
+        }
+        return wireBases.has(cursorCliSkuBaseId(modelId));
+    });
+}
+
+function attachCliSkusToResponse(
+    response: ListCursorModelsResponse,
+    cliSkus: readonly CursorModelSummary[]
+): ListCursorModelsResponse {
+    if ((response.cliModelSkus?.length ?? 0) > 0) {
+        return response;
+    }
+
+    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpWireModelId(entry.modelId));
+    const filtered = filterCliSkusForWireBases([...cliSkus], wires);
+    return filtered.length > 0 ? { ...response, cliModelSkus: filtered } : response;
+}
+
+async function enrichCursorModelsWithCliSkus(
+    response: ListCursorModelsResponse
+): Promise<ListCursorModelsResponse> {
+    if ((response.cliModelSkus?.length ?? 0) > 0) {
+        return response;
+    }
+
+    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpWireModelId(entry.modelId));
+    if (wires.length === 0) {
+        return response;
+    }
+
+    const shared = readSharedCursorModelsCache();
+    if (shared?.cliModelSkus?.length) {
+        return attachCliSkusToResponse(response, shared.cliModelSkus);
+    }
+
+    // Never spawn `agent --list-models` while an ACP session holds the CLI lock.
+    if (isAgentAcpTransportActive()) {
+        return response;
+    }
+
+    try {
+        const probe = await runCursorModelProbe();
+        const cliSkus = filterCliSkusForWireBases(probe.availableModels ?? [], wires);
+        return cliSkus.length > 0 ? { ...response, cliModelSkus: cliSkus } : response;
+    } catch {
+        return response;
+    }
+}
 
 export type ListCursorModelsResponse = CursorModelsResponse;
 
@@ -111,17 +181,18 @@ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
     });
 }
 
-function applyInMemoryCache(response: ListCursorModelsResponse): ListCursorModelsResponse {
-    if ((response.availableModels?.length ?? 0) > 0) {
+async function applyInMemoryCache(response: ListCursorModelsResponse): Promise<ListCursorModelsResponse> {
+    const enriched = await enrichCursorModelsWithCliSkus(response);
+    if ((enriched.availableModels?.length ?? 0) > 0) {
         cache.expiresAt = Date.now() + CACHE_TTL_MS;
-        cache.response = response;
-        writeSharedCursorModelsCache(response);
+        cache.response = enriched;
+        writeSharedCursorModelsCache(enriched);
     }
-    return response;
+    return enriched;
 }
 
 /** ACP session snapshot (Zed-style); falls back to seeded / on-disk cache from the last live session. */
-function listCursorModelsWhileAcpActive(): ListCursorModelsResponse {
+async function listCursorModelsWhileAcpActive(): Promise<ListCursorModelsResponse> {
     const acp = getCursorAcpModelsSnapshot();
     if (acp && acp.availableModels.length > 0) {
         return applyInMemoryCache({ success: true, ...acp });
@@ -132,7 +203,9 @@ function listCursorModelsWhileAcpActive(): ListCursorModelsResponse {
         return applyInMemoryCache(shared);
     }
     if (cache.expiresAt > Date.now() && (cache.response.availableModels?.length ?? 0) > 0) {
-        return cache.response;
+        const shared = readSharedCursorModelsCache();
+        const cachedSkus = cache.response.cliModelSkus ?? shared?.cliModelSkus ?? [];
+        return attachCliSkusToResponse(cache.response, cachedSkus);
     }
     return { success: true, availableModels: [], currentModelId: null };
 }
@@ -148,7 +221,7 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
     }
 
     if (cache.expiresAt > Date.now() && (cache.response.availableModels?.length ?? 0) > 0) {
-        return cache.response;
+        return enrichCursorModelsWithCliSkus(cache.response);
     }
 
     const shared = readSharedCursorModelsCache();
@@ -162,8 +235,24 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
 
     inflight = (async () => {
         try {
-            const response = await runCursorModelProbe();
-            return applyInMemoryCache(response);
+            const acpResponse = await runCursorAcpModelProbe();
+            if (cursorProbeResponseHasWireCatalog(acpResponse)) {
+                return applyInMemoryCache(acpResponse);
+            }
+
+            const probeResponse = await runCursorModelProbe();
+            if (cursorProbeResponseHasWireCatalog(probeResponse)) {
+                return applyInMemoryCache(probeResponse);
+            }
+
+            // CLI `--list-models` returns slug ids without bracket params; never cache
+            // those for the web picker (New Session would show only Default + current slug).
+            if (acpResponse.success) {
+                return acpResponse;
+            }
+            return probeResponse.success
+                ? { success: true, availableModels: [], currentModelId: null }
+                : probeResponse;
         } catch (error) {
             return {
                 success: false,
@@ -178,7 +267,7 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
 }
 
 export function seedCursorModelsCache(response: ListCursorModelsResponse): void {
-    applyInMemoryCache(response);
+    void applyInMemoryCache(response);
 }
 
 export function _resetCursorModelsCacheForTests(): void {

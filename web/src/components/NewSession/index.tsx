@@ -19,9 +19,9 @@ import {
     resolveNewSessionCursorBaseSelectValue,
     resolveNewSessionCursorEffortSelectValue,
     resolveWireIdForBaseChange,
-    shouldShowCursorModelsUnavailable,
-    shouldShowNewSessionCursorVariantPicker
+    shouldShowCursorModelsUnavailable
 } from './newSessionCursorModels'
+import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
 import {
     clearNewSessionFormDraft,
     loadNewSessionFormDraft,
@@ -205,8 +205,12 @@ export function NewSession(props: {
         enabled: agent === 'cursor' && Boolean(machineId)
     })
     const cursorPicker = useMemo(
-        () => buildNewSessionCursorPickerState(cursorModelsState.availableModels, model),
-        [cursorModelsState.availableModels, model]
+        () => buildNewSessionCursorPickerState(
+            cursorModelsState.availableModels,
+            model,
+            cursorModelsState.cliModelSkus
+        ),
+        [cursorModelsState.availableModels, cursorModelsState.cliModelSkus, model]
     )
 
     const cursorBaseSelectValue = useMemo(
@@ -214,9 +218,29 @@ export function NewSession(props: {
         [cursorPicker, cursorSelectedBase]
     )
 
+    const cursorVariantOptions = useMemo(() => {
+        if (cursorPicker.mode !== 'dual') {
+            return cursorPicker.effortOptions
+        }
+        const baseKey = cursorBaseSelectValue !== 'auto'
+            ? cursorBaseSelectValue
+            : cursorPicker.baseKey
+        return buildCursorEffortPickerOptions(resolveCursorVariantOptions(baseKey ?? null, cursorPicker.catalog))
+    }, [cursorPicker, cursorBaseSelectValue])
+
+    const cursorVariantSelectOptions = useMemo(() => {
+        if (cursorVariantOptions.length === 0) {
+            return []
+        }
+        return [
+            { value: 'auto', label: t('newSession.model.selectVariant') },
+            ...cursorVariantOptions
+        ]
+    }, [cursorVariantOptions, t])
+
     const cursorEffortSelectValue = useMemo(
-        () => resolveNewSessionCursorEffortSelectValue(model, cursorPicker.effortOptions),
-        [model, cursorPicker.effortOptions]
+        () => resolveNewSessionCursorEffortSelectValue(model, cursorVariantOptions),
+        [model, cursorVariantOptions]
     )
 
     useEffect(() => {
@@ -242,32 +266,7 @@ export function NewSession(props: {
         cursorSelectedBase
     ])
 
-    useEffect(() => {
-        if (agent !== 'cursor' || cursorModelsState.isLoading || model === 'auto') {
-            return
-        }
-        if (cursorPicker.catalog.wireToBase.has(model)) {
-            return
-        }
-        const base = resolveCursorBaseFromWire(model, cursorPicker.catalog)
-        const variants = cursorPicker.catalog.variantsByBase.get(base) ?? []
-        if (variants.length === 0) {
-            setModel('auto')
-            setCursorSelectedBase('auto')
-            return
-        }
-        const remapped = resolveWireIdForBaseChange(base, cursorPicker.catalog, model)
-        if (remapped !== model) {
-            setModel(remapped)
-        }
-    }, [
-        agent,
-        model,
-        cursorModelsState.isLoading,
-        cursorPicker.catalog
-    ])
-
-    const showCursorVariantPicker = shouldShowNewSessionCursorVariantPicker(cursorPicker)
+    const showCursorVariantPicker = cursorPicker.mode === 'dual' && cursorVariantOptions.length > 1
 
     useEffect(() => {
         if (agent !== 'cursor' || cursorModelsState.isLoading) {
@@ -285,7 +284,7 @@ export function NewSession(props: {
             setModel('auto')
             return
         }
-        setModel(resolveWireIdForBaseChange(pendingBase, cursorPicker.catalog, model))
+        setModel(resolveWireIdForBaseChange(pendingBase, cursorPicker.catalog, model) ?? 'auto')
     }, [
         agent,
         cursorModelsState.isLoading,
@@ -427,7 +426,7 @@ export function NewSession(props: {
             return
         }
         pendingCursorBaseRef.current = null
-        setModel(resolveWireIdForBaseChange(baseKey, cursorPicker.catalog, model))
+        setModel(resolveWireIdForBaseChange(baseKey, cursorPicker.catalog, model) ?? 'auto')
     }, [cursorModelsState.isLoading, cursorPicker.catalog, model])
 
     const handleCursorEffortChange = useCallback((wireId: string) => {
@@ -542,6 +541,18 @@ export function NewSession(props: {
 
             if (sessionType === 'simple' && directoryExists === false && !directoryCreationConfirmed) {
                 setDirectoryCreationConfirmed(true)
+                return
+            }
+
+            if (
+                agent === 'cursor'
+                && cursorPicker.mode === 'dual'
+                && cursorBaseSelectValue !== 'auto'
+                && cursorVariantOptions.length > 1
+                && !cursorVariantOptions.some((option) => option.value === model)
+            ) {
+                haptic.notification('error')
+                setError(t('newSession.model.selectVariant'))
                 return
             }
 
@@ -665,8 +676,8 @@ export function NewSession(props: {
                             <ModelSelector
                                 agent={agent}
                                 model={cursorEffortSelectValue}
-                                label={t('misc.effort')}
-                                options={cursorPicker.effortOptions}
+                                label={t('misc.variant')}
+                                options={cursorVariantSelectOptions}
                                 isDisabled={cursorModelPickersDisabled}
                                 isLoading={cursorModelsState.isLoading}
                                 onModelChange={handleCursorEffortChange}

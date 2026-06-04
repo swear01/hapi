@@ -19,7 +19,7 @@ describe('resolveSessionCursorModelChange', () => {
         sessionCurrentModelId: 'composer-2.5[fast=true]'
     })
 
-    it('maps base change to a wire id and updates selected base', () => {
+    it('updates selected base without applying when the base has multiple variants', () => {
         const plan = resolveSessionCursorModelChange({
             picker,
             sessionModel: 'composer-2.5[fast=true]',
@@ -29,12 +29,35 @@ describe('resolveSessionCursorModelChange', () => {
         })
         expect(plan).toEqual({
             ok: true,
-            wireId: 'composer-2.5[fast=true]',
-            nextSelectedBase: 'composer-2.5'
+            wireId: null,
+            nextSelectedBase: 'composer-2.5',
+            shouldApply: false
         })
     })
 
-    it('accepts effort wire ids without matching stale session baseKey', () => {
+    it('applies a base change when the base has exactly one wire variant', () => {
+        const singlePicker = buildSessionCursorPickerState({
+            sessionModels: [{ modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]' }],
+            machineModels: [],
+            sessionModel: null,
+            sessionCurrentModelId: null
+        })
+        const plan = resolveSessionCursorModelChange({
+            picker: singlePicker,
+            sessionModel: null,
+            cursorSelectedBase: 'auto',
+            kind: 'base',
+            value: 'gpt-5.5'
+        })
+        expect(plan).toEqual({
+            ok: true,
+            wireId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]',
+            nextSelectedBase: 'gpt-5.5',
+            shouldApply: true
+        })
+    })
+
+    it('accepts exact variant wire ids without matching stale session baseKey', () => {
         const plan = resolveSessionCursorModelChange({
             picker,
             sessionModel: 'composer-2.5[fast=true]',
@@ -45,11 +68,12 @@ describe('resolveSessionCursorModelChange', () => {
         expect(plan).toEqual({
             ok: true,
             wireId: 'composer-2.5[fast=false]',
-            nextSelectedBase: 'composer-2.5'
+            nextSelectedBase: 'composer-2.5',
+            shouldApply: true
         })
     })
 
-    it('rejects effort wire ids missing from catalog', () => {
+    it('rejects variant wire ids missing from catalog', () => {
         const plan = resolveSessionCursorModelChange({
             picker,
             sessionModel: 'composer-2.5[fast=true]',
@@ -67,6 +91,43 @@ describe('resolveSessionCursorModelChange', () => {
         expect(
             resolveSessionCursorBaseSelectValue(picker, 'auto')
         ).toBe('composer-2.5')
+    })
+
+    it('highlights Default when session has no model even if local base is auto', () => {
+        const defaultPicker = buildSessionCursorPickerState({
+            sessionModels,
+            machineModels: [],
+            sessionModel: null,
+            sessionCurrentModelId: null
+        })
+        expect(resolveSessionCursorBaseSelectValue(defaultPicker, 'auto')).toBe('auto')
+    })
+})
+
+describe('CLI sku variants in session picker', () => {
+    it('accepts CLI sku ids attached to an ACP base', () => {
+        const picker = buildSessionCursorPickerState({
+            sessionModels: [{ modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]' }],
+            machineModels: [],
+            cliModelSkus: [
+                { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
+                { modelId: 'gpt-5.5-low', name: 'GPT-5.5 1M Low' }
+            ],
+            sessionModel: 'gpt-5.5[context=272k,reasoning=medium,fast=false]',
+            sessionCurrentModelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]'
+        })
+        const plan = resolveSessionCursorModelChange({
+            picker,
+            sessionModel: 'gpt-5.5[context=272k,reasoning=medium,fast=false]',
+            cursorSelectedBase: 'gpt-5.5',
+            kind: 'effort',
+            value: 'gpt-5.5-high-fast'
+        })
+        expect(plan).toMatchObject({
+            ok: true,
+            wireId: 'gpt-5.5-high-fast',
+            shouldApply: true
+        })
     })
 })
 

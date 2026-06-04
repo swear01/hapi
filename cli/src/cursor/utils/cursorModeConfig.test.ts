@@ -194,7 +194,7 @@ describe('applyCursorAcpModel', () => {
         expect(setConfigOption).toHaveBeenCalledWith('s1', 'model-opt', 'composer-2.5[fast=false]');
     });
 
-    it('retries set_config_option once before falling back to set_model', async () => {
+    it('retries set_config_option once before failing apply', async () => {
         const setConfigOption = vi.fn()
             .mockRejectedValueOnce(new Error('transient'))
             .mockResolvedValueOnce(undefined);
@@ -219,7 +219,7 @@ describe('applyCursorAcpModel', () => {
         expect(setModel).not.toHaveBeenCalled();
     });
 
-    it('falls back to session/set_model when set_config_option is unavailable', async () => {
+    it('returns not applied when set_config_option is unavailable', async () => {
         const setModel = vi.fn(async () => {});
         const backend = mockModelBackend({
             setModel,
@@ -229,12 +229,8 @@ describe('applyCursorAcpModel', () => {
 
         await expect(
             applyCursorAcpModel(backend, 's1', 'composer-2.5[fast=true]')
-        ).resolves.toEqual({
-            applied: true,
-            resolvedWireId: 'composer-2.5[fast=true]',
-            requestedWireId: 'composer-2.5[fast=true]'
-        });
-        expect(setModel).toHaveBeenCalledWith('s1', 'composer-2.5[fast=true]');
+        ).resolves.toEqual({ applied: false });
+        expect(setModel).not.toHaveBeenCalled();
     });
 });
 
@@ -250,9 +246,22 @@ describe('resolveCursorAcpWireId', () => {
         );
     });
 
-    it('returns the sole variant for a base id request', () => {
+    it('maps base-only CLI sku requests onto the sole ACP wire for that base', () => {
         expect(resolveCursorAcpWireId('composer-2.5', [{ modelId: 'composer-2.5[fast=true]' }])).toBe(
             'composer-2.5[fast=true]'
         );
+    });
+
+    it('maps legacy Cursor CLI fast aliases onto matching ACP wire ids', () => {
+        expect(resolveCursorAcpWireId('composer-2.5-fast', available)).toBe(
+            'composer-2.5[fast=true]'
+        );
+    });
+
+    it('does not match partial ACP parameter requests against full config option wire ids', () => {
+        expect(resolveCursorAcpWireId('claude-opus-4-8[effort=high]', [
+            { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=low,fast=false]' },
+            { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]' }
+        ])).toBe(null);
     });
 });
