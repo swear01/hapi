@@ -27,14 +27,32 @@ describe('cursorAskQuestion', () => {
 
         expect(parsed.questions).toHaveLength(1);
         expect(parsed.questions[0]).toMatchObject({
+            id: 'approach',
             header: 'Choose approach',
             question: 'Which approach?',
             multiSelect: false,
             options: [
-                { label: 'Option A', description: null },
-                { label: 'Option B', description: null }
+                { id: 'a', label: 'Option A', description: null },
+                { id: 'b', label: 'Option B', description: null }
             ]
         });
+    });
+
+    it('preserves stable ids used by AskUserQuestionFooter ACP submit', () => {
+        const parsed = parseCursorAskQuestionInput({
+            questions: [
+                {
+                    id: 'approach',
+                    prompt: 'Which approach?',
+                    options: [{ id: 'a', label: 'Option A' }]
+                }
+            ]
+        });
+        const q = parsed.questions[0];
+        expect(q?.id).toBe('approach');
+        expect(q?.options[0]?.id).toBe('a');
+        // Mirrors AskUserQuestionFooter: question.id + option.id, not index/label.
+        expect({ [q!.id!]: [q!.options[0]!.id!] }).toEqual({ approach: ['a'] });
     });
 
     it('returns empty questions for invalid input', () => {

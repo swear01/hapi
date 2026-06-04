@@ -28,6 +28,9 @@ export function parseCursorAskQuestionInput(input: unknown): { questions: AskUse
                 ? raw.header.trim()
                 : ''
         const multiSelect = raw.allowMultiple === true || raw.multiSelect === true
+        const questionId = typeof raw.id === 'string' && raw.id.trim()
+            ? raw.id.trim()
+            : String(questions.length)
 
         const rawOptions = Array.isArray(raw.options) ? raw.options : []
         const options: AskUserQuestionQuestion['options'] = []
@@ -39,12 +42,16 @@ export function parseCursorAskQuestionInput(input: unknown): { questions: AskUse
                     ? opt.id.trim()
                     : ''
             if (!label) continue
-            options.push({ label, description: null })
+            const optionId = typeof opt.id === 'string' && opt.id.trim()
+                ? opt.id.trim()
+                : label
+            options.push({ id: optionId, label, description: null })
         }
 
         if (!question && options.length === 0) continue
 
         questions.push({
+            id: questionId,
             header: header.length > 0 ? header : (requestTitle.length > 0 ? requestTitle : null),
             question,
             options,

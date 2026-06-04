@@ -54,15 +54,25 @@ function computeAnswersForQuestion(
     question: AskUserQuestionQuestion,
     selectedOptionIndices: number[],
     otherSelected: boolean,
-    otherText: string
+    otherText: string,
+    useStableIds: boolean
 ): string[] {
     const answers: string[] = []
 
     for (const idx of selectedOptionIndices) {
         const opt = question.options[idx]
         if (!opt) continue
+        if (useStableIds) {
+            const optionId = opt.id?.trim() || opt.label.trim()
+            if (optionId.length > 0) {
+                answers.push(optionId)
+            }
+            continue
+        }
         const label = opt.label.trim()
-        if (label.length > 0) answers.push(label)
+        if (label.length > 0) {
+            answers.push(label)
+        }
     }
 
     const other = otherText.trim()
@@ -83,11 +93,12 @@ export function AskUserQuestionFooter(props: {
     const { t } = useTranslation()
     const { haptic } = usePlatform()
     const permission = props.tool.permission
+    const useStableQuestionIds = isCursorAskQuestionToolName(props.tool.name)
     const parsed = useMemo(() => (
-        isCursorAskQuestionToolName(props.tool.name)
+        useStableQuestionIds
             ? parseCursorAskQuestionInput(props.tool.input)
             : parseAskUserQuestionInput(props.tool.input)
-    ), [props.tool.name, props.tool.input])
+    ), [props.tool.name, props.tool.input, useStableQuestionIds])
     const questions = parsed.questions
 
     const [step, setStep] = useState(0)
@@ -142,10 +153,17 @@ export function AskUserQuestionFooter(props: {
             question,
             selectedByQuestion[idx] ?? [],
             otherSelectedByQuestion[idx] ?? false,
-            otherTextByQuestion[idx] ?? ''
+            otherTextByQuestion[idx] ?? '',
+            useStableQuestionIds
         )
         return answers.length > 0 ? answers : null
     }
+
+    const questionAnswerKey = (question: AskUserQuestionQuestion, index: number): string => (
+        useStableQuestionIds && question.id?.trim()
+            ? question.id.trim()
+            : String(index)
+    )
 
     const submit = async () => {
         if (loading) return
@@ -166,7 +184,11 @@ export function AskUserQuestionFooter(props: {
                     setStep(i)
                     return
                 }
-                answers[String(i)] = a
+                const q = questions[i]
+                if (!q) {
+                    continue
+                }
+                answers[questionAnswerKey(q, i)] = a
             }
         }
 
