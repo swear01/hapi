@@ -314,6 +314,23 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const applySeq = ++this.modelApplySeq;
 
         if (!requested || isSpawnDefaultModel(requested)) {
+            const modelOption = backend.getConfigOptionByCategory?.(acpSessionId, 'model');
+            const defaultWire = modelOption?.options?.find(
+                (option) => isSpawnDefaultModel(option.value)
+            )?.value;
+            if (modelOption && defaultWire && backend.setConfigOption) {
+                try {
+                    await backend.setConfigOption(acpSessionId, modelOption.id, defaultWire);
+                    backend.pinSessionModelWireId(acpSessionId, defaultWire);
+                } catch (error) {
+                    logger.debug('[cursor-acp] Failed to set default model via ACP', error);
+                    if (options.throwOnFailure) {
+                        throw new Error('Cursor default model is not available via ACP');
+                    }
+                }
+            } else if (options.throwOnFailure) {
+                throw new Error('Cursor default model is not available via ACP');
+            }
             this.currentBackendModel = null;
             previousSetModel(undefined);
             this.session.pushKeepAlive();

@@ -76,6 +76,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                     return {
                         id: 'model-opt',
                         options: [
+                            { value: 'default[]' },
                             { value: 'composer-2.5[fast=true]' },
                             { value: 'composer-2.5[fast=false]' }
                         ]
@@ -417,6 +418,61 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
+    it('applies ACP default model when setModel is cleared', async () => {
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            keepAlive: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('hold-open', { permissionMode: 'default' });
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
+        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
+
+        session.setModel('composer-2.5[fast=false]');
+        await vi.waitFor(() => {
+            expect(
+                harness.setConfigOptionCalls.some(
+                    (call) => call.configId === 'model-opt' && call.value === 'composer-2.5[fast=false]'
+                )
+            ).toBe(true);
+        });
+
+        harness.setConfigOptionCalls.length = 0;
+        session.setModel(null);
+
+        await vi.waitFor(() => {
+            expect(
+                harness.setConfigOptionCalls.some(
+                    (call) => call.configId === 'model-opt' && call.value === 'default[]'
+                )
+            ).toBe(true);
+            expect(session.model).toBeUndefined();
+        });
+
+        queue.close();
+        await runPromise;
+    });
+
     it('rolls back optimistic setModel when ACP does not expose the requested model', async () => {
         const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
         const keepAlive = vi.fn();
@@ -454,6 +510,51 @@ describe('cursorAcpRemoteLauncher', () => {
             expect(session.model).toBe('composer-2.5[fast=true]');
         });
         expect(keepAlive).toHaveBeenCalled();
+
+        queue.close();
+        await runPromise;
+    });
+
+    it('applyModelConfig(null) resets ACP to the default model option', async () => {
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            keepAlive: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('hold-open', { permissionMode: 'default' });
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
+        await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
+
+        await session.applyModelConfig('composer-2.5[fast=false]');
+        harness.setConfigOptionCalls.length = 0;
+
+        await session.applyModelConfig(null);
+
+        expect(
+            harness.setConfigOptionCalls.some(
+                (call) => call.configId === 'model-opt' && call.value === 'default[]'
+            )
+        ).toBe(true);
 
         queue.close();
         await runPromise;
