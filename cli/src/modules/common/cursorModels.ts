@@ -1,6 +1,13 @@
 import { spawn } from 'node:child_process';
 import type { CursorModelsResponse, CursorModelSummary } from '@hapi/protocol/apiTypes';
+import { isAgentAcpTransportActive } from '@/agent/backends/acp/agentCliGuard';
+import { getCursorAcpModelsSnapshot } from '@/cursor/utils/cursorAcpModelsBridge';
 import { getErrorMessage } from './rpcResponses';
+import {
+    readSharedCursorModelsCache,
+    writeSharedCursorModelsCache,
+    _resetSharedCursorModelsCacheForTests
+} from './cursorModelsSharedCache';
 
 export type ListCursorModelsResponse = CursorModelsResponse;
 
@@ -104,9 +111,49 @@ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
     });
 }
 
-export async function listCursorModels(): Promise<ListCursorModelsResponse> {
-    if (cache.expiresAt > Date.now()) {
+function applyInMemoryCache(response: ListCursorModelsResponse): ListCursorModelsResponse {
+    if ((response.availableModels?.length ?? 0) > 0) {
+        cache.expiresAt = Date.now() + CACHE_TTL_MS;
+        cache.response = response;
+        writeSharedCursorModelsCache(response);
+    }
+    return response;
+}
+
+/** ACP session snapshot (Zed-style); falls back to seeded / on-disk cache from the last live session. */
+function listCursorModelsWhileAcpActive(): ListCursorModelsResponse {
+    const acp = getCursorAcpModelsSnapshot();
+    if (acp && acp.availableModels.length > 0) {
+        return applyInMemoryCache({ success: true, ...acp });
+    }
+    // Session child writes the on-disk cache; prefer it over this process's in-memory entry.
+    const shared = readSharedCursorModelsCache();
+    if (shared) {
+        return applyInMemoryCache(shared);
+    }
+    if (cache.expiresAt > Date.now() && (cache.response.availableModels?.length ?? 0) > 0) {
         return cache.response;
+    }
+    return { success: true, availableModels: [], currentModelId: null };
+}
+
+export async function listCursorModels(): Promise<ListCursorModelsResponse> {
+    if (isAgentAcpTransportActive()) {
+        return listCursorModelsWhileAcpActive();
+    }
+
+    const acp = getCursorAcpModelsSnapshot();
+    if (acp && acp.availableModels.length > 0) {
+        return applyInMemoryCache({ success: true, ...acp });
+    }
+
+    if (cache.expiresAt > Date.now() && (cache.response.availableModels?.length ?? 0) > 0) {
+        return cache.response;
+    }
+
+    const shared = readSharedCursorModelsCache();
+    if (shared) {
+        return applyInMemoryCache(shared);
     }
 
     if (inflight) {
@@ -116,9 +163,7 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
     inflight = (async () => {
         try {
             const response = await runCursorModelProbe();
-            cache.expiresAt = Date.now() + CACHE_TTL_MS;
-            cache.response = response;
-            return response;
+            return applyInMemoryCache(response);
         } catch (error) {
             return {
                 success: false,
@@ -132,8 +177,13 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
     return inflight;
 }
 
+export function seedCursorModelsCache(response: ListCursorModelsResponse): void {
+    applyInMemoryCache(response);
+}
+
 export function _resetCursorModelsCacheForTests(): void {
     cache.expiresAt = 0;
     cache.response = { success: true, availableModels: [], currentModelId: null };
     inflight = null;
+    _resetSharedCursorModelsCacheForTests();
 }

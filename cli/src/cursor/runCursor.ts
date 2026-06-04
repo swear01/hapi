@@ -136,6 +136,7 @@ export async function runCursor(opts: {
             permissionMode: currentPermissionMode,
             resumeSessionId: opts.resumeSessionId,
             model: opts.model,
+            sessionMetadata: bootstrap.metadata,
             onModeChange: createModeChangeHandler(session),
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;

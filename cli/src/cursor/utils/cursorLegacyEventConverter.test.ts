@@ -3,9 +3,9 @@ import {
     parseCursorEvent,
     convertCursorEventToAgentMessage,
     type CursorStreamEvent
-} from './cursorEventConverter';
+} from './cursorLegacyEventConverter';
 
-describe('cursorEventConverter', () => {
+describe('cursorLegacyEventConverter', () => {
     describe('parseCursorEvent', () => {
         it('parses system init event', () => {
             const line =

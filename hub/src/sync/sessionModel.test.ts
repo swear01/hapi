@@ -119,6 +119,75 @@ describe('session model', () => {
         expect(store.sessions.getSession(session.id)?.model).toBeNull()
     })
 
+    it('syncs cursor spawn model to resolved ACP wire id via keepalive', () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+
+        const session = cache.getOrCreateSession(
+            'session-cursor-spawn-model',
+            { path: '/tmp/project', host: 'localhost', flavor: 'cursor' },
+            null,
+            'default',
+            'composer-2.5'
+        )
+
+        expect(session.model).toBe('composer-2.5')
+
+        cache.handleSessionAlive({
+            sid: session.id,
+            time: Date.now(),
+            thinking: false,
+            model: 'composer-2.5[fast=true]'
+        })
+
+        expect(cache.getSession(session.id)?.model).toBe('composer-2.5[fast=true]')
+        expect(store.sessions.getSession(session.id)?.model).toBe('composer-2.5[fast=true]')
+    })
+
+    it('passes cursor spawn model to runner when spawning a remote session', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            engine.getOrCreateMachine(
+                'machine-cursor',
+                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                null,
+                'default'
+            )
+            engine.handleMachineAlive({ machineId: 'machine-cursor', time: Date.now() })
+
+            let capturedModel: string | undefined
+            ;(engine as any).rpcGateway.spawnSession = async (
+                _machineId: string,
+                _directory: string,
+                agent: string,
+                model?: string
+            ) => {
+                capturedModel = model
+                return { type: 'success', sessionId: 'spawned-cursor-session' }
+            }
+
+            const result = await engine.spawnSession(
+                'machine-cursor',
+                '/tmp/project',
+                'cursor',
+                'composer-2.5[fast=false]'
+            )
+
+            expect(result).toEqual({ type: 'success', sessionId: 'spawned-cursor-session' })
+            expect(capturedModel).toBe('composer-2.5[fast=false]')
+        } finally {
+            engine.stop()
+        }
+    })
+
     it('persists keepalive model changes, including clearing the model', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []

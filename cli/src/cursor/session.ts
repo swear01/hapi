@@ -3,6 +3,7 @@ import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { AgentSessionBase } from '@/agent/sessionBase';
 import type { EnhancedMode, PermissionMode } from './loop';
 import type { LocalLaunchExitReason } from '@/agent/localLaunchPolicy';
+import type { CursorSessionProtocol } from './utils/cursorProtocol';
 
 type LocalLaunchFailure = {
     message: string;
@@ -42,9 +43,10 @@ export class CursorSession extends AgentSessionBase<EnhancedMode> {
             mode: opts.mode,
             sessionLabel: 'CursorSession',
             sessionIdLabel: 'Cursor',
-            applySessionIdToMetadata: (metadata, sessionId) => ({
+            applySessionIdToMetadata: (metadata, sessionId, extras) => ({
                 ...metadata,
-                cursorSessionId: sessionId
+                cursorSessionId: sessionId,
+                ...extras
             }),
             permissionMode: opts.permissionMode
         });
@@ -78,5 +80,9 @@ export class CursorSession extends AgentSessionBase<EnhancedMode> {
 
     sendSessionEvent = (event: Parameters<ApiSessionClient['sendSessionEvent']>[0]): void => {
         this.client.sendSessionEvent(event);
+    };
+
+    onSessionFoundWithProtocol = (sessionId: string, protocol: CursorSessionProtocol): void => {
+        this.onSessionFound(sessionId, { cursorSessionProtocol: protocol });
     };
 }

@@ -33,6 +33,16 @@ import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModels } from '@/hooks/queries/useCursorModels'
+import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
+import {
+    buildCursorCatalogFromSources,
+    buildCursorPickerState,
+    resolveCursorBaseFromWire
+} from '@/lib/cursorPickerState'
+import {
+    resolveSessionCursorBaseSelectValue,
+    resolveSessionCursorModelChange
+} from '@/lib/sessionChatCursorModel'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
 import { useVoiceOptional } from '@/lib/voice-context'
 import { RealtimeVoiceSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
@@ -133,6 +143,7 @@ export function SessionChat(props: {
     const visibleGroupsRef = useRef<ToolGroupBlock[]>([])
     const [forceScrollToken, setForceScrollToken] = useState(0)
     const [outlineOpen, setOutlineOpen] = useState(false)
+    const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const agentFlavor = props.session.metadata?.flavor ?? null
     const controlledByUser = props.session.agentState?.controlledByUser === true
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
@@ -170,26 +181,53 @@ export function SessionChat(props: {
             label: opencodeModel.name ?? opencodeModel.modelId
         }))
     }, [agentFlavor, opencodeModelsState.availableModels])
+    const cursorMachineId = props.session.metadata?.machineId ?? null
     const cursorModelsState = useCursorModels({
         api: props.api,
         sessionId: props.session.id,
         enabled: agentFlavor === 'cursor' && props.session.active
     })
-    const cursorModelOptions = useMemo(() => {
+    const cursorMachineModelsState = useCursorModelsForMachine({
+        api: props.api,
+        machineId: cursorMachineId,
+        enabled: agentFlavor === 'cursor' && props.session.active && Boolean(cursorMachineId)
+    })
+    const cursorPicker = useMemo(() => {
         if (agentFlavor !== 'cursor') {
-            return undefined
+            return null
         }
 
-        return [
-            { value: null, label: 'Default' },
-            ...cursorModelsState.availableModels
-                .filter((cursorModel) => cursorModel.modelId !== 'auto')
-                .map((cursorModel) => ({
-                    value: cursorModel.modelId,
-                    label: cursorModel.name ?? cursorModel.modelId
-                }))
-        ]
-    }, [agentFlavor, cursorModelsState.availableModels])
+        const catalog = buildCursorCatalogFromSources({
+            sessionModels: cursorModelsState.availableModels,
+            machineModels: cursorMachineModelsState.availableModels,
+            currentWireId: cursorModelsState.currentModelId ?? props.session.model,
+            sessionModelFromHub: props.session.model,
+            defaultValue: null
+        })
+        return buildCursorPickerState({
+            catalog,
+            currentWireId: props.session.model ?? cursorModelsState.currentModelId,
+            defaultValue: null
+        })
+    }, [
+        agentFlavor,
+        cursorModelsState.availableModels,
+        cursorModelsState.currentModelId,
+        cursorMachineModelsState.availableModels,
+        props.session.model
+    ])
+
+    useEffect(() => {
+        if (agentFlavor !== 'cursor' || !cursorPicker) {
+            return
+        }
+        if (!props.session.model) {
+            setCursorSelectedBase('auto')
+            return
+        }
+        setCursorSelectedBase(resolveCursorBaseFromWire(props.session.model, cursorPicker.catalog))
+    }, [agentFlavor, props.session.model, cursorPicker])
+
     const {
         abortSession,
         switchSession,
@@ -438,6 +476,65 @@ export function SessionChat(props: {
         }
     }, [setModel, props.onRefresh, haptic])
 
+    const handleCursorBaseModelChange = useCallback(async (baseKey: string | null) => {
+        if (!cursorPicker) {
+            await handleModelChange(baseKey)
+            return
+        }
+        const plan = resolveSessionCursorModelChange({
+            picker: cursorPicker,
+            sessionModel: props.session.model,
+            cursorSelectedBase,
+            kind: 'base',
+            value: baseKey
+        })
+        if (!plan.ok) {
+            return
+        }
+        setCursorSelectedBase(plan.nextSelectedBase)
+        await handleModelChange(plan.wireId)
+    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+
+    const handleCursorEffortChange = useCallback(async (wireId: string | null) => {
+        if (!cursorPicker) {
+            await handleModelChange(wireId)
+            return
+        }
+        const plan = resolveSessionCursorModelChange({
+            picker: cursorPicker,
+            sessionModel: props.session.model,
+            cursorSelectedBase,
+            kind: 'effort',
+            value: wireId
+        })
+        if (!plan.ok) {
+            console.error(plan.reason)
+            return
+        }
+        setCursorSelectedBase(plan.nextSelectedBase)
+        await handleModelChange(plan.wireId)
+    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+
+    const handleCursorFlatModelChange = useCallback(async (value: string | null) => {
+        if (!cursorPicker) {
+            await handleModelChange(value)
+            return
+        }
+        const plan = resolveSessionCursorModelChange({
+            picker: cursorPicker,
+            sessionModel: props.session.model,
+            cursorSelectedBase,
+            kind: 'flat',
+            value
+        })
+        if (!plan.ok) {
+            console.error(plan.reason)
+            return
+        }
+        setCursorSelectedBase(plan.nextSelectedBase)
+        await handleModelChange(plan.wireId)
+    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+
     const handleModelReasoningEffortChange = useCallback(async (modelReasoningEffort: string | null) => {
         try {
             await setModelReasoningEffort(modelReasoningEffort)
@@ -634,7 +731,7 @@ export function SessionChat(props: {
                             agentFlavor === 'codex'
                                 ? codexModelOptions
                                 : agentFlavor === 'cursor'
-                                    ? cursorModelOptions
+                                    ? cursorPicker?.modelOptions
                                     : agentFlavor === 'opencode'
                                         ? opencodeModelOptions
                                         : undefined
@@ -654,12 +751,29 @@ export function SessionChat(props: {
                                 : undefined
                         }
                         onPermissionModeChange={handlePermissionModeChange}
+                        selectedModelBase={
+                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+                                ? resolveSessionCursorBaseSelectValue(cursorPicker, cursorSelectedBase)
+                                : undefined
+                        }
+                        modelEffortOptions={
+                            agentFlavor === 'cursor' && cursorPicker?.showEffortPicker
+                                ? cursorPicker.effortOptions
+                                : undefined
+                        }
                         onModelChange={
                             agentFlavor === 'codex'
                                 ? (props.session.active && !controlledByUser && !codexModelsState.error ? handleModelChange : undefined)
                                 : agentFlavor === 'cursor'
-                                    ? (props.session.active && !cursorModelsState.error ? handleModelChange : undefined)
+                                    ? (props.session.active && !cursorModelsState.error
+                                        ? (cursorPicker?.mode === 'dual' ? handleCursorBaseModelChange : handleCursorFlatModelChange)
+                                        : undefined)
                                     : handleModelChange
+                        }
+                        onModelEffortChange={
+                            agentFlavor === 'cursor' && props.session.active && !cursorModelsState.error
+                                ? handleCursorEffortChange
+                                : undefined
                         }
                         onModelReasoningEffortChange={
                             (agentFlavor === 'codex' || agentFlavor === 'opencode') && props.session.active && !controlledByUser

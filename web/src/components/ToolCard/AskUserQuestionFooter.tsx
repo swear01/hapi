@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { isAskUserQuestionToolName, parseAskUserQuestionInput, type AskUserQuestionQuestion } from '@/components/ToolCard/askUserQuestion'
+import { isCursorAskQuestionToolName, parseCursorAskQuestionInput } from '@/components/ToolCard/cursorAskQuestion'
 import {
     AskUserQuestionOptionBody,
     askUserQuestionQuoteClassName,
@@ -82,7 +83,11 @@ export function AskUserQuestionFooter(props: {
     const { t } = useTranslation()
     const { haptic } = usePlatform()
     const permission = props.tool.permission
-    const parsed = useMemo(() => parseAskUserQuestionInput(props.tool.input), [props.tool.input])
+    const parsed = useMemo(() => (
+        isCursorAskQuestionToolName(props.tool.name)
+            ? parseCursorAskQuestionInput(props.tool.input)
+            : parseAskUserQuestionInput(props.tool.input)
+    ), [props.tool.name, props.tool.input])
     const questions = parsed.questions
 
     const [step, setStep] = useState(0)
