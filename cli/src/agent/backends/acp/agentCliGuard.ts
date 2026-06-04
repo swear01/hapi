@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -17,6 +17,60 @@ function getAcpLockDir(): string {
     return join(home, 'locks', 'agent-acp-active');
 }
 
+function readLockPid(lockDir: string): number | null {
+    const pidPath = join(lockDir, 'pid');
+    if (!existsSync(pidPath)) {
+        return null;
+    }
+
+    try {
+        const raw = readFileSync(pidPath, 'utf8').trim();
+        const pid = Number(raw);
+        if (!Number.isInteger(pid) || pid <= 0) {
+            return null;
+        }
+        return pid;
+    } catch {
+        return null;
+    }
+}
+
+function isProcessAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // Process exists but we lack permission to signal it.
+        return code === 'EPERM';
+    }
+}
+
+function removeAcpLockDir(): void {
+    const lockDir = getAcpLockDir();
+    if (!existsSync(lockDir)) {
+        return;
+    }
+    try {
+        rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+        // Best effort — stale lock is preferable to killing a live ACP session.
+    }
+}
+
+/** Remove lock directories left behind by SIGKILL / crash / reboot. */
+function clearStaleAcpLockIfNeeded(): void {
+    const lockDir = getAcpLockDir();
+    if (!existsSync(lockDir)) {
+        return;
+    }
+
+    const pid = readLockPid(lockDir);
+    if (pid === null || !isProcessAlive(pid)) {
+        removeAcpLockDir();
+    }
+}
+
 export function registerActiveAcpTransport(): void {
     activeAcpTransportCount += 1;
     const lockDir = getAcpLockDir();
@@ -33,24 +87,18 @@ export function unregisterActiveAcpTransport(): void {
     if (activeAcpTransportCount > 0) {
         return;
     }
-    const lockDir = getAcpLockDir();
-    if (existsSync(lockDir)) {
-        try {
-            rmSync(lockDir, { recursive: true, force: true });
-        } catch {
-            // Best effort — stale lock is preferable to killing a live ACP session.
-        }
-    }
+    removeAcpLockDir();
 }
 
 export function isAgentAcpTransportActive(): boolean {
-    return activeAcpTransportCount > 0 || existsSync(getAcpLockDir());
+    if (activeAcpTransportCount > 0) {
+        return true;
+    }
+    clearStaleAcpLockIfNeeded();
+    return existsSync(getAcpLockDir());
 }
 
 export function _resetAgentCliGuardForTests(): void {
     activeAcpTransportCount = 0;
-    const lockDir = getAcpLockDir();
-    if (existsSync(lockDir)) {
-        rmSync(lockDir, { recursive: true, force: true });
-    }
+    removeAcpLockDir();
 }
