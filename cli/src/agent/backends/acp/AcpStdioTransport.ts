@@ -49,6 +49,8 @@ export function buildAcpStdioSpawnOptions(env?: Record<string, string>): SpawnOp
 }
 
 export class AcpStdioTransport {
+    /** Only Cursor's `agent` CLI is single-process; other ACP backends must not block model probes. */
+    private readonly shouldGuardAgentCli: boolean;
     private readonly process: ChildProcessWithoutNullStreams;
     private readonly pending = new Map<string | number, {
         resolve: (value: unknown) => void;
@@ -67,13 +69,16 @@ export class AcpStdioTransport {
         args?: string[];
         env?: Record<string, string>;
     }) {
+        this.shouldGuardAgentCli = options.command === 'agent';
         this.process = spawn(
             options.command,
             options.args ?? [],
             buildAcpStdioSpawnOptions(options.env)
         ) as ChildProcessWithoutNullStreams;
 
-        registerActiveAcpTransport();
+        if (this.shouldGuardAgentCli) {
+            registerActiveAcpTransport();
+        }
 
         this.process.stdout.setEncoding('utf8');
         this.process.stdout.on('data', (chunk) => this.handleStdout(chunk));
@@ -178,7 +183,7 @@ export class AcpStdioTransport {
     }
 
     private releaseAgentCliGuard(): void {
-        if (this.guardReleased) {
+        if (!this.shouldGuardAgentCli || this.guardReleased) {
             return;
         }
         this.guardReleased = true;
