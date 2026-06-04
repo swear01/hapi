@@ -806,6 +806,7 @@ export function SessionChat(props: {
                                 ? (props.session.active && !controlledByUser && !codexModelsState.error ? handleModelChange : undefined)
                                 : agentFlavor === 'cursor'
                                     ? (props.session.active
+                                        && !controlledByUser
                                         && !cursorModelsState.isLoading
                                         && !cursorModelsState.error
                                         && cursorPicker
@@ -815,7 +816,10 @@ export function SessionChat(props: {
                                     : handleModelChange
                         }
                         onModelEffortChange={
-                            agentFlavor === 'cursor' && props.session.active && !cursorModelsState.error
+                            agentFlavor === 'cursor'
+                                && props.session.active
+                                && !controlledByUser
+                                && !cursorModelsState.error
                                 ? handleCursorEffortChange
                                 : undefined
                         }
