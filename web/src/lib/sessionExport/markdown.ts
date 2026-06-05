@@ -16,7 +16,11 @@ function getSessionTitle(payload: HapiSessionExport): string {
 }
 
 function escapeYamlString(value: string): string {
-    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    return value
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
 }
 
 function formatTimestamp(value: number): string {

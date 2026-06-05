@@ -66,6 +66,25 @@ describe('serializeSessionMarkdown', () => {
         expect(markdown).toContain('Hi there')
     })
 
+    it('escapes newlines and quotes in YAML front matter metadata', () => {
+        const markdown = serializeSessionMarkdown({
+            ...makeExport([]),
+            session: {
+                ...makeExport([]).session,
+                metadata: {
+                    path: '/tmp/line\nbreak',
+                    host: 'host"quote',
+                    name: 'Title\nwith"newline'
+                }
+            }
+        })
+
+        expect(markdown).toContain('title: "Title\\nwith\\"newline"')
+        expect(markdown).toContain('path: "/tmp/line\\nbreak"')
+        expect(markdown).toContain('host: "host\\"quote"')
+        expect(markdown).toMatch(/^---\n[\s\S]*\n---\n/)
+    })
+
     it('skips messages that normalize to null and summarizes tool calls', () => {
         const markdown = serializeSessionMarkdown(makeExport([
             {
