@@ -119,6 +119,8 @@ Before commit/push/PR: use the **`pre-push-review`** skill (`~/.cursor/skills/pr
 
 ## Testing
 
+- Before manual/integration testing: inspect local-only notes under `.git/info/` (e.g. `hapi-local-notes.md`, issue env files). They may define ports, tokens, restart scripts, and worktree caveats.
+- If a `.git/info` test script hardcodes `/home/ubuntu/hapi`, adjust it for the active worktree before starting hub/runner; otherwise you may test the wrong checkout.
 - Test framework: Vitest (via `bun run test`)
 - Test files: `*.test.ts` next to source
 - Run: `bun run test` (from root) or `bun run test` (from package)
