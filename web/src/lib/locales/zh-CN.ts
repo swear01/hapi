@@ -491,6 +491,8 @@ export default {
   'settings.chat.terminalToolDisplay.detailed': '详细（显示输出预览）',
   'settings.chat.groupedToolBackground': '聚合 Tool Use 背景',
   'settings.chat.userMessageBackground': '用户消息背景',
+  'settings.chat.scratchlist': '草稿夹',
+  'settings.chat.scratchlist.description': '默认隐藏草稿夹。需要暂存草稿或想法时可在此开启。',
   'settings.chat.surfaceColor.default': '默认颜色',
   'settings.chat.surfaceColor.softBlue': '柔和蓝',
   'settings.chat.surfaceColor.softGreen': '柔和绿',

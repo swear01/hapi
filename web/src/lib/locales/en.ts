@@ -489,6 +489,8 @@ export default {
   'settings.chat.terminalToolDisplay.detailed': 'Detailed (show output preview)',
   'settings.chat.groupedToolBackground': 'Grouped Tool Use Background',
   'settings.chat.userMessageBackground': 'User Message Background',
+  'settings.chat.scratchlist': 'Scratchlist',
+  'settings.chat.scratchlist.description': 'Hide scratchlist by default. Enable it here when you want a parking lot for drafts.',
   'settings.chat.surfaceColor.default': 'Default color',
   'settings.chat.surfaceColor.softBlue': 'Soft blue',
   'settings.chat.surfaceColor.softGreen': 'Soft green',

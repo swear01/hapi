@@ -31,6 +31,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { SessionHeader } from '@/components/SessionHeader'
 import { TeamPanel } from '@/components/TeamPanel'
 import { usePlatform } from '@/hooks/usePlatform'
+import { useScratchlistEnabled } from '@/hooks/useScratchlistEnabled'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModels } from '@/hooks/queries/useCursorModels'
@@ -165,6 +166,7 @@ export function SessionChat(props: {
     availableSlashCommands?: readonly SlashCommand[]
 }) {
     const { haptic } = usePlatform()
+    const [scratchlistEnabled] = useScratchlistEnabled()
     const { t } = useTranslation()
     const navigate = useNavigate()
     const sessionInactive = !props.session.active
@@ -775,11 +777,13 @@ export function SessionChat(props: {
                          * read B's storage directly. Cleaner than chasing
                          * the race inside the panel.
                          */}
-                        <ScratchlistHost
-                            key={props.session.id}
-                            sessionId={props.session.id}
-                            onSend={props.onSend}
-                        />
+                        {scratchlistEnabled ? (
+                            <ScratchlistHost
+                                key={props.session.id}
+                                sessionId={props.session.id}
+                                onSend={props.onSend}
+                            />
+                        ) : null}
                         <QueuedMessagesBar
                             sessionId={props.session.id}
                             api={props.api}

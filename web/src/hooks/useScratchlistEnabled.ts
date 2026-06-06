@@ -33,6 +33,8 @@ export function useScratchlistEnabled(): [boolean, (enabled: boolean) => void] {
     const [enabled, setEnabledState] = useState<boolean>(readScratchlistEnabledPreference)
 
     useEffect(() => {
+        if (!isBrowser()) return
+
         const onStorage = (event: StorageEvent) => {
             if (event.key !== SCRATCHLIST_ENABLED_STORAGE_KEY) return
             setEnabledState(readScratchlistEnabledPreference())

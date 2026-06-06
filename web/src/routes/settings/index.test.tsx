@@ -271,7 +271,7 @@ describe('SettingsPage', () => {
         expect(screen.getAllByText('Grouped Tool Use Background').length).toBeGreaterThanOrEqual(1)
         expect(screen.getAllByText('User Message Background').length).toBeGreaterThanOrEqual(1)
         expect(screen.getAllByText('Scratchlist').length).toBeGreaterThanOrEqual(1)
-        expect(screen.getAllByText('Hide scratchlist by default').length).toBeGreaterThanOrEqual(1)
+        expect(screen.getAllByText(/Hide scratchlist by default/).length).toBeGreaterThanOrEqual(1)
         expect(screen.getAllByText('Default color').length).toBeGreaterThanOrEqual(1)
         expect(screen.getAllByText('Soft blue').length).toBeGreaterThanOrEqual(1)
         expect(screen.getAllByText('Soft green').length).toBeGreaterThanOrEqual(1)

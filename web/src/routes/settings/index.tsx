@@ -18,6 +18,7 @@ import { getFontScaleOptions, useFontScale, type FontScale } from '@/hooks/useFo
 import { getTerminalFontSizeOptions, useTerminalFontSize, type TerminalFontSize } from '@/hooks/useTerminalFontSize'
 import { getComposerEnterBehaviorOptions, useComposerEnterBehavior, type ComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { getTerminalToolDisplayModeOptions, useTerminalToolDisplayMode, type TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
+import { useScratchlistEnabled } from '@/hooks/useScratchlistEnabled'
 import { getSessionListStatusModeOptions, useSessionListStatusMode, type SessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import {
     MAX_SESSION_PREVIEW_LIMIT,
@@ -337,6 +338,7 @@ export default function SettingsPage() {
     const { sessionPreviewLimit, setSessionPreviewLimit } = useSessionPreviewLimit()
     const { composerEnterBehavior, setComposerEnterBehavior } = useComposerEnterBehavior()
     const { terminalToolDisplayMode, setTerminalToolDisplayMode } = useTerminalToolDisplayMode()
+    const [scratchlistEnabled, setScratchlistEnabled] = useScratchlistEnabled()
     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
     const {
         toolGroupBackground,
@@ -1006,6 +1008,19 @@ export default function SettingsPage() {
                             onCustomChange={(value) => setUserMessageBackground(toCustomChatSurfaceColorPreference(value))}
                             t={t}
                         />
+                        <label className="flex w-full items-start justify-between gap-3 px-3 py-3 transition-colors hover:bg-[var(--app-subtle-bg)]">
+                            <span className="min-w-0">
+                                <span className="block text-[var(--app-fg)]">{t('settings.chat.scratchlist')}</span>
+                                <span className="mt-1 block text-xs text-[var(--app-hint)]">{t('settings.chat.scratchlist.description')}</span>
+                            </span>
+                            <input
+                                type="checkbox"
+                                checked={scratchlistEnabled}
+                                onChange={(event) => setScratchlistEnabled(event.target.checked)}
+                                aria-label={t('settings.chat.scratchlist')}
+                                className="mt-1 h-5 w-5 shrink-0 accent-[var(--app-link)]"
+                            />
+                        </label>
                     </div>
 
                     {/* Voice Assistant section */}
