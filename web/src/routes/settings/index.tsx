@@ -994,6 +994,19 @@ export default function SettingsPage() {
                                 </div>
                             )}
                         </div>
+                        <label className="flex w-full items-start justify-between gap-3 px-3 py-3 transition-colors hover:bg-[var(--app-subtle-bg)]">
+                            <span className="min-w-0">
+                                <span className="block text-[var(--app-fg)]">{t('settings.chat.scratchlist')}</span>
+                                <span className="mt-1 block text-xs text-[var(--app-hint)]">{t('settings.chat.scratchlist.description')}</span>
+                            </span>
+                            <input
+                                type="checkbox"
+                                checked={scratchlistEnabled}
+                                onChange={(event) => setScratchlistEnabled(event.target.checked)}
+                                aria-label={t('settings.chat.scratchlist')}
+                                className="mt-1 h-5 w-5 shrink-0 accent-[var(--app-link)]"
+                            />
+                        </label>
                         <ChatSurfaceColorControl
                             label={t('settings.chat.groupedToolBackground')}
                             preference={toolGroupBackground}
@@ -1008,19 +1021,6 @@ export default function SettingsPage() {
                             onCustomChange={(value) => setUserMessageBackground(toCustomChatSurfaceColorPreference(value))}
                             t={t}
                         />
-                        <label className="flex w-full items-start justify-between gap-3 px-3 py-3 transition-colors hover:bg-[var(--app-subtle-bg)]">
-                            <span className="min-w-0">
-                                <span className="block text-[var(--app-fg)]">{t('settings.chat.scratchlist')}</span>
-                                <span className="mt-1 block text-xs text-[var(--app-hint)]">{t('settings.chat.scratchlist.description')}</span>
-                            </span>
-                            <input
-                                type="checkbox"
-                                checked={scratchlistEnabled}
-                                onChange={(event) => setScratchlistEnabled(event.target.checked)}
-                                aria-label={t('settings.chat.scratchlist')}
-                                className="mt-1 h-5 w-5 shrink-0 accent-[var(--app-link)]"
-                            />
-                        </label>
                     </div>
 
                     {/* Voice Assistant section */}
