@@ -3,6 +3,7 @@ import { cleanup, render, waitFor } from '@testing-library/react'
 
 const mermaidMocks = vi.hoisted(() => ({
     initializeMock: vi.fn(),
+    parseMock: vi.fn(),
     renderMock: vi.fn(),
     setParseErrorHandlerMock: vi.fn(),
 }))
@@ -10,6 +11,7 @@ const mermaidMocks = vi.hoisted(() => ({
 vi.mock('mermaid', () => ({
     default: {
         initialize: mermaidMocks.initializeMock,
+        parse: mermaidMocks.parseMock,
         render: mermaidMocks.renderMock,
         setParseErrorHandler: mermaidMocks.setParseErrorHandlerMock,
     }
@@ -35,6 +37,8 @@ describe('MermaidDiagram', () => {
     beforeEach(() => {
         mermaidMocks.initializeMock.mockClear()
         mermaidMocks.setParseErrorHandlerMock.mockClear()
+        mermaidMocks.parseMock.mockReset()
+        mermaidMocks.parseMock.mockResolvedValue({ diagramType: 'flowchart-v2' })
         mermaidMocks.renderMock.mockReset()
         mermaidMocks.renderMock.mockResolvedValue({
             svg: '<svg data-testid="mock-mermaid"></svg>'
@@ -57,15 +61,17 @@ describe('MermaidDiagram', () => {
 
         expect(mermaidMocks.initializeMock).toHaveBeenCalled()
         expect(mermaidMocks.initializeMock).toHaveBeenCalledWith(expect.objectContaining({
-            securityLevel: 'strict'
+            securityLevel: 'strict',
+            suppressErrorRendering: true,
         }))
+        expect(mermaidMocks.parseMock).toHaveBeenCalledWith('graph TD\nA --> B', { suppressErrors: true })
         expect(mermaidMocks.renderMock).toHaveBeenCalledWith(expect.stringContaining('mermaid-'), 'graph TD\nA --> B')
         expect(MARKDOWN_COMPONENTS_BY_LANGUAGE.mermaid.SyntaxHighlighter).toBe(MermaidDiagram)
     })
 
-    it('falls back to source and suppresses Mermaid parse-error side effects when render fails', async () => {
+    it('falls back to source and suppresses Mermaid parse-error side effects for invalid syntax', async () => {
         document.documentElement.dataset.theme = 'dark'
-        mermaidMocks.renderMock.mockRejectedValueOnce(new Error('invalid Mermaid'))
+        mermaidMocks.parseMock.mockResolvedValueOnce(false)
 
         renderMermaid('graph TD\nA --')
 
@@ -75,9 +81,27 @@ describe('MermaidDiagram', () => {
             expect(fallback?.textContent).toBe('graph TD\nA --')
         })
 
-        expect(mermaidMocks.initializeMock).toHaveBeenCalledWith(expect.objectContaining({
-            suppressErrors: true,
-        }))
+        expect(mermaidMocks.parseMock).toHaveBeenCalledWith('graph TD\nA --', { suppressErrors: true })
+        expect(mermaidMocks.renderMock).not.toHaveBeenCalled()
         expect(mermaidMocks.setParseErrorHandlerMock).toHaveBeenCalled()
     })
+
+    it('falls back to source and asks Mermaid not to inject its own error SVG when render throws', async () => {
+        mermaidMocks.renderMock.mockRejectedValueOnce(new Error('render failed'))
+        const code = 'gantt\ndateFormat YYYY-MM-DD\nsection A\nTask :a, 2024-01-01'
+
+        renderMermaid(code)
+
+        await waitFor(() => {
+            const fallback = document.querySelector('.aui-mermaid-fallback')
+            expect(fallback).toBeTruthy()
+            expect(fallback?.textContent).toBe(code)
+        })
+
+        expect(mermaidMocks.renderMock).toHaveBeenCalled()
+        expect(mermaidMocks.initializeMock).toHaveBeenCalledWith(expect.objectContaining({
+            suppressErrorRendering: true,
+        }))
+    })
+
 })
