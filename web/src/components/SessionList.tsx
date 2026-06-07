@@ -100,22 +100,29 @@ function getGroupDisplayName(directory: string): string {
 export const UNKNOWN_MACHINE_ID = '__unknown__'
 export const GROUP_SESSION_PREVIEW_LIMIT = DEFAULT_SESSION_PREVIEW_LIMIT
 
+export function getSessionDedupKey(session: SessionSummary): string | null {
+    const agentId = session.metadata?.agentSessionId?.trim()
+    if (!agentId) return null
+    // Scope by flavor: agentSessionId is flattened from native ids and can retain a
+    // stale cross-flavor value (codexSessionId ?? claudeSessionId ?? ...).
+    return `${session.metadata?.flavor ?? 'unknown'}:${agentId}`
+}
+
 export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
     const byAgentId = new Map<string, SessionSummary[]>()
     const result: SessionSummary[] = []
 
     for (const session of sessions) {
-        // SessionSummary maps native ids (e.g. cursorSessionId) into agentSessionId.
-        const agentId = session.metadata?.agentSessionId
-        if (!agentId) {
+        const dedupKey = getSessionDedupKey(session)
+        if (!dedupKey) {
             result.push(session)
             continue
         }
-        const group = byAgentId.get(agentId)
+        const group = byAgentId.get(dedupKey)
         if (group) {
             group.push(session)
         } else {
-            byAgentId.set(agentId, [session])
+            byAgentId.set(dedupKey, [session])
         }
     }
 

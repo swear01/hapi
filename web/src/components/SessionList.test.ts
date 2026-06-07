@@ -3,6 +3,7 @@ import type { SessionSummary } from '@/types/api'
 import {
     deduplicateSessionsByAgentId,
     expandSelectedSessionCollapseOverrides,
+    getSessionDedupKey,
     getVisibleSessionPreview,
     isSidebarEmptySessionStub,
     normalizeSearch,
@@ -109,6 +110,26 @@ describe('deduplicateSessionsByAgentId', () => {
         const result = deduplicateSessionsByAgentId(sessions)
         expect(result).toHaveLength(2)
         expect(result.map(s => s.id).sort()).toEqual(['b', 'd'])
+    })
+
+    it('does not dedupe across flavors sharing the same flattened agentSessionId', () => {
+        const sessions = [
+            makeSession({
+                id: 'codex',
+                metadata: { path: '/p', flavor: 'codex', agentSessionId: 'stale-shared-id' },
+                updatedAt: 100
+            }),
+            makeSession({
+                id: 'cursor',
+                metadata: { path: '/p', flavor: 'cursor', agentSessionId: 'stale-shared-id' },
+                updatedAt: 200
+            })
+        ]
+
+        expect(getSessionDedupKey(sessions[0])).toBe('codex:stale-shared-id')
+        expect(getSessionDedupKey(sessions[1])).toBe('cursor:stale-shared-id')
+        expect(deduplicateSessionsByAgentId(sessions).map(session => session.id).sort()).toEqual(['codex', 'cursor'])
+        expect(prepareSidebarSessions(sessions).map(session => session.id).sort()).toEqual(['codex', 'cursor'])
     })
 })
 
