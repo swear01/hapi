@@ -9,7 +9,10 @@ const harness = vi.hoisted(() => ({
     loadSessionCalled: false,
     newSessionCalled: false,
     promptCalls: 0,
+    promptTexts: [] as string[],
+    promptHandler: null as (((onUpdate: (message: unknown) => void) => void | Promise<void>) | null),
     backendArgs: null as { command: string; args?: string[] } | null,
+    bridgeOptions: [] as unknown[],
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
     releaseSetConfigOption: null as (() => void) | null
@@ -84,8 +87,10 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 }
                 return undefined;
             }),
-            prompt: vi.fn(async () => {
+            prompt: vi.fn(async (_sessionId: string, content: Array<{ type: string; text: string }>, onUpdate: (message: unknown) => void) => {
                 harness.promptCalls++;
+                harness.promptTexts.push(content.map((part) => part.text).join('\n'));
+                await harness.promptHandler?.(onUpdate);
             }),
             cancelPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
@@ -112,10 +117,13 @@ vi.mock('@/agent/permissionAdapter', () => ({
 }));
 
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
-    buildHapiMcpBridge: async () => ({
+    buildHapiMcpBridge: async (_client: unknown, options?: unknown) => {
+        harness.bridgeOptions.push(options);
+        return ({
         server: { stop: () => {} },
         mcpServers: {}
-    })
+    });
+    }
 }));
 
 vi.mock('@/ui/ink/OpencodeDisplay', () => ({
@@ -140,7 +148,8 @@ function makeSession(sessionId: string | null): CursorSession {
         updateMetadata: vi.fn(),
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
-        keepAlive: vi.fn()
+        keepAlive: vi.fn(),
+        sendClaudeSessionMessage: vi.fn()
     } as unknown as ApiSessionClient;
 
     const session = new CursorSession({
@@ -171,6 +180,9 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.loadSessionCalled = false;
         harness.newSessionCalled = false;
         harness.promptCalls = 0;
+        harness.promptTexts = [];
+        harness.promptHandler = null;
+        harness.bridgeOptions = [];
         harness.setConfigOptionCalls = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
@@ -632,5 +644,98 @@ describe('cursorAcpRemoteLauncher', () => {
         await cursorAcpRemoteLauncher(session);
 
         expect(harness.promptCalls).toBe(2);
+    });
+
+    it('prepends Cursor title instructions only on the first prompt', async () => {
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            sendClaudeSessionMessage: vi.fn(),
+            keepAlive: vi.fn(),
+            emitMessagesConsumed: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('first request', { permissionMode: 'default' });
+        queue.push('follow-up', { permissionMode: 'default' });
+        queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(harness.promptTexts[0]).toContain('Use the title tool sparingly');
+        expect(harness.promptTexts[0]).toContain('hapi_change_title');
+        expect(harness.promptTexts[0]).toContain('first request');
+        expect(harness.promptTexts[1]).toBe('follow-up');
+    });
+
+    it('writes session summary after a successful Cursor hapi_change_title tool result', async () => {
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const sendClaudeSessionMessage = vi.fn();
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            sendClaudeSessionMessage,
+            keepAlive: vi.fn(),
+            emitMessagesConsumed: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        harness.promptHandler = async (onUpdate) => {
+            onUpdate({
+                type: 'tool_call',
+                id: 'title-call',
+                name: 'hapi_change_title',
+                input: { title: 'Cursor Title' },
+                status: 'completed'
+            });
+            onUpdate({
+                type: 'tool_result',
+                id: 'title-call',
+                output: { ok: true },
+                status: 'completed'
+            });
+        };
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('please do work', { permissionMode: 'default' });
+        queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(harness.bridgeOptions).toEqual([{ emitTitleSummary: false }]);
+        expect(sendClaudeSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'summary',
+            summary: 'Cursor Title'
+        }));
     });
 });
