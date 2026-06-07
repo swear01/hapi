@@ -17,7 +17,6 @@ import { classifySessionAttention } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
 import { getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
 import { getCodexImportedAt, subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
-import { resolveAgentSessionIdFromMetadata } from '@/lib/sessionResume'
 
 type SessionGroup = {
     key: string
@@ -106,8 +105,8 @@ export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selecte
     const result: SessionSummary[] = []
 
     for (const session of sessions) {
-        const agentId = resolveAgentSessionIdFromMetadata(session.metadata)
-            ?? session.metadata?.agentSessionId
+        // SessionSummary maps native ids (e.g. cursorSessionId) into agentSessionId.
+        const agentId = session.metadata?.agentSessionId
         if (!agentId) {
             result.push(session)
             continue
