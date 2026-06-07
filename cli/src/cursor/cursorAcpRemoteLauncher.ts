@@ -17,8 +17,10 @@ import { setCursorAcpModelsSnapshot } from './utils/cursorAcpModelsBridge';
 import { buildCursorModelsSnapshotFromAcp } from './utils/cursorAcpModelsSnapshot';
 import { CursorExtensionAdapter } from './utils/cursorExtensionAdapter';
 import { applyCursorAcpMode, applyCursorAcpModel, wireIdForCursorSessionState } from './utils/cursorModeConfig';
+import { TITLE_INSTRUCTION } from './utils/systemPrompt';
 import { seedCursorModelsCache } from '@/modules/common/cursorModels';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { randomUUID } from 'node:crypto';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -32,6 +34,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendModel: string | null = null;
     private unregisterModelApplyHandler: (() => void) | null = null;
     private modelApplySeq = 0;
+    private instructionsSent = false;
+    private readonly pendingTitleByToolCallId = new Map<string, string>();
 
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -53,7 +57,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
 
-        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client);
+        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            // Cursor ACP streams MCP tool lifecycle events back to this launcher.
+            // Own the summary write here so successful tool completions are the
+            // single source of truth and direct MCP writes do not double-emit.
+            emitTitleSummary: false
+        });
         this.happyServer = happyServer;
 
         const backend = createCursorAcpBackend({ cwd: session.path, model: session.model });
@@ -183,9 +192,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             this.applyDisplayMode(batch.mode.permissionMode as PermissionMode);
             messageBuffer.addMessage(batch.message, 'user');
 
+            let messageText = batch.message;
+            if (!this.instructionsSent) {
+                messageText = `${TITLE_INSTRUCTION}\n\n${messageText}`;
+                this.instructionsSent = true;
+            }
+
             const promptContent: PromptContent[] = [{
                 type: 'text',
-                text: batch.message
+                text: messageText
             }];
 
             session.onThinkingChange(true);
@@ -256,9 +271,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             case 'usage':
                 break;
             case 'tool_call':
+                this.captureTitleToolCall(message);
                 this.messageBuffer.addMessage(`Tool: ${message.name}`, 'tool');
                 break;
             case 'tool_result':
+                this.applyTitleToolResult(message);
                 this.messageBuffer.addMessage('Tool result', 'result');
                 break;
             case 'plan':
@@ -269,6 +286,30 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             default:
                 break;
         }
+    }
+
+    private captureTitleToolCall(message: Extract<AgentMessage, { type: 'tool_call' }>): void {
+        if (!isHapiChangeTitleToolName(message.name)) {
+            return;
+        }
+        const title = extractTitle(message.input);
+        if (!title) {
+            return;
+        }
+        this.pendingTitleByToolCallId.set(message.id, title);
+    }
+
+    private applyTitleToolResult(message: Extract<AgentMessage, { type: 'tool_result' }>): void {
+        const title = this.pendingTitleByToolCallId.get(message.id);
+        this.pendingTitleByToolCallId.delete(message.id);
+        if (!title || message.status !== 'completed') {
+            return;
+        }
+        this.session.client.sendClaudeSessionMessage({
+            type: 'summary',
+            summary: title,
+            leafUuid: randomUUID()
+        });
     }
 
     private installLiveSessionConfigSync(
@@ -434,6 +475,24 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 function isSpawnDefaultModel(modelId: string): boolean {
     const normalized = modelId.trim().toLowerCase();
     return normalized === 'auto' || normalized === 'default' || normalized === 'default[]';
+}
+
+function isHapiChangeTitleToolName(name: string): boolean {
+    return name === 'hapi_change_title'
+        || name === 'mcp__hapi__change_title'
+        || name === 'change_title';
+}
+
+function extractTitle(input: unknown): string | null {
+    if (!input || typeof input !== 'object') {
+        return null;
+    }
+    const title = (input as { title?: unknown }).title;
+    if (typeof title !== 'string') {
+        return null;
+    }
+    const trimmed = title.trim();
+    return trimmed.length > 0 ? trimmed : null;
 }
 
 function syncCursorModelsFromAcp(backend: AcpSdkBackend, acpSessionId: string): void {

@@ -673,7 +673,7 @@ describe('cursorAcpRemoteLauncher', () => {
         });
         session.onSessionFoundWithProtocol = vi.fn();
         queue.push('first request', { permissionMode: 'default' });
-        queue.push('follow-up', { permissionMode: 'default' });
+        queue.push('follow-up', { permissionMode: 'plan' });
         queue.close();
 
         await cursorAcpRemoteLauncher(session);
