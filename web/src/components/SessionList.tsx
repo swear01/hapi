@@ -134,6 +134,34 @@ export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selecte
     return result
 }
 
+function hasSidebarTitleSignal(session: SessionSummary): boolean {
+    const meta = session.metadata
+    if (!meta) return false
+    if (meta.name?.trim()) return true
+    if (meta.summary?.text?.trim()) return true
+    return false
+}
+
+export function isSidebarEmptySessionStub(session: SessionSummary): boolean {
+    if (session.active) return false
+    const meta = session.metadata
+    if (!meta) return true
+    if (meta.agentSessionId?.trim()) return false
+    if (hasSidebarTitleSignal(session)) return false
+    return true
+}
+
+export function shouldShowSessionInSidebar(session: SessionSummary, selectedSessionId?: string | null): boolean {
+    if (session.id === selectedSessionId) return true
+    if (session.active) return true
+    return !isSidebarEmptySessionStub(session)
+}
+
+export function prepareSidebarSessions(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
+    return deduplicateSessionsByAgentId(sessions, selectedSessionId)
+        .filter(session => shouldShowSessionInSidebar(session, selectedSessionId))
+}
+
 function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
     const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[] }>()
 
@@ -742,7 +770,7 @@ export function SessionList(props: {
     }
 
     const allSessions = useMemo(
-        () => deduplicateSessionsByAgentId(props.sessions, selectedSessionId),
+        () => prepareSidebarSessions(props.sessions, selectedSessionId),
         [props.sessions, selectedSessionId]
     )
     const visibleSessions = useMemo(
@@ -891,7 +919,7 @@ export function SessionList(props: {
                     <div className="text-xs text-[var(--app-hint)]">
                         {isSearching
                             ? t('sessions.search.count', { n: visibleSessions.length, total: allSessions.length })
-                            : t('sessions.count', { n: props.sessions.length, m: allGroups.length })}
+                            : t('sessions.count', { n: allSessions.length, m: allGroups.length })}
                     </div>
                     <button
                         type="button"
