@@ -738,4 +738,114 @@ describe('cursorAcpRemoteLauncher', () => {
             summary: 'Cursor Title'
         }));
     });
+
+    async function runWithTitleToolEvents(events: unknown[]): Promise<ReturnType<typeof vi.fn>> {
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const sendClaudeSessionMessage = vi.fn();
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            sendClaudeSessionMessage,
+            keepAlive: vi.fn(),
+            emitMessagesConsumed: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        harness.promptHandler = async (onUpdate) => {
+            for (const event of events) {
+                onUpdate(event);
+            }
+        };
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('please do work', { permissionMode: 'default' });
+        queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+        return sendClaudeSessionMessage;
+    }
+
+    it('does not write summary when title tool_result is not completed', async () => {
+        for (const status of ['failed', 'cancelled', 'in_progress'] as const) {
+            const sendClaudeSessionMessage = await runWithTitleToolEvents([
+                { type: 'tool_call', id: 'title-call', name: 'hapi_change_title', input: { title: 'Should Not Apply' }, status: 'in_progress' },
+                { type: 'tool_result', id: 'title-call', output: {}, status }
+            ]);
+            const summaryCalls = sendClaudeSessionMessage.mock.calls.filter(
+                ([msg]) => (msg as { type: string }).type === 'summary'
+            );
+            expect(summaryCalls, `status=${status}`).toHaveLength(0);
+        }
+    });
+
+    it('does not write summary when title input is empty, missing, or non-string', async () => {
+        const inputs: unknown[] = [
+            {},
+            { title: '' },
+            { title: '   ' },
+            { title: 123 },
+            null
+        ];
+        for (const input of inputs) {
+            const sendClaudeSessionMessage = await runWithTitleToolEvents([
+                { type: 'tool_call', id: 'title-call', name: 'hapi_change_title', input, status: 'completed' },
+                { type: 'tool_result', id: 'title-call', output: {}, status: 'completed' }
+            ]);
+            const summaryCalls = sendClaudeSessionMessage.mock.calls.filter(
+                ([msg]) => (msg as { type: string }).type === 'summary'
+            );
+            expect(summaryCalls, `input=${JSON.stringify(input)}`).toHaveLength(0);
+        }
+    });
+
+    it('recognizes mcp__hapi__change_title and change_title tool names', async () => {
+        for (const name of ['mcp__hapi__change_title', 'change_title']) {
+            const sendClaudeSessionMessage = await runWithTitleToolEvents([
+                { type: 'tool_call', id: 'title-call', name, input: { title: `via ${name}` }, status: 'completed' },
+                { type: 'tool_result', id: 'title-call', output: {}, status: 'completed' }
+            ]);
+            expect(sendClaudeSessionMessage, `name=${name}`).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'summary',
+                summary: `via ${name}`
+            }));
+        }
+    });
+
+    it('ignores orphan tool_result without a prior tool_call', async () => {
+        const sendClaudeSessionMessage = await runWithTitleToolEvents([
+            { type: 'tool_result', id: 'unknown-call', output: {}, status: 'completed' }
+        ]);
+        const summaryCalls = sendClaudeSessionMessage.mock.calls.filter(
+            ([msg]) => (msg as { type: string }).type === 'summary'
+        );
+        expect(summaryCalls).toHaveLength(0);
+    });
+
+    it('non-title tool_call does not produce a summary or block a later title call', async () => {
+        const sendClaudeSessionMessage = await runWithTitleToolEvents([
+            { type: 'tool_call', id: 'read-call', name: 'read_file', input: { path: '/x' }, status: 'completed' },
+            { type: 'tool_result', id: 'read-call', output: {}, status: 'completed' },
+            { type: 'tool_call', id: 'title-call', name: 'hapi_change_title', input: { title: 'After Read' }, status: 'completed' },
+            { type: 'tool_result', id: 'title-call', output: {}, status: 'completed' }
+        ]);
+        const summaryCalls = sendClaudeSessionMessage.mock.calls.filter(
+            ([msg]) => (msg as { type: string }).type === 'summary'
+        );
+        expect(summaryCalls).toHaveLength(1);
+        expect(summaryCalls[0][0]).toMatchObject({ type: 'summary', summary: 'After Read' });
+    });
 });
