@@ -17,6 +17,7 @@ import { classifySessionAttention } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
 import { getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
 import { getCodexImportedAt, subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
+import { resolveAgentSessionIdFromMetadata } from '@/lib/sessionResume'
 
 type SessionGroup = {
     key: string
@@ -105,7 +106,8 @@ export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selecte
     const result: SessionSummary[] = []
 
     for (const session of sessions) {
-        const agentId = session.metadata?.agentSessionId
+        const agentId = resolveAgentSessionIdFromMetadata(session.metadata)
+            ?? session.metadata?.agentSessionId
         if (!agentId) {
             result.push(session)
             continue
@@ -741,8 +743,8 @@ export function SessionList(props: {
     }
 
     const allSessions = useMemo(
-        () => props.sessions,
-        [props.sessions]
+        () => deduplicateSessionsByAgentId(props.sessions, selectedSessionId),
+        [props.sessions, selectedSessionId]
     )
     const visibleSessions = useMemo(
         () => isSearching

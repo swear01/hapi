@@ -71,6 +71,25 @@ describe('deduplicateSessionsByAgentId', () => {
         expect(result).toHaveLength(3)
     })
 
+    it('deduplicates cursor sessions by cursorSessionId', () => {
+        const sessions = [
+            makeSession({
+                id: 'a',
+                active: true,
+                metadata: { path: '/p', flavor: 'cursor', cursorSessionId: 'acp-thread-1' },
+                updatedAt: 100
+            }),
+            makeSession({
+                id: 'b',
+                metadata: { path: '/p', flavor: 'cursor', cursorSessionId: 'acp-thread-1' },
+                updatedAt: 200
+            })
+        ]
+        const result = deduplicateSessionsByAgentId(sessions)
+        expect(result).toHaveLength(1)
+        expect(result[0].id).toBe('a')
+    })
+
     it('deduplicates independently across different agentSessionIds', () => {
         const sessions = [
             makeSession({ id: 'a', metadata: { path: '/p', agentSessionId: 'thread-1' }, updatedAt: 100 }),
