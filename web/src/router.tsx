@@ -864,7 +864,7 @@ function SessionPage() {
 
     const getAutocompleteSuggestions = useCallback(async (query: string) => {
         if (query.startsWith('@')) {
-            if (!api || !sessionId) return []
+            if (agentType !== 'codex' || !api || !sessionId) return []
             const search = query.slice(1)
             const response = await api.searchSessionFiles(sessionId, search, 50)
             if (!response.success || !response.files) return []
@@ -882,7 +882,7 @@ function SessionPage() {
             return await getSkillSuggestions(query)
         }
         return await getSlashSuggestions(query)
-    }, [api, sessionId, getSkillSuggestions, getSlashSuggestions])
+    }, [agentType, api, sessionId, getSkillSuggestions, getSlashSuggestions])
 
     const refreshSelectedSession = useCallback(() => {
         void refetchSession()
