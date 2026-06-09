@@ -119,6 +119,10 @@ export default {
   'session.time.importedFromCodex.hoursAgo': 'imported from Codex {n}h ago',
   'session.time.importedFromCodex.daysAgo': 'imported from Codex {n}d ago',
 
+  // Session inactive
+  'session.inactive.autoResume': 'This session is inactive. Send a message to resume.',
+  'session.inactive.cannotResume': 'This session is inactive and cannot be resumed.',
+
   // Session header
   'session.title': 'Files',
   'session.more': 'More actions',

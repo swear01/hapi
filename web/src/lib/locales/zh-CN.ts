@@ -119,6 +119,10 @@ export default {
   'session.time.importedFromCodex.hoursAgo': '{n} 小时前从codex客户端导入',
   'session.time.importedFromCodex.daysAgo': '{n} 天前从codex客户端导入',
 
+  // Session inactive
+  'session.inactive.autoResume': '此会话已停止。发送消息即可恢复。',
+  'session.inactive.cannotResume': '此会话已停止，无法恢复。',
+
   // Session header
   'session.title': '文件',
   'session.more': '更多操作',
