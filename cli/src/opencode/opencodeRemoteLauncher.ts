@@ -237,6 +237,9 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                             await backend.setConfigOption(acpSessionId, thoughtLevelOption.id, resolvedEffort);
                             this.currentBackendEffort = resolvedEffort;
                             this.setEffortSupported = true;
+                            if (requestedEffort !== resolvedEffort) {
+                                this.rollbackReasoningEffort(batch, resolvedEffort);
+                            }
                         } catch (error) {
                             const message = error instanceof Error ? error.message : String(error);
                             const methodNotFound = /method not found/i.test(message);

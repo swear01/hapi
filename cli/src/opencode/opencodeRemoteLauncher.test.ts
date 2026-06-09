@@ -275,6 +275,29 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(harness.promptCount).toBe(1);
     });
 
+    it('syncs hub effort state after coercing an unsupported request to a different supported value', async () => {
+        harness.thoughtLevelOption = {
+            id: 'effort',
+            currentValue: 'high',
+            options: [
+                { value: 'low', name: 'Low' },
+                { value: 'medium', name: 'Medium' }
+            ]
+        };
+        const { session, setModelReasoningEffort, pushKeepAlive } = createSessionStub([
+            { message: 'first', mode: createModeWithEffort(undefined, 'max') }
+        ]);
+
+        await opencodeRemoteLauncher(session as never);
+
+        expect(harness.setConfigOptionArgs).toEqual([
+            { sessionId: 'acp-session-1', configId: 'effort', value: 'low' }
+        ]);
+        expect(setModelReasoningEffort).toHaveBeenCalledWith('low');
+        expect(pushKeepAlive).toHaveBeenCalledTimes(1);
+        expect(harness.promptCount).toBe(1);
+    });
+
     it('resets to the backend launch-time default model when the queued mode.model is null', async () => {
         // Seed the backend with a launch-time default model so the launcher
         // captures it as `defaultBackendModel`. Without that, `/model default`
