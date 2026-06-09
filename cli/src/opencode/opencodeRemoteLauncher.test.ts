@@ -255,7 +255,25 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(harness.promptCount).toBe(2);
     });
 
+    it('rejects unsupported reasoning effort values before calling setConfigOption', async () => {
+        harness.thoughtLevelOption = {
+            id: 'effort',
+            currentValue: 'low',
+            options: [
+                { value: 'low', name: 'Low' },
+                { value: 'medium', name: 'Medium' }
+            ]
+        };
+        const { session, setModelReasoningEffort } = createSessionStub([
+            { message: 'first', mode: createModeWithEffort(undefined, 'high') }
+        ]);
 
+        await opencodeRemoteLauncher(session as never);
+
+        expect(harness.setConfigOptionArgs).toEqual([]);
+        expect(setModelReasoningEffort).toHaveBeenCalledWith('low');
+        expect(harness.promptCount).toBe(1);
+    });
 
     it('resets to the backend launch-time default model when the queued mode.model is null', async () => {
         // Seed the backend with a launch-time default model so the launcher
@@ -411,6 +429,48 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(result).toEqual({
             success: false,
             error: 'OpenCode model metadata is not available'
+        });
+    });
+
+    it('registers a listOpencodeReasoningEffortOptions RPC handler that returns ACP options', async () => {
+        harness.thoughtLevelOption = {
+            id: 'effort',
+            currentValue: 'low',
+            options: [
+                { value: 'low', name: 'Low' },
+                { value: 'medium', name: 'Medium' }
+            ]
+        };
+        const { session, rpcHandlers } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+        await opencodeRemoteLauncher(session as never);
+
+        const handler = rpcHandlers.get('listOpencodeReasoningEffortOptions');
+        expect(handler).toBeDefined();
+        const result = await handler!(undefined) as Record<string, unknown>;
+        expect(result).toEqual({
+            success: true,
+            options: [
+                { value: 'low', name: 'Low' },
+                { value: 'medium', name: 'Medium' }
+            ],
+            currentValue: 'low'
+        });
+    });
+
+    it('listOpencodeReasoningEffortOptions handler returns unavailable when backend has no thought level option', async () => {
+        const { session, rpcHandlers } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+        await opencodeRemoteLauncher(session as never);
+
+        const handler = rpcHandlers.get('listOpencodeReasoningEffortOptions');
+        expect(handler).toBeDefined();
+        const result = await handler!(undefined) as Record<string, unknown>;
+        expect(result).toEqual({
+            success: false,
+            error: 'OpenCode reasoning effort options are not available'
         });
     });
 
