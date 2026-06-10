@@ -395,7 +395,7 @@ export class AcpStdioTransport {
         if (matchesAcpRetryBackoff(text)) {
             this.stderrErrorHandler({
                 type: 'unknown',
-                message: 'OpenCode is retrying after an upstream failure. The turn may be stalled.',
+                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
                 raw: text
             });
             return;
