@@ -64,7 +64,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
         backend.onStderrError((error) => {
             logger.debug('[cursor-acp] stderr error', error);
-            session.sendSessionEvent({ type: 'message', message: error.message });
+            const converted = convertAgentMessage({ type: 'error', message: error.message });
+            if (converted) {
+                session.sendAgentMessage(converted);
+            }
             messageBuffer.addMessage(error.message, 'status');
         });
 
@@ -72,7 +75,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             await backend.initialize();
         } catch (error) {
             const errMsg = error instanceof Error ? error.message : String(error);
-            throw new Error(`${CURSOR_ACP_REQUIRED_MESSAGE} (${errMsg})`);
+            const fullMsg = `${CURSOR_ACP_REQUIRED_MESSAGE} (${errMsg})`;
+            const converted = convertAgentMessage({ type: 'error', message: fullMsg });
+            if (converted) {
+                session.sendAgentMessage(converted);
+            }
+            messageBuffer.addMessage(fullMsg, 'status');
+            throw new Error(fullMsg);
         }
 
         await backend.authenticateIfAvailable('cursor_login');
@@ -202,11 +211,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
-                session.sendSessionEvent({
-                    type: 'message',
-                    message: `Cursor Agent failed: ${errMsg}`
-                });
-                messageBuffer.addMessage(`Cursor Agent failed: ${errMsg}`, 'status');
+                const message = `Cursor Agent failed: ${errMsg}`;
+                const converted = convertAgentMessage({ type: 'error', message });
+                if (converted) {
+                    session.sendAgentMessage(converted);
+                }
+                messageBuffer.addMessage(message, 'status');
             } finally {
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
@@ -268,6 +278,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 break;
             case 'plan':
                 this.messageBuffer.addMessage('Plan updated', 'status');
+                break;
+            case 'error':
+                this.messageBuffer.addMessage(message.message, 'status');
                 break;
             case 'turn_complete':
                 break;
