@@ -7,7 +7,7 @@ const guard = vi.hoisted(() => ({
 
 const spawnState = vi.hoisted(() => ({
     exitHandlers: [] as Array<(code: number | null, signal: NodeJS.Signals | null) => void>,
-    stdinWrite: vi.fn(() => true),
+    stdinWrite: vi.fn<(chunk: string) => boolean>(() => true),
     exitCode: null as number | null
 }));
 
@@ -38,7 +38,7 @@ vi.mock('node:child_process', () => ({
             },
             stdin: {
                 end: vi.fn(),
-                write: (...args: unknown[]) => spawnState.stdinWrite(...args)
+                write: (chunk: string) => spawnState.stdinWrite(chunk)
             },
             on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
                 if (event === 'exit') {
@@ -114,6 +114,6 @@ describe('AcpStdioTransport closed stdin writes', () => {
 
         const transport = new AcpStdioTransport({ command: 'gemini' });
         await expect(transport.sendRequest('initialize')).rejects.toThrow('WritableIterable is closed');
-        await expect(transport.sendRequest('session/new')).rejects.toThrow('ACP transport is closed');
+        await expect(transport.sendRequest('session/new')).rejects.toThrow('WritableIterable is closed');
     });
 });
