@@ -202,11 +202,16 @@ describe('cursorAcpRemoteLauncher', () => {
     it('throws on initialize failure without invoking legacy launcher', async () => {
         harness.initializeError = new Error('agent acp not found');
         const session = makeSession(null);
+        const client = session.client as unknown as { sendAgentMessage: ReturnType<typeof vi.fn> };
 
         await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow(
             /Cursor ACP mode is required for new Cursor remote sessions/
         );
 
+        expect(client.sendAgentMessage).toHaveBeenCalledWith({
+            type: 'error',
+            message: expect.stringContaining('agent acp not found')
+        });
         expect(legacyLauncher).not.toHaveBeenCalled();
         expect(harness.newSessionCalled).toBe(false);
     });
