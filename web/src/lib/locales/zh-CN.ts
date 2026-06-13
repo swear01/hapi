@@ -503,6 +503,8 @@ export default {
   'settings.display.sessionPreviewLimit': '会话折叠阈值',
   'settings.display.sessionPreviewLimit.decrease': '减少折叠前显示的会话数',
   'settings.display.sessionPreviewLimit.increase': '增加折叠前显示的会话数',
+  'settings.display.activeSessionsOnly': '仅显示活跃会话',
+  'settings.display.activeSessionsOnly.desc': '在侧边栏隐藏非活跃会话；当前打开的会话仍会保留显示。',
   'settings.display.sessionListStatus': '会话列表状态',
   'settings.display.sessionListStatus.standard': '标准',
   'settings.display.sessionListStatus.detailed': '详细',

@@ -499,6 +499,8 @@ export default {
   'settings.display.sessionPreviewLimit': 'Sessions Before Folding',
   'settings.display.sessionPreviewLimit.decrease': 'Show fewer sessions before folding',
   'settings.display.sessionPreviewLimit.increase': 'Show more sessions before folding',
+  'settings.display.activeSessionsOnly': 'Active sessions only',
+  'settings.display.activeSessionsOnly.desc': 'Hide inactive sessions in the sidebar. The session you have open stays visible.',
   'settings.display.sessionListStatus': 'Session list status',
   'settings.display.sessionListStatus.standard': 'Standard',
   'settings.display.sessionListStatus.detailed': 'Detailed',

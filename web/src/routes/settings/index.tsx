@@ -19,6 +19,7 @@ import { getTerminalFontSizeOptions, useTerminalFontSize, type TerminalFontSize 
 import { getComposerEnterBehaviorOptions, useComposerEnterBehavior, type ComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { getTerminalToolDisplayModeOptions, useTerminalToolDisplayMode, type TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { getSessionListStatusModeOptions, useSessionListStatusMode, type SessionListStatusMode } from '@/hooks/useSessionListStatusMode'
+import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
 import {
     MAX_SESSION_PREVIEW_LIMIT,
     MIN_SESSION_PREVIEW_LIMIT,
@@ -338,6 +339,7 @@ export default function SettingsPage() {
     const { composerEnterBehavior, setComposerEnterBehavior } = useComposerEnterBehavior()
     const { terminalToolDisplayMode, setTerminalToolDisplayMode } = useTerminalToolDisplayMode()
     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
+    const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
     const {
         toolGroupBackground,
         userMessageBackground,
@@ -836,6 +838,23 @@ export default function SettingsPage() {
                             decreaseLabel={t('settings.display.sessionPreviewLimit.decrease')}
                             increaseLabel={t('settings.display.sessionPreviewLimit.increase')}
                         />
+                        <div className="flex items-center justify-between gap-3 px-3 py-3">
+                            <div className="flex flex-col">
+                                <span className="text-[var(--app-fg)]">{t('settings.display.activeSessionsOnly')}</span>
+                                <span className="text-xs text-[var(--app-hint)]">{t('settings.display.activeSessionsOnly.desc')}</span>
+                            </div>
+                            <label className="relative inline-flex h-5 w-9 shrink-0 items-center">
+                                <input
+                                    type="checkbox"
+                                    checked={showActiveSessionsOnly}
+                                    onChange={(e) => setShowActiveSessionsOnly(e.target.checked)}
+                                    className="peer sr-only"
+                                    aria-label={t('settings.display.activeSessionsOnly')}
+                                />
+                                <span className="absolute inset-0 rounded-full bg-[var(--app-border)] transition-colors peer-checked:bg-[var(--app-link)]" />
+                                <span className="absolute left-0.5 h-4 w-4 rounded-full bg-[var(--app-bg)] transition-transform peer-checked:translate-x-4" />
+                            </label>
+                        </div>
                         <div ref={sessionListStatusContainerRef} className="relative">
                             <button
                                 type="button"
