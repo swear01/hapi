@@ -68,7 +68,8 @@ export async function runCodex(opts: {
         permissionMode: mode.permissionMode,
         model: mode.model,
         modelReasoningEffort: mode.modelReasoningEffort,
-        collaborationMode: mode.collaborationMode
+        collaborationMode: mode.collaborationMode,
+        serviceTier: mode.serviceTier
     }));
 
     const codexCliOverrides = parseCodexCliOverrides(opts.codexArgs);
@@ -81,6 +82,9 @@ export async function runCodex(opts: {
     let currentModel = opts.model;
     let currentModelReasoningEffort: ReasoningEffort | undefined = opts.modelReasoningEffort;
     let currentCollaborationMode: EnhancedMode['collaborationMode'] = opts.collaborationMode ?? 'default';
+    // Service tier (Fast mode). `undefined` leaves it at the account default,
+    // `'fast'` enables Fast mode, `null` selects the standard tier explicitly.
+    let currentServiceTier: string | null | undefined = undefined;
 
     const lifecycle = createRunnerLifecycle({
         session,
@@ -115,6 +119,7 @@ export async function runCodex(opts: {
         model?: string | null;
         modelReasoningEffort?: ReasoningEffort | null;
         collaborationMode?: EnhancedMode['collaborationMode'];
+        serviceTier?: string | null;
     } | undefined): void => {
         if (!updates) return;
         if (updates.permissionMode !== undefined) {
@@ -128,6 +133,9 @@ export async function runCodex(opts: {
         }
         if (updates.collaborationMode !== undefined) {
             currentCollaborationMode = updates.collaborationMode;
+        }
+        if (updates.serviceTier !== undefined) {
+            currentServiceTier = updates.serviceTier;
         }
         applyCurrentConfigToSession();
     };
@@ -164,7 +172,8 @@ export async function runCodex(opts: {
                     permissionMode: currentPermissionMode,
                     collaborationMode: currentCollaborationMode,
                     model: currentModel,
-                    modelReasoningEffort: currentModelReasoningEffort
+                    modelReasoningEffort: currentModelReasoningEffort,
+                    serviceTier: currentServiceTier
                 });
                 if (slash.kind === 'goal') {
                     if (slash.message) {
@@ -183,7 +192,8 @@ export async function runCodex(opts: {
                         permissionMode: currentPermissionMode ?? 'default',
                         model: currentModel,
                         modelReasoningEffort: currentModelReasoningEffort,
-                        collaborationMode: currentCollaborationMode
+                        collaborationMode: currentCollaborationMode,
+                        serviceTier: currentServiceTier
                     }, localId);
                     return;
                 }
@@ -221,7 +231,8 @@ export async function runCodex(opts: {
                     permissionMode: messagePermissionMode ?? 'default',
                     model: currentModel,
                     modelReasoningEffort: currentModelReasoningEffort,
-                    collaborationMode: currentCollaborationMode
+                    collaborationMode: currentCollaborationMode,
+                    serviceTier: currentServiceTier
                 };
                 if (isolatedCommandText) {
                     messageQueue.pushIsolateAndClear(isolatedCommandText, enhancedMode, localId);
@@ -234,7 +245,8 @@ export async function runCodex(opts: {
                     permissionMode: currentPermissionMode ?? 'default',
                     model: currentModel,
                     modelReasoningEffort: currentModelReasoningEffort,
-                    collaborationMode: currentCollaborationMode
+                    collaborationMode: currentCollaborationMode,
+                    serviceTier: currentServiceTier
                 };
                 messageQueue.push(formatMessageWithAttachments(message.content.text, message.content.attachments), enhancedMode, localId);
             }
@@ -297,11 +309,25 @@ export async function runCodex(opts: {
         return trimmedValue;
     };
 
+    const resolveServiceTier = (value: unknown): string | null => {
+        if (value === null) {
+            return null;
+        }
+        if (typeof value !== 'string') {
+            throw new Error('Invalid service tier');
+        }
+        const trimmedValue = value.trim().toLowerCase();
+        if (!trimmedValue || trimmedValue === 'standard' || trimmedValue === 'default' || trimmedValue === 'auto') {
+            return null;
+        }
+        return trimmedValue;
+    };
+
     session.rpcHandlerManager.registerHandler(RPC_METHODS.SetSessionConfig, async (payload: unknown) => {
         if (!payload || typeof payload !== 'object') {
             throw new Error('Invalid session config payload');
         }
-        const config = payload as { permissionMode?: unknown; model?: unknown; modelReasoningEffort?: unknown; collaborationMode?: unknown };
+        const config = payload as { permissionMode?: unknown; model?: unknown; modelReasoningEffort?: unknown; collaborationMode?: unknown; serviceTier?: unknown };
 
         if (config.permissionMode !== undefined) {
             currentPermissionMode = resolvePermissionMode(config.permissionMode);
@@ -320,16 +346,22 @@ export async function runCodex(opts: {
             currentCollaborationMode = resolveCollaborationMode(config.collaborationMode);
         }
 
+        if (config.serviceTier !== undefined) {
+            currentServiceTier = resolveServiceTier(config.serviceTier);
+        }
+
         applyCurrentConfigToSession({ syncModel: shouldSyncModel });
         const applied: {
             permissionMode: PermissionMode;
             model?: string | null;
             modelReasoningEffort: ReasoningEffort | null;
             collaborationMode: EnhancedMode['collaborationMode'];
+            serviceTier: string | null;
         } = {
             permissionMode: currentPermissionMode,
             modelReasoningEffort: currentModelReasoningEffort ?? null,
-            collaborationMode: currentCollaborationMode
+            collaborationMode: currentCollaborationMode,
+            serviceTier: currentServiceTier ?? null
         };
         if (shouldSyncModel) {
             applied.model = currentModel ?? null;

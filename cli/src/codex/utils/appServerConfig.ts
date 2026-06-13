@@ -126,6 +126,10 @@ export function buildThreadStartParams(args: {
         params.model = args.mode.model;
     }
 
+    if (args.mode.serviceTier !== undefined) {
+        params.serviceTier = args.mode.serviceTier;
+    }
+
     return params;
 }
 
@@ -194,6 +198,10 @@ export function buildTurnStartParams(args: {
         };
     } else if (model) {
         params.model = model;
+    }
+
+    if (args.mode?.serviceTier !== undefined) {
+        params.serviceTier = args.mode.serviceTier;
     }
 
     return params;
