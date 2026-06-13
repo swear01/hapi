@@ -137,6 +137,69 @@ describe('appServerConfig', () => {
         });
     });
 
+    it('passes service tier override in thread params when set to fast', () => {
+        const params = buildThreadStartParams({
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', collaborationMode: 'default', serviceTier: 'fast' },
+            mcpServers
+        });
+
+        expect(params.serviceTier).toBe('fast');
+    });
+
+    it('sends explicit null service tier in thread params when standard is selected', () => {
+        const params = buildThreadStartParams({
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', collaborationMode: 'default', serviceTier: null },
+            mcpServers
+        });
+
+        expect(params.serviceTier).toBeNull();
+    });
+
+    it('omits service tier from thread params when untouched', () => {
+        const params = buildThreadStartParams({
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', collaborationMode: 'default' },
+            mcpServers
+        });
+
+        expect('serviceTier' in params).toBe(false);
+    });
+
+    it('passes service tier override in turn params when set to fast', () => {
+        const params = buildTurnStartParams({
+            threadId: 'thread-1',
+            message: 'hello',
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', model: 'gpt-5.5', collaborationMode: 'default', serviceTier: 'fast' }
+        });
+
+        expect(params.serviceTier).toBe('fast');
+    });
+
+    it('sends explicit null service tier in turn params when standard is selected', () => {
+        const params = buildTurnStartParams({
+            threadId: 'thread-1',
+            message: 'hello',
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', model: 'gpt-5.5', collaborationMode: 'default', serviceTier: null }
+        });
+
+        expect(params.serviceTier).toBeNull();
+    });
+
+    it('omits service tier from turn params when untouched', () => {
+        const params = buildTurnStartParams({
+            threadId: 'thread-1',
+            message: 'hello',
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'default', model: 'gpt-5.5', collaborationMode: 'default' }
+        });
+
+        expect('serviceTier' in params).toBe(false);
+    });
+
     it('builds turn params with mode defaults', () => {
         const params = buildTurnStartParams({
             threadId: 'thread-1',
