@@ -20,7 +20,7 @@ import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@
 import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
-import { codexModelSupportsFastMode } from '@/components/AssistantChat/codexFastMode'
+import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
@@ -1180,7 +1180,8 @@ function SessionChatInner(props: SessionChatProps) {
                             agentFlavor === 'codex'
                                 && props.session.active
                                 && !controlledByUser
-                                && codexModelSupportsFastMode(props.session.model)
+                                && !codexModelsState.error
+                                && codexModelAdvertisesFastTier(props.session.model, codexModelsState.models)
                                 ? handleServiceTierChange
                                 : undefined
                         }

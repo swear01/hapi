@@ -1,20 +1,36 @@
 import { describe, expect, it } from 'vitest'
-import { codexModelSupportsFastMode, isFastServiceTier } from './codexFastMode'
+import { codexModelAdvertisesFastTier, isFastServiceTier } from './codexFastMode'
 
-describe('codexModelSupportsFastMode', () => {
-    it('accepts GPT-5.5 and GPT-5.4 variants', () => {
-        expect(codexModelSupportsFastMode('gpt-5.5')).toBe(true)
-        expect(codexModelSupportsFastMode('gpt-5.5-codex')).toBe(true)
-        expect(codexModelSupportsFastMode('GPT-5.4')).toBe(true)
-        expect(codexModelSupportsFastMode('gpt-5.4-codex')).toBe(true)
+const models = [
+    { id: 'gpt-5.5-codex', isDefault: true, serviceTiers: ['standard', 'fast'] },
+    { id: 'gpt-5.3-codex-spark', isDefault: false, serviceTiers: ['standard'] },
+    { id: 'o3', isDefault: false }
+]
+
+describe('codexModelAdvertisesFastTier', () => {
+    it('is true when the active model advertises a fast tier', () => {
+        expect(codexModelAdvertisesFastTier('gpt-5.5-codex', models)).toBe(true)
     })
 
-    it('rejects unsupported or empty models', () => {
-        expect(codexModelSupportsFastMode('gpt-5.3-codex-spark')).toBe(false)
-        expect(codexModelSupportsFastMode('o3')).toBe(false)
-        expect(codexModelSupportsFastMode(null)).toBe(false)
-        expect(codexModelSupportsFastMode(undefined)).toBe(false)
-        expect(codexModelSupportsFastMode('   ')).toBe(false)
+    it('falls back to the catalog default model when session model is auto/null', () => {
+        // default model (gpt-5.5-codex) advertises fast
+        expect(codexModelAdvertisesFastTier(null, models)).toBe(true)
+        expect(codexModelAdvertisesFastTier(undefined, models)).toBe(true)
+        expect(codexModelAdvertisesFastTier('  ', models)).toBe(true)
+    })
+
+    it('is false when the active model does not advertise a fast tier', () => {
+        expect(codexModelAdvertisesFastTier('gpt-5.3-codex-spark', models)).toBe(false)
+        expect(codexModelAdvertisesFastTier('o3', models)).toBe(false)
+    })
+
+    it('is false when the model is unknown or the catalog is empty', () => {
+        expect(codexModelAdvertisesFastTier('gpt-9', models)).toBe(false)
+        expect(codexModelAdvertisesFastTier('gpt-5.5-codex', [])).toBe(false)
+    })
+
+    it('matches fast tier ids case-insensitively', () => {
+        expect(codexModelAdvertisesFastTier('m', [{ id: 'm', isDefault: true, serviceTiers: ['Fast'] }])).toBe(true)
     })
 })
 

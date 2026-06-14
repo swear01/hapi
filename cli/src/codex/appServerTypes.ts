@@ -34,6 +34,12 @@ export interface ModelListItem {
         description?: string;
     }>;
     defaultReasoningEffort?: string | null;
+    serviceTiers?: Array<{
+        id?: string;
+        name?: string;
+        description?: string;
+    }>;
+    defaultServiceTier?: string | null;
     isDefault?: boolean;
     [key: string]: unknown;
 }

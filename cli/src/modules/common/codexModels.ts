@@ -30,6 +30,28 @@ function normalizeSupportedReasoningEfforts(value: unknown): string[] | undefine
     return efforts.length > 0 ? efforts : undefined;
 }
 
+// The Codex model catalog advertises which service tiers are available for a
+// model in the *current* account/auth context — e.g. an API-key session or a
+// plan without Fast credits simply won't list a `fast` tier. We surface the
+// tier ids so the web can gate the Fast-mode toggle on real availability
+// instead of a model-name heuristic.
+function normalizeServiceTiers(value: unknown): string[] | undefined {
+    if (!Array.isArray(value)) {
+        return undefined;
+    }
+
+    const tiers = value
+        .map((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return null;
+            }
+            return asNonEmptyString((entry as { id?: unknown }).id);
+        })
+        .filter((entry): entry is string => entry !== null);
+
+    return tiers.length > 0 ? tiers : undefined;
+}
+
 function normalizeModel(entry: unknown): CodexModelSummary | null {
     if (!entry || typeof entry !== 'object') {
         return null;
@@ -46,7 +68,8 @@ function normalizeModel(entry: unknown): CodexModelSummary | null {
         displayName: asNonEmptyString(record.displayName) ?? id,
         isDefault: record.isDefault === true,
         defaultReasoningEffort: asNonEmptyString(record.defaultReasoningEffort),
-        supportedReasoningEfforts: normalizeSupportedReasoningEfforts(record.supportedReasoningEfforts)
+        supportedReasoningEfforts: normalizeSupportedReasoningEfforts(record.supportedReasoningEfforts),
+        serviceTiers: normalizeServiceTiers(record.serviceTiers)
     };
 }
 
