@@ -13,6 +13,7 @@ const mockCodexSession = vi.hoisted(() => ({
 const harness = vi.hoisted(() => ({
     bootstrapArgs: [] as Array<Record<string, unknown>>,
     loopArgs: [] as Array<Record<string, unknown>>,
+    sessionInfo: { serviceTier: null as string | null } as Record<string, unknown>,
     session: {
         onUserMessage: vi.fn(),
         onCancelQueuedMessage: vi.fn(),
@@ -27,14 +28,16 @@ vi.mock('@/agent/sessionFactory', () => ({
         harness.bootstrapArgs.push(options)
         return {
             api: {},
-            session: harness.session
+            session: harness.session,
+            sessionInfo: harness.sessionInfo
         }
     }),
     bootstrapExistingSession: vi.fn(async (options: Record<string, unknown>) => {
         harness.bootstrapArgs.push(options)
         return {
             api: {},
-            session: harness.session
+            session: harness.session,
+            sessionInfo: harness.sessionInfo
         }
     })
 }))
@@ -104,6 +107,7 @@ describe('runCodex', () => {
     beforeEach(() => {
         harness.bootstrapArgs.length = 0
         harness.loopArgs.length = 0
+        harness.sessionInfo = { serviceTier: null }
         harness.session.onUserMessage.mockReset()
         harness.session.onCancelQueuedMessage.mockReset()
         harness.session.rpcHandlerManager.registerHandler.mockReset()
@@ -140,6 +144,32 @@ describe('runCodex', () => {
             replayTranscriptHistoryOnStart: false
         }))
         expect(mockCodexSession.setCollaborationMode).toHaveBeenLastCalledWith('plan')
+    })
+
+    it('preserves a persisted Fast service tier on startup', async () => {
+        harness.sessionInfo = { serviceTier: 'fast' }
+
+        await runCodexImpl({
+            existingSessionId: 'hapi-session-1',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'codex-thread-1'
+        } as Parameters<typeof runCodex>[0])
+
+        // The first keepalive sync must re-assert Fast, not collapse it.
+        expect(mockCodexSession.setServiceTier).toHaveBeenCalledWith('fast')
+        expect(mockCodexSession.setServiceTier).not.toHaveBeenCalledWith(null)
+    })
+
+    it('does not collapse an untouched service tier into explicit Standard on startup', async () => {
+        harness.sessionInfo = { serviceTier: null }
+
+        await runCodexImpl({
+            workingDirectory: '/tmp/project'
+        } as Parameters<typeof runCodex>[0])
+
+        // Untouched (account-default) sessions must omit the tier entirely so
+        // the keepalive never persists serviceTier: null over the default.
+        expect(mockCodexSession.setServiceTier).not.toHaveBeenCalled()
     })
 
     it('replays transcript history when attaching a new Hapi session to an existing Codex thread', async () => {

@@ -58,7 +58,7 @@ export async function runCodex(opts: {
             model: opts.model,
             modelReasoningEffort: opts.modelReasoningEffort
         });
-    const { api, session } = bootstrap;
+    const { api, session, sessionInfo } = bootstrap;
 
     const startingMode: 'local' | 'remote' = startedBy === 'runner' ? 'remote' : 'local';
 
@@ -82,9 +82,12 @@ export async function runCodex(opts: {
     let currentModel = opts.model;
     let currentModelReasoningEffort: ReasoningEffort | undefined = opts.modelReasoningEffort;
     let currentCollaborationMode: EnhancedMode['collaborationMode'] = opts.collaborationMode ?? 'default';
-    // Service tier (Fast mode). `undefined` leaves it at the account default,
-    // `'fast'` enables Fast mode, `null` selects the standard tier explicitly.
-    let currentServiceTier: string | null | undefined = undefined;
+    // Service tier (Fast mode). `undefined` leaves it untouched (account
+    // default), `'fast'` enables Fast mode, `null` selects the standard tier
+    // explicitly. Seed from the persisted session so a resumed Fast thread
+    // keeps running Fast; a persisted standard/null is treated as untouched so
+    // we never collapse "unset" into an explicit Standard the user didn't pick.
+    let currentServiceTier: string | null | undefined = sessionInfo.serviceTier ?? undefined;
 
     const lifecycle = createRunnerLifecycle({
         session,
@@ -106,7 +109,12 @@ export async function runCodex(opts: {
             sessionInstance.setModel(currentModel ?? null);
         }
         sessionInstance.setModelReasoningEffort(currentModelReasoningEffort ?? null);
-        sessionInstance.setServiceTier(currentServiceTier ?? null);
+        // Preserve the third state: only sync when the user/persisted session
+        // has an explicit tier. `undefined` means "omit" so the keepalive does
+        // not overwrite the account-default or persisted Fast tier with null.
+        if (currentServiceTier !== undefined) {
+            sessionInstance.setServiceTier(currentServiceTier);
+        }
         sessionInstance.setCollaborationMode(currentCollaborationMode);
         logger.debug(
             `[Codex] Synced session config for keepalive: ` +
