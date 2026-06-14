@@ -141,6 +141,12 @@ export const SessionEffortRequestSchema = z.object({
 
 export type SessionEffortRequest = z.infer<typeof SessionEffortRequestSchema>
 
+export const SessionServiceTierRequestSchema = z.object({
+    serviceTier: z.string().trim().min(1).nullable()
+})
+
+export type SessionServiceTierRequest = z.infer<typeof SessionServiceTierRequestSchema>
+
 export const RenameSessionRequestSchema = z.object({
     name: z.string().min(1).max(255)
 })

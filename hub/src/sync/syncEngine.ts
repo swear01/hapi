@@ -299,6 +299,7 @@ export class SyncEngine {
         model?: string | null
         modelReasoningEffort?: string | null
         effort?: string | null
+        serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
     }): void {
         this.sessionCache.handleSessionAlive(payload)
@@ -620,6 +621,7 @@ export class SyncEngine {
             model?: string | null
             modelReasoningEffort?: string | null
             effort?: string | null
+            serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
         }
     ): Promise<void> {
@@ -643,6 +645,7 @@ export class SyncEngine {
                 model?: Session['model']
                 modelReasoningEffort?: Session['modelReasoningEffort']
                 effort?: Session['effort']
+                serviceTier?: Session['serviceTier']
                 collaborationMode?: Session['collaborationMode']
             }
         }

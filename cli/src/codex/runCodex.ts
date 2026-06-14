@@ -106,6 +106,7 @@ export async function runCodex(opts: {
             sessionInstance.setModel(currentModel ?? null);
         }
         sessionInstance.setModelReasoningEffort(currentModelReasoningEffort ?? null);
+        sessionInstance.setServiceTier(currentServiceTier ?? null);
         sessionInstance.setCollaborationMode(currentCollaborationMode);
         logger.debug(
             `[Codex] Synced session config for keepalive: ` +
@@ -156,6 +157,10 @@ export async function runCodex(opts: {
         const sessionCollaborationMode = sessionWrapperRef.current?.getCollaborationMode();
         if (sessionCollaborationMode) {
             currentCollaborationMode = sessionCollaborationMode;
+        }
+        const sessionServiceTier = sessionWrapperRef.current?.getServiceTier();
+        if (sessionServiceTier !== undefined) {
+            currentServiceTier = sessionServiceTier;
         }
     };
 

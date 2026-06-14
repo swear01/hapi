@@ -31,6 +31,7 @@ function createSession(overrides?: Partial<Session>): Session {
         model: 'gpt-5.4',
         modelReasoningEffort: null,
         effort: null,
+        serviceTier: null,
         permissionMode: 'default',
         collaborationMode: 'default'
     }
