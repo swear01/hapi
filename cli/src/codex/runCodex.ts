@@ -82,11 +82,11 @@ export async function runCodex(opts: {
     let currentModel = opts.model;
     let currentModelReasoningEffort: ReasoningEffort | undefined = opts.modelReasoningEffort;
     let currentCollaborationMode: EnhancedMode['collaborationMode'] = opts.collaborationMode ?? 'default';
-    // Service tier (Fast mode). `undefined` leaves it untouched (account
-    // default), `'fast'` enables Fast mode, `null` selects the standard tier
-    // explicitly. Seed from the persisted session so a resumed Fast thread
-    // keeps running Fast; a persisted standard/null is treated as untouched so
-    // we never collapse "unset" into an explicit Standard the user didn't pick.
+    // Service tier (Fast mode), stored representation: `'fast'` and
+    // `'standard'` are explicit user choices, `undefined`/`null` mean untouched
+    // (use the account default). Seed from the persisted session so both a
+    // resumed Fast thread and an explicit Standard choice stay sticky across
+    // restart/resume; a persisted `null` stays untouched (omitted).
     let currentServiceTier: string | null | undefined = sessionInfo.serviceTier ?? undefined;
 
     const lifecycle = createRunnerLifecycle({
@@ -322,6 +322,11 @@ export async function runCodex(opts: {
         return trimmedValue;
     };
 
+    // Stored representation: `'fast'` and `'standard'` are explicit user
+    // choices; `null` means untouched (use the account default). The
+    // `'standard'` sentinel is only translated to the Codex app-server's
+    // `serviceTier: null` when building thread/turn params — see
+    // appServerConfig — so an explicit Fast-off stays sticky across resume.
     const resolveServiceTier = (value: unknown): string | null => {
         if (value === null) {
             return null;
@@ -330,10 +335,13 @@ export async function runCodex(opts: {
             throw new Error('Invalid service tier');
         }
         const trimmedValue = value.trim().toLowerCase();
-        if (!trimmedValue || trimmedValue === 'standard' || trimmedValue === 'default' || trimmedValue === 'auto') {
+        if (trimmedValue === 'fast' || trimmedValue === 'standard') {
+            return trimmedValue;
+        }
+        if (!trimmedValue || trimmedValue === 'default' || trimmedValue === 'auto') {
             return null;
         }
-        return trimmedValue;
+        throw new Error('Invalid service tier');
     };
 
     session.rpcHandlerManager.registerHandler(RPC_METHODS.SetSessionConfig, async (payload: unknown) => {

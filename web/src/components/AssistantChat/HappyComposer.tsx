@@ -629,8 +629,10 @@ export function HappyComposer(props: {
         haptic('light')
     }, [onServiceTierChange, controlsDisabled, haptic])
 
-    const fastModeOptions: Array<{ value: string | null; label: string }> = useMemo(() => [
-        { value: null, label: t('misc.fastModeStandard') },
+    // 'standard' (not null) is the explicit Fast-off choice so it persists
+    // distinctly from an untouched/account-default session.
+    const fastModeOptions: Array<{ value: string; label: string }> = useMemo(() => [
+        { value: 'standard', label: t('misc.fastModeStandard') },
         { value: 'fast', label: t('misc.fastModeFast') }
     ], [t])
 

@@ -63,7 +63,7 @@ describe('resolveCodexSlashCommand', () => {
         expect(resolveCodexSlashCommand('/fast off', { ...state, serviceTier: 'fast' })).toEqual({
             kind: 'handled',
             message: 'Codex Fast mode disabled',
-            updates: { serviceTier: null }
+            updates: { serviceTier: 'standard' }
         });
     });
 

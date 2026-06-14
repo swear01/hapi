@@ -48,6 +48,23 @@ function resolveSandboxPolicyOverride(value: CodexCliOverrides['sandbox'] | unde
     }
 }
 
+/**
+ * Translate HAPI's stored service-tier representation into the Codex
+ * app-server `serviceTier` field for thread/turn params:
+ * - `'fast'`     → `'fast'`  (Fast tier)
+ * - `'standard'` → `null`    (explicit Standard tier)
+ * - anything else / untouched → `undefined` (omit; use account default)
+ */
+function toAppServerServiceTier(stored: string | null | undefined): string | null | undefined {
+    if (stored === 'fast') {
+        return 'fast';
+    }
+    if (stored === 'standard') {
+        return null;
+    }
+    return undefined;
+}
+
 export function supportsReasoningSummary(model: string | undefined): boolean {
     const normalized = model?.trim().toLowerCase();
     if (!normalized) return true;
@@ -126,8 +143,9 @@ export function buildThreadStartParams(args: {
         params.model = args.mode.model;
     }
 
-    if (args.mode.serviceTier !== undefined) {
-        params.serviceTier = args.mode.serviceTier;
+    const threadServiceTier = toAppServerServiceTier(args.mode.serviceTier);
+    if (threadServiceTier !== undefined) {
+        params.serviceTier = threadServiceTier;
     }
 
     return params;
@@ -200,8 +218,9 @@ export function buildTurnStartParams(args: {
         params.model = model;
     }
 
-    if (args.mode?.serviceTier !== undefined) {
-        params.serviceTier = args.mode.serviceTier;
+    const turnServiceTier = toAppServerServiceTier(args.mode?.serviceTier);
+    if (turnServiceTier !== undefined) {
+        params.serviceTier = turnServiceTier;
     }
 
     return params;

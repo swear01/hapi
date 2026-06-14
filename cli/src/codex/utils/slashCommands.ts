@@ -212,7 +212,7 @@ export function resolveCodexSlashCommand(
             return {
                 kind: 'handled',
                 message: 'Codex Fast mode disabled',
-                updates: { serviceTier: null }
+                updates: { serviceTier: 'standard' }
             };
         }
         if (arg === 'status') {

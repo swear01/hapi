@@ -160,6 +160,20 @@ describe('runCodex', () => {
         expect(mockCodexSession.setServiceTier).not.toHaveBeenCalledWith(null)
     })
 
+    it('keeps an explicit Standard service tier sticky on startup', async () => {
+        harness.sessionInfo = { serviceTier: 'standard' }
+
+        await runCodexImpl({
+            existingSessionId: 'hapi-session-1',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'codex-thread-1'
+        } as Parameters<typeof runCodex>[0])
+
+        // Explicit Standard must survive resume (not be dropped to untouched),
+        // so later turns keep sending app-server serviceTier: null.
+        expect(mockCodexSession.setServiceTier).toHaveBeenCalledWith('standard')
+    })
+
     it('does not collapse an untouched service tier into explicit Standard on startup', async () => {
         harness.sessionInfo = { serviceTier: null }
 
