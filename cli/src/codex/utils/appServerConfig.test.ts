@@ -137,14 +137,14 @@ describe('appServerConfig', () => {
         });
     });
 
-    it('passes service tier override in thread params when set to fast', () => {
+    it('translates Fast to the advertised app-server tier (priority) in thread params', () => {
         const params = buildThreadStartParams({
             cwd: '/workspace/project',
             mode: { permissionMode: 'default', collaborationMode: 'default', serviceTier: 'fast' },
             mcpServers
         });
 
-        expect(params.serviceTier).toBe('fast');
+        expect(params.serviceTier).toBe('priority');
     });
 
     it('translates explicit Standard to app-server null in thread params', () => {
@@ -173,7 +173,7 @@ describe('appServerConfig', () => {
         expect('serviceTier' in nullParams).toBe(false);
     });
 
-    it('passes service tier override in turn params when set to fast', () => {
+    it('translates Fast to the advertised app-server tier (priority) in turn params', () => {
         const params = buildTurnStartParams({
             threadId: 'thread-1',
             message: 'hello',
@@ -181,7 +181,7 @@ describe('appServerConfig', () => {
             mode: { permissionMode: 'default', model: 'gpt-5.5', collaborationMode: 'default', serviceTier: 'fast' }
         });
 
-        expect(params.serviceTier).toBe('fast');
+        expect(params.serviceTier).toBe('priority');
     });
 
     it('translates explicit Standard to app-server null in turn params', () => {
