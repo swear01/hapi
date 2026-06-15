@@ -22,6 +22,16 @@ function parseReasoningEffort(value: string): ReasoningEffort {
     }
 }
 
+// Mirror the web /service-tier endpoint's enum so the internal resume spawn
+// path can never seed/persist an unsupported tier string.
+function parseServiceTier(value: string): 'fast' | 'standard' {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'fast' || normalized === 'standard') {
+        return normalized
+    }
+    throw new Error('Invalid --service-tier value')
+}
+
 export const codexCommand: CommandDefinition = {
     name: 'codex',
     requiresRuntimeAssets: true,
@@ -82,7 +92,7 @@ export const codexCommand: CommandDefinition = {
                     if (!tier) {
                         throw new Error('Missing --service-tier value')
                     }
-                    options.serviceTier = tier
+                    options.serviceTier = parseServiceTier(tier)
                 } else {
                     unknownArgs.push(arg)
                 }
