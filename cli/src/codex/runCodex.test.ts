@@ -174,6 +174,21 @@ describe('runCodex', () => {
         expect(mockCodexSession.setServiceTier).toHaveBeenCalledWith('standard')
     })
 
+    it('prefers the spawn-time service tier override when resuming (hub passes Fast)', async () => {
+        // On resume the hub spawns a fresh session (serviceTier null in the new
+        // row) and passes the old tier via opts; the override must win so the
+        // resumed thread immediately runs Fast.
+        harness.sessionInfo = { serviceTier: null }
+
+        await runCodexImpl({
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'codex-thread-1',
+            serviceTier: 'fast'
+        } as Parameters<typeof runCodex>[0])
+
+        expect(mockCodexSession.setServiceTier).toHaveBeenCalledWith('fast')
+    })
+
     it('does not collapse an untouched service tier into explicit Standard on startup', async () => {
         harness.sessionInfo = { serviceTier: null }
 

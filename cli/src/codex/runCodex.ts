@@ -31,6 +31,7 @@ export async function runCodex(opts: {
     resumeSessionId?: string;
     model?: string;
     modelReasoningEffort?: ReasoningEffort;
+    serviceTier?: string;
     collaborationMode?: EnhancedMode['collaborationMode'];
     existingSessionId?: string;
     workingDirectory?: string;
@@ -84,10 +85,11 @@ export async function runCodex(opts: {
     let currentCollaborationMode: EnhancedMode['collaborationMode'] = opts.collaborationMode ?? 'default';
     // Service tier (Fast mode), stored representation: `'fast'` and
     // `'standard'` are explicit user choices, `undefined`/`null` mean untouched
-    // (use the account default). Seed from the persisted session so both a
-    // resumed Fast thread and an explicit Standard choice stay sticky across
-    // restart/resume; a persisted `null` stays untouched (omitted).
-    let currentServiceTier: string | null | undefined = sessionInfo.serviceTier ?? undefined;
+    // (use the account default). Prefer the spawn-time override (set by the hub
+    // when resuming a session, mirroring model/effort) so a resumed Fast/Standard
+    // thread immediately runs with the right tier; otherwise seed from the
+    // persisted session. A persisted/absent `null` stays untouched (omitted).
+    let currentServiceTier: string | null | undefined = opts.serviceTier ?? sessionInfo.serviceTier ?? undefined;
 
     const lifecycle = createRunnerLifecycle({
         session,

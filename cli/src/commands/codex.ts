@@ -36,6 +36,7 @@ export const codexCommand: CommandDefinition = {
                 resumeSessionId?: string
                 model?: string
                 modelReasoningEffort?: ReasoningEffort
+                serviceTier?: string
             } = {}
             const unknownArgs: string[] = []
             let hasExplicitPermissionMode = false
@@ -76,6 +77,12 @@ export const codexCommand: CommandDefinition = {
                         throw new Error('Missing --model-reasoning-effort value')
                     }
                     options.modelReasoningEffort = parseReasoningEffort(effort)
+                } else if (arg === '--service-tier') {
+                    const tier = commandArgs[++i]
+                    if (!tier) {
+                        throw new Error('Missing --service-tier value')
+                    }
+                    options.serviceTier = tier
                 } else {
                     unknownArgs.push(arg)
                 }
