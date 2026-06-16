@@ -156,10 +156,14 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
         }
 
         const bytes = Uint8Array.from(Buffer.from(result.content, 'base64'))
+        // Generated images are content-addressed by an immutable random id, so the bytes for a
+        // given id never change. Cache aggressively so remounts/scroll/session reopen don't
+        // re-run the full HTTP -> socket.io RPC -> base64 round-trip every time (issue #927).
         return c.body(bytes, 200, {
             'Content-Type': result.mimeType ?? 'application/octet-stream',
             'Content-Disposition': `inline; filename="${encodeURIComponent(result.fileName ?? 'generated-image')}"`,
-            'Cache-Control': 'no-store'
+            'Cache-Control': 'private, max-age=31536000, immutable',
+            ETag: `"${parsed.data.imageId}"`
         })
     })
 
