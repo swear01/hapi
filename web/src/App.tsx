@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
 import { initializeChatSurfaceColors } from '@/hooks/useChatSurfaceColors'
 import { initializeTheme } from '@/hooks/useTheme'
+import { initializeThemeColors } from '@/hooks/useThemeColors'
 import { useAuth } from '@/hooks/useAuth'
 import { useAuthSource } from '@/hooks/useAuthSource'
 import { useServerUrl } from '@/hooks/useServerUrl'
@@ -59,6 +60,7 @@ function AppInner() {
         tg?.ready()
         tg?.expand()
         initializeTheme()
+        initializeThemeColors()
         initializeChatSurfaceColors()
     }, [])
 

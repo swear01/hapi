@@ -35,6 +35,7 @@ import {
     type ChatSurfaceColorPreset,
 } from '@/hooks/useChatSurfaceColors'
 import { useAppearance, getAppearanceOptions, type AppearancePreference } from '@/hooks/useTheme'
+import { useThemeColors, type ThemeColorKeyId } from '@/hooks/useThemeColors'
 import { PROTOCOL_VERSION } from '@hapi/protocol'
 import { VoiceRespondsControls, VoiceSoundsControls, VoicePersonaControls, VoiceDiagnosticsControls } from '@/components/settings/VoiceAdvancedControls'
 
@@ -303,6 +304,65 @@ function ChatSurfaceColorControl(props: {
                         className="h-8 w-11 cursor-pointer appearance-none border-0 bg-transparent p-0"
                     />
                 </label>
+            </div>
+        </div>
+    )
+}
+
+function ThemeColorControl(props: { t: (key: string) => string }) {
+    const { keys, getPickerValue, isCustomized, hasAnyCustom, setColor, resetColor, resetAll } = useThemeColors()
+
+    return (
+        <div className="border-t border-[var(--app-divider)] px-3 py-3">
+            <div className="mb-1 flex items-center justify-between gap-3">
+                <span className="text-[var(--app-fg)]">{props.t('settings.display.themeColors.title')}</span>
+                {hasAnyCustom && (
+                    <button
+                        type="button"
+                        onClick={resetAll}
+                        className="text-sm text-[var(--app-link)] transition-colors hover:underline"
+                    >
+                        {props.t('settings.display.themeColors.resetAll')}
+                    </button>
+                )}
+            </div>
+            <div className="mb-3 text-sm text-[var(--app-hint)]">{props.t('settings.display.themeColors.description')}</div>
+            <div className="flex flex-col gap-2">
+                {keys.map((key) => {
+                    const value = getPickerValue(key.id)
+                    const customized = isCustomized(key.id)
+                    return (
+                        <div key={key.id} className="flex items-center justify-between gap-3">
+                            <span className="text-sm text-[var(--app-fg)]">{props.t(key.labelKey)}</span>
+                            <div className="flex items-center gap-2">
+                                {customized && (
+                                    <button
+                                        type="button"
+                                        onClick={() => resetColor(key.id as ThemeColorKeyId)}
+                                        className="text-xs text-[var(--app-hint)] transition-colors hover:text-[var(--app-link)]"
+                                    >
+                                        {props.t('settings.display.themeColors.reset')}
+                                    </button>
+                                )}
+                                <label
+                                    className={`inline-flex items-center rounded-xl border px-2 py-1 transition-colors ${
+                                        customized
+                                            ? 'border-[var(--app-link)] bg-[var(--app-subtle-bg)]'
+                                            : 'border-[var(--app-border)] bg-[var(--app-bg)]'
+                                    }`}
+                                >
+                                    <input
+                                        aria-label={props.t(key.labelKey)}
+                                        type="color"
+                                        value={value}
+                                        onChange={(event) => setColor(key.id as ThemeColorKeyId, event.target.value)}
+                                        className="h-8 w-11 cursor-pointer appearance-none border-0 bg-transparent p-0"
+                                    />
+                                </label>
+                            </div>
+                        </div>
+                    )
+                })}
             </div>
         </div>
     )
@@ -733,6 +793,7 @@ export default function SettingsPage() {
                                 </div>
                             )}
                         </div>
+                        <ThemeColorControl t={t} />
                         <div ref={fontContainerRef} className="relative">
                             <button
                                 type="button"
