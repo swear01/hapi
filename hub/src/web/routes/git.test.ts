@@ -36,5 +36,26 @@ describe('generated images route', () => {
         // cacheable; `no-store` forces a full RPC round-trip on every remount (issue #927).
         expect(cacheControl).toContain('immutable')
         expect(cacheControl).not.toContain('no-store')
+        expect(response.headers.get('etag')).toBe('"img-1"')
+    })
+
+    it('returns 304 without an RPC round-trip when If-None-Match matches', async () => {
+        const session = { id: 'session-1', namespace: 'default', active: true } as unknown as Session
+        let rpcCalls = 0
+        const engine = {
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
+            readGeneratedImage: async () => {
+                rpcCalls += 1
+                return { success: true, content: '', mimeType: 'image/png', fileName: 'shot.png' }
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const response = await buildApp(engine).request('/api/sessions/session-1/generated-images/img-1', {
+            headers: { 'if-none-match': '"img-1"' }
+        })
+
+        expect(response.status).toBe(304)
+        // The whole point: a cache hit must not touch the CLI over the socket.
+        expect(rpcCalls).toBe(0)
     })
 })
