@@ -1001,7 +1001,7 @@ function SessionChatInner(props: SessionChatProps) {
             ) : null}
 
             <AssistantRuntimeProvider runtime={runtime}>
-                <DragDropZone disabled={sessionInactive || props.isSending}>
+                <DragDropZone disabled={sessionInactive || props.isSending || pendingSchedule != null}>
                     <HappyThread
                         key={props.session.id}
                         api={props.api}

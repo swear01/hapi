@@ -17,9 +17,9 @@ export function DragDropZone({
     const onDragOver = useCallback((e: React.DragEvent) => {
         if (e.dataTransfer.types.includes('Files')) {
             e.preventDefault()
-            e.dataTransfer.dropEffect = 'copy'
+            e.dataTransfer.dropEffect = disabled ? 'none' : 'copy'
         }
-    }, [])
+    }, [disabled])
 
     const onDrop = useCallback(
         async (e: React.DragEvent) => {
@@ -45,7 +45,7 @@ export function DragDropZone({
             onDrop={onDrop}
         >
             {children}
-            {isDragging && (
+            {isDragging && !disabled && (
                 <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-[var(--app-link)] bg-[var(--app-link)]/10">
                     <div className="rounded-lg bg-[var(--app-bg)] px-4 py-2 text-sm font-medium text-[var(--app-link)] shadow-lg">
                         {t('composer.dropToAttach')}
