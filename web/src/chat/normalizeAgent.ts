@@ -583,11 +583,11 @@ export function normalizeAgentRecord(
                 localId,
                 createdAt,
                 role: 'event',
-                isSidechain: false,
                 content: {
                     type: 'error',
                     message: data.message
                 },
+                isSidechain: false,
                 meta
             }
         }
