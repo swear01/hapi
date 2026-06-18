@@ -23,6 +23,9 @@ export function DragDropZone({
 
     const onDrop = useCallback(
         async (e: React.DragEvent) => {
+            // Let non-file drops (e.g. selected text into the composer) keep
+            // their default browser behaviour instead of being cancelled.
+            if (!e.dataTransfer.types.includes('Files')) return
             e.preventDefault()
             if (disabled) return
             const files = Array.from(e.dataTransfer.files)

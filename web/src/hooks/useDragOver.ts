@@ -25,25 +25,33 @@ export function useDragOver(): boolean {
 
         const clearDrag = () => setIsDraggingFiles(false)
 
-        // Prevent the browser from opening the file when dropped outside a zone
-        const preventDefault = (e: DragEvent) => {
+        // Prevent the browser from opening/navigating to a file dropped outside
+        // an explicit drop zone (e.g. the sidebar). This must run on BOTH
+        // `dragover` and `drop`: preventing only `dragover` still lets the
+        // browser perform its default file-open action on the `drop` event.
+        const preventFileDefault = (e: DragEvent) => {
             if (e.dataTransfer?.types.includes('Files')) {
                 e.preventDefault()
             }
         }
 
+        const onDrop = (e: DragEvent) => {
+            preventFileDefault(e)
+            clearDrag()
+        }
+
         document.addEventListener('dragenter', onDragEnter)
         document.addEventListener('dragleave', onDragLeave)
         document.addEventListener('dragend', clearDrag)
-        document.addEventListener('drop', clearDrag)
-        document.addEventListener('dragover', preventDefault)
+        document.addEventListener('drop', onDrop)
+        document.addEventListener('dragover', preventFileDefault)
 
         return () => {
             document.removeEventListener('dragenter', onDragEnter)
             document.removeEventListener('dragleave', onDragLeave)
             document.removeEventListener('dragend', clearDrag)
-            document.removeEventListener('drop', clearDrag)
-            document.removeEventListener('dragover', preventDefault)
+            document.removeEventListener('drop', onDrop)
+            document.removeEventListener('dragover', preventFileDefault)
         }
     }, [])
 
