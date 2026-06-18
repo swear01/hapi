@@ -7,7 +7,7 @@ import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
 import { extractBackgroundTaskDelta } from './backgroundTasks'
 
 const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
-type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'collaborationMode'
+type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode'
 
 export class SessionCache {
     private readonly sessions: Map<string, Session> = new Map()
@@ -148,6 +148,7 @@ export class SessionCache {
             model: stored.model,
             modelReasoningEffort: stored.modelReasoningEffort,
             effort: stored.effort,
+            serviceTier: stored.serviceTier,
             permissionMode: existing?.permissionMode ?? metadata?.preferredPermissionMode,
             collaborationMode: existing?.collaborationMode
         }
@@ -173,6 +174,7 @@ export class SessionCache {
         model?: string | null
         modelReasoningEffort?: string | null
         effort?: string | null
+        serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
     }): void {
         const t = clampAliveTime(payload.time)
@@ -187,6 +189,7 @@ export class SessionCache {
         const previousModel = session.model
         const previousModelReasoningEffort = session.modelReasoningEffort
         const previousEffort = session.effort
+        const previousServiceTier = session.serviceTier
         const previousCollaborationMode = session.collaborationMode
         const pendingThinkingUntil = this.pendingThinkingUntilBySessionId.get(session.id) ?? 0
         const requestedThinking = Boolean(payload.thinking)
@@ -228,6 +231,14 @@ export class SessionCache {
             }
             session.effort = payload.effort
         }
+        if (payload.serviceTier !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'serviceTier', t)) {
+            if (payload.serviceTier !== session.serviceTier) {
+                this.store.sessions.setSessionServiceTier(payload.sid, payload.serviceTier, session.namespace, {
+                    touchUpdatedAt: false
+                })
+            }
+            session.serviceTier = payload.serviceTier
+        }
         if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
         }
@@ -238,6 +249,7 @@ export class SessionCache {
             || previousModel !== session.model
             || previousModelReasoningEffort !== session.modelReasoningEffort
             || previousEffort !== session.effort
+            || previousServiceTier !== session.serviceTier
             || previousCollaborationMode !== session.collaborationMode
         const shouldBroadcast = (!wasActive && session.active)
             || (wasThinking !== session.thinking)
@@ -257,6 +269,7 @@ export class SessionCache {
                     model: session.model,
                     modelReasoningEffort: session.modelReasoningEffort,
                     effort: session.effort,
+                    serviceTier: session.serviceTier,
                     collaborationMode: session.collaborationMode
                 } satisfies SessionPatch
             })
@@ -404,9 +417,10 @@ export class SessionCache {
         sessionId: string,
         config: {
             permissionMode?: PermissionMode
-            model?: string | null
+            model?: { provider: string; modelId: string } | string | null
             modelReasoningEffort?: string | null
             effort?: string | null
+            serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
         }
     ): void {
@@ -422,15 +436,27 @@ export class SessionCache {
             this.markRuntimeConfigUpdated(sessionId, 'permissionMode', appliedAt)
         }
         if (config.model !== undefined) {
-            if (config.model !== session.model) {
-                const updated = this.store.sessions.setSessionModel(sessionId, config.model, session.namespace, {
+            const modelValue = config.model
+            // Normalize object form { provider, modelId } to plain string for DB storage
+            const piModelObject = modelValue !== null && typeof modelValue === 'object'
+                ? modelValue
+                : null
+            const normalizedModel: string | null = piModelObject ? piModelObject.modelId : modelValue as string | null
+            if (normalizedModel !== session.model) {
+                const updated = this.store.sessions.setSessionModel(sessionId, normalizedModel, session.namespace, {
                     touchUpdatedAt: false
                 })
                 if (!updated) {
                     throw new Error('Failed to update session model')
                 }
             }
-            session.model = config.model
+            session.model = normalizedModel
+            // Pi requires provider + modelId to uniquely identify a model.
+            // Persist the provider-qualified form in metadata so web can
+            // resolve the exact model even when two providers share a modelId.
+            if (session.metadata?.flavor === 'pi') {
+                this.persistPiSelectedModel(session, piModelObject)
+            }
             this.markRuntimeConfigUpdated(sessionId, 'model', appliedAt)
         }
         if (config.modelReasoningEffort !== undefined) {
@@ -456,6 +482,18 @@ export class SessionCache {
             }
             session.effort = config.effort
             this.markRuntimeConfigUpdated(sessionId, 'effort', appliedAt)
+        }
+        if (config.serviceTier !== undefined) {
+            if (config.serviceTier !== session.serviceTier) {
+                const updated = this.store.sessions.setSessionServiceTier(sessionId, config.serviceTier, session.namespace, {
+                    touchUpdatedAt: false
+                })
+                if (!updated) {
+                    throw new Error('Failed to update session service tier')
+                }
+            }
+            session.serviceTier = config.serviceTier
+            this.markRuntimeConfigUpdated(sessionId, 'serviceTier', appliedAt)
         }
         if (config.collaborationMode !== undefined) {
             session.collaborationMode = config.collaborationMode
@@ -751,6 +789,15 @@ export class SessionCache {
             }
         }
 
+        if (newStored.serviceTier === null && oldStored.serviceTier !== null) {
+            const updated = this.store.sessions.setSessionServiceTier(newSessionId, oldStored.serviceTier, namespace, {
+                touchUpdatedAt: false
+            })
+            if (!updated) {
+                throw new Error('Failed to preserve session service tier during merge')
+            }
+        }
+
         if (oldStored.todos !== null && oldStored.todosUpdatedAt !== null) {
             this.store.sessions.setSessionTodos(
                 newSessionId,
@@ -888,6 +935,34 @@ export class SessionCache {
         session.metadataVersion = result.version
     }
 
+    private persistPiSelectedModel(session: Session, piSelected: { provider: string; modelId: string } | null): void {
+        const currentMetadata = session.metadata
+        if (!currentMetadata || currentMetadata.piSelectedModel === piSelected) {
+            return
+        }
+
+        const nextMetadata = { ...currentMetadata, piSelectedModel: piSelected }
+        const result = this.store.sessions.updateSessionMetadata(
+            session.id,
+            nextMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            return
+        }
+
+        const parsed = MetadataSchema.safeParse(result.value)
+        if (!parsed.success) {
+            return
+        }
+
+        session.metadata = parsed.data
+        session.metadataVersion = result.version
+    }
+
     private mergeAgentState(oldState: unknown | null, newState: unknown | null): unknown | null {
         if (oldState === null) return newState
         if (newState === null) return oldState
@@ -913,12 +988,13 @@ export class SessionCache {
 
     private extractAgentSessionId(
         metadata: NonNullable<Session['metadata']>
-    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'cursorSessionId'; value: string } | null {
+    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'cursorSessionId' | 'piSessionId'; value: string } | null {
         if (metadata.codexSessionId) return { field: 'codexSessionId', value: metadata.codexSessionId }
         if (metadata.claudeSessionId) return { field: 'claudeSessionId', value: metadata.claudeSessionId }
         if (metadata.geminiSessionId) return { field: 'geminiSessionId', value: metadata.geminiSessionId }
         if (metadata.opencodeSessionId) return { field: 'opencodeSessionId', value: metadata.opencodeSessionId }
         if (metadata.cursorSessionId) return { field: 'cursorSessionId', value: metadata.cursorSessionId }
+        if (metadata.piSessionId) return { field: 'piSessionId', value: metadata.piSessionId }
         return null
     }
 
