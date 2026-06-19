@@ -6,7 +6,6 @@ import { connectCommand } from './connect'
 import { runnerCommand } from './runner'
 import { resumeCommand } from './resume'
 import { doctorCommand } from './doctor'
-import { geminiCommand } from './gemini'
 import { kimiCommand } from './kimi'
 import { opencodeCommand } from './opencode'
 import { piCommand } from './pi'
@@ -21,7 +20,6 @@ const COMMANDS: CommandDefinition[] = [
     connectCommand,
     codexCommand,
     cursorCommand,
-    geminiCommand,
     kimiCommand,
     opencodeCommand,
     piCommand,

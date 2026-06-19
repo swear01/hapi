@@ -7,7 +7,6 @@ import type {
     ClaudePermissionMode,
     CodexPermissionMode,
     CursorPermissionMode,
-    GeminiPermissionMode,
     KimiPermissionMode,
     OpencodePermissionMode
 } from '@hapi/protocol/types'
@@ -104,17 +103,7 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
     }
 
     if (target.flavor === 'gemini') {
-        const { runGemini } = await import('@/gemini/runGemini')
-        await runGemini({
-            existingSessionId: base.existingSessionId,
-            workingDirectory: base.workingDirectory,
-            resumeSessionId: base.resumeSessionId,
-            startedBy: base.startedBy,
-            permissionMode: base.permissionMode as GeminiPermissionMode | undefined,
-            startingMode: 'local',
-            model: target.model ?? undefined
-        })
-        return
+        throw new Error('Gemini CLI is no longer supported and cannot be resumed (Google sunset the consumer Gemini CLI on 2026-06-18). The session history remains viewable in the web UI.')
     }
 
     if (target.flavor === 'opencode') {
