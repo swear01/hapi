@@ -4,7 +4,10 @@ import type { ApiClient } from '@/api/client'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
+import { useProjectGroupActions } from '@/hooks/mutations/useProjectGroupActions'
+import { getProjectGroupActionAvailability } from '@/lib/projectGroupActions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
+import { ProjectGroupActionMenu } from '@/components/ProjectGroupActionMenu'
 import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -322,6 +325,13 @@ function groupByMachine(
     })
 }
 
+const stopRowPressPropagation = {
+    onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
+    onMouseUp: (e: React.MouseEvent) => e.stopPropagation(),
+    onTouchStart: (e: React.TouchEvent) => e.stopPropagation(),
+    onTouchEnd: (e: React.TouchEvent) => e.stopPropagation(),
+}
+
 function CopyPathButton({ path, className }: { path: string; className?: string }) {
     const [copied, setCopied] = useState(false)
     const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -342,12 +352,121 @@ function CopyPathButton({ path, className }: { path: string; className?: string 
             className={`shrink-0 p-0.5 rounded transition-colors ${copied ? 'text-[var(--app-badge-success-text)]' : 'text-[var(--app-hint)] hover:text-[var(--app-fg)]'} ${className ?? ''}`}
             title={copied ? 'Copied!' : `Copy: ${path}`}
             onClick={handleClick}
+            {...stopRowPressPropagation}
         >
             {copied
                 ? <CheckIcon className="h-3.5 w-3.5" />
                 : <CopyIcon className="h-3.5 w-3.5" />
             }
         </button>
+    )
+}
+
+function ProjectGroupHeader(props: {
+    group: SessionGroup
+    groupTitle: string
+    isCollapsed: boolean
+    onToggle: () => void
+    onNewSessionInDirectory?: (args: { machineId: string | null; directory: string }) => void
+    api: ApiClient | null
+}) {
+    const { t } = useTranslation()
+    const { haptic } = usePlatform()
+    const { group, groupTitle, isCollapsed, onToggle, onNewSessionInDirectory, api } = props
+    const [menuOpen, setMenuOpen] = useState(false)
+    const [menuAnchorPoint, setMenuAnchorPoint] = useState({ x: 0, y: 0 })
+    const [archiveAllOpen, setArchiveAllOpen] = useState(false)
+    const [deleteOpen, setDeleteOpen] = useState(false)
+    const { archiveAll, deleteAll, isPending } = useProjectGroupActions(api, group.sessions)
+    const { canArchiveAll, canDelete } = getProjectGroupActionAvailability(group.sessions)
+    const canStartInGroupDirectory = group.directory !== 'Other'
+    const longPressHandlers = useLongPress({
+        onLongPress: (point) => {
+            haptic.impact('medium')
+            setMenuAnchorPoint(point)
+            setMenuOpen(true)
+        },
+        threshold: 500
+    })
+
+    const handleCopyPath = () => {
+        void navigator.clipboard.writeText(group.directory)
+    }
+
+    return (
+        <>
+            <div
+                {...longPressHandlers}
+                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
+                onClick={() => {
+                    if (!menuOpen) onToggle()
+                }}
+                style={{ WebkitTouchCallout: 'none' }}
+                title={group.directory}
+            >
+                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+                <span className="font-medium text-sm truncate flex-1">
+                    {groupTitle}
+                </span>
+                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                {onNewSessionInDirectory && canStartInGroupDirectory ? (
+                    <button
+                        type="button"
+                        onClick={(event) => {
+                            event.stopPropagation()
+                            onNewSessionInDirectory({
+                                machineId: group.machineId,
+                                directory: group.directory
+                            })
+                        }}
+                        {...stopRowPressPropagation}
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                        title={t('sessions.group.new')}
+                        aria-label={t('sessions.group.new')}
+                    >
+                        <PlusIcon className="h-3.5 w-3.5" />
+                    </button>
+                ) : null}
+                <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
+                    ({group.sessions.length})
+                </span>
+            </div>
+
+            <ProjectGroupActionMenu
+                isOpen={menuOpen}
+                onClose={() => setMenuOpen(false)}
+                onCopyPath={handleCopyPath}
+                onArchiveAll={() => setArchiveAllOpen(true)}
+                canArchiveAll={canArchiveAll}
+                onDelete={() => setDeleteOpen(true)}
+                canDelete={canDelete}
+                anchorPoint={menuAnchorPoint}
+            />
+
+            <ConfirmDialog
+                isOpen={archiveAllOpen}
+                onClose={() => setArchiveAllOpen(false)}
+                title={t('dialog.archiveAll.title')}
+                description={t('dialog.archiveAll.description', { name: group.displayName })}
+                confirmLabel={t('dialog.archiveAll.confirm')}
+                confirmingLabel={t('dialog.archiveAll.confirming')}
+                onConfirm={archiveAll}
+                isPending={isPending}
+                destructive
+            />
+
+            <ConfirmDialog
+                isOpen={deleteOpen}
+                onClose={() => setDeleteOpen(false)}
+                title={t('dialog.deleteGroup.title')}
+                description={t('dialog.deleteGroup.description', { name: group.displayName, count: group.sessions.length })}
+                confirmLabel={t('dialog.deleteGroup.confirm')}
+                confirmingLabel={t('dialog.deleteGroup.confirming')}
+                onConfirm={deleteAll}
+                isPending={isPending}
+                destructive
+            />
+        </>
     )
 }
 
@@ -1294,7 +1413,6 @@ export function SessionList(props: {
                     const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
                     const canCollapseSessions = getGroupVisibleCount(group) > sessionPreviewLimit
                     const showMoreCount = Math.min(sessionPreviewLimit, hiddenSessionCount)
-                    const canStartInGroupDirectory = group.directory !== 'Other'
                     // With multiple machines in the unfiltered view, disambiguate
                     // same-named directories by suffixing the machine label.
                     const groupTitle = showMachineFilterBar && activeMachineFilter === null
@@ -1302,37 +1420,14 @@ export function SessionList(props: {
                         : group.displayName
                     return (
                         <div key={group.key}>
-                            <div
-                                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
-                                onClick={() => toggleGroup(group.key, isCollapsed)}
-                                title={group.directory}
-                            >
-                                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
-                                <span className="font-medium text-sm truncate flex-1">
-                                    {groupTitle}
-                                </span>
-                                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
-                                {onNewSessionInDirectory && canStartInGroupDirectory ? (
-                                    <button
-                                        type="button"
-                                        onClick={(event) => {
-                                            event.stopPropagation()
-                                            onNewSessionInDirectory({
-                                                machineId: group.machineId,
-                                                directory: group.directory
-                                            })
-                                        }}
-                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
-                                        title={t('sessions.group.new')}
-                                        aria-label={t('sessions.group.new')}
-                                    >
-                                        <PlusIcon className="h-3.5 w-3.5" />
-                                    </button>
-                                ) : null}
-                                <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
-                                    ({group.sessions.length})
-                                </span>
-                            </div>
+                            <ProjectGroupHeader
+                                group={group}
+                                groupTitle={groupTitle}
+                                isCollapsed={isCollapsed}
+                                onToggle={() => toggleGroup(group.key, isCollapsed)}
+                                onNewSessionInDirectory={onNewSessionInDirectory}
+                                api={api}
+                            />
 
                             {/* Sessions */}
                             <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
