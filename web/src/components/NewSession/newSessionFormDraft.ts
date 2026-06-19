@@ -1,3 +1,4 @@
+import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
 import type { AgentType, ClaudeEffort, CodexReasoningEffort, SessionType } from './types'
 
 const DRAFT_STORAGE_KEY = 'hapi:new-session-form-draft'
@@ -33,7 +34,12 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
             return null
         }
         return {
-            agent: parsed.agent as AgentType,
+            // Coerce a stale/uncreatable agent (e.g. a pre-removal 'gemini'
+            // draft) back to a launchable default so a restored browse draft
+            // cannot submit a non-creatable agent the selector no longer offers.
+            agent: (CREATABLE_AGENT_FLAVORS as readonly string[]).includes(parsed.agent)
+                ? (parsed.agent as AgentType)
+                : 'claude',
             model: parsed.model,
             cursorSelectedBase: typeof parsed.cursorSelectedBase === 'string' ? parsed.cursorSelectedBase : 'auto',
             machineId: typeof parsed.machineId === 'string' ? parsed.machineId : null,

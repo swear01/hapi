@@ -1076,6 +1076,9 @@ export function buildCliArgs(
   options: SpawnSessionOptions,
   yolo?: boolean
 ): string[] {
+  if (agent === 'gemini') {
+    throw new Error('Gemini CLI is no longer supported and cannot be launched (Google sunset the consumer Gemini CLI on 2026-06-18).');
+  }
   const agentCommand = agent === 'codex'
     ? 'codex'
     : agent === 'cursor'
