@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { AssistantRuntimeProvider, useAssistantApi, useAssistantState } from '@assistant-ui/react'
+import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
 import type { ApiClient } from '@/api/client'
 import type {
     AttachmentMetadata,
@@ -374,6 +375,8 @@ type SessionChatProps = {
     // user dismisses or starts editing.
     sendError?: ComposerSendError | null
     onClearSendError?: () => void
+    initialOutlineOpen?: boolean
+    onInitialOutlineConsumed?: () => void
 }
 
 /**
@@ -407,7 +410,15 @@ function SessionChatInner(props: SessionChatProps) {
     const blocksByIdRef = useRef<Map<string, ChatBlock>>(new Map())
     const visibleGroupsRef = useRef<ToolGroupBlock[]>([])
     const [forceScrollToken, setForceScrollToken] = useState(0)
-    const [outlineOpen, setOutlineOpen] = useState(false)
+    const [outlineOpen, setOutlineOpen] = useState(props.initialOutlineOpen ?? false)
+    useEffect(() => {
+        if (!props.initialOutlineOpen) {
+            return
+        }
+        setOutlineOpen(true)
+        props.onInitialOutlineConsumed?.()
+    }, [props.initialOutlineOpen, props.onInitialOutlineConsumed])
+
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
     const scratchlist = useScratchlist(props.session.id)
@@ -995,12 +1006,17 @@ function SessionChatInner(props: SessionChatProps) {
         props.onRefresh()
     }, [switchSession, props.onRefresh])
 
-    const handleViewFiles = useCallback(() => {
+    const handleToggleFiles = useCallback(() => {
+        setOutlineOpen(false)
         navigate({
             to: '/sessions/$sessionId/files',
             params: { sessionId: props.session.id }
         })
     }, [navigate, props.session.id])
+
+    const handleToggleOutline = useCallback(() => {
+        setOutlineOpen((open) => !open)
+    }, [])
 
     const handleViewTerminal = useCallback(() => {
         navigate({
@@ -1089,8 +1105,10 @@ function SessionChatInner(props: SessionChatProps) {
             <SessionHeader
                 session={props.session}
                 onBack={props.onBack}
-                onViewFiles={props.session.metadata?.path ? handleViewFiles : undefined}
-                onOpenOutline={() => setOutlineOpen(true)}
+                onToggleFiles={props.session.metadata?.path ? handleToggleFiles : undefined}
+                filesActive={false}
+                onToggleOutline={handleToggleOutline}
+                outlineActive={outlineOpen}
                 api={props.api}
                 onSessionDeleted={props.onBack}
                 onSessionReopened={(newSessionId) => {
@@ -1120,7 +1138,8 @@ function SessionChatInner(props: SessionChatProps) {
 
             <AssistantRuntimeProvider runtime={runtime}>
                 <ShareSeedConsumer sessionId={props.session.id} sessionActive={props.session.active} />
-                <div className="relative flex min-h-0 flex-1 flex-col">
+                <DragDropZone disabled={sessionInactive || props.isSending || pendingSchedule != null}>
+
                     <HappyThread
                         // Key with prefix: different components under the same session
                         // (thread, scratchlist, composer) must have distinct keys to avoid
@@ -1320,7 +1339,7 @@ function SessionChatInner(props: SessionChatProps) {
                         sendError={props.sendError ?? null}
                         onClearSendError={props.onClearSendError}
                     />
-                </div>
+                </DragDropZone>
             </AssistantRuntimeProvider>
 
             {/* Voice session component - renders nothing but initializes voice backend */}

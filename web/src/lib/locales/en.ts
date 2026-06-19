@@ -142,6 +142,7 @@ export default {
 
   // Session header
   'session.title': 'Files',
+  'session.view.returnToChat': 'Return to conversation',
   'session.more': 'More actions',
   'session.outline.open': 'Conversation outline',
   'session.outline.close': 'Close outline',
@@ -284,6 +285,7 @@ export default {
   // Files page
   'files.page.title': 'Files',
   'files.page.refresh': 'Refresh',
+  'files.page.refreshFilesystem': 'Refresh filesystem view',
   'files.page.searchPlaceholder': 'Search files',
   'files.projectRoot': 'project root',
   'files.branch.detached': 'detached HEAD',
@@ -410,6 +412,7 @@ export default {
   'composer.abort': 'Abort',
   'composer.switchRemote': 'Switch to remote mode',
   'composer.attach': 'Attach file',
+  'composer.dropToAttach': 'Drop to attach',
   'composer.send': 'Send',
   'composer.stop': 'Stop',
   'composer.voice': 'Voice assistant',

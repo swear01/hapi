@@ -142,6 +142,7 @@ export default {
 
   // Session header
   'session.title': '文件',
+  'session.view.returnToChat': '返回会话',
   'session.more': '更多操作',
   'session.outline.open': '会话大纲',
   'session.outline.close': '关闭大纲',
@@ -288,6 +289,7 @@ export default {
   // Files page
   'files.page.title': '文件',
   'files.page.refresh': '刷新',
+  'files.page.refreshFilesystem': '刷新文件系统视图',
   'files.page.searchPlaceholder': '搜索文件',
   'files.projectRoot': '项目根目录',
   'files.branch.detached': '游离 HEAD',
@@ -414,6 +416,7 @@ export default {
   'composer.abort': '中止',
   'composer.switchRemote': '切换到远程模式',
   'composer.attach': '添加文件',
+  'composer.dropToAttach': '松开以添加文件',
   'composer.send': '发送',
   'composer.stop': '停止',
   'composer.voice': '语音助手',
