@@ -198,6 +198,14 @@ export const resumeCommand: CommandDefinition = {
             assertTargetMachine(target, machineId)
             assertDirectoryExists(target)
 
+            // Gemini CLI is no longer launchable (Google sunset the consumer
+            // Gemini CLI on 2026-06-18). Reject BEFORE the handoff below so an
+            // active Gemini session is left running/readable rather than being
+            // stopped by handoffSessionToLocal and then failing locally.
+            if (target.flavor === 'gemini') {
+                throw new Error('Gemini CLI is no longer supported and cannot be resumed (Google sunset the consumer Gemini CLI on 2026-06-18). The session history remains viewable in the web UI.')
+            }
+
             if (target.active && target.controlledByUser) {
                 throw new Error('Session is already controlled by a local terminal')
             }
