@@ -26,6 +26,6 @@ describe('ModelEffortSettingsSection', () => {
         expect(screen.getByText('Variant')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /^Composer 2.5$/ })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Composer 2.5 Fast/ })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: /^Composer 2.5$/ }).querySelector('.bg-\[var\(--app-link\)\]')).not.toBeNull();
+        expect(screen.getByRole('button', { name: /^Composer 2.5$/ }).innerHTML).toContain('bg-[var(--app-link)]');
     });
 });

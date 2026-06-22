@@ -58,7 +58,6 @@ describe('buildCursorModelsSnapshotFromAcp', () => {
                 if (category === 'model') {
                     return {
                         id: 'model',
-                        category: 'model',
                         currentValue: 'composer-2.5',
                         options: [{ value: 'composer-2.5', name: 'Composer 2.5' }]
                     };
@@ -66,7 +65,6 @@ describe('buildCursorModelsSnapshotFromAcp', () => {
                 if (category === 'fast') {
                     return {
                         id: 'fast',
-                        category: 'fast',
                         currentValue: 'false',
                         options: [{ value: 'false', name: 'Off' }, { value: 'true', name: 'Fast' }]
                     };
@@ -76,13 +74,11 @@ describe('buildCursorModelsSnapshotFromAcp', () => {
             getSessionConfigOptions: () => [
                 {
                     id: 'model',
-                    category: 'model',
                     currentValue: 'composer-2.5',
                     options: [{ value: 'composer-2.5', name: 'Composer 2.5' }]
                 },
                 {
                     id: 'fast',
-                    category: 'fast',
                     currentValue: 'false',
                     options: [{ value: 'false', name: 'Off' }, { value: 'true', name: 'Fast' }]
                 }

@@ -261,6 +261,42 @@ describe('applyCursorAcpModel', () => {
         expect(setConfigOption).toHaveBeenNthCalledWith(2, 's1', 'fast', 'true');
     });
 
+    it('does not fall back to base-only model apply when parameterized fast update fails', async () => {
+        const setConfigOption = vi.fn()
+            .mockResolvedValueOnce(undefined)
+            .mockRejectedValueOnce(new Error('fast update failed'));
+        const backend = mockModelBackend({
+            setConfigOption,
+            getSessionModelsMetadata: vi.fn(() => ({
+                availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }],
+                currentModelId: 'composer-2.5'
+            })),
+            getConfigOptionByCategory: vi.fn((_sessionId: string, category: string) => {
+                if (category === 'model') {
+                    return {
+                        id: 'model',
+                        category: 'model',
+                        options: [{ value: 'composer-2.5', name: 'Composer 2.5' }]
+                    };
+                }
+                if (category === 'fast') {
+                    return {
+                        id: 'fast',
+                        category: 'fast',
+                        options: [{ value: 'false', name: 'Off' }, { value: 'true', name: 'Fast' }]
+                    };
+                }
+                return undefined;
+            })
+        });
+
+        await expect(applyCursorAcpModel(backend, 's1', 'composer-2.5')).resolves.toEqual({
+            applied: false
+        });
+        expect(setConfigOption).toHaveBeenCalledTimes(2);
+        expect(backend.pinSessionModelWireId).not.toHaveBeenCalled();
+    });
+
     it('retries set_config_option once before failing apply', async () => {
         const setConfigOption = vi.fn()
             .mockRejectedValueOnce(new Error('transient'))
