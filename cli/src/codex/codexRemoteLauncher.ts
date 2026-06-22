@@ -2880,7 +2880,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         sourceImageId,
                         fileName: image.fileName,
                         mimeType: image.mimeType,
-                        id: randomUUID()
+                        id: randomUUID(),
+                        source: {
+                            ingress: 'tool_result',
+                            flavor: 'codex',
+                            toolCallId: asString(msg.call_id ?? msg.callId),
+                        },
                     });
                 }
             }
