@@ -754,6 +754,7 @@ export class SyncEngine {
             effort?: string | null
             serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
+            personality?: Session['personality']
         }
     ): Promise<void> {
         const session = this.sessionCache.getSession(sessionId)
@@ -778,6 +779,7 @@ export class SyncEngine {
                 effort?: Session['effort']
                 serviceTier?: Session['serviceTier']
                 collaborationMode?: Session['collaborationMode']
+                personality?: Session['personality']
             }
         }
         if (typeof obj.error === 'string' && obj.error.trim().length > 0) {
