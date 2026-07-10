@@ -130,16 +130,6 @@ function formatCodexReasoningLabel(effort?: string | null): string {
     return `reasoning ${normalized}`
 }
 
-function isCodexFastMode(model?: string | null, effort?: string | null): boolean {
-    const normalizedEffort = effort?.trim().toLowerCase()
-    if (normalizedEffort === 'none' || normalizedEffort === 'minimal' || normalizedEffort === 'low') {
-        return true
-    }
-
-    const normalizedModel = model?.trim().toLowerCase() ?? ''
-    return normalizedModel.includes('mini') || normalizedModel.includes('fast')
-}
-
 /** Cursor native ACP does not emit usage_update; hide the bar to avoid empty/misleading UI. */
 export function shouldShowComposerStatusBar(agentFlavor: string | null | undefined): boolean {
     return agentFlavor !== 'cursor'
@@ -215,12 +205,8 @@ export function StatusBar(props: {
     const codexReasoningLabel = (props.agentFlavor === 'codex' || props.agentFlavor === 'opencode')
         ? formatCodexReasoningLabel(props.modelReasoningEffort)
         : null
-    // Prefer the explicit service tier (the real Fast-mode toggle) when set;
-    // fall back to the effort/model heuristic only when the tier is unknown.
     const codexFastMode = props.agentFlavor === 'codex'
-        ? (props.serviceTier != null
-            ? isFastServiceTier(props.serviceTier)
-            : isCodexFastMode(props.model, props.modelReasoningEffort))
+        ? isFastServiceTier(props.serviceTier)
         : false
     const goalLabel = props.agentFlavor === 'codex' && props.threadGoal
         ? props.threadGoal.status === 'active'
