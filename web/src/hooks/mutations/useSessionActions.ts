@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { isPermissionModeAllowedForFlavor } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import type { CodexCollaborationMode, PermissionMode } from '@/types/api'
+import type { CodexPersonality } from '@hapi/protocol'
 import type { ReopenSessionResponse } from '@hapi/protocol/apiTypes'
 import { queryKeys } from '@/lib/query-keys'
 import { clearMessageWindow } from '@/lib/message-window-store'
@@ -19,6 +20,7 @@ export function useSessionActions(
     switchSession: () => Promise<void>
     setPermissionMode: (mode: PermissionMode) => Promise<void>
     setCollaborationMode: (mode: CodexCollaborationMode) => Promise<void>
+    setPersonality: (personality: CodexPersonality | null) => Promise<void>
     setModel: (model: { provider: string; modelId: string } | string | null) => Promise<void>
     setModelReasoningEffort: (modelReasoningEffort: string | null) => Promise<void>
     setEffort: (effort: string | null) => Promise<void>
@@ -106,6 +108,13 @@ export function useSessionActions(
                 throw new Error('Collaboration mode is only supported for remote Codex sessions')
             }
             await api.setCollaborationMode(sessionId, mode)
+        },
+        onSuccess: () => void invalidateSession(),
+    })
+    const personalityMutation = useMutation({
+        mutationFn: async (personality: CodexPersonality | null) => {
+            if (!api || !sessionId || agentFlavor !== 'codex' || !codexCollaborationModeSupported) throw new Error('Personality is only supported for remote Codex sessions')
+            await api.setPersonality(sessionId, personality)
         },
         onSuccess: () => void invalidateSession(),
     })
@@ -199,6 +208,7 @@ export function useSessionActions(
         switchSession: switchMutation.mutateAsync,
         setPermissionMode: permissionMutation.mutateAsync,
         setCollaborationMode: collaborationMutation.mutateAsync,
+        setPersonality: personalityMutation.mutateAsync,
         setModel: modelMutation.mutateAsync,
         setModelReasoningEffort: modelReasoningEffortMutation.mutateAsync,
         setEffort: effortMutation.mutateAsync,
@@ -211,6 +221,7 @@ export function useSessionActions(
             || switchMutation.isPending
             || permissionMutation.isPending
             || collaborationMutation.isPending
+            || personalityMutation.isPending
             || modelMutation.isPending
             || modelReasoningEffortMutation.isPending
             || effortMutation.isPending
