@@ -26,4 +26,10 @@ describe('maintenance release version', () => {
         expect(releaseWorkflow).toContain('test "$TAG_VERSION" = "$CLI_VERSION"')
         expect(releaseWorkflow).not.toContain('Update Homebrew formula')
     })
+
+    it('only releases commits contained in main', () => {
+        expect(releaseWorkflow).toContain('fetch-depth: 0')
+        expect(releaseWorkflow).toContain('git fetch origin main:refs/remotes/origin/main')
+        expect(releaseWorkflow).toContain('git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main')
+    })
 })
