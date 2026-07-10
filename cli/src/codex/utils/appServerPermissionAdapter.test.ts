@@ -189,17 +189,21 @@ describe('registerAppServerPermissionHandlers', () => {
         });
     });
 
-    it('accepts non-HAPI MCP elicitation requests when live permission mode is yolo', async () => {
+    it('forwards form MCP elicitation through user input even in yolo mode', async () => {
         const { client, handlers } = createClient();
-        let permissionMode: 'default' | 'read-only' | 'safe-yolo' | 'yolo' = 'default';
         const permissionHandler = {
             handleToolCall: vi.fn()
         };
+        const onUserInputRequest = vi.fn(async () => ({
+            decision: 'accept' as const,
+            answers: { approval: { answers: ['allow'] } }
+        }));
 
         registerAppServerPermissionHandlers({
             client: client as never,
             permissionHandler: permissionHandler as never,
-            getPermissionMode: () => permissionMode
+            getPermissionMode: () => 'yolo',
+            onUserInputRequest
         });
 
         const handler = handlers.get('mcpServer/elicitation/request');
@@ -225,13 +229,6 @@ describe('registerAppServerPermissionHandlers', () => {
         };
 
         await expect(handler?.(request)).resolves.toEqual({
-            action: 'cancel',
-            content: null,
-            _meta: null
-        });
-
-        permissionMode = 'yolo';
-        await expect(handler?.(request)).resolves.toEqual({
             action: 'accept',
             content: {
                 approval: 'allow'
@@ -239,15 +236,19 @@ describe('registerAppServerPermissionHandlers', () => {
             _meta: null
         });
 
-        permissionMode = 'default';
-        await expect(handler?.(request)).resolves.toEqual({
-            action: 'cancel',
-            content: null,
-            _meta: null
+        expect(onUserInputRequest).toHaveBeenCalledWith({
+            id: expect.any(String),
+            input: {
+                questions: [{
+                    id: 'approval',
+                    question: 'approval',
+                    options: [{ label: 'allow', description: '' }, { label: 'deny', description: '' }]
+                }]
+            }
         });
     });
 
-    it('does not auto-accept non-HAPI MCP elicitation requests in safe-yolo mode', async () => {
+    it('forwards URL MCP elicitation and preserves a declined response', async () => {
         const { client, handlers } = createClient();
         const permissionHandler = {
             handleToolCall: vi.fn()
@@ -256,7 +257,21 @@ describe('registerAppServerPermissionHandlers', () => {
         registerAppServerPermissionHandlers({
             client: client as never,
             permissionHandler: permissionHandler as never,
-            getPermissionMode: () => 'safe-yolo'
+            getPermissionMode: () => 'yolo',
+            onUserInputRequest: vi.fn(async ({ input }) => {
+                expect(input).toEqual({
+                    url: 'https://example.com/login',
+                    questions: [{
+                        id: '__mcp_url_confirmation',
+                        question: 'Sign in to continue',
+                        options: [{
+                            label: 'Open sign-in page and continue',
+                            description: 'https://example.com/login'
+                        }]
+                    }]
+                });
+                return { decision: 'decline' as const };
+            })
         });
 
         const handler = handlers.get('mcpServer/elicitation/request');
@@ -266,15 +281,14 @@ describe('registerAppServerPermissionHandlers', () => {
             threadId: 'thread-1',
             turnId: 'turn-1',
             serverName: 'external',
-            mode: 'form',
-            message: 'Collect data',
-            _meta: null,
-            requestedSchema: {
-                type: 'object',
-                properties: {},
+            request: {
+                mode: 'url',
+                message: 'Sign in to continue',
+                url: 'https://example.com/login',
+                elicitationId: 'auth-1'
             }
         })).resolves.toEqual({
-            action: 'cancel',
+            action: 'decline',
             content: null,
             _meta: null
         });

@@ -8,6 +8,7 @@ import {
     isRequestUserInputToolName,
     parseRequestUserInputInput,
     formatRequestUserInputAnswers,
+    openRequestUserInputUrl,
     type RequestUserInputQuestion
 } from '@/components/ToolCard/requestUserInput'
 import { cn } from '@/lib/utils'
@@ -139,6 +140,14 @@ export function RequestUserInputFooter(props: {
 
         // Format answers for submission
         const formattedAnswers = formatRequestUserInputAnswers(stateByQuestion)
+
+        if (parsed.url) {
+            if (!openRequestUserInputUrl(parsed.url)) {
+                setError(t('tool.requestUserInput.popupBlocked'))
+                haptic.notification('error')
+                return
+            }
+        }
 
         setLoading(true)
         await run(() => props.api.approvePermission(props.sessionId, permission.id, formattedAnswers), 'success')

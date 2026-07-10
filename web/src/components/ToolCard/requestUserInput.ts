@@ -23,11 +23,28 @@ export function isRequestUserInputToolName(toolName: string): boolean {
     return toolName === 'request_user_input'
 }
 
-export function parseRequestUserInputInput(input: unknown): { questions: RequestUserInputQuestion[] } {
-    if (!isObject(input)) return { questions: [] }
+export function openRequestUserInputUrl(url: string): boolean {
+    const opened = window.open(url, '_blank')
+    if (!opened) return false
+    opened.opener = null
+    return true
+}
+
+export function parseRequestUserInputInput(input: unknown): { questions: RequestUserInputQuestion[]; url: string | null } {
+    if (!isObject(input)) return { questions: [], url: null }
+
+    let url: string | null = null
+    if (typeof input.url === 'string') {
+        try {
+            const parsed = new URL(input.url)
+            if (parsed.protocol === 'https:' || parsed.protocol === 'http:') url = parsed.toString()
+        } catch {
+            // Invalid and non-web URLs must never be opened by the approval UI.
+        }
+    }
 
     const rawQuestions = input.questions
-    if (!Array.isArray(rawQuestions)) return { questions: [] }
+    if (!Array.isArray(rawQuestions)) return { questions: [], url }
 
     const questions: RequestUserInputQuestion[] = []
     for (const raw of rawQuestions) {
@@ -56,7 +73,7 @@ export function parseRequestUserInputInput(input: unknown): { questions: Request
         })
     }
 
-    return { questions }
+    return { questions, url }
 }
 
 export function extractRequestUserInputQuestionsInfo(input: unknown): RequestUserInputQuestionInfo[] | null {
