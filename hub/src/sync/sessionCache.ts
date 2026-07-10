@@ -12,7 +12,7 @@ const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
 // snapshot. Cap retries so genuine concurrent contention still surfaces to the
 // HTTP caller as 409 instead of spinning forever.
 const METADATA_RETRY_ATTEMPTS = 5
-type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode'
+type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode' | 'personality'
 
 export class SessionCache {
     private readonly sessions: Map<string, Session> = new Map()
@@ -171,7 +171,8 @@ export class SessionCache {
             effort: stored.effort,
             serviceTier: stored.serviceTier,
             permissionMode: existing?.permissionMode ?? metadata?.preferredPermissionMode,
-            collaborationMode: existing?.collaborationMode
+            collaborationMode: existing?.collaborationMode,
+            personality: existing?.personality
         }
 
         this.sessions.set(sessionId, session)
@@ -197,6 +198,7 @@ export class SessionCache {
         effort?: string | null
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
+        personality?: Session['personality']
     }): void {
         const t = clampAliveTime(payload.time)
         if (!t) return
@@ -212,6 +214,7 @@ export class SessionCache {
         const previousEffort = session.effort
         const previousServiceTier = session.serviceTier
         const previousCollaborationMode = session.collaborationMode
+        const previousPersonality = session.personality
         const pendingThinkingUntil = this.pendingThinkingUntilBySessionId.get(session.id) ?? 0
         const requestedThinking = Boolean(payload.thinking)
         const hubNow = Date.now()
@@ -263,6 +266,7 @@ export class SessionCache {
         if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
         }
+        if (payload.personality !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'personality', t)) session.personality = payload.personality
 
         const now = Date.now()
         const lastBroadcastAt = this.lastBroadcastAtBySessionId.get(session.id) ?? 0
@@ -272,6 +276,7 @@ export class SessionCache {
             || previousEffort !== session.effort
             || previousServiceTier !== session.serviceTier
             || previousCollaborationMode !== session.collaborationMode
+            || previousPersonality !== session.personality
         const shouldBroadcast = (!wasActive && session.active)
             || (wasThinking !== session.thinking)
             || modeChanged
@@ -443,6 +448,7 @@ export class SessionCache {
             effort?: string | null
             serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
+            personality?: Session['personality']
         }
     ): void {
         const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
@@ -519,6 +525,10 @@ export class SessionCache {
         if (config.collaborationMode !== undefined) {
             session.collaborationMode = config.collaborationMode
             this.markRuntimeConfigUpdated(sessionId, 'collaborationMode', appliedAt)
+        }
+        if (config.personality !== undefined) {
+            session.personality = config.personality
+            this.markRuntimeConfigUpdated(sessionId, 'personality', appliedAt)
         }
 
         this.publisher.emit({ type: 'session-updated', sessionId, data: session })

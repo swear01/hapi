@@ -5,6 +5,7 @@ import type { EnhancedMode, PermissionMode } from './loop';
 import type { CodexCliOverrides } from './utils/codexCliOverrides';
 import type { LocalLaunchExitReason } from '@/agent/localLaunchPolicy';
 import type { Metadata, SessionModel, SessionModelReasoningEffort } from '@/api/types';
+import type { CodexPersonality } from '@hapi/protocol/modes';
 
 type LocalLaunchFailure = {
     message: string;
@@ -39,6 +40,7 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         model?: SessionModel;
         modelReasoningEffort?: SessionModelReasoningEffort;
         collaborationMode?: EnhancedMode['collaborationMode'];
+        personality?: CodexPersonality | null;
         replayTranscriptHistoryOnStart?: boolean;
     }) {
         super({
@@ -59,7 +61,8 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
             permissionMode: opts.permissionMode,
             model: opts.model,
             modelReasoningEffort: opts.modelReasoningEffort,
-            collaborationMode: opts.collaborationMode
+            collaborationMode: opts.collaborationMode,
+            personality: opts.personality
         });
 
         this.codexArgs = opts.codexArgs;
@@ -71,6 +74,7 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         this.model = opts.model;
         this.modelReasoningEffort = opts.modelReasoningEffort;
         this.collaborationMode = opts.collaborationMode;
+        this.personality = opts.personality;
     }
 
     onTranscriptPathFound(path: string): void {
