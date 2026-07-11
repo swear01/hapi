@@ -11,9 +11,11 @@ import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { getConversationMessageAnchorId } from '@/chat/outline'
 import { MessageMetadata } from '@/components/AssistantChat/messages/MessageMetadata'
 import { MessageTimestamp } from '@/components/AssistantChat/messages/MessageTimestamp'
+import { useTranslation } from '@/lib/use-translation'
 
 export function HappyUserMessage() {
     const ctx = useHappyChatContext()
+    const { t } = useTranslation()
     const { copied, copy } = useCopyToClipboard()
     const [showMetadata, setShowMetadata] = useState(false)
     const role = useAssistantState(({ message }) => message.role)
@@ -47,6 +49,7 @@ export function HappyUserMessage() {
         return message.content.find((part) => part.type === 'text')?.text ?? ''
     })
     const invokedAt = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.invokedAt)
+    const steered = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.steered === true)
 
     const hasMetadata = invokedAt != null
 
@@ -117,6 +120,14 @@ export function HappyUserMessage() {
                     )}
                 </div>
                 <div className="flex justify-end items-center gap-2">
+                    {steered && (
+                        <span
+                            title={t('queuedMessages.steeredBadgeTitle')}
+                            className="inline-flex items-center gap-0.5 text-[10px] leading-none text-[var(--app-hint)]"
+                        >
+                            {t('queuedMessages.steeredBadge')}
+                        </span>
+                    )}
                     <MessageTimestamp className="text-[10px] leading-none text-[var(--app-hint)]" />
                     {hasMetadata && (
                         <button

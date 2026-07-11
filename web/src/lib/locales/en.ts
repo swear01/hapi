@@ -466,6 +466,11 @@ export default {
   'composer.scheduleErrorTooFar': 'Maximum schedule time is 7 days.',
   'queuedMessages.scheduledFor': 'Scheduled for {time}',
   'queuedMessages.editAlreadyInvoked': "Message already sent — it can't be edited",
+  'queuedMessages.steerNow': 'Steer',
+  'queuedMessages.steerFailed': 'Could not steer message',
+  'queuedMessages.steerAlreadyInvoked': 'Message already sent',
+  'queuedMessages.steeredBadge': '↳ Steered',
+  'queuedMessages.steeredBadgeTitle': 'Steered into the active turn',
 
   // Scratchlist (per-session workbench, issue #11)
   'scratchlist.title': 'Scratchlist',

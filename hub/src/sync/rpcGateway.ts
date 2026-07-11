@@ -282,6 +282,16 @@ export class RpcGateway {
         return await this.machineRpc(machineId, RPC_METHODS.ListOpencodeModelsForCwd, { cwd }) as RpcListOpencodeModelsResponse
     }
 
+    async steerQueuedMessage(
+        sessionId: string,
+        localId: string
+    ): Promise<{ steered: boolean; error?: string }> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
+            steered: boolean
+            error?: string
+        }
+    }
+
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through
      *  a single entry point instead of per-method wrappers. */
     async callPiRpc<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {

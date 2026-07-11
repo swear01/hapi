@@ -470,6 +470,11 @@ export default {
   'composer.scheduleErrorTooFar': '最多只能定时 7 天。',
   'queuedMessages.scheduledFor': '定时发送: {time}',
   'queuedMessages.editAlreadyInvoked': '消息已发送，无法编辑',
+  'queuedMessages.steerNow': '立即发出',
+  'queuedMessages.steerFailed': '无法立即发出',
+  'queuedMessages.steerAlreadyInvoked': '消息已发出',
+  'queuedMessages.steeredBadge': '↳ 已介入',
+  'queuedMessages.steeredBadgeTitle': '已介入当前进行中的回合',
 
   // Scratchlist (per-session workbench, issue #11)
   'scratchlist.title': '草稿夹',

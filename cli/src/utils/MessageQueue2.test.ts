@@ -573,6 +573,44 @@ describe('MessageQueue2', () => {
         });
     });
 
+    describe('takeByLocalId / peekByLocalId', () => {
+        it('peek returns the item without removing it', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg1', 'local', 'id-a');
+            const peeked = queue.peekByLocalId('id-a');
+            expect(peeked?.message).toBe('msg1');
+            expect(queue.size()).toBe(1);
+        });
+
+        it('take removes and returns the item with its index', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg1', 'local', 'id-a');
+            queue.push('msg2', 'local', 'id-b');
+            const taken = queue.takeByLocalId('id-a');
+            expect(taken?.item.message).toBe('msg1');
+            expect(taken?.index).toBe(0);
+            expect(queue.size()).toBe(1);
+            expect(queue.queue[0].localId).toBe('id-b');
+        });
+
+        it('take returns null when missing', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            expect(queue.takeByLocalId('missing')).toBeNull();
+        });
+
+        it('restoreTakenItem puts the item back at the original index', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('a', 'local', 'id-a');
+            queue.push('b', 'local', 'id-b');
+            queue.push('c', 'local', 'id-c');
+            const taken = queue.takeByLocalId('id-b');
+            expect(taken).not.toBeNull();
+            expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-c']);
+            queue.restoreTakenItem(taken!);
+            expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-b', 'id-c']);
+        });
+    });
+
     it('should differentiate between pushImmediate and pushIsolateAndClear behavior', async () => {
         const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
         
