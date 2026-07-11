@@ -506,13 +506,12 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
-     * Kick off a soft steer without waiting for the injected prompt to finish.
-     * Throws synchronously when the transport is unavailable or no turn is in
-     * flight; otherwise writes `session/prompt` and returns immediately so hub
-     * steer RPCs can ack within the Socket.IO timeout. Background rejection is
-     * logged only — the caller's hub ack / messages-consumed already happened.
+     * Kick off a soft steer without blocking the hub RPC on turn completion.
+     * Returns a promise that settles when the concurrent `session/prompt` finishes
+     * (or fails) so callers can keep the launcher busy until then. The promise is
+     * also logged on failure; callers may `void` it after recording the waiter.
      */
-    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): void {
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
@@ -520,12 +519,16 @@ export class AcpSdkBackend implements AgentBackend {
             throw new Error('No active ACP prompt to soft-steer into');
         }
 
-        void this.transport.sendRequest('session/prompt', {
+        const pending = this.transport.sendRequest('session/prompt', {
             sessionId,
             prompt: content
-        }, { timeoutMs: Infinity }).catch((error) => {
+        }, { timeoutMs: Infinity }).then(() => undefined);
+
+        void pending.catch((error) => {
             logger.warn('[ACP] soft-steer session/prompt failed', error);
         });
+
+        return pending;
     }
 
     async respondToPermission(

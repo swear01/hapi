@@ -967,7 +967,7 @@ describe('AcpSdkBackend', () => {
         }]);
     });
 
-    it('beginSoftSteerPrompt returns without awaiting session/prompt completion', async () => {
+    it('beginSoftSteerPrompt returns a pending promise without blocking the caller', async () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         let resolvePrompt: ((value: unknown) => void) | null = null;
         const backendInternal = backend as unknown as {
@@ -988,10 +988,15 @@ describe('AcpSdkBackend', () => {
         };
 
         // Must not hang waiting for the ACP prompt response (hub RPC is 30s).
-        backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+        let settled = false;
+        const pending = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).then(() => {
+            settled = true;
+        });
         expect(resolvePrompt).not.toBeNull();
+        expect(settled).toBe(false);
         resolvePrompt!({ stopReason: 'end_turn' });
-        await Promise.resolve();
+        await pending;
+        expect(settled).toBe(true);
     });
 
     it('softSteerPrompt awaits session/prompt completion', async () => {
