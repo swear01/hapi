@@ -170,16 +170,24 @@ function unwrapElicitationRequest(params: unknown): Record<string, unknown> {
     return asRecord(record.request) ?? record;
 }
 
-function elicitationOptions(property: Record<string, unknown>): Array<{ label: string; description: string }> {
-    const values = Array.isArray(property.enum)
-        ? property.enum
-        : Array.isArray(property.oneOf)
-            ? property.oneOf.map((item) => asRecord(item)?.const).filter((item) => item !== undefined)
-            : property.type === 'boolean'
-                ? [true, false]
-                : [];
+function elicitationChoiceValues(property: Record<string, unknown>): unknown[] {
+    if (Array.isArray(property.enum)) return property.enum;
+    if (Array.isArray(property.oneOf)) {
+        return property.oneOf.map((item) => asRecord(item)?.const).filter((item) => item !== undefined);
+    }
+    if (property.type === 'array') {
+        const items = asRecord(property.items);
+        if (Array.isArray(items?.enum)) return items.enum;
+        if (Array.isArray(items?.oneOf)) {
+            return items.oneOf.map((item) => asRecord(item)?.const).filter((item) => item !== undefined);
+        }
+    }
+    if (property.type === 'boolean') return [true, false];
+    return [];
+}
 
-    return values.map((value) => ({
+function elicitationOptions(property: Record<string, unknown>): Array<{ label: string; description: string }> {
+    return elicitationChoiceValues(property).map((value) => ({
         label: String(value),
         description: ''
     }));
@@ -252,16 +260,18 @@ function buildElicitationContent(params: unknown, answers: UserInputAnswer): Rec
         const selectedValues = values.filter((value) => !value.startsWith('user_note: '));
         const selected = selectedValues[0];
         const note = values.find((value) => value.startsWith('user_note: '))?.slice('user_note: '.length);
-        const hasSchemaChoices = Array.isArray(property.enum)
-            || Array.isArray(property.oneOf)
-            || property.type === 'boolean';
+        const hasSchemaChoices = elicitationChoiceValues(property).length > 0;
         if (hasSchemaChoices && selected === undefined) continue;
         const value = selected ?? note;
         if (value === undefined) continue;
 
         if (property.type === 'boolean') content[id] = value === 'true';
         else if (property.type === 'number' || property.type === 'integer') content[id] = Number(value);
-        else if (property.type === 'array') content[id] = selectedValues;
+        else if (property.type === 'array') content[id] = selectedValues.length > 0
+            ? selectedValues
+            : note !== undefined
+                ? [note]
+                : [];
         else content[id] = value;
     }
 

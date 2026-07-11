@@ -316,6 +316,60 @@ describe('registerAppServerPermissionHandlers', () => {
         });
     });
 
+    it('round-trips array choices and free-text array input', async () => {
+        const { client, handlers } = createClient();
+        const onUserInputRequest = vi.fn(async () => ({
+            decision: 'accept' as const,
+            answers: {
+                tags: { answers: ['bug'] },
+                paths: { answers: ['user_note: src/index.ts'] }
+            }
+        }));
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Choose metadata',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    tags: { type: 'array', items: { type: 'string', enum: ['bug', 'feature'] } },
+                    paths: { type: 'array', items: { type: 'string' } }
+                },
+                required: ['tags', 'paths']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: {
+                tags: ['bug'],
+                paths: ['src/index.ts']
+            },
+            _meta: null
+        });
+        expect(onUserInputRequest).toHaveBeenCalledWith({
+            id: expect.any(String),
+            input: {
+                questions: [{
+                    id: 'tags',
+                    question: 'Choose metadata\n\ntags',
+                    required: true,
+                    options: [{ label: 'bug', description: '' }, { label: 'feature', description: '' }]
+                }, {
+                    id: 'paths',
+                    question: 'Choose metadata\n\npaths',
+                    required: true,
+                    options: []
+                }]
+            }
+        });
+    });
+
     it('treats an omitted MCP elicitation mode as a form request', async () => {
         const { client, handlers } = createClient();
         const onUserInputRequest = vi.fn(async () => ({
