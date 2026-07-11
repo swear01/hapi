@@ -1301,6 +1301,7 @@ export class SyncEngine {
             preferredPermissionMode,
             session.serviceTier ?? undefined,
             access.sessionId
+            session.collaborationMode ?? undefined
         )
 
         if (spawnResult.type !== 'success') {

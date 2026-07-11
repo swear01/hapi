@@ -278,12 +278,14 @@ describe('ApiMachineClient listOpencodeModelsForCwd handler', () => {
 })
 
 describe('ApiMachineClient listGrokModelsForCwd handler', () => {
+describe('ApiMachineClient SpawnHappySession handler', () => {
     let workspaceRoot: string
 
     beforeEach(() => {
         ioMock.mockReset()
         listGrokModelsForCwdMock.mockReset()
         workspaceRoot = mkdtempSync(join(tmpdir(), 'hapi-grok-machine-ws-'))
+        workspaceRoot = mkdtempSync(join(tmpdir(), 'hapi-machine-spawn-'))
     })
 
     afterEach(() => {
@@ -417,6 +419,47 @@ describe('ApiMachineClient Codex transcript handlers', () => {
 
             expect(result).toEqual({ success: false, error: 'Codex session is outside workspace roots' })
             expect(existsSync(outsideFile)).toBe(true)
+    async function callSpawnHappySession(
+        client: ApiMachineClient,
+        machineId: string,
+        params: Record<string, unknown>
+    ): Promise<unknown> {
+        const manager = (client as unknown as {
+            rpcHandlerManager: { handleRequest: (req: { method: string; params: string }) => Promise<string> }
+        }).rpcHandlerManager
+        const raw = await manager.handleRequest({
+            method: `${machineId}:spawn-happy-session`,
+            params: JSON.stringify(params)
+        })
+        return JSON.parse(raw) as unknown
+    }
+
+    it('forwards collaborationMode and serviceTier to spawnSession', async () => {
+        const machine = makeMachine('machine-spawn-1')
+        const client = new ApiMachineClient('cli-token', machine, [workspaceRoot])
+        const spawnSession = vi.fn(async () => ({ type: 'success' as const, sessionId: 'session-1' }))
+
+        client.setRPCHandlers({
+            spawnSession,
+            stopSession: vi.fn(async () => {}),
+            requestShutdown: vi.fn()
+        })
+
+        try {
+            const result = await callSpawnHappySession(client, machine.id, {
+                directory: workspaceRoot,
+                agent: 'codex',
+                serviceTier: 'fast',
+                collaborationMode: 'plan'
+            })
+
+            expect(result).toEqual({ type: 'success', sessionId: 'session-1' })
+            expect(spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+                directory: workspaceRoot,
+                agent: 'codex',
+                serviceTier: 'fast',
+                collaborationMode: 'plan'
+            }))
         } finally {
             client.shutdown()
         }
