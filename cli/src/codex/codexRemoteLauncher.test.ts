@@ -4,6 +4,7 @@ import type { EnhancedMode } from './loop';
 
 const harness = vi.hoisted(() => ({
     notifications: [] as Array<{ method: string; params: unknown }>,
+    dispatchNotification: null as ((method: string, params: unknown) => void) | null,
     registerRequestCalls: [] as string[],
     requestHandlers: new Map<string, (params: unknown) => Promise<unknown> | unknown>(),
     initializeCalls: [] as unknown[],
@@ -78,6 +79,7 @@ vi.mock('./codexAppServerClient', () => {
 
         setNotificationHandler(handler: ((method: string, params: unknown) => void) | null): void {
             this.notificationHandler = handler;
+            harness.dispatchNotification = handler;
         }
 
         setStderrHandler(handler: ((text: string) => void) | null): void {
@@ -1015,6 +1017,7 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
 describe('codexRemoteLauncher', () => {
     afterEach(() => {
         harness.notifications = [];
+        harness.dispatchNotification = null;
         harness.registerRequestCalls = [];
         harness.requestHandlers = new Map();
         harness.initializeCalls = [];
@@ -1532,6 +1535,130 @@ describe('codexRemoteLauncher', () => {
         });
         expect(getModel()).toBe('gpt-5.4-mini');
         expect(getModelReasoningEffort()).toBe('low');
+    });
+
+    it('keeps the original safety-buffered turn running when the user dismisses the retry', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        const { session, rpcHandlers, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Keep waiting']
+                }
+            }
+        });
+
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+        expect(harness.startTurnMessages).toEqual(['first message']);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
+    });
+
+    it('dismisses safety-buffering choices when hidden or when agent output starts', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        const { session, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+        const hiddenRequestId = Object.keys(getAgentState().requests)[0];
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: false,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await vi.waitFor(() => {
+            expect(getAgentState().requests).toEqual({});
+            expect(getAgentState().completedRequests[hiddenRequestId]).toMatchObject({
+                status: 'canceled',
+                reason: 'Safety buffering ended'
+            });
+        });
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+        const outputRequestId = Object.keys(getAgentState().requests)[0];
+        expect(outputRequestId).not.toBe(hiddenRequestId);
+
+        harness.dispatchNotification?.('item/agentMessage/delta', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'message-1',
+            delta: 'Visible response'
+        });
+        await vi.waitFor(() => {
+            expect(getAgentState().requests).toEqual({});
+            expect(getAgentState().completedRequests[outputRequestId]).toMatchObject({
+                status: 'canceled',
+                reason: 'Agent output started'
+            });
+        });
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
+    });
+
+    it('surfaces safety buffering without offering retry when fasterModel is null', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = null;
+        const { session, sessionEvents, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(sessionEvents).toContainEqual({
+                type: 'message',
+                message: 'Codex is taking extra time to review this request. Learn more: https://help.openai.com/en/articles/20001326'
+            });
+        });
+        expect(getAgentState().requests).toEqual({});
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
     });
 
     it('does not replay a safety-buffered turn when rollback is unavailable', async () => {
