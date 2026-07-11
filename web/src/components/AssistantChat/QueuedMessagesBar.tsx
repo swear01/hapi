@@ -149,7 +149,7 @@ export function computeCanCancel({
  * and cancel.
  *
  * Edit = client-side cancel + prefill composer with message text.
- * Steer = deliver into the active turn now (Codex turn/steer / Cursor interrupt+prompt).
+ * Steer = soft mid-turn delivery now (Codex turn/steer / Cursor ACP soft-send).
  * Cancel = DELETE /sessions/:id/messages/:messageId with optimistic removal.
  */
 export function QueuedMessagesBar({

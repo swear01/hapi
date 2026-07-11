@@ -934,4 +934,52 @@ describe('AcpSdkBackend', () => {
 
         expect(registered.get('cursor/ask_question')).toBe(handler);
     });
+
+    it('beginSoftSteerPrompt sends concurrent session/prompt without cancel', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendNotification: (method: string, params: unknown) => void;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequest: async (method, params) => {
+                calls.push({ method, params });
+                return { stopReason: 'end_turn' };
+            },
+            sendNotification: () => {},
+            close: async () => {}
+        };
+
+        backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+
+        expect(calls).toEqual([{
+            method: 'session/prompt',
+            params: {
+                sessionId: 'session-1',
+                prompt: [{ type: 'text', text: 'pivot now' }]
+            }
+        }]);
+    });
+
+    it('beginSoftSteerPrompt rejects when no prompt is in flight', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = false;
+        backendInternal.transport = {
+            sendRequest: async () => null,
+            close: async () => {}
+        };
+
+        expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'x' }]))
+            .toThrow(/No active ACP prompt/);
+    });
 });
