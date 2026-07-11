@@ -441,7 +441,7 @@ describe('ApiMachineClient Codex transcript handlers', () => {
 
         client.setRPCHandlers({
             spawnSession,
-            stopSession: vi.fn(async () => {}),
+            stopSession: vi.fn(() => true),
             requestShutdown: vi.fn()
         })
 
