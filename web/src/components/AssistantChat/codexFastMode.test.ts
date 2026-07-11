@@ -55,12 +55,13 @@ describe('isFastServiceTier', () => {
 })
 
 describe('getDisplayedCodexServiceTier', () => {
-    it('shows an untouched/default tier as Standard', () => {
+    it('displays untouched and explicit non-fast tiers as standard', () => {
         expect(getDisplayedCodexServiceTier(null)).toBe('standard')
         expect(getDisplayedCodexServiceTier(undefined)).toBe('standard')
+        expect(getDisplayedCodexServiceTier('standard')).toBe('standard')
     })
 
-    it('preserves an explicit Fast selection', () => {
+    it('preserves the fast selection', () => {
         expect(getDisplayedCodexServiceTier('fast')).toBe('fast')
     })
 })
