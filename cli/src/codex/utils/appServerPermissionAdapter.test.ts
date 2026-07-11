@@ -288,6 +288,34 @@ describe('registerAppServerPermissionHandlers', () => {
         });
     });
 
+    it('does not coerce a note-only MCP choice into a schema value', async () => {
+        const { client, handlers } = createClient();
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest: vi.fn(async () => ({
+                decision: 'accept' as const,
+                answers: { approved: { answers: ['user_note: please approve'] } }
+            }))
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Approve?',
+            requestedSchema: {
+                type: 'object',
+                properties: { approved: { type: 'boolean' } },
+                required: ['approved']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: {},
+            _meta: null
+        });
+    });
+
     it('treats an omitted MCP elicitation mode as a form request', async () => {
         const { client, handlers } = createClient();
         const onUserInputRequest = vi.fn(async () => ({

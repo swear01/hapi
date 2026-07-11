@@ -51,4 +51,24 @@ describe('MCP URL request user input', () => {
             userNote: ''
         })).toBe(true)
     })
+
+    it('requires an actual selection for required choice questions', () => {
+        const question = parseRequestUserInputInput({
+            questions: [{
+                id: 'approved',
+                question: 'Approved?',
+                required: true,
+                options: [{ label: 'true', description: '' }, { label: 'false', description: '' }]
+            }]
+        }).questions[0]!
+
+        expect(isRequestUserInputQuestionAnswered(question, {
+            selected: null,
+            userNote: 'please approve'
+        })).toBe(false)
+        expect(isRequestUserInputQuestionAnswered(question, {
+            selected: 'true',
+            userNote: 'please approve'
+        })).toBe(true)
+    })
 })

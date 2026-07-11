@@ -252,6 +252,10 @@ function buildElicitationContent(params: unknown, answers: UserInputAnswer): Rec
         const selectedValues = values.filter((value) => !value.startsWith('user_note: '));
         const selected = selectedValues[0];
         const note = values.find((value) => value.startsWith('user_note: '))?.slice('user_note: '.length);
+        const hasSchemaChoices = Array.isArray(property.enum)
+            || Array.isArray(property.oneOf)
+            || property.type === 'boolean';
+        if (hasSchemaChoices && selected === undefined) continue;
         const value = selected ?? note;
         if (value === undefined) continue;
 

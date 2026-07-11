@@ -96,7 +96,7 @@ export function isRequestUserInputQuestionAnswered(
     if (!question.required) return true
     if (!answer) return false
     if (question.options.length > 0) {
-        return answer.selected !== null || answer.userNote.trim().length > 0
+        return answer.selected !== null
     }
     return answer.userNote.trim().length > 0
 }
