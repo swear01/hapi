@@ -19,6 +19,7 @@ const harness = vi.hoisted(() => ({
     startTurnErrors: [] as Error[],
     interruptedTurns: [] as Array<{ threadId: string; turnId: string }>,
     rollbackCalls: [] as Array<{ threadId: string; numTurns: number }>,
+    rollbackErrors: [] as Error[],
     compactThreadIds: [] as string[],
     goalSetCalls: [] as unknown[],
     goalGetCalls: [] as unknown[],
@@ -851,6 +852,10 @@ vi.mock('./codexAppServerClient', () => {
         async rollbackThread(params?: { threadId?: string; numTurns?: number }): Promise<{ thread: { id: string } }> {
             const threadId = params?.threadId ?? 'thread-unknown';
             harness.rollbackCalls.push({ threadId, numTurns: params?.numTurns ?? 0 });
+            const error = harness.rollbackErrors.shift();
+            if (error) {
+                throw error;
+            }
             return { thread: { id: threadId } };
         }
 
@@ -1025,6 +1030,7 @@ describe('codexRemoteLauncher', () => {
         harness.startTurnErrors = [];
         harness.interruptedTurns = [];
         harness.rollbackCalls = [];
+        harness.rollbackErrors = [];
         harness.compactThreadIds = [];
         harness.goalSetCalls = [];
         harness.goalGetCalls = [];
@@ -1465,10 +1471,11 @@ describe('codexRemoteLauncher', () => {
         expect(exitReason).toBe('exit');
         expect(harness.startTurnThreadIds).toEqual(['thread-1']);
         expect(harness.startTurnMessages).toEqual(['first message']);
-        expect(sessionEvents.filter((event) => event.type === 'message')).toEqual([{
-            type: 'message',
-            message: 'Task failed: This content was flagged for possible cybersecurity risk.'
-        }]);
+        const failureMessages = sessionEvents.filter((event) => event.type === 'message');
+        expect(failureMessages).toHaveLength(1);
+        expect(failureMessages[0]?.message).toContain('This content was flagged for possible cybersecurity risk.');
+        expect(failureMessages[0]?.message).toContain('https://openai.com/form/enterprise-trusted-access-for-cyber/');
+        expect(failureMessages[0]?.message).toContain('https://help.openai.com/en/articles/20001326');
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(session.thinking).toBe(false);
     });
@@ -1513,12 +1520,54 @@ describe('codexRemoteLauncher', () => {
         expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
         expect(harness.startTurnParams[1]).toMatchObject({
             threadId: 'thread-1',
-            model: 'gpt-5.4-mini',
             effort: 'low',
-            input: [{ type: 'text', text: 'first message' }]
+            input: [{ type: 'text', text: 'first message' }],
+            collaborationMode: {
+                mode: 'default',
+                settings: {
+                    model: 'gpt-5.4-mini',
+                    reasoning_effort: 'low'
+                }
+            }
         });
         expect(getModel()).toBe('gpt-5.4-mini');
         expect(getModelReasoningEffort()).toBe('low');
+    });
+
+    it('does not replay a safety-buffered turn when rollback is unavailable', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        harness.emitTurnAbortedOnInterrupt = true;
+        harness.rollbackErrors.push(new Error('thread/rollback is unsupported'));
+        const { session, sessionEvents, rpcHandlers, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Retry with a faster model']
+                }
+            }
+        });
+
+        await expect(running).resolves.toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(harness.rollbackCalls).toEqual([{ threadId: 'thread-1', numTurns: 1 }]);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Failed to retry with a faster model: thread/rollback is unsupported'
+        });
+        await vi.waitFor(() => {
+            expect(sessionEvents).toContainEqual({ type: 'ready' });
+        });
+        expect(session.thinking).toBe(false);
     });
 
     it('surfaces model reroute and Trusted Access verification notices', async () => {
