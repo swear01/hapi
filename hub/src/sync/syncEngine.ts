@@ -1191,7 +1191,8 @@ export class SyncEngine {
             resumeToken,
             session.effort ?? undefined,
             preferredPermissionMode,
-            session.serviceTier ?? undefined
+            session.serviceTier ?? undefined,
+            session.collaborationMode ?? undefined
         )
 
         if (spawnResult.type !== 'success') {
