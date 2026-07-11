@@ -1251,6 +1251,8 @@ export function HappyComposer(props: {
         handleEffortChange,
         handleServiceTierChange,
         handleSuggestionSelect,
+        personality,
+        onPersonalityChange,
         t
     ])
 
