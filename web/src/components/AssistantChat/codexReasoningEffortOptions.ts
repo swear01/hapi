@@ -8,20 +8,13 @@ export type ComposerReasoningEffortSourceOption = {
     name?: string
 }
 
-type CodexReasoningEffortModel = {
-    id: string
-    isDefault: boolean
-    supportedReasoningEfforts?: string[]
-}
-
 const CODEX_REASONING_EFFORT_PRESETS = ['low', 'medium', 'high', 'xhigh'] as const
 const CODEX_REASONING_EFFORT_LABELS: Record<string, string> = {
     low: 'Low',
     medium: 'Medium',
     high: 'High',
     xhigh: 'XHigh',
-    max: 'Max',
-    ultra: 'Ultra'
+    max: 'Max'
 }
 
 function normalizeCodexComposerReasoningEffort(effort?: string | null): string | null {
@@ -38,29 +31,7 @@ function formatCodexReasoningEffortLabel(effort: string): string {
         ?? `${effort.charAt(0).toUpperCase()}${effort.slice(1)}`
 }
 
-export function getCodexModelReasoningEffortOptions(
-    model: string | null | undefined,
-    models: ReadonlyArray<CodexReasoningEffortModel>
-): ComposerReasoningEffortSourceOption[] | undefined {
-    const normalizedModel = model?.trim().toLowerCase()
-    const activeModel = normalizedModel && normalizedModel !== 'auto'
-        ? models.find((candidate) => candidate.id.trim().toLowerCase() === normalizedModel)
-        : models.find((candidate) => candidate.isDefault)
-    const efforts = activeModel?.supportedReasoningEfforts
-        ?.map((effort) => effort.trim().toLowerCase())
-        .filter(Boolean)
-
-    if (!efforts || efforts.length === 0) {
-        return undefined
-    }
-
-    return Array.from(new Set(efforts)).map((effort) => ({
-        value: effort,
-        name: formatCodexReasoningEffortLabel(effort)
-    }))
-}
-
-function buildDynamicComposerReasoningEffortOptions(
+function buildOpencodeComposerReasoningEffortOptions(
     currentEffort: string | null,
     dynamicOptions: ComposerReasoningEffortSourceOption[]
 ): CodexComposerReasoningEffortOption[] {
@@ -95,11 +66,7 @@ export function getCodexComposerReasoningEffortOptions(
         if (!dynamicOptions || dynamicOptions.length === 0) {
             return []
         }
-        return buildDynamicComposerReasoningEffortOptions(normalizedCurrentEffort, dynamicOptions)
-    }
-
-    if (flavor === 'codex' && dynamicOptions && dynamicOptions.length > 0) {
-        return buildDynamicComposerReasoningEffortOptions(normalizedCurrentEffort, dynamicOptions)
+        return buildOpencodeComposerReasoningEffortOptions(normalizedCurrentEffort, dynamicOptions)
     }
 
     const options: CodexComposerReasoningEffortOption[] = [

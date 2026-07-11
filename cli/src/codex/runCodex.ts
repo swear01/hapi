@@ -15,13 +15,15 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { CodexCollaborationModeSchema, PermissionModeSchema } from '@hapi/protocol/schemas';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
-import { isReasoningEffort, type ReasoningEffort } from './appServerTypes';
+import type { ReasoningEffort } from './appServerTypes';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { listSlashCommands } from '@/modules/common/slashCommands';
 import { resolveCodexSlashCommand } from './utils/slashCommands';
 import type { CodexPersonality } from '@hapi/protocol/modes';
 
 export { emitReadyIfIdle } from './utils/emitReadyIfIdle';
+
+const REASONING_EFFORTS = new Set<ReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh'])
 
 export async function runCodex(opts: {
     startedBy?: 'runner' | 'terminal';
@@ -320,10 +322,10 @@ export async function runCodex(opts: {
         if (value === null) {
             return undefined;
         }
-        if (!isReasoningEffort(value)) {
+        if (typeof value !== 'string' || !REASONING_EFFORTS.has(value as ReasoningEffort)) {
             throw new Error('Invalid model reasoning effort');
         }
-        return value;
+        return value as ReasoningEffort;
     };
 
     const resolveModel = (value: unknown): string => {

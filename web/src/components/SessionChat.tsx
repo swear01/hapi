@@ -23,7 +23,6 @@ import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
-import { getCodexModelReasoningEffortOptions } from '@/components/AssistantChat/codexReasoningEffortOptions'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
@@ -521,12 +520,6 @@ function SessionChatInner(props: SessionChatProps) {
         }
         return options
     }, [agentFlavor, codexModelsState.models])
-    const codexReasoningEffortOptions = useMemo(
-        () => agentFlavor === 'codex'
-            ? getCodexModelReasoningEffortOptions(props.session.model, codexModelsState.models)
-            : undefined,
-        [agentFlavor, props.session.model, codexModelsState.models]
-    )
     const opencodeModelsState = useOpencodeModels({
         api: props.api,
         sessionId: props.session.id,
@@ -1263,11 +1256,9 @@ function SessionChatInner(props: SessionChatProps) {
                         piModels={agentFlavor === 'pi' ? (piModelsState.availableModels.length > 0 ? piModelsState.availableModels : piCachedModels) : undefined}
                         piSelectedModel={agentFlavor === 'pi' ? piSelectedModel : undefined}
                         availableModelReasoningEffortOptions={
-                            agentFlavor === 'codex'
-                                ? codexReasoningEffortOptions
-                                : agentFlavor === 'opencode' && opencodeReasoningEffortState.options.length > 0
-                                    ? opencodeReasoningEffortState.options
-                                    : undefined
+                            agentFlavor === 'opencode' && opencodeReasoningEffortState.options.length > 0
+                                ? opencodeReasoningEffortState.options
+                                : undefined
                         }
                         active={props.session.active}
                         allowSendWhenInactive
