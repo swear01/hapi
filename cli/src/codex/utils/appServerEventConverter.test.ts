@@ -722,6 +722,47 @@ describe('AppServerEventConverter', () => {
         }]);
     });
 
+    it('preserves cyber-policy metadata from wrapped and completed-turn errors', () => {
+        const converter = new AppServerEventConverter();
+
+        expect(converter.handleNotification('codex/event/error', {
+            msg: {
+                type: 'error',
+                thread_id: 'thread-1',
+                turn_id: 'turn-1',
+                message: 'wrapped policy failure',
+                codex_error_info: 'cyber_policy',
+                will_retry: false
+            }
+        })).toEqual([{
+            type: 'task_failed',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            retryable: false,
+            codex_error_info: 'cyber_policy',
+            error: 'wrapped policy failure'
+        }]);
+
+        expect(converter.handleNotification('turn/completed', {
+            threadId: 'thread-1',
+            turn: {
+                id: 'turn-1',
+                status: 'failed',
+                error: {
+                    message: 'completed policy failure',
+                    codexErrorInfo: 'CyberPolicy'
+                }
+            }
+        })).toEqual([{
+            type: 'task_failed',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            terminal_source: 'turn_completed',
+            codex_error_info: 'CyberPolicy',
+            error: 'completed policy failure'
+        }]);
+    });
+
     it('maps Codex model safety notifications', () => {
         const converter = new AppServerEventConverter();
 

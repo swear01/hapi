@@ -2145,7 +2145,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
             cancelSafetyBufferingRequest('Safety buffering prompt replaced');
             const request = {
-                requestId: `codex-safety-buffering:${args.threadId}:${args.turnId}`,
+                requestId: `codex-safety-buffering:${args.threadId}:${args.turnId}:${randomUUID()}`,
                 ...args,
                 message: activeMessage
             };
