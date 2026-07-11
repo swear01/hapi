@@ -1,7 +1,12 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
-import { I18nProvider } from '@/lib/i18n-context'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { shouldShowComposerStatusBar, StatusBar } from './StatusBar'
+
+vi.mock('@/lib/use-translation', () => ({
+    useTranslation: () => ({ t: (key: string) => key })
+}))
+
+afterEach(cleanup)
 
 describe('shouldShowComposerStatusBar', () => {
     it('hides the composer status bar for Cursor sessions', () => {
@@ -15,19 +20,55 @@ describe('shouldShowComposerStatusBar', () => {
     })
 })
 
-describe('StatusBar', () => {
+describe('Codex Fast badge', () => {
+    function renderStatusBar(props: {
+        model?: string
+        modelReasoningEffort?: string
+        serviceTier?: string | null
+    }) {
+        render(
+            <StatusBar
+                active
+                thinking={false}
+                agentState={null}
+                agentFlavor="codex"
+                {...props}
+            />
+        )
+    }
+
+    it('does not infer Fast from low reasoning when the service tier is unset', () => {
+        renderStatusBar({ modelReasoningEffort: 'low' })
+        expect(screen.queryByText('fast')).not.toBeInTheDocument()
+    })
+
+    it('does not infer Fast from a mini model when the service tier is unset', () => {
+        renderStatusBar({ model: 'gpt-5.4-mini' })
+        expect(screen.queryByText('fast')).not.toBeInTheDocument()
+    })
+
+    it('shows Fast for the explicit Fast service tier', () => {
+        renderStatusBar({ serviceTier: 'fast' })
+        expect(screen.getByText('fast')).toBeInTheDocument()
+    })
+
+    it('does not show Fast for the explicit Standard service tier', () => {
+        renderStatusBar({ serviceTier: 'standard' })
+        expect(screen.queryByText('fast')).not.toBeInTheDocument()
+    })
+})
+
+describe('Codex reasoning badge', () => {
     it('shows the selected Codex reasoning effort', () => {
         render(
-            <I18nProvider>
-                <StatusBar
-                    active
-                    thinking={false}
-                    agentState={null}
-                    agentFlavor="codex"
-                    model="gpt-5.6-sol"
-                    modelReasoningEffort="xhigh"
-                />
-            </I18nProvider>
+            <StatusBar
+                active
+                thinking={false}
+                agentState={null}
+                agentFlavor="codex"
+                model="gpt-5.6-sol"
+                modelReasoningEffort="xhigh"
+            />
         )
 
         expect(screen.getByText('reasoning xhigh')).toBeInTheDocument()
