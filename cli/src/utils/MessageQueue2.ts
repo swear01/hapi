@@ -301,6 +301,11 @@ export class MessageQueue2<T> {
         }
         const idx = Math.max(0, Math.min(taken.index, this.queue.length));
         this.queue.splice(idx, 0, taken.item);
+        if (this.waiter) {
+            const waiter = this.waiter;
+            this.waiter = null;
+            waiter(true);
+        }
     }
 
     /**

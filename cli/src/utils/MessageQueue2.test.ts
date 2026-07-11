@@ -609,6 +609,21 @@ describe('MessageQueue2', () => {
             queue.restoreTakenItem(taken!);
             expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-b', 'id-c']);
         });
+
+        it('restoreTakenItem wakes a waiter parked on an empty queue', async () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            const waitPromise = queue.waitForMessagesAndGetAsString();
+            queue.push('placeholder', 'local', 'id-placeholder');
+            const taken = queue.takeByLocalId('id-placeholder');
+            expect(taken).not.toBeNull();
+            expect(queue.size()).toBe(0);
+
+            queue.restoreTakenItem(taken!);
+
+            const result = await waitPromise;
+            expect(result?.message).toBe('placeholder');
+            expect(queue.size()).toBe(0);
+        });
     });
 
     it('should differentiate between pushImmediate and pushIsolateAndClear behavior', async () => {

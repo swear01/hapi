@@ -207,7 +207,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 }
 
                 try {
-                    this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
+                    await this.backend.softSteerPrompt(this.acpSessionId, [{
                         type: 'text',
                         text: taken.item.message
                     }]);

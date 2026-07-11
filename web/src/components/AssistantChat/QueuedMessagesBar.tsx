@@ -34,6 +34,39 @@ function ClockIcon() {
     )
 }
 
+/** Inject-into-stream glyph: mid-turn soft steer (icon-only; label via title/aria). */
+function SteerIcon() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            className="h-3.5 w-3.5"
+            aria-hidden="true"
+        >
+            <path
+                d="M3 12h10"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+            />
+            <path
+                d="M5 3v5.5L9 12"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+            <path
+                d="M7.5 10.5 9 12l1.5-1.5"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+        </svg>
+    )
+}
+
 /**
  * Orders queued messages so the floating bar reads top-down as a single timeline:
  *   1. Immediate-queued messages first, in the order they were submitted.
@@ -191,17 +224,17 @@ export function QueuedMessagesBar({
     return (
         <div
             role="status"
-            aria-label={`${queued.length} queued message${queued.length === 1 ? '' : 's'} pending invocation`}
+            aria-label={t('queuedMessages.pendingAriaLabel', { count: queued.length })}
             className="mx-auto w-full max-w-content mb-1"
         >
             <div className="px-3 py-2 text-sm text-[var(--app-fg-muted)]">
                 <div className="flex items-center gap-1.5 mb-1.5 text-xs font-medium text-[var(--app-hint)]">
                     <ClockIcon />
-                    <span>Queued</span>
+                    <span>{t('queuedMessages.title')}</span>
                 </div>
                 <ul
                     className="flex flex-col gap-1.5 max-h-32 sm:max-h-48 overflow-y-auto"
-                    aria-label="Queued messages"
+                    aria-label={t('queuedMessages.listAriaLabel')}
                 >
                     {queued.map((msg) => {
                         const preview = getQueuedMessagePreview(msg)
@@ -318,7 +351,8 @@ export function QueuedMessagesBar({
                                 <div className="flex shrink-0 items-center gap-1">
                                     <button
                                         type="button"
-                                        aria-label="Edit queued message"
+                                        aria-label={t('queuedMessages.edit')}
+                                        title={t('queuedMessages.edit')}
                                         disabled={!canEdit}
                                         onClick={handleEdit}
                                         onMouseDown={(e) => e.preventDefault()}
@@ -347,14 +381,26 @@ export function QueuedMessagesBar({
                                             disabled={!canSteer}
                                             onClick={handleSteer}
                                             onMouseDown={(e) => e.preventDefault()}
-                                            className="flex h-6 items-center justify-center rounded px-1.5 text-[10px] font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
+                                            className="group/steer flex h-6 items-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
                                         >
-                                            {isSteerPending ? '…' : t('queuedMessages.steerNow')}
+                                            {isSteerPending ? (
+                                                <span className="flex h-6 w-6 items-center justify-center text-xs" aria-hidden="true">…</span>
+                                            ) : (
+                                                <>
+                                                    <span className="flex h-6 w-6 shrink-0 items-center justify-center">
+                                                        <SteerIcon />
+                                                    </span>
+                                                    <span className="max-w-0 overflow-hidden whitespace-nowrap text-[10px] font-medium opacity-0 transition-[max-width,opacity,padding] duration-150 group-hover/steer:max-w-[5.5rem] group-hover/steer:pr-1.5 group-hover/steer:opacity-100">
+                                                        {t('queuedMessages.steerNow')}
+                                                    </span>
+                                                </>
+                                            )}
                                         </button>
                                     )}
                                     <button
                                         type="button"
-                                        aria-label="Cancel queued message"
+                                        aria-label={t('queuedMessages.cancel')}
+                                        title={t('queuedMessages.cancel')}
                                         disabled={!canCancel}
                                         onClick={handleCancel}
                                         onMouseDown={(e) => e.preventDefault()}
