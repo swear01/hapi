@@ -72,7 +72,12 @@ describe('AppServerEventConverter', () => {
         expect(interrupted).toEqual([{ type: 'turn_aborted', turn_id: 'turn-1' }]);
 
         const failed = converter.handleNotification('turn/completed', { turn: { id: 'turn-1' }, status: 'Failed', message: 'boom' });
-        expect(failed).toEqual([{ type: 'task_failed', turn_id: 'turn-1', error: 'boom' }]);
+        expect(failed).toEqual([{
+            type: 'task_failed',
+            turn_id: 'turn-1',
+            terminal_source: 'turn_completed',
+            error: 'boom'
+        }]);
     });
 
     it('accumulates agent message deltas', () => {
