@@ -8,6 +8,7 @@ import {
     getPermissionModeTone,
     getPermissionModesForFlavor,
     isPermissionModeAllowedForFlavor,
+    isSteeringSupportedForFlavor,
 } from './modes'
 
 describe('Gemini CLI sunset (read-only, not creatable)', () => {
@@ -101,5 +102,17 @@ describe('claude auto permission mode', () => {
     it('has a label and tone', () => {
         expect(getPermissionModeLabel('auto')).toBe('Auto')
         expect(getPermissionModeTone('auto')).toBe('warning')
+    })
+})
+
+describe('isSteeringSupportedForFlavor', () => {
+    it('supports codex and cursor only', () => {
+        expect(isSteeringSupportedForFlavor('codex')).toBe(true)
+        expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
+        expect(isSteeringSupportedForFlavor('claude')).toBe(false)
+        expect(isSteeringSupportedForFlavor('opencode')).toBe(false)
+        expect(isSteeringSupportedForFlavor('pi')).toBe(false)
+        expect(isSteeringSupportedForFlavor(undefined)).toBe(false)
+        expect(isSteeringSupportedForFlavor(null)).toBe(false)
     })
 })

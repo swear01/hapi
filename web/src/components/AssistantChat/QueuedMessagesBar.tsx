@@ -7,9 +7,11 @@ import { EMPTY_STATE } from '@/hooks/queries/useMessages'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
 import type { DecryptedMessage } from '@/types/api'
 import { useCancelQueuedMessage } from '@/hooks/mutations/useCancelQueuedMessage'
+import { useSteerQueuedMessage } from '@/hooks/mutations/useSteerQueuedMessage'
 import { useTranslation } from '@/lib/use-translation'
 import { useToast } from '@/lib/toast-context'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+import { isSteeringSupportedForFlavor } from '@hapi/protocol'
 import { formatScheduledTime } from '@/lib/scheduledTime'
 
 function ClockIcon() {
@@ -143,18 +145,26 @@ export function computeCanCancel({
 
 /**
  * Floating bar above the composer showing queued (pending invocation) messages.
- * Each item has an edit button (✎) and a cancel button (✕).
+ * Each item has edit, optional Steer (when the agent supports mid-turn delivery),
+ * and cancel.
  *
- * Edit = client-side cancel + prefill composer with message text (Codex dialect).
+ * Edit = client-side cancel + prefill composer with message text.
+ * Steer = deliver into the active turn now (Codex turn/steer / Cursor interrupt+prompt).
  * Cancel = DELETE /sessions/:id/messages/:messageId with optimistic removal.
  */
 export function QueuedMessagesBar({
     sessionId,
     api,
+    agentFlavor,
+    isThinking,
     onEdit,
 }: {
     sessionId: string
     api: ApiClient | null
+    /** Session agent flavor — gates the Steer button. */
+    agentFlavor?: string | null
+    /** True while an agent turn is in flight. */
+    isThinking?: boolean
     /**
      * Called when the user clicks Edit on a queued message.
      * The parent should restore `text` into the composer and `pendingSchedule` into the schedule state.
@@ -165,8 +175,10 @@ export function QueuedMessagesBar({
     const queued = useQueuedMessages(sessionId)
     const assistantApi = useAssistantApi()
     const cancelMutation = useCancelQueuedMessage(api)
+    const steerMutation = useSteerQueuedMessage(api)
     const { t } = useTranslation()
     const { addToast } = useToast()
+    const steeringSupported = isSteeringSupportedForFlavor(agentFlavor)
 
     if (queued.length === 0) {
         return null
@@ -193,12 +205,32 @@ export function QueuedMessagesBar({
                         const editText = getQueuedMessageEditText(preview)
                         const hasAttachments = attachmentNames.length > 0
                         const localId = msg.localId ?? msg.id
-                        const isPending = cancelMutation.isPending && cancelMutation.variables?.localId === localId
-                        const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending })
+                        const isCancelPending = cancelMutation.isPending && cancelMutation.variables?.localId === localId
+                        const isSteerPending = steerMutation.isPending && steerMutation.variables?.localId === localId
+                        const canCancel = computeCanCancel({
+                            id: msg.id,
+                            localId: msg.localId,
+                            isPending: isCancelPending || isSteerPending,
+                        })
+                        const isFutureScheduled = msg.scheduledAt != null && msg.scheduledAt > Date.now()
+                        const canSteer = steeringSupported
+                            && Boolean(isThinking)
+                            && !isFutureScheduled
+                            && canCancel
 
                         const handleCancel = () => {
                             if (!canCancel) return
                             cancelMutation.mutate({
+                                sessionId,
+                                messageId: msg.id,
+                                localId,
+                                snapshot: msg,
+                            })
+                        }
+
+                        const handleSteer = () => {
+                            if (!canSteer) return
+                            steerMutation.mutate({
                                 sessionId,
                                 messageId: msg.id,
                                 localId,
@@ -270,11 +302,11 @@ export function QueuedMessagesBar({
                                             ))}
                                         </div>
                                     ) : null}
-                                    {msg.scheduledAt != null && msg.scheduledAt > Date.now() && (
+                                    {isFutureScheduled && (
                                         <div className="mt-1 flex items-center gap-1 text-xs text-[var(--app-hint)]">
                                             <ClockIcon />
                                             <span>
-                                                {t('queuedMessages.scheduledFor', { time: formatScheduledTime(msg.scheduledAt) })}
+                                                {t('queuedMessages.scheduledFor', { time: formatScheduledTime(msg.scheduledAt!) })}
                                             </span>
                                         </div>
                                     )}
@@ -303,6 +335,19 @@ export function QueuedMessagesBar({
                                             />
                                         </svg>
                                     </button>
+                                    {steeringSupported && (
+                                        <button
+                                            type="button"
+                                            aria-label={t('queuedMessages.steerNow')}
+                                            title={t('queuedMessages.steerNow')}
+                                            disabled={!canSteer}
+                                            onClick={handleSteer}
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            className="flex h-6 items-center justify-center rounded px-1.5 text-[10px] font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            {isSteerPending ? '…' : t('queuedMessages.steerNow')}
+                                        </button>
+                                    )}
                                     <button
                                         type="button"
                                         aria-label="Cancel queued message"

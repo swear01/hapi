@@ -20,6 +20,8 @@ import { applyCursorAcpMode, applyCursorAcpModel, wireIdForCursorSessionState } 
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import type { EnhancedMode } from './loop';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -33,6 +35,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendModel: string | null = null;
     private unregisterModelApplyHandler: (() => void) | null = null;
     private modelApplySeq = 0;
+    private promptInFlight = false;
+    private acpSessionId: string | null = null;
+    /** Queued message promoted by Steer: interrupt current prompt, then send immediately. */
+    private pendingSteer: { message: string; mode: EnhancedMode; localId: string } | null = null;
 
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -146,6 +152,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             }
         }
 
+        this.acpSessionId = acpSessionId;
         session.client.emitSessionReady();
 
         syncCursorModelsFromAcp(backend, acpSessionId);
@@ -175,18 +182,77 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             onSwitch: () => this.handleSwitchRequest()
         });
 
+        // Cursor ACP has no non-interrupting steer: cancel the in-flight prompt
+        // and promote the queued message to run next (same session).
+        session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.SteerQueuedMessage,
+            async (payload: unknown) => {
+                const localId = typeof (payload as { localId?: unknown } | null)?.localId === 'string'
+                    ? (payload as { localId: string }).localId
+                    : '';
+                if (!localId) {
+                    return { steered: false, error: 'Missing localId' };
+                }
+                if (!this.promptInFlight || !this.acpSessionId || !this.backend) {
+                    return { steered: false, error: 'No active steerable turn' };
+                }
+                if (this.pendingSteer) {
+                    return { steered: false, error: 'A steer is already pending' };
+                }
+                const item = session.queue.takeByLocalId(localId);
+                if (!item) {
+                    return { steered: false, error: 'Message not in queue' };
+                }
+                this.pendingSteer = {
+                    message: item.message,
+                    mode: item.mode,
+                    localId
+                };
+                try {
+                    await this.backend.cancelPrompt(this.acpSessionId);
+                } catch (error) {
+                    logger.debug('[cursor-acp] cancel for steer failed', error);
+                    // Put the message back so it is not lost.
+                    session.queue.push(item.message, item.mode, localId);
+                    this.pendingSteer = null;
+                    return { steered: false, error: 'Failed to interrupt active turn' };
+                }
+                return { steered: true };
+            }
+        );
+
         const sendReady = () => {
             session.sendSessionEvent({ type: 'ready' });
         };
 
         while (!this.shouldExit) {
             const waitSignal = this.abortController.signal;
-            const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
+            let batch: { message: string; mode: EnhancedMode; isolate: boolean; hash: string } | null = null;
+            let steeredLocalId: string | null = null;
+
+            if (this.pendingSteer) {
+                const steer = this.pendingSteer;
+                this.pendingSteer = null;
+                batch = {
+                    message: steer.message,
+                    mode: steer.mode,
+                    isolate: false,
+                    hash: 'steer'
+                };
+                steeredLocalId = steer.localId;
+            } else {
+                batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
+            }
+
             if (!batch) {
                 if (waitSignal.aborted && !this.shouldExit) {
                     continue;
                 }
                 break;
+            }
+
+            if (steeredLocalId) {
+                session.client.emitMessagesConsumed([steeredLocalId], { steered: true });
             }
 
             const requestedModel = batch.mode.model === null
@@ -217,6 +283,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             }];
 
             session.onThinkingChange(true);
+            this.promptInFlight = true;
 
             try {
                 await backend.prompt(acpSessionId, promptContent, (message) => {
@@ -232,10 +299,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 }
                 messageBuffer.addMessage(message, 'status');
             } finally {
+                this.promptInFlight = false;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');
-                if (session.queue.size() === 0 && !this.shouldExit) {
+                if (session.queue.size() === 0 && !this.pendingSteer && !this.shouldExit) {
                     sendReady();
                 }
             }
@@ -244,6 +312,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+        this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
+            steered: false,
+            error: 'Session ending'
+        }));
+        this.pendingSteer = null;
+        this.promptInFlight = false;
         this.unregisterModelApplyHandler?.();
         this.unregisterModelApplyHandler = null;
 
@@ -437,13 +511,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     private async handleAbort(): Promise<void> {
         const backend = this.backend;
-        const sessionId = this.session.sessionId;
+        const sessionId = this.acpSessionId ?? this.session.sessionId;
+        this.pendingSteer = null;
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
         }
         await this.permissionAdapter?.cancelAll('User aborted');
         await this.extensionAdapter?.cancelAll('User aborted');
         this.session.queue.reset();
+        this.promptInFlight = false;
         this.session.onThinkingChange(false);
         this.abortController.abort();
         this.abortController = new AbortController();

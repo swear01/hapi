@@ -153,3 +153,19 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
         label: getCodexCollaborationModeLabel(mode)
     }))
 }
+
+/**
+ * Flavors that can deliver a queued message into an active turn on demand
+ * (per-message "Steer" from the waiting queue), without waiting for full-turn end.
+ *
+ * - Codex: app-server `turn/steer` (true mid-turn inject)
+ * - Cursor: ACP cancel + immediate next `session/prompt` (interrupt-and-send;
+ *   Cursor ACP has no non-interrupting steer primitive)
+ *
+ * Claude / others: not supported (no reachable mid-turn inject path).
+ */
+export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor'] as const
+
+export function isSteeringSupportedForFlavor(flavor?: string | null): boolean {
+    return (STEERING_SUPPORTED_FLAVORS as readonly string[]).includes(flavor ?? '')
+}
