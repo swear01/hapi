@@ -181,6 +181,7 @@ function elicitationChoiceValues(property: Record<string, unknown>): unknown[] {
         if (Array.isArray(items?.oneOf)) {
             return items.oneOf.map((item) => asRecord(item)?.const).filter((item) => item !== undefined);
         }
+        if (items?.type === 'boolean') return [true, false];
     }
     if (property.type === 'boolean') return [true, false];
     return [];
@@ -248,6 +249,23 @@ function answerValues(answers: UserInputAnswer, id: string): string[] {
         : [];
 }
 
+function coerceSchemaValue(value: string, schema: Record<string, unknown>): unknown {
+    if (schema.type === 'boolean') {
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+        return undefined;
+    }
+    if (schema.type === 'number') {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : undefined;
+    }
+    if (schema.type === 'integer') {
+        const number = Number(value);
+        return Number.isInteger(number) ? number : undefined;
+    }
+    return value;
+}
+
 function buildElicitationContent(params: unknown, answers: UserInputAnswer): Record<string, unknown> {
     const request = unwrapElicitationRequest(params);
     if (request.mode === 'url') return {};
@@ -265,14 +283,20 @@ function buildElicitationContent(params: unknown, answers: UserInputAnswer): Rec
         const value = selected ?? note;
         if (value === undefined) continue;
 
-        if (property.type === 'boolean') content[id] = value === 'true';
-        else if (property.type === 'number' || property.type === 'integer') content[id] = Number(value);
-        else if (property.type === 'array') content[id] = selectedValues.length > 0
-            ? selectedValues
-            : note !== undefined
-                ? [note]
-                : [];
-        else content[id] = value;
+        if (property.type === 'array') {
+            const itemSchema = asRecord(property.items) ?? {};
+            const rawValues = selectedValues.length > 0
+                ? selectedValues
+                : note !== undefined
+                    ? [note]
+                    : [];
+            content[id] = rawValues
+                .map((item) => coerceSchemaValue(item, itemSchema))
+                .filter((item) => item !== undefined);
+        } else {
+            const coerced = coerceSchemaValue(value, property);
+            if (coerced !== undefined) content[id] = coerced;
+        }
     }
 
     return content;

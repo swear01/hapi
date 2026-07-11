@@ -370,6 +370,46 @@ describe('registerAppServerPermissionHandlers', () => {
         });
     });
 
+    it('preserves number, integer, and boolean array item types', async () => {
+        const { client, handlers } = createClient();
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest: vi.fn(async () => ({
+                decision: 'accept' as const,
+                answers: {
+                    scores: { answers: ['2.5'] },
+                    indices: { answers: ['3'] },
+                    flags: { answers: ['true'] }
+                }
+            }))
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Choose typed arrays',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    scores: { type: 'array', items: { type: 'number', enum: [1.5, 2.5] } },
+                    indices: { type: 'array', items: { type: 'integer', enum: [2, 3] } },
+                    flags: { type: 'array', items: { type: 'boolean' } }
+                },
+                required: ['scores', 'indices', 'flags']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: {
+                scores: [2.5],
+                indices: [3],
+                flags: [true]
+            },
+            _meta: null
+        });
+    });
+
     it('treats an omitted MCP elicitation mode as a form request', async () => {
         const { client, handlers } = createClient();
         const onUserInputRequest = vi.fn(async () => ({
