@@ -93,7 +93,9 @@ export async function runCodex(opts: {
     // thread immediately runs with the right tier; otherwise seed from the
     // persisted session. A persisted/absent `null` stays untouched (omitted).
     let currentServiceTier: string | null | undefined = opts.serviceTier ?? sessionInfo.serviceTier ?? undefined;
-    let currentPersonality: CodexPersonality | null | undefined = opts.personality ?? sessionInfo.personality ?? undefined;
+    let currentPersonality: CodexPersonality | null | undefined = opts.personality !== undefined
+        ? opts.personality
+        : sessionInfo.personality ?? undefined;
 
     const lifecycle = createRunnerLifecycle({
         session,

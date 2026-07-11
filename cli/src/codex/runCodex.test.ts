@@ -232,6 +232,33 @@ describe('runCodex', () => {
         expect(harness.bootstrapArgs[0]).not.toHaveProperty('lazy')
     })
 
+    it('restores persisted personality into keepalive and app-server mode', async () => {
+        harness.sessionInfo = { serviceTier: null, personality: 'friendly' }
+
+        await runCodexImpl({
+            existingSessionId: 'hapi-session-1',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'codex-thread-1'
+        } as Parameters<typeof runCodex>[0])
+
+        expect(mockCodexSession.setPersonality).toHaveBeenCalledWith('friendly')
+        expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: 'friendly' }))
+    })
+
+    it('lets an explicit default personality override a persisted selection', async () => {
+        harness.sessionInfo = { serviceTier: null, personality: 'pragmatic' }
+
+        await runCodexImpl({
+            existingSessionId: 'hapi-session-1',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'codex-thread-1',
+            personality: null
+        } as Parameters<typeof runCodex>[0])
+
+        expect(mockCodexSession.setPersonality).toHaveBeenCalledWith(null)
+        expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: null }))
+    })
+
     it('replays transcript history when attaching a new Hapi session to an existing Codex thread', async () => {
         await runCodexImpl({
             workingDirectory: '/tmp/project',
