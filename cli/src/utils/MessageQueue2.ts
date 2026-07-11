@@ -270,6 +270,25 @@ export class MessageQueue2<T> {
     }
 
     /**
+     * Look up a queued item by localId without removing it.
+     */
+    peekByLocalId(localId: string): QueueItem<T> | null {
+        if (!localId) return null;
+        return this.queue.find(item => item.localId === localId) ?? null;
+    }
+
+    /**
+     * Remove and return a queued item by localId, or null if not found.
+     */
+    takeByLocalId(localId: string): QueueItem<T> | null {
+        if (!localId) return null;
+        const idx = this.queue.findIndex(item => item.localId === localId);
+        if (idx === -1) return null;
+        const [item] = this.queue.splice(idx, 1);
+        return item ?? null;
+    }
+
+    /**
      * Reset the queue - clears all messages and resets to empty state
      */
     reset(): void {

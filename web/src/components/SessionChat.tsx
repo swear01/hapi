@@ -1320,7 +1320,6 @@ function SessionChatInner(props: SessionChatProps) {
                                 </div>
                             </div>
                         ) : null}
-
                         {/*
                          * tiann/hapi#893: one-time banner shown on first
                          * v2-load when localStorage entries got migrated to
@@ -1356,6 +1355,8 @@ function SessionChatInner(props: SessionChatProps) {
                             <QueuedMessagesBar
                                 sessionId={props.session.id}
                                 api={props.api}
+                                agentFlavor={agentFlavor}
+                                isThinking={props.session.thinking}
                                 onEdit={({ pendingSchedule: restored }) => {
                                     // Restore the schedule so the clock button re-activates
                                     setPendingSchedule(restored)
