@@ -20,6 +20,7 @@ const harness = vi.hoisted(() => ({
     startTurnParams: [] as Array<Record<string, unknown>>,
     startTurnErrors: [] as Error[],
     interruptedTurns: [] as Array<{ threadId: string; turnId: string }>,
+    rollbackCalls: [] as Array<{ threadId: string; numTurns: number }>,
     compactThreadIds: [] as string[],
     goalSetCalls: [] as unknown[],
     goalGetCalls: [] as unknown[],
@@ -28,6 +29,10 @@ const harness = vi.hoisted(() => ({
     suppressGoalNotifications: false,
     suppressTurnCompletion: false,
     remainingThreadSystemErrors: 0,
+    emitCyberPolicyAfterThreadSystemError: false,
+    emitSafetyBuffering: false,
+    safetyBufferingFasterModel: null as string | null,
+    emitModelSafetyNotices: false,
     startTurnMessages: [] as string[],
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
@@ -199,7 +204,65 @@ vi.mock('./codexAppServerClient', () => {
                 } else {
                     notify();
                 }
+                if (harness.emitCyberPolicyAfterThreadSystemError) {
+                    const policyError = {
+                        threadId,
+                        turnId,
+                        error: {
+                            message: 'This content was flagged for possible cybersecurity risk.',
+                            codexErrorInfo: 'cyberPolicy'
+                        },
+                        willRetry: false
+                    };
+                    harness.notifications.push({ method: 'error', params: policyError });
+                    this.notificationHandler?.('error', policyError);
+
+                    const completed = {
+                        threadId,
+                        turnId,
+                        turn: { id: turnId, status: 'failed' }
+                    };
+                    harness.notifications.push({ method: 'turn/completed', params: completed });
+                    this.notificationHandler?.('turn/completed', completed);
+                }
                 return { turn: { id: turnId } };
+            }
+
+            if (harness.emitSafetyBuffering) {
+                harness.emitSafetyBuffering = false;
+                const notification = {
+                    threadId,
+                    turnId,
+                    model: 'gpt-5.4',
+                    useCases: ['cyber'],
+                    reasons: ['review'],
+                    showBufferingUi: true,
+                    fasterModel: harness.safetyBufferingFasterModel
+                };
+                harness.notifications.push({ method: 'model/safetyBuffering/updated', params: notification });
+                this.notificationHandler?.('model/safetyBuffering/updated', notification);
+                return { turn: { id: turnId } };
+            }
+
+            if (harness.emitModelSafetyNotices) {
+                harness.emitModelSafetyNotices = false;
+                const rerouted = {
+                    threadId,
+                    turnId,
+                    fromModel: 'gpt-5.4',
+                    toModel: 'gpt-5.4-codex',
+                    reason: 'highRiskCyberActivity'
+                };
+                harness.notifications.push({ method: 'model/rerouted', params: rerouted });
+                this.notificationHandler?.('model/rerouted', rerouted);
+
+                const verification = {
+                    threadId,
+                    turnId,
+                    verifications: ['trustedAccessForCyber']
+                };
+                harness.notifications.push({ method: 'model/verification', params: verification });
+                this.notificationHandler?.('model/verification', verification);
             }
 
             if (
@@ -829,6 +892,12 @@ vi.mock('./codexAppServerClient', () => {
             return {};
         }
 
+        async rollbackThread(params?: { threadId?: string; numTurns?: number }): Promise<{ thread: { id: string } }> {
+            const threadId = params?.threadId ?? 'thread-unknown';
+            harness.rollbackCalls.push({ threadId, numTurns: params?.numTurns ?? 0 });
+            return { thread: { id: threadId } };
+        }
+
         async disconnect(): Promise<void> {}
     }
 
@@ -882,6 +951,7 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
     const collaborationModes: Array<EnhancedMode['collaborationMode'] | undefined> = [];
     let currentPermissionMode: EnhancedMode['permissionMode'] = mode.permissionMode;
     let currentModel: string | null | undefined = mode.model;
+    let currentModelReasoningEffort = mode.modelReasoningEffort;
     let currentCollaborationMode: EnhancedMode['collaborationMode'] | undefined = mode.collaborationMode;
     let agentState: FakeAgentState = {
         requests: {},
@@ -928,6 +998,9 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
         getModel() {
             return currentModel;
         },
+        setModelReasoningEffort(nextEffort: EnhancedMode['modelReasoningEffort']) {
+            currentModelReasoningEffort = nextEffort;
+        },
         getCollaborationMode() {
             return currentCollaborationMode;
         },
@@ -971,6 +1044,7 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
             currentPermissionMode = nextMode;
         },
         getModel: () => currentModel,
+        getModelReasoningEffort: () => currentModelReasoningEffort,
         getCollaborationMode: () => currentCollaborationMode,
         collaborationModes,
         getAgentState: () => agentState
@@ -996,6 +1070,7 @@ describe('codexRemoteLauncher', () => {
         harness.startTurnParams = [];
         harness.startTurnErrors = [];
         harness.interruptedTurns = [];
+        harness.rollbackCalls = [];
         harness.compactThreadIds = [];
         harness.goalSetCalls = [];
         harness.goalGetCalls = [];
@@ -1003,6 +1078,10 @@ describe('codexRemoteLauncher', () => {
         harness.goal = null;
         harness.suppressGoalNotifications = false;
         harness.suppressTurnCompletion = false;
+        harness.emitCyberPolicyAfterThreadSystemError = false;
+        harness.emitSafetyBuffering = false;
+        harness.safetyBufferingFasterModel = null;
+        harness.emitModelSafetyNotices = false;
         harness.startTurnMessages = [];
         harness.failResumeThreadIds = [];
         harness.remainingThreadSystemErrors = 0;
@@ -1461,6 +1540,88 @@ describe('codexRemoteLauncher', () => {
         }));
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(session.thinking).toBe(false);
+    });
+
+    it('does not retry when a generic systemError is followed by a cyber-policy block', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitCyberPolicyAfterThreadSystemError = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1']);
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(sessionEvents.filter((event) => event.type === 'message')).toEqual([{
+            type: 'message',
+            message: 'Task failed: This content was flagged for possible cybersecurity risk.'
+        }]);
+        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('retries a safety-buffered turn with the offered faster model only after user opt-in', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        harness.emitTurnAbortedOnInterrupt = true;
+        const {
+            session,
+            rpcHandlers,
+            getAgentState,
+            getModel,
+            getModelReasoningEffort
+        } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+
+        await vi.waitFor(() => {
+            expect(Object.values(getAgentState().requests)).toContainEqual(expect.objectContaining({
+                tool: 'request_user_input'
+            }));
+        });
+        expect(harness.startTurnThreadIds).toEqual(['thread-1']);
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Retry with a faster model']
+                }
+            }
+        });
+
+        await expect(running).resolves.toBe('exit');
+        expect(harness.interruptedTurns).toEqual([{ threadId: 'thread-1', turnId: 'turn-1' }]);
+        expect(harness.rollbackCalls).toEqual([{ threadId: 'thread-1', numTurns: 1 }]);
+        expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
+        expect(harness.startTurnParams[1]).toMatchObject({
+            threadId: 'thread-1',
+            model: 'gpt-5.4-mini',
+            effort: 'low',
+            input: [{ type: 'text', text: 'first message' }]
+        });
+        expect(getModel()).toBe('gpt-5.4-mini');
+        expect(getModelReasoningEffort()).toBe('low');
+    });
+
+    it('surfaces model reroute and Trusted Access verification notices', async () => {
+        harness.emitModelSafetyNotices = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Codex rerouted the model from gpt-5.4 to gpt-5.4-codex (highRiskCyberActivity).'
+        });
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Your conversations have multiple flags for possible cybersecurity risk. Responses may take longer because extra safety checks are on. To get authorized for security work, join [Trusted Access for Cyber](https://chatgpt.com/cyber).'
+        });
     });
 
     it('compacts the same thread before retrying context-window overflow', async () => {
