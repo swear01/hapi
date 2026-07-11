@@ -296,7 +296,8 @@ export class SessionCache {
                     modelReasoningEffort: session.modelReasoningEffort,
                     effort: session.effort,
                     serviceTier: session.serviceTier,
-                    collaborationMode: session.collaborationMode
+                    collaborationMode: session.collaborationMode,
+                    personality: session.personality
                 } satisfies SessionPatch
             })
         }
