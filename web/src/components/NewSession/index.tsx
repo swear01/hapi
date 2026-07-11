@@ -235,10 +235,16 @@ export function NewSession(props: {
         && codexModelAdvertisesFastTier(model === 'auto' ? null : model, codexModelsState.models)
 
     useEffect(() => {
+        // Wait for the Codex model catalog to settle before clearing Fast;
+        // otherwise Browse → remount restores serviceTier: 'fast' and this
+        // effect would wipe it while models are still loading.
+        if (agent === 'codex' && codexModelsState.isLoading) {
+            return
+        }
         if (!showCodexFastMode && serviceTier !== 'standard') {
             setServiceTier('standard')
         }
-    }, [showCodexFastMode, serviceTier])
+    }, [agent, codexModelsState.isLoading, showCodexFastMode, serviceTier])
     const cursorModelsState = useCursorModelsForMachine({
         api: props.api,
         machineId,
