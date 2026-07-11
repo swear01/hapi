@@ -23,7 +23,7 @@ export function normalizeDecryptedMessage(message: DecryptedMessage): Normalized
     if (record.role === 'user') {
         const normalized = normalizeUserRecord(message.id, message.localId, message.createdAt, record.content, record.meta)
         return normalized
-            ? { ...normalized, status: message.status, originalText: message.originalText, invokedAt: message.invokedAt, steered: message.steered }
+            ? { ...normalized, status: message.status, originalText: message.originalText, invokedAt: message.invokedAt }
             : {
                 id: message.id,
                 localId: message.localId,
@@ -34,8 +34,7 @@ export function normalizeDecryptedMessage(message: DecryptedMessage): Normalized
                 meta: record.meta,
                 status: message.status,
                 originalText: message.originalText,
-                invokedAt: message.invokedAt,
-                steered: message.steered
+                invokedAt: message.invokedAt
             }
     }
     if (record.role === 'agent') {
