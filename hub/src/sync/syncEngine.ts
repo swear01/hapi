@@ -812,6 +812,7 @@ export class SyncEngine {
         permissionMode?: PermissionMode,
         serviceTier?: string,
         existingSessionId?: string
+        collaborationMode?: CodexCollaborationMode
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -827,6 +828,7 @@ export class SyncEngine {
             permissionMode,
             serviceTier,
             existingSessionId
+            collaborationMode
         )
     }
 
