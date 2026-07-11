@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     isRequestUserInputQuestionAnswered,
+    isRequestUserInputUrlConfirmed,
     openRequestUserInputUrl,
     parseRequestUserInputInput
 } from './requestUserInput'
@@ -69,6 +70,32 @@ describe('MCP URL request user input', () => {
         expect(isRequestUserInputQuestionAnswered(question, {
             selected: 'true',
             userNote: 'please approve'
+        })).toBe(true)
+    })
+
+    it('opens an MCP URL only after selecting its explicit confirmation option', () => {
+        const url = 'https://example.com/login'
+        const hidden = parseRequestUserInputInput({
+            url,
+            questions: [{ id: 'unrelated', question: 'Continue?', options: [] }]
+        })
+        expect(isRequestUserInputUrlConfirmed(hidden, {
+            unrelated: { selected: null, userNote: 'yes' }
+        })).toBe(false)
+
+        const explicit = parseRequestUserInputInput({
+            url,
+            questions: [{
+                id: '__mcp_url_confirmation',
+                question: 'Sign in',
+                options: [{ label: 'Open', description: url }]
+            }]
+        })
+        expect(isRequestUserInputUrlConfirmed(explicit, {
+            __mcp_url_confirmation: { selected: null, userNote: '' }
+        })).toBe(false)
+        expect(isRequestUserInputUrlConfirmed(explicit, {
+            __mcp_url_confirmation: { selected: 'Open', userNote: '' }
         })).toBe(true)
     })
 })

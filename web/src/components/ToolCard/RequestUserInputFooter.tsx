@@ -9,6 +9,7 @@ import {
     parseRequestUserInputInput,
     formatRequestUserInputAnswers,
     isRequestUserInputQuestionAnswered,
+    isRequestUserInputUrlConfirmed,
     openRequestUserInputUrl,
     type RequestUserInputQuestion
 } from '@/components/ToolCard/requestUserInput'
@@ -134,6 +135,10 @@ export function RequestUserInputFooter(props: {
         const formattedAnswers = formatRequestUserInputAnswers(stateByQuestion)
 
         if (parsed.url) {
+            if (!isRequestUserInputUrlConfirmed(parsed, stateByQuestion)) {
+                setError(t('tool.selectOption'))
+                return
+            }
             if (!openRequestUserInputUrl(parsed.url)) {
                 setError(t('tool.requestUserInput.popupBlocked'))
                 haptic.notification('error')

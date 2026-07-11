@@ -17,6 +17,11 @@ export type RequestUserInputQuestionAnswer = {
     userNote: string
 }
 
+export type ParsedRequestUserInput = {
+    questions: RequestUserInputQuestion[]
+    url: string | null
+}
+
 export type RequestUserInputQuestionInfo = {
     id: string
     question: string | null
@@ -42,7 +47,7 @@ export function openRequestUserInputUrl(url: string): boolean {
     }
 }
 
-export function parseRequestUserInputInput(input: unknown): { questions: RequestUserInputQuestion[]; url: string | null } {
+export function parseRequestUserInputInput(input: unknown): ParsedRequestUserInput {
     if (!isObject(input)) return { questions: [], url: null }
 
     let url: string | null = null
@@ -87,6 +92,21 @@ export function parseRequestUserInputInput(input: unknown): { questions: Request
     }
 
     return { questions, url }
+}
+
+export function isRequestUserInputUrlConfirmed(
+    parsed: ParsedRequestUserInput,
+    answersByQuestion: Record<string, RequestUserInputQuestionAnswer>
+): boolean {
+    if (!parsed.url) return false
+    return parsed.questions.some((question) => {
+        if (question.id !== '__mcp_url_confirmation') return false
+        const selected = answersByQuestion[question.id]?.selected
+        if (!selected) return false
+        return question.options.some((option) => (
+            option.label === selected && option.description === parsed.url
+        ))
+    })
 }
 
 export function isRequestUserInputQuestionAnswered(
