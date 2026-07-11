@@ -87,7 +87,15 @@ describe('appServerConfig', () => {
         });
 
         expect(params.sandbox).toBe('danger-full-access');
-        expect(params.approvalPolicy).toBe('never');
+        expect(params.approvalPolicy).toEqual({
+            granular: {
+                sandbox_approval: false,
+                rules: false,
+                skill_approval: false,
+                request_permissions: false,
+                mcp_elicitations: true
+            }
+        });
     });
 
     it('keeps on-failure approvals for safe-yolo threads', () => {

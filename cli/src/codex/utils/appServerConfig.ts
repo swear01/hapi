@@ -24,6 +24,20 @@ const MODELS_WITHOUT_REASONING_SUMMARY = new Set([
 ]);
 
 function resolveApprovalPolicy(mode: EnhancedMode): ApprovalPolicy {
+    if (mode.permissionMode === 'yolo') {
+        // Codex's `never` policy auto-declines MCP elicitations before app-server
+        // can forward them. Keep command/sandbox prompts disabled for Yolo while
+        // allowing auth and structured-input elicitations to reach HAPI's UI.
+        return {
+            granular: {
+                sandbox_approval: false,
+                rules: false,
+                skill_approval: false,
+                request_permissions: false,
+                mcp_elicitations: true
+            }
+        };
+    }
     return resolveCodexPermissionModeConfig(mode.permissionMode).approvalPolicy;
 }
 
