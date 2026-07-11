@@ -2,6 +2,7 @@ import { CODEX_PERMISSION_MODES } from '@hapi/protocol/modes';
 import type { CodexPermissionMode } from '@hapi/protocol/types';
 import { isReasoningEffort, type ReasoningEffort } from '../appServerTypes';
 import type { EnhancedMode } from '../loop';
+import type { CodexPersonality } from '@hapi/protocol/modes';
 import type { SlashCommand } from '@/modules/common/slashCommands';
 
 export const MAX_CODEX_GOAL_OBJECTIVE_CHARS = 4_000;
@@ -32,6 +33,7 @@ export type CodexSlashResolution =
             model?: string | null;
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
+            personality?: CodexPersonality | null;
         };
     }
     | {
@@ -44,6 +46,7 @@ export type CodexSlashResolution =
             model?: string | null;
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
+            personality?: CodexPersonality | null;
         };
     }
     | {
@@ -62,6 +65,7 @@ export function resolveCodexSlashCommand(
         model?: string;
         modelReasoningEffort?: ReasoningEffort;
         serviceTier?: string | null;
+        personality?: CodexPersonality | null;
     }
 ): CodexSlashResolution {
     const match = /^\s*\/([a-z0-9:_-]+)(?:\s+([\s\S]*))?$/i.exec(text);
@@ -227,6 +231,14 @@ export function resolveCodexSlashCommand(
         };
     }
 
+    if (command === 'personality') {
+        const value = rest.toLowerCase();
+        if (!value) return { kind: 'handled', message: `Codex personality: ${state.personality ?? 'default'}` };
+        if (value === 'default' || value === 'auto') return { kind: 'handled', message: 'Codex personality set to default', updates: { personality: null } };
+        if (!['friendly', 'pragmatic', 'none'].includes(value)) return { kind: 'handled', message: `Unknown Codex personality: ${rest}` };
+        return { kind: 'handled', message: `Codex personality set to ${value}`, updates: { personality: value as CodexPersonality } };
+    }
+
     if (command === 'permissions' || command === 'permission') {
         if (!rest) {
             return { kind: 'handled', message: `Codex permission mode: ${state.permissionMode}` };
@@ -260,6 +272,7 @@ export function resolveCodexSlashCommand(
                 '- `/model [name|auto]` — show or set model',
                 '- `/reasoning [low|medium|high|xhigh|max|ultra|default]` — show or set reasoning effort',
                 '- `/fast [on|off|status]` — toggle Fast mode (GPT-5.5 / GPT-5.4, ChatGPT login)',
+                '- `/personality [friendly|pragmatic|none|default]` — show or set response personality',
                 '- `/permissions [default|read-only|safe-yolo|yolo]` — show or set permission mode',
                 '',
                 'Custom `/commands` from `.codex/prompts` are expanded before sending.'

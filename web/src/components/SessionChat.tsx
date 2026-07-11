@@ -686,6 +686,7 @@ function SessionChatInner(props: SessionChatProps) {
         switchSession,
         setPermissionMode,
         setCollaborationMode,
+        setPersonality,
         setModel,
         setModelReasoningEffort,
         setEffort,
@@ -918,6 +919,11 @@ function SessionChatInner(props: SessionChatProps) {
             console.error('Failed to set collaboration mode:', e)
         }
     }, [setCollaborationMode, props.onRefresh, haptic])
+
+    const handlePersonalityChange = useCallback(async (personality: import('@hapi/protocol').CodexPersonality | null) => {
+        try { await setPersonality(personality); haptic.notification('success'); props.onRefresh() }
+        catch (e) { haptic.notification('error'); console.error('Failed to set personality:', e) }
+    }, [setPersonality, props.onRefresh, haptic])
 
     // Model mode change handler
     const handleModelChange = useCallback(async (model: { provider: string; modelId: string } | string | null) => {
@@ -1227,6 +1233,7 @@ function SessionChatInner(props: SessionChatProps) {
                         onClearSchedule={() => setPendingSchedule(null)}
                         permissionMode={props.session.permissionMode}
                         collaborationMode={codexCollaborationModeSupported ? props.session.collaborationMode : undefined}
+                        personality={codexCollaborationModeSupported ? props.session.personality : undefined}
                         threadGoal={reduced.latestGoal}
                         model={props.session.model}
                         modelReasoningEffort={agentFlavor === 'codex' || agentFlavor === 'opencode' ? props.session.modelReasoningEffort : undefined}
@@ -1276,6 +1283,7 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? handleCollaborationModeChange
                                 : undefined
                         }
+                        onPersonalityChange={codexCollaborationModeSupported && props.session.active && !controlledByUser ? handlePersonalityChange : undefined}
                         onPermissionModeChange={handlePermissionModeChange}
                         selectedModelBase={
                             agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
