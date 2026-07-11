@@ -171,12 +171,13 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
  * Flavors that can deliver a queued message into an active turn on demand
  * (per-message "Steer" from the waiting queue), without waiting for full-turn end.
  *
+ * Steer = soft mid-turn delivery (same idea as Cursor GUI default "Send"):
  * - Codex: app-server `turn/steer` (true mid-turn inject)
- * - Cursor: ACP cancel + immediate next `session/prompt` (interrupt-and-send;
- *   Cursor ACP has no non-interrupting steer primitive). Legacy stream-json
- *   Cursor sessions are NOT steerable — gate with {@link isSteeringSupportedForSession}.
+ * - Cursor ACP: concurrent `session/prompt` soft-send (no cancel). Legacy
+ *   stream-json Cursor sessions are NOT steerable — gate with
+ *   {@link isSteeringSupportedForSession}.
  *
- * Claude / others: not supported (no reachable mid-turn inject path).
+ * Claude / others: not supported (no reachable soft-steer path) — UI hides Steer.
  */
 export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor'] as const
 
