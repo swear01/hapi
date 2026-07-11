@@ -206,13 +206,17 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Control commands cannot be steered' };
                 }
 
+                // Ack the hub once the soft-steer request is kicked off — not when
+                // the concurrent session/prompt finishes. ACP treats that response as
+                // turn completion, which can exceed the hub's 30s Socket.IO RPC timeout
+                // and report a false failure after the inject already started.
                 try {
-                    await this.backend.softSteerPrompt(this.acpSessionId, [{
+                    this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
                         type: 'text',
                         text: taken.item.message
                     }]);
                 } catch (error) {
-                    logger.debug('[cursor-acp] soft-steer failed', error);
+                    logger.debug('[cursor-acp] soft-steer failed to start', error);
                     session.queue.restoreTakenItem(taken);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }

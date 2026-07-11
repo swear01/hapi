@@ -967,6 +967,64 @@ describe('AcpSdkBackend', () => {
         }]);
     });
 
+    it('beginSoftSteerPrompt returns without awaiting session/prompt completion', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let resolvePrompt: ((value: unknown) => void) | null = null;
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendNotification: (method: string, params: unknown) => void;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequest: () => new Promise((resolve) => {
+                resolvePrompt = resolve;
+            }),
+            sendNotification: () => {},
+            close: async () => {}
+        };
+
+        // Must not hang waiting for the ACP prompt response (hub RPC is 30s).
+        backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+        expect(resolvePrompt).not.toBeNull();
+        resolvePrompt!({ stopReason: 'end_turn' });
+        await Promise.resolve();
+    });
+
+    it('softSteerPrompt awaits session/prompt completion', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let resolvePrompt: ((value: unknown) => void) | null = null;
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendNotification: (method: string, params: unknown) => void;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequest: () => new Promise((resolve) => {
+                resolvePrompt = resolve;
+            }),
+            sendNotification: () => {},
+            close: async () => {}
+        };
+
+        let done = false;
+        const pending = backend.softSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).then(() => {
+            done = true;
+        });
+        await Promise.resolve();
+        expect(done).toBe(false);
+        resolvePrompt!({ stopReason: 'end_turn' });
+        await pending;
+        expect(done).toBe(true);
+    });
+
     it('beginSoftSteerPrompt rejects when no prompt is in flight', () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const backendInternal = backend as unknown as {

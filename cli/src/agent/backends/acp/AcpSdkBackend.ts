@@ -487,11 +487,9 @@ export class AcpSdkBackend implements AgentBackend {
      * Does **not** cancel the active prompt and does **not** swap message handlers —
      * `session/update` notifications keep flowing to the in-flight turn's handler.
      *
-     * Fire-and-forget from the caller's perspective is fine: this method returns once
-     * the JSON-RPC request is queued on the wire (we still await the RPC response so
-     * transport-level failures surface). Callers that must not block the hub RPC
-     * should `void` this promise after a successful kickoff — prefer
-     * {@link beginSoftSteerPrompt} for that.
+     * Awaits the full concurrent `session/prompt` JSON-RPC response (turn completion
+     * for that inject). Do **not** call this from the hub `SteerQueuedMessage` handler —
+     * that RPC uses a 30s Socket.IO timeout. Use {@link beginSoftSteerPrompt} there.
      */
     async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
         if (!this.transport) {
@@ -509,8 +507,10 @@ export class AcpSdkBackend implements AgentBackend {
 
     /**
      * Kick off a soft steer without waiting for the injected prompt to finish.
-     * Resolves once the request is accepted onto the transport (write queued);
-     * the underlying session/prompt RPC continues in the background.
+     * Throws synchronously when the transport is unavailable or no turn is in
+     * flight; otherwise writes `session/prompt` and returns immediately so hub
+     * steer RPCs can ack within the Socket.IO timeout. Background rejection is
+     * logged only — the caller's hub ack / messages-consumed already happened.
      */
     beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): void {
         if (!this.transport) {
