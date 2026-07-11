@@ -16,6 +16,8 @@ export const cursorCommand: CommandDefinition = {
             const options: {
                 startedBy?: 'runner' | 'terminal'
                 cursorArgs?: string[]
+                cursorWorktree?: boolean | string
+                cursorAddDirs?: string[]
                 permissionMode?: CursorPermissionMode
                 resumeSessionId?: string
                 model?: string
@@ -45,6 +47,8 @@ export const cursorCommand: CommandDefinition = {
                     hasExplicitPermissionMode = true
                 } else if ((arg === '--yolo' || arg === '--force') && !hasExplicitPermissionMode) {
                     options.permissionMode = 'yolo'
+                } else if (arg === '--auto-review' && !hasExplicitPermissionMode) {
+                    options.permissionMode = 'autoReview'
                 } else if (arg === '--mode') {
                     const mode = commandArgs[++i]
                     if (!mode) {
@@ -61,6 +65,20 @@ export const cursorCommand: CommandDefinition = {
                         throw new Error('Missing --model value')
                     }
                     options.model = model
+                } else if (arg === '--cursor-worktree') {
+                    const next = commandArgs[i + 1]
+                    if (next && !next.startsWith('-')) {
+                        options.cursorWorktree = next
+                        i += 1
+                    } else {
+                        options.cursorWorktree = true
+                    }
+                } else if (arg === '--cursor-add-dir') {
+                    const dir = commandArgs[++i]
+                    if (!dir || dir.startsWith('-')) {
+                        throw new Error('Missing --cursor-add-dir value')
+                    }
+                    options.cursorAddDirs = [...(options.cursorAddDirs ?? []), dir]
                 } else if (arg === '--resume') {
                     const chatId = commandArgs[i + 1]
                     if (chatId && !chatId.startsWith('-')) {
