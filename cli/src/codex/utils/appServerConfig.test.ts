@@ -109,6 +109,25 @@ describe('appServerConfig', () => {
         expect(params.approvalPolicy).toBe('on-failure');
     });
 
+    it('allows MCP elicitation without enabling sandbox prompts for read-only threads', () => {
+        const params = buildThreadStartParams({
+            cwd: '/workspace/project',
+            mode: { permissionMode: 'read-only', collaborationMode: 'default' },
+            mcpServers
+        });
+
+        expect(params.sandbox).toBe('read-only');
+        expect(params.approvalPolicy).toEqual({
+            granular: {
+                sandbox_approval: false,
+                rules: false,
+                skill_approval: false,
+                request_permissions: false,
+                mcp_elicitations: true
+            }
+        });
+    });
+
     it('concatenates custom developer instructions after base instructions', () => {
         const params = buildThreadStartParams({
             cwd: '/workspace/project',
@@ -237,7 +256,15 @@ describe('appServerConfig', () => {
         expect(params.threadId).toBe('thread-1');
         expect(params.cwd).toBe('/workspace/project');
         expect(params.input).toEqual([{ type: 'text', text: 'hello' }]);
-        expect(params.approvalPolicy).toBe('never');
+        expect(params.approvalPolicy).toEqual({
+            granular: {
+                sandbox_approval: false,
+                rules: false,
+                skill_approval: false,
+                request_permissions: false,
+                mcp_elicitations: true
+            }
+        });
         expect(params.sandboxPolicy).toEqual({ type: 'readOnly' });
         expect(params.effort).toBe('high');
         expect(params.summary).toBeUndefined();
