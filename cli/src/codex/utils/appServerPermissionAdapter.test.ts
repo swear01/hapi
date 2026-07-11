@@ -189,17 +189,21 @@ describe('registerAppServerPermissionHandlers', () => {
         });
     });
 
-    it('accepts non-HAPI MCP elicitation requests when live permission mode is yolo', async () => {
+    it('forwards form MCP elicitation through user input even in yolo mode', async () => {
         const { client, handlers } = createClient();
-        let permissionMode: 'default' | 'read-only' | 'safe-yolo' | 'yolo' = 'default';
         const permissionHandler = {
             handleToolCall: vi.fn()
         };
+        const onUserInputRequest = vi.fn(async () => ({
+            decision: 'accept' as const,
+            answers: { approval: { answers: ['allow'] } }
+        }));
 
         registerAppServerPermissionHandlers({
             client: client as never,
             permissionHandler: permissionHandler as never,
-            getPermissionMode: () => permissionMode
+            getPermissionMode: () => 'yolo',
+            onUserInputRequest
         });
 
         const handler = handlers.get('mcpServer/elicitation/request');
@@ -218,19 +222,16 @@ describe('registerAppServerPermissionHandlers', () => {
                     approval: {
                         type: 'string',
                         enum: ['allow', 'deny']
+                    },
+                    comment: {
+                        type: 'string',
+                        title: 'Optional comment'
                     }
                 },
                 required: ['approval']
             }
         };
 
-        await expect(handler?.(request)).resolves.toEqual({
-            action: 'cancel',
-            content: null,
-            _meta: null
-        });
-
-        permissionMode = 'yolo';
         await expect(handler?.(request)).resolves.toEqual({
             action: 'accept',
             content: {
@@ -239,15 +240,208 @@ describe('registerAppServerPermissionHandlers', () => {
             _meta: null
         });
 
-        permissionMode = 'default';
-        await expect(handler?.(request)).resolves.toEqual({
-            action: 'cancel',
-            content: null,
+        expect(onUserInputRequest).toHaveBeenCalledWith({
+            id: expect.any(String),
+            input: {
+                questions: [{
+                    id: 'approval',
+                    question: 'Allow the qmd MCP server to run tool "status"?\n\napproval',
+                    required: true,
+                    options: [{ label: 'allow', description: '' }, { label: 'deny', description: '' }]
+                }, {
+                    id: 'comment',
+                    question: 'Allow the qmd MCP server to run tool "status"?\n\nOptional comment',
+                    required: false,
+                    options: []
+                }]
+            }
+        });
+    });
+
+    it('keeps a selected MCP answer when the user also adds a note', async () => {
+        const { client, handlers } = createClient();
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest: vi.fn(async () => ({
+                decision: 'accept' as const,
+                answers: { approval: { answers: ['allow', 'user_note: approved for this task'] } }
+            }))
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Approve?',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    approval: { type: 'string', enum: ['allow', 'deny'] }
+                },
+                required: ['approval']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: { approval: 'allow' },
             _meta: null
         });
     });
 
-    it('does not auto-accept non-HAPI MCP elicitation requests in safe-yolo mode', async () => {
+    it('does not coerce a note-only MCP choice into a schema value', async () => {
+        const { client, handlers } = createClient();
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest: vi.fn(async () => ({
+                decision: 'accept' as const,
+                answers: { approved: { answers: ['user_note: please approve'] } }
+            }))
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Approve?',
+            requestedSchema: {
+                type: 'object',
+                properties: { approved: { type: 'boolean' } },
+                required: ['approved']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: {},
+            _meta: null
+        });
+    });
+
+    it('round-trips array choices and free-text array input', async () => {
+        const { client, handlers } = createClient();
+        const onUserInputRequest = vi.fn(async () => ({
+            decision: 'accept' as const,
+            answers: {
+                tags: { answers: ['bug'] },
+                paths: { answers: ['user_note: src/index.ts'] }
+            }
+        }));
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Choose metadata',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    tags: { type: 'array', items: { type: 'string', enum: ['bug', 'feature'] } },
+                    paths: { type: 'array', items: { type: 'string' } }
+                },
+                required: ['tags', 'paths']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: {
+                tags: ['bug'],
+                paths: ['src/index.ts']
+            },
+            _meta: null
+        });
+        expect(onUserInputRequest).toHaveBeenCalledWith({
+            id: expect.any(String),
+            input: {
+                questions: [{
+                    id: 'tags',
+                    question: 'Choose metadata\n\ntags',
+                    required: true,
+                    multiple: true,
+                    options: [{ label: 'bug', description: '' }, { label: 'feature', description: '' }]
+                }, {
+                    id: 'paths',
+                    question: 'Choose metadata\n\npaths',
+                    required: true,
+                    multiple: true,
+                    options: []
+                }]
+            }
+        });
+    });
+
+    it('preserves number, integer, and boolean array item types', async () => {
+        const { client, handlers } = createClient();
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest: vi.fn(async () => ({
+                decision: 'accept' as const,
+                answers: {
+                    scores: { answers: ['2.5'] },
+                    indices: { answers: ['3'] },
+                    flags: { answers: ['true'] }
+                }
+            }))
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Choose typed arrays',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    scores: { type: 'array', items: { type: 'number', enum: [1.5, 2.5] } },
+                    indices: { type: 'array', items: { type: 'integer', enum: [2, 3] } },
+                    flags: { type: 'array', items: { type: 'boolean' } }
+                },
+                required: ['scores', 'indices', 'flags']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: {
+                scores: [2.5],
+                indices: [3],
+                flags: [true]
+            },
+            _meta: null
+        });
+    });
+
+    it('treats an omitted MCP elicitation mode as a form request', async () => {
+        const { client, handlers } = createClient();
+        const onUserInputRequest = vi.fn(async () => ({
+            decision: 'accept' as const,
+            answers: { nickname: { answers: ['user_note: Codex'] } }
+        }));
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            message: 'Choose a nickname',
+            requestedSchema: {
+                type: 'object',
+                properties: { nickname: { type: 'string' } },
+                required: ['nickname']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: { nickname: 'Codex' },
+            _meta: null
+        });
+        expect(onUserInputRequest).toHaveBeenCalledOnce();
+    });
+
+    it('forwards URL MCP elicitation and preserves a declined response', async () => {
         const { client, handlers } = createClient();
         const permissionHandler = {
             handleToolCall: vi.fn()
@@ -256,7 +450,21 @@ describe('registerAppServerPermissionHandlers', () => {
         registerAppServerPermissionHandlers({
             client: client as never,
             permissionHandler: permissionHandler as never,
-            getPermissionMode: () => 'safe-yolo'
+            getPermissionMode: () => 'yolo',
+            onUserInputRequest: vi.fn(async ({ input }) => {
+                expect(input).toEqual({
+                    url: 'https://example.com/login',
+                    questions: [{
+                        id: '__mcp_url_confirmation',
+                        question: 'Sign in to continue',
+                        options: [{
+                            label: 'Open sign-in page and continue',
+                            description: 'https://example.com/login'
+                        }]
+                    }]
+                });
+                return { decision: 'decline' as const };
+            })
         });
 
         const handler = handlers.get('mcpServer/elicitation/request');
@@ -266,15 +474,14 @@ describe('registerAppServerPermissionHandlers', () => {
             threadId: 'thread-1',
             turnId: 'turn-1',
             serverName: 'external',
-            mode: 'form',
-            message: 'Collect data',
-            _meta: null,
-            requestedSchema: {
-                type: 'object',
-                properties: {},
+            request: {
+                mode: 'url',
+                message: 'Sign in to continue',
+                url: 'https://example.com/login',
+                elicitationId: 'auth-1'
             }
         })).resolves.toEqual({
-            action: 'cancel',
+            action: 'decline',
             content: null,
             _meta: null
         });
