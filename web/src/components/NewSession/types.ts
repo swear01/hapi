@@ -13,6 +13,7 @@ export type SessionType = 'simple' | 'worktree'
 // Codex reports supported efforts dynamically; keep this open for new server values.
 export type CodexReasoningEffort = string
 export type ClaudeEffort = 'auto' | ClaudeEffortLevel
+export type NewSessionServiceTier = 'standard' | 'fast'
 
 function modelPresetOptions<TModel extends string>(
     presets: readonly TModel[],

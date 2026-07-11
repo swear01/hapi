@@ -1,6 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { Machine } from '@/types/api'
+import type { CodexCollaborationMode } from '@hapi/protocol'
+import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
 import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
@@ -30,10 +32,12 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, ClaudeEffort, CodexReasoningEffort, SessionType } from './types'
+import type { AgentType, ClaudeEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
+import { CollaborationModeSelector } from './CollaborationModeSelector'
 import { DirectorySection } from './DirectorySection'
+import { FastModeSelector } from './FastModeSelector'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
 import { OpencodeModelSelector } from './OpencodeModelSelector'
@@ -77,6 +81,8 @@ export function NewSession(props: {
     const pendingCursorBaseRef = useRef<string | null>(null)
     const [effort, setEffort] = useState<ClaudeEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
+    const [serviceTier, setServiceTier] = useState<NewSessionServiceTier>('standard')
+    const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>('default')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
     const [sessionType, setSessionType] = useState<SessionType>('simple')
     const [worktreeName, setWorktreeName] = useState('')
@@ -93,6 +99,8 @@ export function NewSession(props: {
     useEffect(() => {
         setEffort('auto')
         setModelReasoningEffort('default')
+        setServiceTier('standard')
+        setCollaborationMode('default')
         if (agent !== 'cursor') {
             setModel('auto')
             setCursorSelectedBase('auto')
@@ -145,6 +153,8 @@ export function NewSession(props: {
         setCursorSelectedBase(draft.cursorSelectedBase)
         setEffort(draft.effort)
         setModelReasoningEffort(draft.modelReasoningEffort)
+        setServiceTier(draft.serviceTier)
+        setCollaborationMode(draft.collaborationMode)
         setYoloMode(draft.yoloMode)
         setSessionType(draft.sessionType)
         setWorktreeName(draft.worktreeName)
@@ -220,6 +230,15 @@ export function NewSession(props: {
         }
         setModelReasoningEffort('default')
     }, [agent, codexSupportedReasoningEfforts, modelReasoningEffort])
+    const showCodexFastMode = agent === 'codex'
+        && !codexModelsState.error
+        && codexModelAdvertisesFastTier(model === 'auto' ? null : model, codexModelsState.models)
+
+    useEffect(() => {
+        if (!showCodexFastMode && serviceTier !== 'standard') {
+            setServiceTier('standard')
+        }
+    }, [showCodexFastMode, serviceTier])
     const cursorModelsState = useCursorModelsForMachine({
         api: props.api,
         machineId,
@@ -475,6 +494,8 @@ export function NewSession(props: {
             machineId,
             effort,
             modelReasoningEffort,
+            serviceTier,
+            collaborationMode,
             yoloMode,
             sessionType,
             worktreeName
@@ -488,6 +509,8 @@ export function NewSession(props: {
         machineId,
         effort,
         modelReasoningEffort,
+        serviceTier,
+        collaborationMode,
         yoloMode,
         sessionType,
         worktreeName,
@@ -584,6 +607,12 @@ export function NewSession(props: {
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
+            const resolvedServiceTier = agent === 'codex' && showCodexFastMode && serviceTier === 'fast'
+                ? 'fast' as const
+                : undefined
+            const resolvedCollaborationMode = agent === 'codex' && collaborationMode !== 'default'
+                ? collaborationMode
+                : undefined
             const result = await spawnSession({
                 machineId,
                 directory: trimmedDirectory,
@@ -593,7 +622,9 @@ export function NewSession(props: {
                 modelReasoningEffort: resolvedModelReasoningEffort,
                 yolo: yoloMode,
                 sessionType,
-                worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined
+                worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined,
+                serviceTier: resolvedServiceTier,
+                collaborationMode: resolvedCollaborationMode
             })
 
             if (result.type === 'success') {
@@ -743,6 +774,18 @@ export function NewSession(props: {
                 availableOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
                 onChange={setModelReasoningEffort}
+            />
+            <CollaborationModeSelector
+                agent={agent}
+                value={collaborationMode}
+                isDisabled={isFormDisabled}
+                onChange={setCollaborationMode}
+            />
+            <FastModeSelector
+                visible={showCodexFastMode}
+                value={serviceTier}
+                isDisabled={isFormDisabled}
+                onChange={setServiceTier}
             />
             <YoloToggle
                 yoloMode={yoloMode}
