@@ -12,6 +12,7 @@ export type AgentType = AgentFlavor
 export type SessionType = 'simple' | 'worktree'
 export type CodexReasoningEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeEffort = 'auto' | ClaudeEffortLevel
+export type NewSessionServiceTier = 'standard' | 'fast'
 
 function modelPresetOptions<TModel extends string>(
     presets: readonly TModel[],

@@ -1,5 +1,5 @@
-import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
-import type { AgentType, ClaudeEffort, CodexReasoningEffort, SessionType } from './types'
+import { CREATABLE_AGENT_FLAVORS, type CodexCollaborationMode } from '@hapi/protocol'
+import type { AgentType, ClaudeEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 
 const DRAFT_STORAGE_KEY = 'hapi:new-session-form-draft'
 
@@ -10,6 +10,8 @@ export type NewSessionFormDraft = {
     machineId: string | null
     effort: ClaudeEffort
     modelReasoningEffort: CodexReasoningEffort
+    serviceTier: NewSessionServiceTier
+    collaborationMode: CodexCollaborationMode
     yoloMode: boolean
     sessionType: SessionType
     worktreeName: string
@@ -52,6 +54,8 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
             modelReasoningEffort: agentPreserved
                 ? ((parsed.modelReasoningEffort as CodexReasoningEffort | undefined) ?? 'default')
                 : 'default',
+            serviceTier: agentPreserved && parsed.serviceTier === 'fast' ? 'fast' : 'standard',
+            collaborationMode: agentPreserved && parsed.collaborationMode === 'plan' ? 'plan' : 'default',
             yoloMode: Boolean(parsed.yoloMode),
             sessionType: (parsed.sessionType as SessionType | undefined) ?? 'simple',
             worktreeName: typeof parsed.worktreeName === 'string' ? parsed.worktreeName : ''

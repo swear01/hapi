@@ -50,7 +50,10 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.sessionType,
             parsed.data.worktreeName,
             undefined,
-            parsed.data.effort
+            parsed.data.effort,
+            undefined,
+            parsed.data.serviceTier,
+            parsed.data.collaborationMode
         )
         return c.json(result)
     })
