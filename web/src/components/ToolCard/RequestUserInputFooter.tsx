@@ -8,6 +8,7 @@ import {
     isRequestUserInputToolName,
     parseRequestUserInputInput,
     formatRequestUserInputAnswers,
+    isRequestUserInputQuestionAnswered,
     openRequestUserInputUrl,
     type RequestUserInputQuestion
 } from '@/components/ToolCard/requestUserInput'
@@ -113,16 +114,7 @@ export function RequestUserInputFooter(props: {
     const currentQuestion = questions[clampedStep] as RequestUserInputQuestion | undefined
 
     const validateQuestion = (question: RequestUserInputQuestion): boolean => {
-        const state = stateByQuestion[question.id]
-        if (!state) return false
-
-        // For questions with options, require a selection OR user note
-        if (question.options.length > 0) {
-            return state.selected !== null || state.userNote.trim().length > 0
-        }
-
-        // For pure text questions (no options), require user note
-        return state.userNote.trim().length > 0
+        return isRequestUserInputQuestionAnswered(question, stateByQuestion[question.id])
     }
 
     const submit = async () => {

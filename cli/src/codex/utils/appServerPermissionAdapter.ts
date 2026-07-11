@@ -207,12 +207,18 @@ function buildElicitationUserInput(params: unknown): { questions: unknown[]; url
     const schema = asRecord(request.requestedSchema);
     const properties = asRecord(schema?.properties);
     if (!properties) return null;
+    const required = new Set(
+        Array.isArray(schema?.required)
+            ? schema.required.filter((value): value is string => typeof value === 'string')
+            : []
+    );
 
     const questions = Object.entries(properties).map(([id, rawProperty]) => {
         const property = asRecord(rawProperty) ?? {};
         return {
             id,
             question: asString(property.title) ?? asString(property.description) ?? id,
+            required: required.has(id),
             options: elicitationOptions(property)
         };
     });
@@ -242,14 +248,15 @@ function buildElicitationContent(params: unknown, answers: UserInputAnswer): Rec
     for (const [id, rawProperty] of Object.entries(properties)) {
         const property = asRecord(rawProperty) ?? {};
         const values = answerValues(answers, id);
-        const selected = values.find((value) => !value.startsWith('user_note: '));
+        const selectedValues = values.filter((value) => !value.startsWith('user_note: '));
+        const selected = selectedValues[0];
         const note = values.find((value) => value.startsWith('user_note: '))?.slice('user_note: '.length);
-        const value = note ?? selected;
+        const value = selected ?? note;
         if (value === undefined) continue;
 
         if (property.type === 'boolean') content[id] = value === 'true';
         else if (property.type === 'number' || property.type === 'integer') content[id] = Number(value);
-        else if (property.type === 'array') content[id] = values.filter((item) => !item.startsWith('user_note: '));
+        else if (property.type === 'array') content[id] = selectedValues;
         else content[id] = value;
     }
 

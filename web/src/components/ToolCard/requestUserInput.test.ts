@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { openRequestUserInputUrl, parseRequestUserInputInput } from './requestUserInput'
+import {
+    isRequestUserInputQuestionAnswered,
+    openRequestUserInputUrl,
+    parseRequestUserInputInput
+} from './requestUserInput'
 
 describe('MCP URL request user input', () => {
     afterEach(() => vi.restoreAllMocks())
@@ -15,5 +19,22 @@ describe('MCP URL request user input', () => {
         const open = vi.spyOn(window, 'open').mockReturnValue(null)
         expect(openRequestUserInputUrl('https://example.com/login')).toBe(false)
         expect(open).toHaveBeenCalledWith('https://example.com/login', '_blank')
+    })
+
+    it('preserves optional form questions and allows them to stay empty', () => {
+        const parsed = parseRequestUserInputInput({
+            questions: [{ id: 'comment', question: 'Comment', required: false, options: [] }]
+        })
+
+        expect(parsed.questions[0]).toEqual({
+            id: 'comment',
+            question: 'Comment',
+            required: false,
+            options: []
+        })
+        expect(isRequestUserInputQuestionAnswered(parsed.questions[0]!, {
+            selected: null,
+            userNote: ''
+        })).toBe(true)
     })
 })

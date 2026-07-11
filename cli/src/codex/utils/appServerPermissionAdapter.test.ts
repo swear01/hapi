@@ -222,6 +222,10 @@ describe('registerAppServerPermissionHandlers', () => {
                     approval: {
                         type: 'string',
                         enum: ['allow', 'deny']
+                    },
+                    comment: {
+                        type: 'string',
+                        title: 'Optional comment'
                     }
                 },
                 required: ['approval']
@@ -242,9 +246,45 @@ describe('registerAppServerPermissionHandlers', () => {
                 questions: [{
                     id: 'approval',
                     question: 'approval',
+                    required: true,
                     options: [{ label: 'allow', description: '' }, { label: 'deny', description: '' }]
+                }, {
+                    id: 'comment',
+                    question: 'Optional comment',
+                    required: false,
+                    options: []
                 }]
             }
+        });
+    });
+
+    it('keeps a selected MCP answer when the user also adds a note', async () => {
+        const { client, handlers } = createClient();
+        registerAppServerPermissionHandlers({
+            client: client as never,
+            permissionHandler: { handleToolCall: vi.fn() } as never,
+            onUserInputRequest: vi.fn(async () => ({
+                decision: 'accept' as const,
+                answers: { approval: { answers: ['allow', 'user_note: approved for this task'] } }
+            }))
+        });
+
+        const handler = handlers.get('mcpServer/elicitation/request');
+        await expect(handler?.({
+            serverName: 'external',
+            mode: 'form',
+            message: 'Approve?',
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    approval: { type: 'string', enum: ['allow', 'deny'] }
+                },
+                required: ['approval']
+            }
+        })).resolves.toEqual({
+            action: 'accept',
+            content: { approval: 'allow' },
+            _meta: null
         });
     });
 

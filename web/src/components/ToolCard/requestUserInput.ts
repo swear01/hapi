@@ -8,7 +8,13 @@ export type RequestUserInputOption = {
 export type RequestUserInputQuestion = {
     id: string
     question: string
+    required: boolean
     options: RequestUserInputOption[]
+}
+
+export type RequestUserInputQuestionAnswer = {
+    selected: string | null
+    userNote: string
 }
 
 export type RequestUserInputQuestionInfo = {
@@ -69,11 +75,24 @@ export function parseRequestUserInputInput(input: unknown): { questions: Request
         questions.push({
             id,
             question,
+            required: raw.required !== false,
             options
         })
     }
 
     return { questions, url }
+}
+
+export function isRequestUserInputQuestionAnswered(
+    question: RequestUserInputQuestion,
+    answer: RequestUserInputQuestionAnswer | undefined
+): boolean {
+    if (!question.required) return true
+    if (!answer) return false
+    if (question.options.length > 0) {
+        return answer.selected !== null || answer.userNote.trim().length > 0
+    }
+    return answer.userNote.trim().length > 0
 }
 
 export function extractRequestUserInputQuestionsInfo(input: unknown): RequestUserInputQuestionInfo[] | null {
