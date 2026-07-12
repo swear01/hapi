@@ -1619,6 +1619,41 @@ describe('codexRemoteLauncher', () => {
         expect(harness.interruptedTurns).toEqual([]);
         expect(harness.rollbackCalls).toEqual([]);
         expect(harness.startTurnMessages).toEqual(['first message']);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(getAgentState().requests).toEqual({});
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: false,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
 
         harness.dispatchNotification?.('turn/completed', {
             threadId: 'thread-1',
