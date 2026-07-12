@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildGrokAgentArgs } from './grokBackend'
+import { buildGrokAgentArgs, formatGrokError } from './grokBackend'
 
 describe('buildGrokAgentArgs', () => {
     it('starts the official Grok ACP stdio agent', () => {
@@ -16,5 +16,16 @@ describe('buildGrokAgentArgs', () => {
             '--reasoning-effort', 'low',
             'stdio'
         ])
+    })
+})
+
+describe('formatGrokError', () => {
+    it('turns ACP auth failures into an actionable login hint', () => {
+        expect(formatGrokError(new Error('Authentication required: no auth method id provided')))
+            .toContain('grok login --device-auth')
+    })
+
+    it('preserves unrelated Grok errors', () => {
+        expect(formatGrokError(new Error('Payment Required'))).toBe('Payment Required')
     })
 })

@@ -2,15 +2,15 @@ import { logger } from '@/ui/logger'
 import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard'
 import type { PermissionMode } from './types'
 
-export async function grokLocal(opts: {
-    path: string
+type GrokLocalOptions = {
     sessionId: string
     resume: boolean
-    abort: AbortSignal
     model?: string
     effort?: string
     permissionMode?: PermissionMode
-}): Promise<void> {
+}
+
+export function buildGrokLocalArgs(opts: GrokLocalOptions): string[] {
     const args: string[] = []
 
     if (opts.resume) {
@@ -27,6 +27,14 @@ export async function grokLocal(opts: {
     if (opts.permissionMode && opts.permissionMode !== 'default') {
         args.push('--permission-mode', opts.permissionMode)
     }
+    return args
+}
+
+export async function grokLocal(opts: GrokLocalOptions & {
+    path: string
+    abort: AbortSignal
+}): Promise<void> {
+    const args = buildGrokLocalArgs(opts)
 
     logger.debug(`[GrokLocal] Spawning grok with args: ${JSON.stringify(args)}`)
 
