@@ -78,7 +78,7 @@ For a new local session, HAPI supplies a UUID with `grok --session-id`, so the s
 
 ## Current limitations
 
-- The Web UI uses the model selected by Grok Build; dynamic model discovery and mid-session model switching are not exposed yet.
+- The Create page discovers models with `grok models`; mid-session model switching is not exposed yet.
 - Reasoning effort can be selected at launch but is not changed mid-session.
 - OAuth/device-code login must be completed outside the HAPI Web UI.
 - Grok subscription, credit, and model availability are controlled by xAI.

@@ -10,6 +10,7 @@ import type {
     DirectoryEntry,
     FileReadResponse,
     GeneratedImageResponse,
+    GrokModelsResponse,
     ListDirectoryResponse,
     OpencodeModelsResponse,
     OpencodeModelSummary,
@@ -59,6 +60,7 @@ export type RpcCursorModel = CursorModelSummary
 export type RpcListCursorModelsResponse = CursorModelsResponse
 export type RpcOpencodeModel = OpencodeModelSummary
 export type RpcListOpencodeModelsResponse = OpencodeModelsResponse
+export type RpcListGrokModelsResponse = GrokModelsResponse
 export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
 
 export class RpcGateway {
@@ -280,6 +282,10 @@ export class RpcGateway {
 
     async listOpencodeModelsForCwd(machineId: string, cwd: string): Promise<RpcListOpencodeModelsResponse> {
         return await this.machineRpc(machineId, RPC_METHODS.ListOpencodeModelsForCwd, { cwd }) as RpcListOpencodeModelsResponse
+    }
+
+    async listGrokModelsForCwd(machineId: string, cwd: string): Promise<RpcListGrokModelsResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ListGrokModelsForCwd, { cwd }) as RpcListGrokModelsResponse
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

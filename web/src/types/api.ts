@@ -18,6 +18,8 @@ export type {
     DirectoryEntry,
     FileReadResponse,
     GitCommandResponse,
+    GrokModelsResponse,
+    GrokModelSummary,
     ListDirectoryResponse,
     MachineDirectoryEntry,
     MachineListDirectoryResponse,

@@ -55,3 +55,10 @@ export const CLAUDE_EFFORT_OPTIONS: { value: ClaudeEffort; label: string }[] = [
     { value: 'auto', label: 'Auto' },
     ...CLAUDE_EFFORT_LEVELS.map((value) => ({ value, label: CLAUDE_EFFORT_LABELS[value] })),
 ]
+
+export const GROK_EFFORT_OPTIONS: { value: ClaudeEffort; label: string }[] = [
+    { value: 'auto', label: 'Default' },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+]

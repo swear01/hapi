@@ -31,6 +31,7 @@ import type {
     DeleteUploadResponse,
     FileReadResponse,
     GitCommandResponse,
+    GrokModelsResponse,
     ListDirectoryResponse,
     MachineListDirectoryResponse,
     MachinePathsExistsResponse,
@@ -651,6 +652,12 @@ export class ApiClient {
     async getMachineOpencodeModelsForCwd(machineId: string, cwd: string): Promise<OpencodeModelsResponse> {
         return await this.request<OpencodeModelsResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/opencode-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
+    async getMachineGrokModelsForCwd(machineId: string, cwd: string): Promise<GrokModelsResponse> {
+        return await this.request<GrokModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/grok-models?cwd=${encodeURIComponent(cwd)}`
         )
     }
 

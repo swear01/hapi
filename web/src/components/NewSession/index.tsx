@@ -7,6 +7,7 @@ import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
 import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd'
+import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
@@ -37,8 +38,9 @@ import { DirectorySection } from './DirectorySection'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
 import { OpencodeModelSelector } from './OpencodeModelSelector'
-import { ClaudeEffortSelector } from './ClaudeEffortSelector'
+import { LaunchEffortSelector } from './LaunchEffortSelector'
 import { shouldEnableOpencodeModelDiscovery } from './opencodeModelsGate'
+import { buildGrokModelOptions, shouldEnableGrokModelDiscovery } from './grokModels'
 import { ReasoningEffortSelector } from './ReasoningEffortSelector'
 import {
     loadPreferredAgent,
@@ -364,6 +366,21 @@ export function NewSession(props: {
             cwdExists: deferredDirectoryExists,
         })
     })
+    const grokModelsState = useGrokModelsForCwd({
+        api: props.api,
+        machineId,
+        cwd: deferredDirectory,
+        enabled: shouldEnableGrokModelDiscovery({
+            agent,
+            machineId,
+            cwd: deferredDirectory,
+            cwdExists: deferredDirectoryExists,
+        })
+    })
+    const grokModelOptions = useMemo(
+        () => buildGrokModelOptions(grokModelsState.availableModels),
+        [grokModelsState.availableModels]
+    )
     useEffect(() => {
         // Auto-pick the OpenCode default model when discovery finishes, so the
         // form has a sensible value if the user hits Enter without scrolling.
@@ -580,7 +597,9 @@ export function NewSession(props: {
             const resolvedModel = agent === 'opencode'
                 ? (opencodeSelectedModel ?? undefined)
                 : (model !== 'auto' ? model : undefined)
-            const resolvedEffort = agent === 'claude' && effort !== 'auto' ? effort : undefined
+            const resolvedEffort = (agent === 'claude' || agent === 'grok') && effort !== 'auto'
+                ? effort
+                : undefined
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
@@ -717,21 +736,27 @@ export function NewSession(props: {
                         options={
                             agent === 'codex'
                                 ? codexModelOptions
+                                : agent === 'grok'
+                                    ? grokModelOptions
                                 : undefined
                         }
                         isDisabled={
                             isFormDisabled
                             || (agent === 'codex' && Boolean(codexModelsState.error))
+                            || (agent === 'grok' && Boolean(grokModelsState.error))
                         }
-                        isLoading={agent === 'codex' && codexModelsState.isLoading}
+                        isLoading={(agent === 'codex' && codexModelsState.isLoading)
+                            || (agent === 'grok' && grokModelsState.isLoading)}
                         error={agent === 'codex' && codexModelsState.error
                             ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`
-                            : null}
+                            : agent === 'grok' && grokModelsState.error
+                                ? `${t('newSession.model.loadFailed')}: ${grokModelsState.error}`
+                                : null}
                         onModelChange={setModel}
                     />
                 )
             )}
-            <ClaudeEffortSelector
+            <LaunchEffortSelector
                 agent={agent}
                 effort={effort}
                 isDisabled={isFormDisabled}
