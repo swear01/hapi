@@ -187,6 +187,77 @@ describe('AcpSdkBackend', () => {
         });
     });
 
+    it('captures Grok reasoning efforts from x.ai session metadata and switches with set_mode', async () => {
+        const backend = new AcpSdkBackend({ command: 'grok' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown>; close: () => Promise<void> } | null;
+        };
+        backendInternal.transport = {
+            sendRequest: async (method, params) => {
+                calls.push({ method, params });
+                if (method === 'session/new') {
+                    return {
+                        sessionId: 'grok-session-1',
+                        models: {
+                            currentModelId: 'grok-4.5',
+                            availableModels: [{
+                                modelId: 'grok-4.5',
+                                name: 'Grok 4.5',
+                                _meta: {
+                                    reasoningEfforts: [
+                                        { value: 'high', label: 'High Effort', default: true },
+                                        { value: 'low', label: 'Low Effort', default: false }
+                                    ]
+                                }
+                            }]
+                        },
+                        _meta: {
+                            'x.ai/sessionConfig': {
+                                options: [
+                                    { id: 'high', category: 'mode', label: 'High Effort', selected: false },
+                                    { id: 'low', category: 'mode', label: 'Low Effort', selected: true }
+                                ]
+                            }
+                        }
+                    };
+                }
+                if (method === 'session/set_mode') return { meta: null };
+                return null;
+            },
+            close: async () => {}
+        };
+
+        const sessionId = await backend.newSession({ cwd: '/tmp/x', mcpServers: [] });
+
+        expect(backend.getSessionModelsMetadata(sessionId)).toEqual({
+            availableModels: [{
+                modelId: 'grok-4.5',
+                name: 'Grok 4.5',
+                reasoningEfforts: [
+                    { value: 'high', name: 'High Effort', isDefault: true },
+                    { value: 'low', name: 'Low Effort', isDefault: false }
+                ]
+            }],
+            currentModelId: 'grok-4.5'
+        });
+        expect(backend.getThoughtLevelConfigOption(sessionId)).toMatchObject({
+            currentValue: 'low',
+            options: [
+                { value: 'high', name: 'High Effort' },
+                { value: 'low', name: 'Low Effort' }
+            ]
+        });
+
+        await backend.setMode(sessionId, 'high');
+
+        expect(calls).toContainEqual({
+            method: 'session/set_mode',
+            params: { sessionId, modeId: 'high' }
+        });
+        expect(backend.getThoughtLevelConfigOption(sessionId)?.currentValue).toBe('high');
+    });
+
     it('merges configOptions model variants into availableModels when both are present', async () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const backendInternal = backend as unknown as {

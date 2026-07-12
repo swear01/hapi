@@ -48,9 +48,9 @@ describe('hasCapability', () => {
         expect(hasCapability('kimi', Capabilities.Effort)).toBe(false)
     })
 
-    test('grok starts with no runtime model or effort switching capability', () => {
-        expect(hasCapability('grok', Capabilities.ModelChange)).toBe(false)
-        expect(hasCapability('grok', Capabilities.Effort)).toBe(false)
+    test('grok supports runtime model and effort switching through ACP', () => {
+        expect(hasCapability('grok', Capabilities.ModelChange)).toBe(true)
+        expect(hasCapability('grok', Capabilities.Effort)).toBe(true)
     })
 
     test('unknown flavor returns false', () => {
@@ -125,6 +125,7 @@ describe('convenience functions', () => {
         expect(supportsEffort('codex')).toBe(false)
         expect(supportsEffort('gemini')).toBe(false)
         expect(supportsEffort('pi')).toBe(true)
+        expect(supportsEffort('grok')).toBe(true)
         expect(supportsEffort('kimi')).toBe(false)
         expect(supportsEffort(null)).toBe(false)
     })
