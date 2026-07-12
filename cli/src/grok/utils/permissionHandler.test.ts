@@ -6,7 +6,7 @@ import { GrokPermissionHandler } from './permissionHandler'
 
 vi.mock('@/ui/logger', () => ({ logger: { debug: vi.fn() } }))
 
-function createHarness(mode: 'default' | 'plan' | 'bypassPermissions') {
+function createHarness(mode: 'default' | 'auto' | 'plan' | 'bypassPermissions') {
     let state: AgentState = { requests: {}, completedRequests: {} }
     let backendHandler: ((request: PermissionRequest) => void) | null = null
     const responses: PermissionResponse[] = []
@@ -65,6 +65,13 @@ async function flush(): Promise<void> {
 describe('GrokPermissionHandler', () => {
     it('queues default-mode requests for HAPI approval', () => {
         const harness = createHarness('default')
+        harness.emit(request())
+        expect(harness.responses).toEqual([])
+        expect(harness.state().requests?.['perm-1']).toMatchObject({ tool: 'Shell' })
+    })
+
+    it('queues dangerous requests that Grok Auto leaves for user approval', () => {
+        const harness = createHarness('auto')
         harness.emit(request())
         expect(harness.responses).toEqual([])
         expect(harness.state().requests?.['perm-1']).toMatchObject({ tool: 'Shell' })

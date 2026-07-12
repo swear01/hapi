@@ -6,6 +6,7 @@ const harness = vi.hoisted(() => ({
     setModels: [] as Array<{ sessionId: string; modelId: string; flavor?: string }>,
     setModes: [] as Array<{ sessionId: string; modeId: string }>,
     prompts: [] as unknown[][],
+    autoCommandAvailable: true,
     stderrHandler: null as null | ((error: { message: string; raw: string }) => void),
 }))
 
@@ -42,7 +43,10 @@ vi.mock('./utils/grokBackend', () => ({
             id: 'x.ai/reasoning-effort',
             currentValue: 'low',
             options: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }]
-        }))
+        })),
+        hasAvailableCommand: vi.fn((_sessionId: string, command: string) => (
+            command === 'auto' && harness.autoCommandAvailable
+        ))
     })),
     formatGrokError: (error: unknown) => error instanceof Error ? error.message : String(error),
     isGrokBuildAuxiliaryQuotaError: (value: string, activeModel?: string | null) => (
@@ -88,11 +92,26 @@ function createSession() {
         registerExistingNativeSession(id: string) { session.sessionId = id },
         setModel: vi.fn(),
         setEffort: vi.fn(),
+        setPermissionMode: vi.fn(),
         pushKeepAlive: vi.fn(),
         onThinkingChange(thinking: boolean) { session.thinking = thinking },
         sendAgentMessage: vi.fn(),
         sendSessionEvent: vi.fn()
     }
+    return { session, rpcHandlers }
+}
+
+function createPermissionSession(modes: GrokMode['permissionMode'][]) {
+    const { session, rpcHandlers } = createSession()
+    session.queue.reset()
+    modes.forEach((permissionMode, index) => {
+        session.queue.push(`permission-${index + 1}`, {
+            permissionMode,
+            model: 'grok-a',
+            effort: 'low'
+        })
+    })
+    session.queue.close()
     return { session, rpcHandlers }
 }
 
@@ -102,6 +121,7 @@ describe('grokRemoteLauncher runtime config', () => {
         harness.setModes = []
         harness.prompts = []
         harness.stderrHandler = null
+        harness.autoCommandAvailable = true
     })
 
     it('switches model and effort between turns and exposes session catalogs', async () => {
@@ -121,13 +141,46 @@ describe('grokRemoteLauncher runtime config', () => {
         expect(harness.setModes).toEqual([
             { sessionId: 'grok-session-1', modeId: 'medium' }
         ])
-        expect(harness.prompts).toHaveLength(2)
+        expect(harness.prompts).toHaveLength(3)
         expect(session.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('402 Payment Required')
         }))
-        expect(JSON.stringify(harness.prompts[0])).toContain('hapi_change_title')
-        expect(JSON.stringify(harness.prompts[1])).not.toContain('hapi_change_title')
+        expect(JSON.stringify(harness.prompts[0])).toContain('/always-approve off')
+        expect(JSON.stringify(harness.prompts[1])).toContain('hapi_change_title')
+        expect(JSON.stringify(harness.prompts[2])).not.toContain('hapi_change_title')
         expect(await rpcHandlers.get('listGrokModels')?.()).toMatchObject({ success: true, currentModelId: 'grok-a' })
         expect(await rpcHandlers.get('listGrokReasoningEffortOptions')?.()).toMatchObject({ success: true, currentValue: 'low' })
+    })
+
+    it('uses Grok slash commands to enter and leave Auto permission mode without model turns', async () => {
+        const { session } = createPermissionSession(['auto', 'default'])
+
+        await grokRemoteLauncher(session as never, { model: 'grok-a', effort: 'low' })
+
+        expect(harness.prompts.map((prompt) => JSON.stringify(prompt))).toEqual([
+            expect.stringContaining('/auto'),
+            expect.stringContaining('permission-1'),
+            expect.stringContaining('/always-approve off'),
+            expect.stringContaining('permission-2')
+        ])
+    })
+
+    it('rolls Auto back to Default when Grok does not advertise the feature', async () => {
+        harness.autoCommandAvailable = false
+        const { session } = createPermissionSession(['auto'])
+        const rollbacks: string[] = []
+
+        await grokRemoteLauncher(session as never, {
+            model: 'grok-a',
+            effort: 'low',
+            onPermissionModeRollback: (mode) => rollbacks.push(mode)
+        })
+
+        expect(rollbacks).toEqual(['default'])
+        expect(harness.prompts).toHaveLength(2)
+        expect(JSON.stringify(harness.prompts[0])).toContain('/always-approve off')
+        expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('not enabled')
+        }))
     })
 })

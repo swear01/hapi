@@ -28,6 +28,7 @@ type GrokRemoteLauncherOptions = {
     effort?: string
     onModelRollback?: (model: string | null) => void
     onEffortRollback?: (effort: string | null) => void
+    onPermissionModeRollback?: (mode: PermissionMode) => void
     onConfigDiscovered?: (config: { model: string | null; effort: string | null }) => void
 }
 
@@ -42,6 +43,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendModel: string | null = null
     private currentBackendEffort: string | null = null
     private defaultBackendEffort: string | null = null
+    private currentBackendPermissionMode: 'default' | 'auto' | null = null
     private instructionsSent = false
 
     constructor(
@@ -139,7 +141,8 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
             return {
                 success: true,
                 availableModels: metadata.availableModels,
-                currentModelId: metadata.currentModelId
+                currentModelId: metadata.currentModelId,
+                autoPermissionModeSupported: backend.hasAvailableCommand(acpSessionId, 'auto')
             }
         })
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListGrokReasoningEffortOptions, async () => {
@@ -206,6 +209,21 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                         message: `Failed to switch Grok effort to ${requestedEffort}.`
                     })
                 }
+            }
+
+            const requestedPermissionMode = batch.mode.permissionMode
+            try {
+                await this.syncBackendPermissionMode(acpSessionId, requestedPermissionMode)
+            } catch (error) {
+                logger.warn('[grok-remote] Inline permission mode switch failed', error)
+                const fallbackMode: PermissionMode = this.currentBackendPermissionMode ?? 'default'
+                this.rollbackPermissionMode(batch, fallbackMode)
+                session.sendSessionEvent({
+                    type: 'message',
+                    message: requestedPermissionMode === 'auto'
+                        ? 'Grok Auto permission mode is not enabled for this account or CLI build; using Default.'
+                        : `Failed to switch Grok permission mode to ${requestedPermissionMode}.`
+                })
             }
 
             this.applyDisplayMode(batch.mode.permissionMode)
@@ -317,6 +335,50 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         this.session.setEffort(effort)
         this.session.pushKeepAlive()
         this.opts.onEffortRollback?.(effort)
+    }
+
+    private rollbackPermissionMode(
+        batch: { mode: { permissionMode: PermissionMode } },
+        permissionMode: PermissionMode
+    ): void {
+        batch.mode.permissionMode = permissionMode
+        this.session.setPermissionMode(permissionMode)
+        this.session.pushKeepAlive()
+        this.opts.onPermissionModeRollback?.(permissionMode)
+    }
+
+    private async syncBackendPermissionMode(
+        sessionId: string,
+        permissionMode: PermissionMode
+    ): Promise<void> {
+        if (!this.backend) return
+
+        if (permissionMode === 'auto') {
+            if (this.currentBackendPermissionMode === 'auto') return
+            if (!this.backend.hasAvailableCommand(sessionId, 'auto')) {
+                await this.setBackendDefaultPermissionMode(sessionId)
+                throw new Error('Grok did not advertise the /auto command')
+            }
+            await this.backend.prompt(
+                sessionId,
+                [{ type: 'text', text: '/auto' }],
+                () => undefined
+            )
+            this.currentBackendPermissionMode = 'auto'
+            return
+        }
+
+        await this.setBackendDefaultPermissionMode(sessionId)
+    }
+
+    private async setBackendDefaultPermissionMode(sessionId: string): Promise<void> {
+        if (!this.backend || this.currentBackendPermissionMode === 'default') return
+        await this.backend.prompt(
+            sessionId,
+            [{ type: 'text', text: '/always-approve off' }],
+            () => undefined
+        )
+        this.currentBackendPermissionMode = 'default'
     }
 
     private async handleAbort(): Promise<void> {

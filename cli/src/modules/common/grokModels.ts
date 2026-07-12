@@ -18,6 +18,7 @@ interface CacheEntry {
 
 const CACHE_TTL_MS = 60_000
 const PROBE_TIMEOUT_MS = 15_000
+const SETTINGS_PROBE_GRACE_MS = 300
 const cache = new Map<string, CacheEntry>()
 const inflight = new Map<string, Promise<ListGrokModelsForCwdResponse>>()
 
@@ -62,11 +63,18 @@ export function parseGrokModelsOutput(output: string): {
 export function parseGrokInitializeModels(response: unknown): {
     availableModels: GrokModelSummary[]
     currentModelId: string | null
+    autoPermissionModeSupported: boolean
 } {
     if (!isObject(response) || !isObject(response._meta) || !isObject(response._meta.modelState)) {
-        return { availableModels: [], currentModelId: null }
+        return { availableModels: [], currentModelId: null, autoPermissionModeSupported: false }
     }
     const state = response._meta.modelState
+    const rawCommands = Array.isArray(response._meta.availableCommands)
+        ? response._meta.availableCommands
+        : []
+    const autoPermissionModeSupported = rawCommands.some(
+        (entry) => isObject(entry) && asString(entry.name) === 'auto'
+    )
     const currentModelId = asString(state.currentModelId)
     const rawModels = Array.isArray(state.availableModels) ? state.availableModels : []
     const availableModels = rawModels
@@ -92,7 +100,7 @@ export function parseGrokInitializeModels(response: unknown): {
         })
         .filter((entry): entry is GrokModelSummary => entry !== null)
 
-    return { availableModels, currentModelId }
+    return { availableModels, currentModelId, autoPermissionModeSupported }
 }
 
 async function runGrokModelsCliProbe(cwd: string): Promise<ListGrokModelsForCwdResponse> {
@@ -148,6 +156,20 @@ async function runGrokModelsProbe(cwd: string): Promise<ListGrokModelsForCwdResp
         )
     })
     try {
+        let resolveAutoPermissionMode: ((supported: boolean) => void) | null = null
+        const autoPermissionMode = new Promise<boolean>((resolve) => {
+            resolveAutoPermissionMode = resolve
+        })
+        transport.onNotification((method, params) => {
+            if (
+                method === '_x.ai/settings/update'
+                && isObject(params)
+                && 'auto_permission_mode_enabled' in params
+            ) {
+                resolveAutoPermissionMode?.(params.auto_permission_mode_enabled === true)
+                resolveAutoPermissionMode = null
+            }
+        })
         const response = await transport.sendRequest('initialize', {
             protocolVersion: 1,
             clientCapabilities: {
@@ -159,7 +181,15 @@ async function runGrokModelsProbe(cwd: string): Promise<ListGrokModelsForCwdResp
         }, { timeoutMs: PROBE_TIMEOUT_MS })
         const parsed = parseGrokInitializeModels(response)
         if (parsed.availableModels.length > 0) {
-            return { success: true, ...parsed }
+            const remoteSupport = await Promise.race([
+                autoPermissionMode,
+                new Promise<null>((resolve) => setTimeout(resolve, SETTINGS_PROBE_GRACE_MS, null))
+            ])
+            return {
+                success: true,
+                ...parsed,
+                autoPermissionModeSupported: parsed.autoPermissionModeSupported || remoteSupport === true
+            }
         }
     } catch {
         // Older Grok builds may not expose modelState during initialize.

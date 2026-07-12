@@ -1,6 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { Machine } from '@/types/api'
+import type { GrokPermissionMode } from '@hapi/protocol'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
 import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
@@ -35,6 +36,7 @@ import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from 
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { DirectorySection } from './DirectorySection'
+import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
 import { OpencodeModelSelector } from './OpencodeModelSelector'
@@ -80,6 +82,7 @@ export function NewSession(props: {
     const [effort, setEffort] = useState<LaunchEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
+    const [grokPermissionMode, setGrokPermissionMode] = useState<GrokPermissionMode>('default')
     const [sessionType, setSessionType] = useState<SessionType>('simple')
     const [worktreeName, setWorktreeName] = useState('')
     const [directoryCreationConfirmed, setDirectoryCreationConfirmed] = useState(false)
@@ -95,6 +98,7 @@ export function NewSession(props: {
     useEffect(() => {
         setEffort('auto')
         setModelReasoningEffort('default')
+        setGrokPermissionMode('default')
         if (agent !== 'cursor') {
             setModel('auto')
             setCursorSelectedBase('auto')
@@ -148,6 +152,7 @@ export function NewSession(props: {
         setEffort(draft.effort)
         setModelReasoningEffort(draft.modelReasoningEffort)
         setYoloMode(draft.yoloMode)
+        setGrokPermissionMode(draft.grokPermissionMode)
         setSessionType(draft.sessionType)
         setWorktreeName(draft.worktreeName)
         clearNewSessionFormDraft()
@@ -390,6 +395,15 @@ export function NewSession(props: {
         [grokModelsState.availableModels, grokModelsState.currentModelId, model]
     )
     useEffect(() => {
+        if (
+            agent === 'grok'
+            && grokPermissionMode === 'auto'
+            && grokModelsState.autoPermissionModeSupported === false
+        ) {
+            setGrokPermissionMode('default')
+        }
+    }, [agent, grokPermissionMode, grokModelsState.autoPermissionModeSupported])
+    useEffect(() => {
         // Auto-pick the OpenCode default model when discovery finishes, so the
         // form has a sensible value if the user hits Enter without scrolling.
         if (agent !== 'opencode') return
@@ -501,6 +515,7 @@ export function NewSession(props: {
             effort,
             modelReasoningEffort,
             yoloMode,
+            grokPermissionMode,
             sessionType,
             worktreeName
         })
@@ -514,6 +529,7 @@ export function NewSession(props: {
         effort,
         modelReasoningEffort,
         yoloMode,
+        grokPermissionMode,
         sessionType,
         worktreeName,
         trimmedDirectory
@@ -618,7 +634,8 @@ export function NewSession(props: {
                 model: resolvedModel,
                 effort: resolvedEffort,
                 modelReasoningEffort: resolvedModelReasoningEffort,
-                yolo: yoloMode,
+                yolo: agent === 'grok' ? undefined : yoloMode,
+                permissionMode: agent === 'grok' ? grokPermissionMode : undefined,
                 sessionType,
                 worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined
             })
@@ -778,11 +795,20 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
                 onChange={setModelReasoningEffort}
             />
-            <YoloToggle
-                yoloMode={yoloMode}
+            <GrokPermissionModeSelector
+                agent={agent}
+                value={grokPermissionMode}
+                autoPermissionModeSupported={grokModelsState.autoPermissionModeSupported}
                 isDisabled={isFormDisabled}
-                onToggle={setYoloMode}
+                onChange={setGrokPermissionMode}
             />
+            {agent !== 'grok' ? (
+                <YoloToggle
+                    yoloMode={yoloMode}
+                    isDisabled={isFormDisabled}
+                    onToggle={setYoloMode}
+                />
+            ) : null}
 
             {(error ?? spawnError) ? (
                 <div className="px-3 py-2 text-sm text-red-600">

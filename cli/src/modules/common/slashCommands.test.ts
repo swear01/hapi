@@ -232,6 +232,7 @@ describe('listSlashCommands', () => {
             'session-info',
             'goal',
             'always-approve',
+            'auto',
         ])
         for (const composerControl of ['model', 'effort', 'plan', 'view-plan']) {
             expect(builtinNames).not.toContain(composerControl)

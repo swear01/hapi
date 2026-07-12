@@ -11,6 +11,7 @@ export function useGrokModelsForCwd(args: {
 }): {
     availableModels: GrokModelSummary[]
     currentModelId: string | null
+    autoPermissionModeSupported: boolean | null
     isLoading: boolean
     error: string | null
 } {
@@ -36,6 +37,7 @@ export function useGrokModelsForCwd(args: {
     return {
         availableModels: query.data?.availableModels ?? [],
         currentModelId: query.data?.currentModelId ?? null,
+        autoPermissionModeSupported: query.data?.autoPermissionModeSupported ?? null,
         isLoading: query.isLoading,
         error: query.data?.success === false
             ? (query.data.error ?? 'Failed to load Grok models')

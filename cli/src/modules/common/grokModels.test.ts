@@ -29,6 +29,7 @@ Available models:
     test('parses model names and per-model efforts from ACP initialize metadata', () => {
         expect(parseGrokInitializeModels({
             _meta: {
+                availableCommands: [{ name: 'auto' }],
                 modelState: {
                     currentModelId: 'grok-4.5',
                     availableModels: [{
@@ -45,6 +46,7 @@ Available models:
             }
         })).toEqual({
             currentModelId: 'grok-4.5',
+            autoPermissionModeSupported: true,
             availableModels: [{
                 modelId: 'grok-4.5',
                 name: 'Grok 4.5',

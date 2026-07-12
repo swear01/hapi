@@ -213,6 +213,7 @@ describe('AcpSdkBackend', () => {
                             }]
                         },
                         _meta: {
+                            availableCommands: [{ name: 'auto' }],
                             'x.ai/sessionConfig': {
                                 options: [
                                     { id: 'high', category: 'mode', label: 'High Effort', selected: false },
@@ -248,6 +249,7 @@ describe('AcpSdkBackend', () => {
                 { value: 'low', name: 'Low Effort' }
             ]
         });
+        expect(backend.hasAvailableCommand(sessionId, 'auto')).toBe(true);
 
         await backend.setMode(sessionId, 'high');
 

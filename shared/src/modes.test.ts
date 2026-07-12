@@ -32,6 +32,7 @@ describe('getPermissionModesForFlavor', () => {
     test("returns the conservative Grok modes", () => {
         expect(getPermissionModesForFlavor('grok')).toEqual([
             'default',
+            'auto',
             'plan',
             'bypassPermissions'
         ])
@@ -67,7 +68,7 @@ describe('isPermissionModeAllowedForFlavor', () => {
         expect(isPermissionModeAllowedForFlavor('plan', 'grok')).toBe(true)
         expect(isPermissionModeAllowedForFlavor('bypassPermissions', 'grok')).toBe(true)
         expect(isPermissionModeAllowedForFlavor('acceptEdits', 'grok')).toBe(false)
-        expect(isPermissionModeAllowedForFlavor('auto', 'grok')).toBe(false)
+        expect(isPermissionModeAllowedForFlavor('auto', 'grok')).toBe(true)
         expect(isPermissionModeAllowedForFlavor('yolo', 'grok')).toBe(false)
     })
 

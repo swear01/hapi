@@ -127,6 +127,9 @@ export async function runGrok(opts: {
             onEffortRollback: (effort) => {
                 currentEffort = effort
             },
+            onPermissionModeRollback: (permissionMode) => {
+                currentPermissionMode = permissionMode
+            },
             onConfigDiscovered: (config) => {
                 currentModel = config.model
                 currentEffort = config.effort

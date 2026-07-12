@@ -23,6 +23,7 @@ interface GrokLoopOptions {
     onSessionReady?: (session: GrokSession) => void
     onModelRollback?: (model: string | null) => void
     onEffortRollback?: (effort: string | null) => void
+    onPermissionModeRollback?: (mode: PermissionMode) => void
     onConfigDiscovered?: (config: { model: string | null; effort: string | null }) => void
 }
 
@@ -65,6 +66,7 @@ export async function grokLoop(opts: GrokLoopOptions): Promise<void> {
             effort: instance.getEffort() ?? undefined,
             onModelRollback: opts.onModelRollback,
             onEffortRollback: opts.onEffortRollback,
+            onPermissionModeRollback: opts.onPermissionModeRollback,
             onConfigDiscovered: opts.onConfigDiscovered
         }),
         onSessionReady: opts.onSessionReady

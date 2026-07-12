@@ -1,4 +1,8 @@
-import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
+import {
+    CREATABLE_AGENT_FLAVORS,
+    GROK_PERMISSION_MODES,
+    type GrokPermissionMode
+} from '@hapi/protocol'
 import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
 
 const DRAFT_STORAGE_KEY = 'hapi:new-session-form-draft'
@@ -11,6 +15,7 @@ export type NewSessionFormDraft = {
     effort: LaunchEffort
     modelReasoningEffort: CodexReasoningEffort
     yoloMode: boolean
+    grokPermissionMode: GrokPermissionMode
     sessionType: SessionType
     worktreeName: string
 }
@@ -53,6 +58,10 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
                 ? ((parsed.modelReasoningEffort as CodexReasoningEffort | undefined) ?? 'default')
                 : 'default',
             yoloMode: Boolean(parsed.yoloMode),
+            grokPermissionMode: agentPreserved
+                && GROK_PERMISSION_MODES.includes(parsed.grokPermissionMode as GrokPermissionMode)
+                ? parsed.grokPermissionMode as GrokPermissionMode
+                : 'default',
             sessionType: (parsed.sessionType as SessionType | undefined) ?? 'simple',
             worktreeName: typeof parsed.worktreeName === 'string' ? parsed.worktreeName : ''
         }

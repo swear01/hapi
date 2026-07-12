@@ -38,6 +38,7 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'session-info', description: 'Show Grok session model, turns, and context usage', source: 'builtin' },
         { name: 'goal', description: 'Set, manage, or inspect an autonomous goal', source: 'builtin' },
         { name: 'always-approve', description: 'Toggle automatic tool approval', source: 'builtin' },
+        { name: 'auto', description: 'Let Grok classify safe tool calls for automatic approval', source: 'builtin' },
     ],
     opencode: [
         { name: 'help', description: 'Show supported HAPI OpenCode slash commands', source: 'builtin' },
