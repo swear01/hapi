@@ -42,6 +42,7 @@ export type CodexConversionResult = {
     sessionId?: string;
     message?: CodexMessage;
     userMessage?: string;
+    userActivity?: true;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -146,11 +147,9 @@ export function convertCodexEvent(rawEvent: unknown): CodexConversionResult | nu
             const message = asString(payloadRecord.message)
                 ?? asString(payloadRecord.text)
                 ?? asString(payloadRecord.content);
-            if (!message) {
-                return null;
-            }
             return {
-                userMessage: message
+                userActivity: true,
+                ...(message ? { userMessage: message } : {})
             };
         }
 
@@ -221,13 +220,16 @@ export function convertCodexEvent(rawEvent: unknown): CodexConversionResult | nu
         if (itemType === 'message') {
             const role = asString(payloadRecord.role);
             const text = extractCodexText(payloadRecord.content);
-            if (!text) {
-                return null;
-            }
             if (role === 'user') {
-                return { userMessage: text };
+                return {
+                    userActivity: true,
+                    ...(text ? { userMessage: text } : {})
+                };
             }
             if (role === 'assistant') {
+                if (!text) {
+                    return null;
+                }
                 return {
                     message: {
                         type: 'message',
