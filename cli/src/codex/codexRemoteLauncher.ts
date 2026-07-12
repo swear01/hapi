@@ -1822,6 +1822,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             fasterModel: string;
             message: QueuedMessage;
         } | null = null;
+        const dismissedSafetyBufferingKeys = new Set<string>();
         let agentMessageStartedForTurn = false;
         let compactRecovery: {
             threadId: string;
@@ -2049,6 +2050,22 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             permissionHandler.cancelUserInputRequest(request.requestId, reason);
         };
 
+        const safetyBufferingTurnKey = (threadId: string, turnId: string) => `${threadId}\u0000${turnId}`;
+        const safetyBufferingKey = (threadId: string, turnId: string, fasterModel: string) => {
+            return `${safetyBufferingTurnKey(threadId, turnId)}\u0000${fasterModel}`;
+        };
+        const clearDismissedSafetyBufferingForTurn = (threadId: string | null, turnId: string | null) => {
+            if (!threadId || !turnId) {
+                return;
+            }
+            const prefix = `${safetyBufferingTurnKey(threadId, turnId)}\u0000`;
+            for (const key of dismissedSafetyBufferingKeys) {
+                if (key.startsWith(prefix)) {
+                    dismissedSafetyBufferingKeys.delete(key);
+                }
+            }
+        };
+
         const safetyBufferingChoice = (answers: unknown): string | null => {
             const answersRecord = asRecord(answers);
             const action = asRecord(answersRecord?.safety_buffering_action);
@@ -2135,6 +2152,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (!activeMessage || agentMessageStartedForTurn) {
                 return;
             }
+            if (dismissedSafetyBufferingKeys.has(safetyBufferingKey(args.threadId, args.turnId, args.fasterModel))) {
+                return;
+            }
             if (
                 activeSafetyBufferingRequest?.threadId === args.threadId
                 && activeSafetyBufferingRequest.turnId === args.turnId
@@ -2178,10 +2198,15 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const choice = safetyBufferingChoice(answers);
                 if (choice === 'Retry with a faster model') {
                     void retrySafetyBufferedTurn(request);
-                } else if (choice === 'Learn more') {
-                    const message = `Learn more about Codex safety checks: ${SAFETY_BUFFERING_LEARN_MORE_URL}`;
-                    messageBuffer.addMessage(message, 'status');
-                    session.sendSessionEvent({ type: 'message', message });
+                } else if (choice === 'Keep waiting' || choice === 'Learn more') {
+                    dismissedSafetyBufferingKeys.add(
+                        safetyBufferingKey(request.threadId, request.turnId, request.fasterModel)
+                    );
+                    if (choice === 'Learn more') {
+                        const message = `Learn more about Codex safety checks: ${SAFETY_BUFFERING_LEARN_MORE_URL}`;
+                        messageBuffer.addMessage(message, 'status');
+                        session.sendSessionEvent({ type: 'message', message });
+                    }
                 }
             }).catch((error) => {
                 if (activeSafetyBufferingRequest === request) {
@@ -2310,6 +2335,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (msgType === 'task_started') {
                 const turnId = eventTurnId;
                 agentMessageStartedForTurn = false;
+                dismissedSafetyBufferingKeys.clear();
                 if (turnId) {
                     this.currentTurnId = turnId;
                     allowAnonymousTerminalEvent = false;
@@ -2332,6 +2358,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (msgType === 'model_safety_buffering') {
                 const showBufferingUi = msg.show_buffering_ui === true;
                 if (!showBufferingUi) {
+                    clearDismissedSafetyBufferingForTurn(
+                        eventThreadId ?? this.currentThreadId,
+                        eventTurnId ?? this.currentTurnId
+                    );
                     if (
                         activeSafetyBufferingRequest
                         && (!eventTurnId || activeSafetyBufferingRequest.turnId === eventTurnId)
@@ -2500,6 +2530,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (finalizedTurnId) {
                     lastFinalizedTurnId = finalizedTurnId;
                 }
+                clearDismissedSafetyBufferingForTurn(
+                    eventThreadId ?? this.currentThreadId,
+                    finalizedTurnId
+                );
                 if (
                     activeSafetyBufferingRequest
                     && (!finalizedTurnId || activeSafetyBufferingRequest.turnId === finalizedTurnId)
