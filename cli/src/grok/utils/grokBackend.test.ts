@@ -1,9 +1,21 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
     buildGrokAgentArgs,
     formatGrokError,
     isGrokBuildAuxiliaryQuotaError
 } from './grokBackend'
+
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+
+afterEach(() => {
+    if (originalPlatformDescriptor) {
+        Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+    }
+})
+
+function setWindowsPlatform(): void {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+}
 
 describe('buildGrokAgentArgs', () => {
     it('starts the official Grok ACP stdio agent', () => {
@@ -24,6 +36,20 @@ describe('buildGrokAgentArgs', () => {
             '--reasoning-effort', 'low',
             'stdio'
         ])
+    })
+
+    it('rejects dynamic shell metacharacters before a Windows ACP spawn', () => {
+        setWindowsPlatform()
+
+        expect(() => buildGrokAgentArgs({ cwd: 'C:\\repo&whoami' })).toThrow('Invalid cwd')
+        expect(() => buildGrokAgentArgs({
+            cwd: 'C:\\repo',
+            model: 'grok|whoami'
+        })).toThrow('Invalid model')
+        expect(() => buildGrokAgentArgs({
+            cwd: 'C:\\repo',
+            effort: 'low%PATH%'
+        })).toThrow('Invalid effort')
     })
 })
 

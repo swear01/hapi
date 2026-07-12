@@ -1,5 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { buildGrokLocalArgs } from './grokLocal'
+
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+
+afterEach(() => {
+    if (originalPlatformDescriptor) {
+        Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+    }
+})
+
+function setWindowsPlatform(): void {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+}
 
 describe('buildGrokLocalArgs', () => {
     it('uses a caller-supplied id for a new native session', () => {
@@ -24,5 +36,24 @@ describe('buildGrokLocalArgs', () => {
             '--reasoning-effort', 'low',
             '--permission-mode', 'plan'
         ])
+    })
+
+    it('rejects shell metacharacters in dynamic Windows arguments', () => {
+        setWindowsPlatform()
+
+        expect(() => buildGrokLocalArgs({
+            sessionId: 'session&whoami',
+            resume: true
+        })).toThrow('Invalid sessionId')
+        expect(() => buildGrokLocalArgs({
+            sessionId: 'session-1',
+            resume: true,
+            model: 'grok|whoami'
+        })).toThrow('Invalid model')
+        expect(() => buildGrokLocalArgs({
+            sessionId: 'session-1',
+            resume: true,
+            effort: 'low%PATH%'
+        })).toThrow('Invalid effort')
     })
 })

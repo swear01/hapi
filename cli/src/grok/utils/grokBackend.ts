@@ -1,4 +1,5 @@
 import { AcpSdkBackend } from '@/agent/backends/acp'
+import { assertSafeWindowsShellArg } from './windowsShellArgs'
 
 const ANSI_SGR_PATTERN = /\u001b\[[0-9;]*m/g
 
@@ -17,6 +18,10 @@ function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 }
 
 export function buildGrokAgentArgs(opts: { cwd: string; model?: string; effort?: string }): string[] {
+    assertSafeWindowsShellArg(opts.cwd, 'cwd')
+    if (opts.model) assertSafeWindowsShellArg(opts.model, 'model')
+    if (opts.effort) assertSafeWindowsShellArg(opts.effort, 'effort')
+
     // --cwd is a top-level Grok flag and must precede the `agent` subcommand.
     // session/new also carries cwd, but setting it at process start ensures
     // Grok discovers the correct project rules/plugins before initialization.

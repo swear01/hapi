@@ -1,6 +1,7 @@
 import { logger } from '@/ui/logger'
 import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard'
 import type { PermissionMode } from './types'
+import { assertSafeWindowsShellArg } from './utils/windowsShellArgs'
 
 type GrokLocalOptions = {
     sessionId: string
@@ -11,6 +12,10 @@ type GrokLocalOptions = {
 }
 
 export function buildGrokLocalArgs(opts: GrokLocalOptions): string[] {
+    assertSafeWindowsShellArg(opts.sessionId, 'sessionId')
+    if (opts.model) assertSafeWindowsShellArg(opts.model, 'model')
+    if (opts.effort) assertSafeWindowsShellArg(opts.effort, 'effort')
+
     const args: string[] = []
 
     if (opts.resume) {

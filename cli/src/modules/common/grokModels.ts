@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { asString, isObject } from '@hapi/protocol'
 import type { GrokModelSummary, GrokModelsResponse, GrokReasoningEffortOption } from '@hapi/protocol/apiTypes'
 import { AcpStdioTransport } from '@/agent/backends/acp/AcpStdioTransport'
+import { assertSafeWindowsShellArg } from '@/grok/utils/windowsShellArgs'
 import { getErrorMessage } from './rpcResponses'
 import packageJson from '../../../package.json'
 
@@ -23,6 +24,7 @@ const cache = new Map<string, CacheEntry>()
 const inflight = new Map<string, Promise<ListGrokModelsForCwdResponse>>()
 
 export function buildGrokModelsArgs(cwd: string): string[] {
+    assertSafeWindowsShellArg(cwd, 'cwd')
     return ['--cwd', cwd, 'models']
 }
 
@@ -148,6 +150,8 @@ async function runGrokModelsCliProbe(cwd: string): Promise<ListGrokModelsForCwdR
 }
 
 async function runGrokModelsProbe(cwd: string): Promise<ListGrokModelsForCwdResponse> {
+    // The primary ACP probe also uses shell mode on Windows through AcpStdioTransport.
+    assertSafeWindowsShellArg(cwd, 'cwd')
     const transport = new AcpStdioTransport({
         command: 'grok',
         args: ['--cwd', cwd, 'agent', '--reasoning-effort', 'low', 'stdio'],
