@@ -170,6 +170,70 @@ function unwrapElicitationRequest(params: unknown): Record<string, unknown> {
     return asRecord(record.request) ?? record;
 }
 
+function getMcpToolApprovalMeta(params: unknown): Record<string, unknown> | null {
+    const record = asRecord(params) ?? {};
+    const request = unwrapElicitationRequest(params);
+    const meta = asRecord(request._meta) ?? asRecord(record._meta);
+    if (meta?.codex_approval_kind !== 'mcp_tool_call') return null;
+
+    const mode = asString(request.mode) ?? 'form';
+    if (mode !== 'form') return null;
+
+    const schema = asRecord(request.requestedSchema);
+    const properties = asRecord(schema?.properties);
+    if (properties && Object.keys(properties).length > 0) return null;
+
+    return meta;
+}
+
+function mcpApprovalSupportsSessionPersistence(meta: Record<string, unknown>): boolean {
+    if (meta.persist === 'session') return true;
+    return Array.isArray(meta.persist) && meta.persist.includes('session');
+}
+
+function buildMcpToolApprovalInput(
+    params: unknown,
+    meta: Record<string, unknown>
+): { toolName: string; input: Record<string, unknown> } {
+    const record = asRecord(params) ?? {};
+    const request = unwrapElicitationRequest(params);
+    const serverName = asString(record.serverName) ?? asString(request.serverName);
+    const toolTitle = asString(meta.tool_title);
+    const toolName = asString(meta.tool_name) ?? toolTitle ?? serverName ?? 'MCP tool';
+    const input: Record<string, unknown> = {
+        message: asString(request.message) ?? 'Allow MCP tool call?'
+    };
+
+    if (serverName) input.serverName = serverName;
+    if (toolTitle) input.toolTitle = toolTitle;
+    const toolDescription = asString(meta.tool_description);
+    if (toolDescription) input.toolDescription = toolDescription;
+    if (meta.tool_params !== undefined) input.toolParams = meta.tool_params;
+    if (meta.tool_params_display !== undefined) input.toolParamsDisplay = meta.tool_params_display;
+
+    return { toolName, input };
+}
+
+function mapMcpToolApprovalDecision(
+    decision: PermissionDecision,
+    meta: Record<string, unknown>
+): { action: 'accept' | 'decline' | 'cancel'; content: null; _meta: { persist: 'session' } | null } {
+    if (decision === 'denied') {
+        return { action: 'decline', content: null, _meta: null };
+    }
+    if (decision === 'abort') {
+        return { action: 'cancel', content: null, _meta: null };
+    }
+
+    return {
+        action: 'accept',
+        content: null,
+        _meta: decision === 'approved_for_session' && mcpApprovalSupportsSessionPersistence(meta)
+            ? { persist: 'session' }
+            : null
+    };
+}
+
 function elicitationChoiceValues(property: Record<string, unknown>): unknown[] {
     if (Array.isArray(property.enum)) return property.enum;
     if (Array.isArray(property.oneOf)) {
@@ -206,6 +270,7 @@ function buildElicitationUserInput(params: unknown): { questions: unknown[]; url
             url,
             questions: [{
                 id: '__mcp_url_confirmation',
+                header: 'Sign in',
                 question: message,
                 options: [{ label: 'Open sign-in page and continue', description: url }]
             }]
@@ -227,6 +292,7 @@ function buildElicitationUserInput(params: unknown): { questions: unknown[]; url
         const fieldQuestion = asString(property.title) ?? asString(property.description) ?? id;
         return {
             id,
+            header: fieldQuestion,
             question: `${message}\n\n${fieldQuestion}`,
             required: required.has(id),
             ...(property.type === 'array' ? { multiple: true } : {}),
@@ -236,6 +302,7 @@ function buildElicitationUserInput(params: unknown): { questions: unknown[]; url
     return {
         questions: questions.length > 0 ? questions : [{
             id: '__mcp_form_confirmation',
+            header: 'Confirmation',
             question: message,
             options: [{ label: 'Continue', description: '' }]
         }]
@@ -421,6 +488,18 @@ export function registerAppServerPermissionHandlers(args: {
                 content: buildAcceptedElicitationContent(request),
                 _meta: null
             };
+        }
+
+        const approvalMeta = getMcpToolApprovalMeta(params);
+        if (approvalMeta) {
+            const requestId = asString(request.elicitationId) ?? randomUUID();
+            const approval = buildMcpToolApprovalInput(params, approvalMeta);
+            const result = await permissionHandler.handleToolCall(
+                requestId,
+                approval.toolName,
+                approval.input
+            ) as PermissionResult;
+            return mapMcpToolApprovalDecision(result.decision, approvalMeta);
         }
 
         const input = buildElicitationUserInput(params);
