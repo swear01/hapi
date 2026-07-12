@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { buildGrokAgentArgs, formatGrokError } from './grokBackend'
+import {
+    buildGrokAgentArgs,
+    formatGrokError,
+    isGrokBuildAuxiliaryQuotaError
+} from './grokBackend'
 
 describe('buildGrokAgentArgs', () => {
     it('starts the official Grok ACP stdio agent', () => {
@@ -31,5 +35,33 @@ describe('formatGrokError', () => {
 
     it('preserves unrelated Grok errors', () => {
         expect(formatGrokError(new Error('Payment Required'))).toBe('Payment Required')
+    })
+
+    it('strips terminal color codes from surfaced errors', () => {
+        expect(formatGrokError('\u001b[31mERROR\u001b[0m Payment Required'))
+            .toBe('ERROR Payment Required')
+    })
+})
+
+describe('isGrokBuildAuxiliaryQuotaError', () => {
+    const auxiliary402 = [
+        '\u001b[31mERROR\u001b[0m responses API error status=402 Payment Required',
+        'personal-team-blocked:spending-limit: You have run out of credits or need a Grok subscription.',
+        'model_id=grok-build'
+    ].join(' ')
+
+    it('recognizes the non-fatal grok-build side request when another model is active', () => {
+        expect(isGrokBuildAuxiliaryQuotaError(auxiliary402, 'grok-4.5')).toBe(true)
+    })
+
+    it('does not hide a quota error when grok-build is the active model', () => {
+        expect(isGrokBuildAuxiliaryQuotaError(auxiliary402, 'grok-build')).toBe(false)
+    })
+
+    it('does not hide unrelated 402 errors', () => {
+        expect(isGrokBuildAuxiliaryQuotaError(
+            'status=402 Payment Required model_id=grok-4.5 spending-limit',
+            'grok-4.5'
+        )).toBe(false)
     })
 })

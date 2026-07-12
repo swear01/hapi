@@ -11,7 +11,11 @@ import {
 import { GrokDisplay } from '@/ui/ink/GrokDisplay'
 import type { GrokSession } from './session'
 import type { PermissionMode } from './types'
-import { createGrokBackend, formatGrokError } from './utils/grokBackend'
+import {
+    createGrokBackend,
+    formatGrokError,
+    isGrokBuildAuxiliaryQuotaError
+} from './utils/grokBackend'
 import { GrokPermissionHandler } from './utils/permissionHandler'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { GROK_TITLE_INSTRUCTION } from './utils/systemPrompt'
@@ -69,9 +73,17 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         })
         this.backend = backend
         backend.onStderrError((error) => {
+            const activeModel = this.currentBackendModel ?? this.opts.model ?? null
+            if (isGrokBuildAuxiliaryQuotaError(`${error.message}\n${error.raw}`, activeModel)) {
+                logger.debug('[grok-remote] Suppressed non-fatal grok-build session-title quota error', {
+                    activeModel
+                })
+                return
+            }
             logger.debug('[grok-remote] stderr error', error)
-            session.sendSessionEvent({ type: 'message', message: error.message })
-            this.messageBuffer.addMessage(error.message, 'status')
+            const message = formatGrokError(error.message)
+            session.sendSessionEvent({ type: 'message', message })
+            this.messageBuffer.addMessage(message, 'status')
         })
 
         await backend.initialize()

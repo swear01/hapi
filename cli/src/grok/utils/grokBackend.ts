@@ -1,5 +1,11 @@
 import { AcpSdkBackend } from '@/agent/backends/acp'
 
+const ANSI_SGR_PATTERN = /\u001b\[[0-9;]*m/g
+
+function stripAnsi(value: string): string {
+    return value.replace(ANSI_SGR_PATTERN, '')
+}
+
 function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     const result: Record<string, string> = {}
     for (const [key, value] of Object.entries(env)) {
@@ -38,9 +44,28 @@ export function createGrokBackend(opts: {
 }
 
 export function formatGrokError(error: unknown): string {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = stripAnsi(error instanceof Error ? error.message : String(error))
     if (/authentication required|no auth method id provided/i.test(message)) {
         return 'Grok authentication required. Run `grok login --device-auth` on this machine, or configure XAI_API_KEY.'
     }
     return message
+}
+
+/**
+ * Grok 0.2.93 generates a session title through its separate
+ * GROK_SESSION_SUMMARY_MODEL route. Accounts whose catalog only exposes
+ * grok-4.5 can receive a non-fatal 402 for that default grok-build request
+ * while the selected grok-4.5 turn continues normally. The prompt rejection,
+ * if any, is reported separately by backend.prompt(), so suppressing this
+ * auxiliary stderr line cannot hide a failed main turn.
+ */
+export function isGrokBuildAuxiliaryQuotaError(
+    value: string,
+    activeModel: string | null | undefined
+): boolean {
+    if (!activeModel || activeModel === 'grok-build') return false
+    const message = stripAnsi(value)
+    return /(?:status\s*=\s*)?402\s+Payment Required/i.test(message)
+        && /model_id\s*=\s*grok-build\b/i.test(message)
+        && /(?:spending-limit|run out of credits|need a Grok subscription)/i.test(message)
 }

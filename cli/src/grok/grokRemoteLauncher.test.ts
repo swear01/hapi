@@ -6,6 +6,7 @@ const harness = vi.hoisted(() => ({
     setModels: [] as Array<{ sessionId: string; modelId: string; flavor?: string }>,
     setModes: [] as Array<{ sessionId: string; modeId: string }>,
     prompts: [] as unknown[][],
+    stderrHandler: null as null | ((error: { message: string; raw: string }) => void),
 }))
 
 vi.mock('./utils/grokBackend', () => ({
@@ -21,10 +22,16 @@ vi.mock('./utils/grokBackend', () => ({
         }),
         prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
             harness.prompts.push(content)
+            if (harness.prompts.length === 1) {
+                harness.stderrHandler?.({
+                    message: 'status=402 Payment Required model_id=grok-build spending-limit',
+                    raw: 'status=402 Payment Required model_id=grok-build spending-limit'
+                })
+            }
         }),
         cancelPrompt: vi.fn(async () => {}),
         respondToPermission: vi.fn(async () => {}),
-        onStderrError: vi.fn(),
+        onStderrError: vi.fn((handler) => { harness.stderrHandler = handler }),
         onPermissionRequest: vi.fn(),
         disconnect: vi.fn(async () => {}),
         getSessionModelsMetadata: vi.fn(() => ({
@@ -37,7 +44,12 @@ vi.mock('./utils/grokBackend', () => ({
             options: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }]
         }))
     })),
-    formatGrokError: (error: unknown) => error instanceof Error ? error.message : String(error)
+    formatGrokError: (error: unknown) => error instanceof Error ? error.message : String(error),
+    isGrokBuildAuxiliaryQuotaError: (value: string, activeModel?: string | null) => (
+        activeModel !== 'grok-build'
+        && value.includes('402 Payment Required')
+        && value.includes('model_id=grok-build')
+    )
 }))
 
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
@@ -89,6 +101,7 @@ describe('grokRemoteLauncher runtime config', () => {
         harness.setModels = []
         harness.setModes = []
         harness.prompts = []
+        harness.stderrHandler = null
     })
 
     it('switches model and effort between turns and exposes session catalogs', async () => {
@@ -109,6 +122,9 @@ describe('grokRemoteLauncher runtime config', () => {
             { sessionId: 'grok-session-1', modeId: 'medium' }
         ])
         expect(harness.prompts).toHaveLength(2)
+        expect(session.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('402 Payment Required')
+        }))
         expect(JSON.stringify(harness.prompts[0])).toContain('hapi_change_title')
         expect(JSON.stringify(harness.prompts[1])).not.toContain('hapi_change_title')
         expect(await rpcHandlers.get('listGrokModels')?.()).toMatchObject({ success: true, currentModelId: 'grok-a' })
