@@ -10,8 +10,11 @@ function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     return result
 }
 
-export function buildGrokAgentArgs(opts: { model?: string; effort?: string }): string[] {
-    const args = ['agent']
+export function buildGrokAgentArgs(opts: { cwd: string; model?: string; effort?: string }): string[] {
+    // --cwd is a top-level Grok flag and must precede the `agent` subcommand.
+    // session/new also carries cwd, but setting it at process start ensures
+    // Grok discovers the correct project rules/plugins before initialization.
+    const args = ['--cwd', opts.cwd, 'agent']
     if (opts.model) {
         args.push('--model', opts.model)
     }
@@ -23,6 +26,7 @@ export function buildGrokAgentArgs(opts: { model?: string; effort?: string }): s
 }
 
 export function createGrokBackend(opts: {
+    cwd: string
     model?: string
     effort?: string
 }): AcpSdkBackend {

@@ -48,7 +48,10 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         const { server, mcpServers } = await buildHapiMcpBridge(session.client)
         this.happyServer = server
 
-        const backend = createGrokBackend(this.opts)
+        const backend = createGrokBackend({
+            cwd: session.path,
+            ...this.opts
+        })
         this.backend = backend
         backend.onStderrError((error) => {
             logger.debug('[grok-remote] stderr error', error)

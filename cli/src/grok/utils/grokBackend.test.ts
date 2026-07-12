@@ -3,14 +3,18 @@ import { buildGrokAgentArgs, formatGrokError } from './grokBackend'
 
 describe('buildGrokAgentArgs', () => {
     it('starts the official Grok ACP stdio agent', () => {
-        expect(buildGrokAgentArgs({})).toEqual(['agent', 'stdio'])
+        expect(buildGrokAgentArgs({ cwd: '/tmp/project' })).toEqual([
+            '--cwd', '/tmp/project', 'agent', 'stdio'
+        ])
     })
 
     it('places agent options before the stdio subcommand', () => {
         expect(buildGrokAgentArgs({
+            cwd: '/tmp/project',
             model: 'grok-4.5',
             effort: 'low'
         })).toEqual([
+            '--cwd', '/tmp/project',
             'agent',
             '--model', 'grok-4.5',
             '--reasoning-effort', 'low',
