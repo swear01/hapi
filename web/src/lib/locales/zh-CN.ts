@@ -8,6 +8,9 @@ export default {
   'loading.files': '加载文件…',
   'loading.messages': '加载消息…',
   'loading.machines': '加载机器…',
+  'message.copy': '复制',
+  'message.copied': '已复制',
+  'message.info': '消息详情',
 
   // Login / Auth
   'login.title': 'HAPI',
@@ -226,7 +229,7 @@ export default {
   'newSession.type.simple': '简单',
   'newSession.type.simple.desc': '直接使用选定的目录',
   'newSession.type.worktree': '工作树',
-  'newSession.type.worktree.desc': '在仓库旁创建新工作树',
+  'newSession.type.worktree.desc': '在仓库旁创建新工作树（Cursor 使用原生 ~/.cursor/worktrees）',
   'newSession.type.worktree.placeholder': 'feature-x (默认 1228-xxxx)',
   'newSession.agent': '代理',
   'newSession.model': '模型',
@@ -411,6 +414,7 @@ export default {
   'tool.requestUserInput.textPlaceholder': '输入您的答案…',
   'tool.requestUserInput.noteLabel': '补充说明（可选）',
   'tool.requestUserInput.notePlaceholder': '添加备注…',
+  'tool.requestUserInput.popupBlocked': '无法打开登录页面。请允许弹出窗口后重试。',
   'toolGroup.title': '工具活动',
   'toolGroup.primary.fileTargets': '{target} 等 +{n}',
   'toolGroup.primary.commandTargets': '{target} 等 +{n}',
