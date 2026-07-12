@@ -19,6 +19,7 @@ const harness = vi.hoisted(() => ({
     startTurnParams: [] as Array<Record<string, unknown>>,
     startTurnErrors: [] as Error[],
     interruptedTurns: [] as Array<{ threadId: string; turnId: string }>,
+    interruptErrors: [] as Error[],
     rollbackCalls: [] as Array<{ threadId: string; numTurns: number }>,
     rollbackErrors: [] as Error[],
     compactThreadIds: [] as string[],
@@ -29,6 +30,7 @@ const harness = vi.hoisted(() => ({
     suppressGoalNotifications: false,
     suppressTurnCompletion: false,
     remainingThreadSystemErrors: 0,
+    emitFailedCompletionAfterThreadSystemError: false,
     emitCyberPolicyAfterThreadSystemError: false,
     emitSafetyBuffering: false,
     safetyBufferingFasterModel: null as string | null,
@@ -215,6 +217,14 @@ vi.mock('./codexAppServerClient', () => {
                     harness.notifications.push({ method: 'error', params: policyError });
                     this.notificationHandler?.('error', policyError);
 
+                    const completed = {
+                        threadId,
+                        turnId,
+                        turn: { id: turnId, status: 'failed' }
+                    };
+                    harness.notifications.push({ method: 'turn/completed', params: completed });
+                    this.notificationHandler?.('turn/completed', completed);
+                } else if (harness.emitFailedCompletionAfterThreadSystemError) {
                     const completed = {
                         threadId,
                         turnId,
@@ -838,6 +848,10 @@ vi.mock('./codexAppServerClient', () => {
             const threadId = params?.threadId ?? 'thread-unknown';
             const turnId = params?.turnId ?? 'turn-unknown';
             harness.interruptedTurns.push({ threadId, turnId });
+            const error = harness.interruptErrors.shift();
+            if (error) {
+                throw error;
+            }
             if (harness.emitTurnAbortedOnInterrupt) {
                 const interrupted = {
                     threadId,
@@ -1032,6 +1046,7 @@ describe('codexRemoteLauncher', () => {
         harness.startTurnParams = [];
         harness.startTurnErrors = [];
         harness.interruptedTurns = [];
+        harness.interruptErrors = [];
         harness.rollbackCalls = [];
         harness.rollbackErrors = [];
         harness.compactThreadIds = [];
@@ -1041,6 +1056,7 @@ describe('codexRemoteLauncher', () => {
         harness.goal = null;
         harness.suppressGoalNotifications = false;
         harness.suppressTurnCompletion = false;
+        harness.emitFailedCompletionAfterThreadSystemError = false;
         harness.emitCyberPolicyAfterThreadSystemError = false;
         harness.emitSafetyBuffering = false;
         harness.safetyBufferingFasterModel = null;
@@ -1464,6 +1480,22 @@ describe('codexRemoteLauncher', () => {
         expect(session.thinking).toBe(false);
     });
 
+    it('still retries a generic systemError when an empty failed turn completion confirms it', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitFailedCompletionAfterThreadSystemError = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Task failed: Codex thread entered systemError; retrying same conversation (1/3)'
+        });
+        expect(session.thinking).toBe(false);
+    });
+
     it('does not retry when a generic systemError is followed by a cyber-policy block', async () => {
         harness.remainingThreadSystemErrors = 1;
         harness.emitCyberPolicyAfterThreadSystemError = true;
@@ -1480,6 +1512,32 @@ describe('codexRemoteLauncher', () => {
         expect(failureMessages[0]?.message).toContain('https://openai.com/form/enterprise-trusted-access-for-cyber/');
         expect(failureMessages[0]?.message).toContain('https://help.openai.com/en/articles/20001326');
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('does not retry an explicitly non-retryable error even when its text is retryable', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(harness.startTurnMessages).toEqual(['first message']);
+        });
+
+        harness.dispatchNotification?.('error', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            error: { message: 'Selected model is at capacity' },
+            willRetry: false
+        });
+
+        await expect(running).resolves.toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Task failed: Selected model is at capacity'
+        });
+        expect(sessionEvents.some((event) => String(event.message ?? '').includes('retrying same conversation'))).toBe(false);
         expect(session.thinking).toBe(false);
     });
 
@@ -1694,6 +1752,47 @@ describe('codexRemoteLauncher', () => {
         await vi.waitFor(() => {
             expect(sessionEvents).toContainEqual({ type: 'ready' });
         });
+        expect(session.thinking).toBe(false);
+    });
+
+    it('keeps the original turn running when safety-buffering interrupt fails', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        harness.interruptErrors.push(new Error('turn/interrupt failed'));
+        const { session, sessionEvents, rpcHandlers, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Retry with a faster model']
+                }
+            }
+        });
+        await vi.waitFor(() => {
+            expect(sessionEvents).toContainEqual({
+                type: 'message',
+                message: 'Failed to retry with a faster model: turn/interrupt failed'
+            });
+        });
+
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(harness.rollbackCalls).toEqual([]);
+        expect(session.thinking).toBe(true);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
         expect(session.thinking).toBe(false);
     });
 
