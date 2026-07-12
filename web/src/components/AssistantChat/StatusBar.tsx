@@ -125,8 +125,6 @@ function formatTokenCount(value: number): string {
     return String(value)
 }
 
-}
-
 /** Cursor native ACP does not emit usage_update; hide the bar to avoid empty/misleading UI. */
 export function shouldShowComposerStatusBar(agentFlavor: string | null | undefined): boolean {
     return agentFlavor !== 'cursor'

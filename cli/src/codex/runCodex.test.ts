@@ -238,6 +238,8 @@ describe('runCodex', () => {
 
         expect(mockCodexSession.setPersonality).toHaveBeenCalledWith(null)
         expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: null }))
+    })
+
     it('uses lazy bootstrap for a fresh terminal launch', async () => {
         await runCodexImpl({ workingDirectory: '/tmp/project' })
 

@@ -2327,7 +2327,15 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 return;
             }
 
-            if (isTerminalEvent && eventTurnId && eventTurnId === lastFinalizedTurnId) {
+            const isSameThreadRetryCompletion = msgType === 'task_complete'
+                && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0)
+                && (!eventThreadId || eventThreadId === this.currentThreadId);
+            if (
+                isTerminalEvent
+                && eventTurnId
+                && eventTurnId === lastFinalizedTurnId
+                && !isSameThreadRetryCompletion
+            ) {
                 logger.debug(`[Codex] Ignoring duplicate terminal event for turn ${eventTurnId}`);
                 return;
             }
