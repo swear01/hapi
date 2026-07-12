@@ -171,7 +171,7 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message);
                 });
-                await backend.refreshSessionInfo(acpSessionId, session.path);
+                void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
                 logger.warn('[kimi-remote] prompt failed', { message: errorMessage });

@@ -413,7 +413,7 @@ export class AcpSdkBackend implements AgentBackend {
             return;
         }
         try {
-            const response = await this.transport.sendRequest('session/list', { cwd });
+            const response = await this.transport.sendRequest('session/list', { cwd }, { timeoutMs: 5000 });
             if (!isObject(response) || !Array.isArray(response.sessions)) {
                 return;
             }

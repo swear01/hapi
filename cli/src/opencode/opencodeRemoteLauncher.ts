@@ -285,7 +285,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message);
                 });
-                await backend.refreshSessionInfo(acpSessionId, session.path);
+                void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[opencode-remote] prompt failed', error);
                 session.sendSessionEvent({

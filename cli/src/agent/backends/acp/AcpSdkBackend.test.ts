@@ -79,13 +79,15 @@ describe('AcpSdkBackend', () => {
 
     it('refreshes native titles through ACP session/list', async () => {
         const backend = new AcpSdkBackend({ command: 'opencode' });
-        const calls: Array<{ method: string; params: unknown }> = [];
+        const calls: Array<{ method: string; params: unknown; options: unknown }> = [];
         const backendInternal = backend as unknown as {
-            transport: { sendRequest: (method: string, params: unknown) => Promise<unknown> } | null;
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: unknown) => Promise<unknown>;
+            } | null;
         };
         backendInternal.transport = {
-            sendRequest: async (method, params) => {
-                calls.push({ method, params });
+            sendRequest: async (method, params, options) => {
+                calls.push({ method, params, options });
                 return {
                     sessions: [
                         { sessionId: 'other', title: 'Other title' },
@@ -99,7 +101,11 @@ describe('AcpSdkBackend', () => {
 
         await backend.refreshSessionInfo('session-1', '/workspace');
 
-        expect(calls).toEqual([{ method: 'session/list', params: { cwd: '/workspace' } }]);
+        expect(calls).toEqual([{
+            method: 'session/list',
+            params: { cwd: '/workspace' },
+            options: { timeoutMs: 5000 }
+        }]);
         expect(updates).toEqual([{ sessionId: 'session-1', title: 'Native OpenCode title' }]);
     });
 
