@@ -1,4 +1,5 @@
 import React from 'react';
+import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import { convertAgentMessage } from '@/agent/messageConverter';
@@ -10,7 +11,7 @@ import type { OpencodeMode, PermissionMode } from './types';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { createOpencodeBackend } from './utils/opencodeBackend';
 import { OpencodePermissionHandler } from './utils/permissionHandler';
-import { PLAN_MODE_INSTRUCTION, TITLE_INSTRUCTION } from './utils/systemPrompt';
+import { PLAN_MODE_INSTRUCTION } from './utils/systemPrompt';
 import { resolveThoughtLevelEffort } from './thoughtLevelEffort';
 
 type OpencodeRemoteLauncherOptions = {
@@ -24,7 +25,6 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
     private happyServer: { stop: () => void } | null = null;
     private abortController = new AbortController();
     private displayPermissionMode: PermissionMode | null = null;
-    private instructionsSent = false;
     private currentBackendModel: string | null = null;
     private defaultBackendModel: string | null = null;
     private currentBackendEffort: string | null = null;
@@ -55,13 +55,16 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
 
-        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client);
+        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            enableChangeTitle: false
+        });
         this.happyServer = happyServer;
 
         const backend = createOpencodeBackend({
             cwd: session.path
         });
         this.backend = backend;
+        registerAcpSessionTitleSync(backend, session.client);
 
         backend.onStderrError((error) => {
             logger.debug('[opencode-remote] stderr error', error);
@@ -266,14 +269,9 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
             this.applyDisplayMode(batch.mode.permissionMode);
             messageBuffer.addMessage(batch.message, 'user');
 
-            // Inject title instructions on first prompt
             let messageText = batch.message;
             if (batch.mode.permissionMode === 'plan') {
                 messageText = `${PLAN_MODE_INSTRUCTION}\n\n${messageText}`;
-            }
-            if (!this.instructionsSent) {
-                messageText = `${TITLE_INSTRUCTION}\n\n${messageText}`;
-                this.instructionsSent = true;
             }
 
             const promptContent: PromptContent[] = [{
@@ -287,6 +285,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message);
                 });
+                await backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[opencode-remote] prompt failed', error);
                 session.sendSessionEvent({

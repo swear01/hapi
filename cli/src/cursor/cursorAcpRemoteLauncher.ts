@@ -30,6 +30,7 @@ import { cursorPassThroughStatusMessage, parseCursorSpecialCommand } from './cur
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -68,7 +69,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
 
-        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client);
+        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            enableChangeTitle: false
+        });
         this.happyServer = happyServer;
 
         const autoReview = isCursorAutoReviewMode(session.getPermissionMode() as PermissionMode);
@@ -81,6 +84,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             addDirs: session.cursorAddDirs
         });
         this.backend = backend;
+        registerAcpSessionTitleSync(backend, session.client);
         this.recordCursorNativeWorktreeMetadata();
 
         backend.setUsageUpdateListener((message) => this.handleAgentMessage(message));
@@ -250,6 +254,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message) => {
                     this.handleAgentMessage(message);
                 });
+                await backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);

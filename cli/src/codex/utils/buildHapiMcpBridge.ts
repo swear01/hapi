@@ -44,6 +44,7 @@ export interface HapiMcpBridge {
 
 export interface HapiMcpBridgeOptions {
     emitTitleSummary?: boolean;
+    enableChangeTitle?: boolean;
 }
 
 /**
@@ -58,7 +59,8 @@ export async function buildHapiMcpBridge(
     options: HapiMcpBridgeOptions = {}
 ): Promise<HapiMcpBridge> {
     const happyServer = await startHappyServer(client, {
-        emitTitleSummary: options.emitTitleSummary
+        emitTitleSummary: options.emitTitleSummary,
+        enableChangeTitle: options.enableChangeTitle
     });
     const bridgeCommand = getHappyCliCommand(['mcp', '--url', happyServer.url]);
 
@@ -71,11 +73,13 @@ export async function buildHapiMcpBridge(
             hapi: {
                 command: bridgeCommand.command,
                 args: bridgeCommand.args,
-                tools: {
-                    change_title: {
-                        approval_mode: 'approve'
+                ...(options.enableChangeTitle === false ? {} : {
+                    tools: {
+                        change_title: {
+                            approval_mode: 'approve' as const
+                        }
                     }
-                }
+                })
             }
         }
     };
