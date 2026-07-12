@@ -47,6 +47,11 @@ describe('hasCapability', () => {
         expect(hasCapability('kimi', Capabilities.Effort)).toBe(false)
     })
 
+    test('grok starts with no runtime model or effort switching capability', () => {
+        expect(hasCapability('grok', Capabilities.ModelChange)).toBe(false)
+        expect(hasCapability('grok', Capabilities.Effort)).toBe(false)
+    })
+
     test('unknown flavor returns false', () => {
         expect(hasCapability('unknown-flavor', Capabilities.ModelChange)).toBe(false)
     })
@@ -66,6 +71,7 @@ describe('getFlavorLabel', () => {
         expect(getFlavorLabel('opencode')).toBe('OpenCode')
         expect(getFlavorLabel('pi')).toBe('Pi')
         expect(getFlavorLabel('kimi')).toBe('Kimi')
+        expect(getFlavorLabel('grok')).toBe('Grok Build')
     })
 
     test('unknown flavor returns Unknown', () => {
@@ -87,6 +93,7 @@ describe('isKnownFlavor', () => {
         expect(isKnownFlavor('opencode')).toBe(true)
         expect(isKnownFlavor('pi')).toBe(true)
         expect(isKnownFlavor('kimi')).toBe(true)
+        expect(isKnownFlavor('grok')).toBe(true)
     })
 
     test('returns false for unknown/null/undefined', () => {
