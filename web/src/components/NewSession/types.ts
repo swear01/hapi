@@ -38,6 +38,7 @@ export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]
         ...modelPresetOptions(GEMINI_MODEL_PRESETS, GEMINI_MODEL_LABELS),
     ],
     opencode: [],
+    grok: [],
     pi: [],
 }
 

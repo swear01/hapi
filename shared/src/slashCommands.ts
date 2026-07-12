@@ -32,6 +32,7 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'compress', description: 'Compress the context by replacing it with a summary', source: 'builtin' },
         { name: 'stats', description: 'Check session stats', source: 'builtin' },
     ],
+    grok: [],
     opencode: [
         { name: 'help', description: 'Show supported HAPI OpenCode slash commands', source: 'builtin' },
         { name: 'status', description: 'Show current OpenCode session config', source: 'builtin' },

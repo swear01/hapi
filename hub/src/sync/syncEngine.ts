@@ -763,6 +763,7 @@ export class SyncEngine {
         if (flavor === 'codex') return metadata.codexSessionId ?? null
         if (flavor === 'gemini') return metadata.geminiSessionId ?? null
         if (flavor === 'opencode') return metadata.opencodeSessionId ?? null
+        if (flavor === 'grok') return metadata.grokSessionId ?? null
         if (flavor === 'cursor') return metadata.cursorSessionId ?? null
         if (flavor === 'kimi') return metadata.kimiSessionId ?? null
         if (flavor === 'pi') return metadata.piSessionId ?? null
@@ -1469,6 +1470,7 @@ export class SyncEngine {
             && (prev?.claudeSessionId ?? null) === (next.claudeSessionId ?? null)
             && (prev?.geminiSessionId ?? null) === (next.geminiSessionId ?? null)
             && (prev?.opencodeSessionId ?? null) === (next.opencodeSessionId ?? null)
+            && (prev?.grokSessionId ?? null) === (next.grokSessionId ?? null)
             && (prev?.cursorSessionId ?? null) === (next.cursorSessionId ?? null)
             && (prev?.piSessionId ?? null) === (next.piSessionId ?? null)
             && (prev?.kimiSessionId ?? null) === (next.kimiSessionId ?? null)
