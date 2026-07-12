@@ -29,9 +29,9 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, or OpenCode sessions from your
 - `hapi codex` - Start Codex mode. See `src/codex/runCodex.ts`.
 - `hapi codex resume <sessionId>` - Resume existing Codex session.
 - `hapi cursor` - Start Cursor Agent mode. See `src/cursor/runCursor.ts`.
-- `hapi grok` - Start Grok Build mode. See `src/grok/runGrok.ts`.
   Supports `hapi cursor resume <chatId>`, `hapi cursor --continue`, `--mode plan|ask`, `--yolo`, `--model`.
   Local and remote modes supported; remote uses `agent -p` with stream-json.
+- `hapi grok` - Start Grok Build mode. See `src/grok/runGrok.ts`.
 - `hapi gemini` - Start Gemini mode via ACP. See `src/agent/runners/runAgentSession.ts`.
   Note: Gemini runs in remote mode only; it waits for messages from the hub UI/Telegram.
 - `hapi opencode` - Start OpenCode mode via ACP. See `src/opencode/runOpencode.ts`.
