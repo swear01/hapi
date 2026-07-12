@@ -31,7 +31,7 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, ClaudeEffort, CodexReasoningEffort, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { DirectorySection } from './DirectorySection'
@@ -77,7 +77,7 @@ export function NewSession(props: {
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
-    const [effort, setEffort] = useState<ClaudeEffort>('auto')
+    const [effort, setEffort] = useState<LaunchEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
     const [sessionType, setSessionType] = useState<SessionType>('simple')

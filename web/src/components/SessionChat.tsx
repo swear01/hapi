@@ -582,12 +582,12 @@ function SessionChatInner(props: SessionChatProps) {
     const grokModelsState = useGrokModels({
         api: props.api,
         sessionId: props.session.id,
-        enabled: agentFlavor === 'grok' && props.session.active
+        enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
     })
     const grokEffortState = useGrokReasoningEffortOptions({
         api: props.api,
         sessionId: props.session.id,
-        enabled: agentFlavor === 'grok' && props.session.active
+        enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
     })
     const grokModelOptions = useMemo(() => (
         agentFlavor === 'grok'

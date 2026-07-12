@@ -1,12 +1,12 @@
-import type { AgentType, ClaudeEffort } from './types'
+import type { AgentType, LaunchEffort } from './types'
 import { CLAUDE_EFFORT_OPTIONS, GROK_EFFORT_OPTIONS } from './types'
 import { useTranslation } from '@/lib/use-translation'
 
 export function LaunchEffortSelector(props: {
     agent: AgentType
-    effort: ClaudeEffort
+    effort: LaunchEffort
     isDisabled: boolean
-    onEffortChange: (value: ClaudeEffort) => void
+    onEffortChange: (value: LaunchEffort) => void
     grokOptions?: Array<{ value: string; label: string }>
 }) {
     const { t } = useTranslation()
@@ -27,7 +27,7 @@ export function LaunchEffortSelector(props: {
             </label>
             <select
                 value={props.effort}
-                onChange={(e) => props.onEffortChange(e.target.value as ClaudeEffort)}
+                onChange={(e) => props.onEffortChange(e.target.value)}
                 disabled={props.isDisabled}
                 className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
             >

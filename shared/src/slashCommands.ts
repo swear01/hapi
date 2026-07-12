@@ -38,10 +38,6 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'session-info', description: 'Show Grok session model, turns, and context usage', source: 'builtin' },
         { name: 'goal', description: 'Set, manage, or inspect an autonomous goal', source: 'builtin' },
         { name: 'always-approve', description: 'Toggle automatic tool approval', source: 'builtin' },
-        { name: 'model', description: 'Show or switch the active Grok model', source: 'builtin' },
-        { name: 'effort', description: 'Show or switch Grok reasoning effort', source: 'builtin' },
-        { name: 'plan', description: 'Enter Grok plan mode', source: 'builtin' },
-        { name: 'view-plan', description: 'Show the current Grok plan', source: 'builtin' },
     ],
     opencode: [
         { name: 'help', description: 'Show supported HAPI OpenCode slash commands', source: 'builtin' },

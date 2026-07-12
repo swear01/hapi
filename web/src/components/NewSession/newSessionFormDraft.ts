@@ -1,5 +1,5 @@
 import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
-import type { AgentType, ClaudeEffort, CodexReasoningEffort, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
 
 const DRAFT_STORAGE_KEY = 'hapi:new-session-form-draft'
 
@@ -8,7 +8,7 @@ export type NewSessionFormDraft = {
     model: string
     cursorSelectedBase: string
     machineId: string | null
-    effort: ClaudeEffort
+    effort: LaunchEffort
     modelReasoningEffort: CodexReasoningEffort
     yoloMode: boolean
     sessionType: SessionType
@@ -48,7 +48,7 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
                 ? parsed.cursorSelectedBase
                 : 'auto',
             machineId: typeof parsed.machineId === 'string' ? parsed.machineId : null,
-            effort: agentPreserved ? ((parsed.effort as ClaudeEffort | undefined) ?? 'auto') : 'auto',
+            effort: agentPreserved ? ((parsed.effort as LaunchEffort | undefined) ?? 'auto') : 'auto',
             modelReasoningEffort: agentPreserved
                 ? ((parsed.modelReasoningEffort as CodexReasoningEffort | undefined) ?? 'default')
                 : 'default',
