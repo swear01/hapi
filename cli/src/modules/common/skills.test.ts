@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { listSkills } from './skills'
+import { listSkills, resolveSkill } from './skills'
 
 async function writeSkill(skillDir: string, name: string, description: string): Promise<void> {
     await mkdir(skillDir, { recursive: true })
@@ -325,6 +325,22 @@ describe('listSkills', () => {
         expect(sharedSkills[0]).toEqual({
             name: 'shared',
             description: 'Local shared skill'
+        })
+    })
+
+    it('resolves the same nearest project skill selected by listSkills', async () => {
+        const repoRoot = join(sandboxDir, 'repo')
+        const workingDirectory = join(repoRoot, 'apps', 'web')
+
+        await mkdir(join(repoRoot, '.git'), { recursive: true })
+        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'User shared skill')
+        await writeSkill(join(repoRoot, '.agents', 'skills', 'shared'), 'shared', 'Repo shared skill')
+        await writeSkill(join(workingDirectory, '.agents', 'skills', 'shared'), 'shared', 'Local shared skill')
+
+        await expect(resolveSkill('shared', workingDirectory, { flavor: 'opencode' })).resolves.toEqual({
+            name: 'shared',
+            description: 'Local shared skill',
+            body: '# shared'
         })
     })
 })
