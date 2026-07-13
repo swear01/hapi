@@ -31,6 +31,9 @@ export const RPC_METHODS = {
     ListOpencodeModels: 'listOpencodeModels',
     ListOpencodeModelsForCwd: 'listOpencodeModelsForCwd',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+    ListGrokModelsForCwd: 'listGrokModelsForCwd',
+    ListGrokModels: 'listGrokModels',
+    ListGrokReasoningEffortOptions: 'listGrokReasoningEffortOptions',
     /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
     SteerQueuedMessage: 'steer-queued-message'
 } as const
