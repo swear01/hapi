@@ -27,7 +27,7 @@ const AUTO_APPROVE_TOOL_NAME_HINTS = [
     'think',
     'save_memory'
 ];
-const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'skill_lookup', 'save_memory'];
+const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'save_memory'];
 const AUTO_APPROVE_WRITE_TOOL_HINTS = ['write', 'edit', 'create', 'delete', 'patch', 'fs-edit'];
 
 export function resolveToolAutoApprovalDecision(
