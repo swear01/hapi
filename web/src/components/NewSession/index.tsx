@@ -1,7 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { Machine } from '@/types/api'
-import type { GrokPermissionMode } from '@hapi/protocol'
+import type { CodexCollaborationMode, GrokPermissionMode } from '@hapi/protocol'
+import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
 import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
@@ -32,10 +33,12 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
+import { CollaborationModeSelector } from './CollaborationModeSelector'
 import { DirectorySection } from './DirectorySection'
+import { FastModeSelector } from './FastModeSelector'
 import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
@@ -81,6 +84,8 @@ export function NewSession(props: {
     const pendingCursorBaseRef = useRef<string | null>(null)
     const [effort, setEffort] = useState<LaunchEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
+    const [serviceTier, setServiceTier] = useState<NewSessionServiceTier>('standard')
+    const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>('default')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
     const [grokPermissionMode, setGrokPermissionMode] = useState<GrokPermissionMode>('default')
     const [sessionType, setSessionType] = useState<SessionType>('simple')
@@ -98,6 +103,8 @@ export function NewSession(props: {
     useEffect(() => {
         setEffort('auto')
         setModelReasoningEffort('default')
+        setServiceTier('standard')
+        setCollaborationMode('default')
         setGrokPermissionMode('default')
         if (agent !== 'cursor') {
             setModel('auto')
@@ -151,6 +158,8 @@ export function NewSession(props: {
         setCursorSelectedBase(draft.cursorSelectedBase)
         setEffort(draft.effort)
         setModelReasoningEffort(draft.modelReasoningEffort)
+        setServiceTier(draft.serviceTier)
+        setCollaborationMode(draft.collaborationMode)
         setYoloMode(draft.yoloMode)
         setGrokPermissionMode(draft.grokPermissionMode)
         setSessionType(draft.sessionType)
@@ -207,6 +216,21 @@ export function NewSession(props: {
         }
         return options
     }, [codexModelsState.models, model])
+    const showCodexFastMode = agent === 'codex'
+        && !codexModelsState.error
+        && codexModelAdvertisesFastTier(model === 'auto' ? null : model, codexModelsState.models)
+
+    useEffect(() => {
+        // Wait for the Codex model catalog to settle before clearing Fast;
+        // otherwise Browse → remount restores serviceTier: 'fast' and this
+        // effect would wipe it while models are still loading.
+        if (agent === 'codex' && codexModelsState.isLoading) {
+            return
+        }
+        if (!showCodexFastMode && serviceTier !== 'standard') {
+            setServiceTier('standard')
+        }
+    }, [agent, codexModelsState.isLoading, showCodexFastMode, serviceTier])
     const codexSupportedReasoningEfforts = useMemo(
         () => getCodexModelReasoningEfforts(codexModelsState.models, model),
         [codexModelsState.models, model]
@@ -514,6 +538,8 @@ export function NewSession(props: {
             machineId,
             effort,
             modelReasoningEffort,
+            serviceTier,
+            collaborationMode,
             yoloMode,
             grokPermissionMode,
             sessionType,
@@ -528,6 +554,8 @@ export function NewSession(props: {
         machineId,
         effort,
         modelReasoningEffort,
+        serviceTier,
+        collaborationMode,
         yoloMode,
         grokPermissionMode,
         sessionType,
@@ -627,6 +655,12 @@ export function NewSession(props: {
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
+            const resolvedServiceTier = agent === 'codex' && showCodexFastMode && serviceTier === 'fast'
+                ? 'fast' as const
+                : undefined
+            const resolvedCollaborationMode = agent === 'codex' && collaborationMode !== 'default'
+                ? collaborationMode
+                : undefined
             const result = await spawnSession({
                 machineId,
                 directory: trimmedDirectory,
@@ -637,7 +671,9 @@ export function NewSession(props: {
                 yolo: agent === 'grok' ? undefined : yoloMode,
                 permissionMode: agent === 'grok' ? grokPermissionMode : undefined,
                 sessionType,
-                worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined
+                worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined,
+                serviceTier: resolvedServiceTier,
+                collaborationMode: resolvedCollaborationMode
             })
 
             if (result.type === 'success') {
@@ -794,6 +830,18 @@ export function NewSession(props: {
                 availableOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
                 onChange={setModelReasoningEffort}
+            />
+            <CollaborationModeSelector
+                agent={agent}
+                value={collaborationMode}
+                isDisabled={isFormDisabled}
+                onChange={setCollaborationMode}
+            />
+            <FastModeSelector
+                visible={showCodexFastMode}
+                value={serviceTier}
+                isDisabled={isFormDisabled}
+                onChange={setServiceTier}
             />
             <GrokPermissionModeSelector
                 agent={agent}

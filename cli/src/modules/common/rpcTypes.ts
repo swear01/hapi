@@ -13,6 +13,7 @@ export interface SpawnSessionOptions {
     yolo?: boolean
     permissionMode?: string
     serviceTier?: string
+    collaborationMode?: 'default' | 'plan'
     token?: string
     sessionType?: 'simple' | 'worktree'
     worktreeName?: string
