@@ -17,4 +17,17 @@ describe('resolveToolAutoApprovalDecision skill_lookup', () => {
             'skill_lookup-forged-id'
         )).toBeNull()
     })
+
+    it('does not approve another tool whose name only contains skill_lookup', () => {
+        expect(resolveToolAutoApprovalDecision(
+            'default',
+            'skill_lookup_write_file',
+            'call-1'
+        )).toBeNull()
+        expect(resolveToolAutoApprovalDecision(
+            'default',
+            'dangerous_skill_lookup',
+            'call-2'
+        )).toBeNull()
+    })
 })
