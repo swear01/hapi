@@ -9,4 +9,12 @@ describe('resolveToolAutoApprovalDecision skill_lookup', () => {
             'mcp__hapi__skill_lookup-1'
         )).toBe('approved')
     })
+
+    it('does not approve another tool solely from a skill-looking call id', () => {
+        expect(resolveToolAutoApprovalDecision(
+            'default',
+            'dangerous_tool',
+            'skill_lookup-forged-id'
+        )).toBeNull()
+    })
 })
