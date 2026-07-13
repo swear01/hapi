@@ -23,6 +23,7 @@ describe('newSessionFormDraft', () => {
             serviceTier: 'standard',
             collaborationMode: 'default',
             yoloMode: false,
+            grokPermissionMode: 'default',
             sessionType: 'simple',
             worktreeName: ''
         })
@@ -37,6 +38,7 @@ describe('newSessionFormDraft', () => {
             serviceTier: 'standard',
             collaborationMode: 'default',
             yoloMode: false,
+            grokPermissionMode: 'default',
             sessionType: 'simple',
             worktreeName: ''
         })
@@ -64,6 +66,7 @@ describe('newSessionFormDraft', () => {
             serviceTier: 'standard',
             collaborationMode: 'default',
             yoloMode: false,
+            grokPermissionMode: 'default',
             sessionType: 'simple',
             worktreeName: ''
         })
@@ -82,6 +85,7 @@ describe('newSessionFormDraft', () => {
             serviceTier: 'fast',
             collaborationMode: 'plan',
             yoloMode: false,
+            grokPermissionMode: 'default',
             sessionType: 'simple',
             worktreeName: ''
         })
@@ -102,6 +106,7 @@ describe('newSessionFormDraft', () => {
             serviceTier: 'fast',
             collaborationMode: 'plan',
             yoloMode: true,
+            grokPermissionMode: 'default',
             sessionType: 'simple',
             worktreeName: ''
         })

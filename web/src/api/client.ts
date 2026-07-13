@@ -31,6 +31,8 @@ import type {
     DeleteUploadResponse,
     FileReadResponse,
     GitCommandResponse,
+    GrokModelsResponse,
+    GrokReasoningEffortResponse,
     ListDirectoryResponse,
     MachineListDirectoryResponse,
     MachinePathsExistsResponse,
@@ -597,6 +599,7 @@ export class ApiClient {
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
         effort?: string,
+        permissionMode?: PermissionMode,
         serviceTier?: 'fast' | 'standard',
         collaborationMode?: 'default' | 'plan'
     ): Promise<SpawnResponse> {
@@ -611,6 +614,7 @@ export class ApiClient {
                 sessionType,
                 worktreeName,
                 effort,
+                permissionMode,
                 serviceTier,
                 collaborationMode
             })
@@ -664,6 +668,24 @@ export class ApiClient {
     async getMachineOpencodeModelsForCwd(machineId: string, cwd: string): Promise<OpencodeModelsResponse> {
         return await this.request<OpencodeModelsResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/opencode-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
+    async getMachineGrokModelsForCwd(machineId: string, cwd: string): Promise<GrokModelsResponse> {
+        return await this.request<GrokModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/grok-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
+    async getSessionGrokModels(sessionId: string): Promise<GrokModelsResponse> {
+        return await this.request<GrokModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/grok-models`
+        )
+    }
+
+    async getSessionGrokReasoningEffortOptions(sessionId: string): Promise<GrokReasoningEffortResponse> {
+        return await this.request<GrokReasoningEffortResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/grok-reasoning-effort-options`
         )
     }
 
