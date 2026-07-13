@@ -7,6 +7,7 @@ const mockCodexSession = vi.hoisted(() => ({
     setModelReasoningEffort: vi.fn(),
     setServiceTier: vi.fn(),
     setCollaborationMode: vi.fn(),
+    setPersonality: vi.fn(),
     stopKeepAlive: vi.fn()
 }))
 
@@ -126,6 +127,7 @@ describe('runCodex', () => {
         mockCodexSession.setModelReasoningEffort.mockReset()
         mockCodexSession.setServiceTier.mockReset()
         mockCodexSession.setCollaborationMode.mockReset()
+        mockCodexSession.setPersonality.mockReset()
         lifecycleMock.registerProcessHandlers.mockClear()
         lifecycleMock.cleanupAndExit.mockClear()
         lifecycleMock.markCrash.mockClear()
