@@ -5,7 +5,7 @@ import { useSessionBrowserTitle } from './useSessionBrowserTitle'
 
 function makeSession(metadata: Session['metadata']): Session {
     return {
-        id: 'session-1234567890',
+        id: '1234567890abcdef',
         active: true,
         thinking: false,
         activeAt: 0,
@@ -41,5 +41,24 @@ describe('useSessionBrowserTitle', () => {
 
         unmount()
         expect(document.title).toBe('HAPI')
+    })
+
+    it('uses the app title while loading and the shared session fallbacks when titles are missing', () => {
+        document.title = 'Stale session - HAPI'
+
+        const { rerender } = renderHook(
+            ({ session }: { session: Session | null }) => useSessionBrowserTitle(session),
+            { initialProps: { session: null as Session | null } },
+        )
+
+        expect(document.title).toBe('HAPI')
+
+        rerender({
+            session: makeSession({ path: '/work/hapi', host: 'localhost' }),
+        })
+        expect(document.title).toBe('hapi - HAPI')
+
+        rerender({ session: makeSession(null) })
+        expect(document.title).toBe('12345678 - HAPI')
     })
 })
