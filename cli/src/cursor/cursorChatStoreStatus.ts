@@ -49,8 +49,8 @@ export async function inspectCursorChatStore(
     options: InspectCursorChatStoreOptions
 ): Promise<CursorChatStoreStatus> {
     const cursorSessionId = options.cursorSessionId.trim()
-    const workspacePath = options.workspacePath.trim()
-    if (!isSafeCursorSessionId(cursorSessionId) || !workspacePath) {
+    const workspacePath = options.workspacePath
+    if (!isSafeCursorSessionId(cursorSessionId) || workspacePath.length === 0) {
         return { onDisk: false, store: null }
     }
 
