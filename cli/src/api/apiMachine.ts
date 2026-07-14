@@ -139,13 +139,14 @@ export class ApiMachineClient {
 
         this.rpcHandlerManager.registerHandler<CursorChatStoreStatusRequest, CursorChatStoreStatus>(
             RPC_METHODS.CursorChatStoreStatus,
-            async (params) => await inspectCursorChatStore({
-                home: typeof params?.homeDir === 'string' && params.homeDir.length > 0
-                    ? params.homeDir
-                    : homedir(),
-                workspacePath: typeof params?.workspacePath === 'string' ? params.workspacePath : '',
-                cursorSessionId: typeof params?.cursorSessionId === 'string' ? params.cursorSessionId : ''
-            })
+            async (params) => {
+                const recordedHome = typeof params?.homeDir === 'string' ? params.homeDir.trim() : ''
+                return await inspectCursorChatStore({
+                    home: recordedHome || homedir(),
+                    workspacePath: typeof params?.workspacePath === 'string' ? params.workspacePath : '',
+                    cursorSessionId: typeof params?.cursorSessionId === 'string' ? params.cursorSessionId : ''
+                })
+            }
         )
 
         this.rpcHandlerManager.registerHandler<ListMachineDirectoryRequest, MachineListDirectoryResponse>(RPC_METHODS.ListMachineDirectory, async (params) => {
