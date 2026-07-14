@@ -1617,6 +1617,7 @@ describe('session model', () => {
                     path: '/tmp/project',
                     host: 'cursor-host',
                     machineId: 'cursor-machine',
+                    homeDir: '/home/cursor-owner',
                     flavor: 'cursor',
                     cursorSessionId: 'cursor-thread-missing',
                     cursorSessionProtocol: 'acp'
@@ -1633,10 +1634,11 @@ describe('session model', () => {
             engine.handleMachineAlive({ machineId: 'cursor-machine', time: Date.now() })
 
             let spawnCalled = false
-            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({
-                onDisk: false,
-                store: null
-            })
+            let probeArgs: unknown[] | null = null
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async (...args: unknown[]) => {
+                probeArgs = args
+                return { onDisk: false, store: null }
+            }
             ;(engine as any).rpcGateway.spawnSession = async () => {
                 spawnCalled = true
                 return { type: 'success', sessionId: session.id }
@@ -1649,6 +1651,12 @@ describe('session model', () => {
                 message: 'Cursor chat data is no longer available on the recorded machine',
                 code: 'resume_unavailable'
             })
+            expect(probeArgs as unknown).toEqual([
+                'cursor-machine',
+                '/tmp/project',
+                'cursor-thread-missing',
+                '/home/cursor-owner'
+            ])
             expect(spawnCalled).toBe(false)
         } finally {
             engine.stop()
@@ -1671,6 +1679,7 @@ describe('session model', () => {
                     path: '/remote/project',
                     host: 'shared-host-label',
                     machineId: 'recorded-machine',
+                    homeDir: '/home/recorded-owner',
                     flavor: 'cursor',
                     cursorSessionId: 'cursor-thread-remote',
                     cursorSessionProtocol: 'acp'
@@ -1703,8 +1712,124 @@ describe('session model', () => {
             expect(captured as unknown).toEqual([
                 'recorded-machine',
                 '/remote/project',
-                'cursor-thread-remote'
+                'cursor-thread-remote',
+                '/home/recorded-owner'
             ])
+        } finally {
+            engine.stop()
+        }
+    })
+
+    it('does not probe a same-host machine when the recorded Cursor machine is offline', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            const session = engine.getOrCreateSession(
+                'cursor-offline-recorded-machine-status',
+                {
+                    path: '/remote/project',
+                    host: 'shared-host-label',
+                    machineId: 'recorded-machine-offline',
+                    flavor: 'cursor',
+                    cursorSessionId: 'cursor-thread-offline',
+                    cursorSessionProtocol: 'acp'
+                },
+                null,
+                'default'
+            )
+            engine.getOrCreateMachine(
+                'recorded-machine-offline',
+                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                null,
+                'default'
+            )
+            engine.getOrCreateMachine(
+                'wrong-same-host-machine',
+                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                null,
+                'default'
+            )
+            engine.handleMachineAlive({ machineId: 'wrong-same-host-machine', time: Date.now() })
+
+            let probeCalled = false
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => {
+                probeCalled = true
+                return { onDisk: true, store: 'acp' }
+            }
+
+            expect(await engine.getCursorChatStoreStatus(session.id, 'default')).toEqual({
+                type: 'error',
+                message: 'No machine online',
+                code: 'no_machine_online'
+            })
+            expect(probeCalled).toBe(false)
+        } finally {
+            engine.stop()
+        }
+    })
+
+    it('does not probe or spawn on a same-host machine when the recorded Cursor machine is offline', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            const session = engine.getOrCreateSession(
+                'cursor-offline-recorded-machine-resume',
+                {
+                    path: '/remote/project',
+                    host: 'shared-host-label',
+                    machineId: 'recorded-machine-offline',
+                    flavor: 'cursor',
+                    cursorSessionId: 'cursor-thread-offline',
+                    cursorSessionProtocol: 'acp'
+                },
+                null,
+                'default'
+            )
+            engine.getOrCreateMachine(
+                'recorded-machine-offline',
+                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                null,
+                'default'
+            )
+            engine.getOrCreateMachine(
+                'wrong-same-host-machine',
+                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                null,
+                'default'
+            )
+            engine.handleMachineAlive({ machineId: 'wrong-same-host-machine', time: Date.now() })
+
+            let probeCalled = false
+            let spawnCalled = false
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => {
+                probeCalled = true
+                return { onDisk: true, store: 'acp' }
+            }
+            ;(engine as any).rpcGateway.spawnSession = async () => {
+                spawnCalled = true
+                return { type: 'success', sessionId: session.id }
+            }
+            ;(engine as any).waitForSessionActive = async () => true
+
+            expect(await engine.resumeSession(session.id, 'default')).toEqual({
+                type: 'error',
+                message: 'No machine online',
+                code: 'no_machine_online'
+            })
+            expect(probeCalled).toBe(false)
+            expect(spawnCalled).toBe(false)
         } finally {
             engine.stop()
         }
