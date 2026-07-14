@@ -25,6 +25,7 @@ import { formatReopenError } from '@/lib/reopenError'
 import type { Machine } from '@/types/api'
 import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
 import { MachineGroupHeader } from '@/components/MachineGroupHeader'
+import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 
 type SessionGroup = {
     key: string
@@ -589,6 +590,11 @@ function SessionItem(props: {
     const [renameOpen, setRenameOpen] = useState(false)
     const [archiveOpen, setArchiveOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
+    const { status: cursorChatStoreStatus } = useCursorChatStoreStatus({
+        api,
+        session: s,
+        enabled: menuOpen
+    })
 
     const { archiveSession, reopenSession, renameSession, deleteSession, isPending } = useSessionActions(
         api,
@@ -719,7 +725,7 @@ function SessionItem(props: {
                 sessionActive={s.active}
                 onRename={() => setRenameOpen(true)}
                 onArchive={() => setArchiveOpen(true)}
-                onReopen={handleReopen}
+                onReopen={cursorChatStoreStatus?.onDisk === false ? undefined : handleReopen}
                 onDelete={() => setDeleteOpen(true)}
                 anchorPoint={menuAnchorPoint}
             />

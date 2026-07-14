@@ -28,6 +28,7 @@ import { useSidebarResize } from '@/hooks/useSidebarResize'
 import { useMessages } from '@/hooks/queries/useMessages'
 import { useMachines } from '@/hooks/queries/useMachines'
 import { useSession } from '@/hooks/queries/useSession'
+import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
@@ -632,6 +633,7 @@ function SessionPage() {
         error: sessionError,
         refetch: refetchSession,
     } = useSession(api, sessionId)
+    const { status: cursorChatStoreStatus } = useCursorChatStoreStatus({ api, session })
     const {
         messages,
         pendingMessages,
@@ -781,7 +783,7 @@ function SessionPage() {
             if (!api || !session || session.active) {
                 return currentSessionId
             }
-            if (!inactiveSessionCanResume(session, messages.length)) {
+            if (!inactiveSessionCanResume(session, messages.length, cursorChatStoreStatus?.onDisk)) {
                 // #918: surface as a session_inactive ApiError so the
                 // onError consumer's classifier renders the Reopen
                 // affordance.  `status: 409` mirrors the hub guard for
@@ -918,6 +920,7 @@ function SessionPage() {
         <SessionChat
             api={api}
             session={session}
+            cursorChatOnDisk={cursorChatStoreStatus?.onDisk}
             messages={messages}
             pendingMessages={pendingMessages}
             messagesWarning={messagesWarning}

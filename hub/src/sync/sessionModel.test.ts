@@ -1187,6 +1187,7 @@ describe('session model', () => {
                 engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
                 return { type: 'success', sessionId: spawnedSessionId }
             }
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
             ;(engine as any).waitForSessionActive = async () => true
             ;(engine as any).waitForSessionReady = async () => 'ended'
 
@@ -1319,6 +1320,7 @@ describe('session model', () => {
                 engine.handleSessionReady({ sid: spawnedSessionId, time: Date.now() })
                 return { type: 'success', sessionId: spawnedSessionId }
             }
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'acp' })
             ;(engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(oldSession.id, 'default')
@@ -1387,6 +1389,7 @@ describe('session model', () => {
                 engine.handleSessionAlive({ sid: spawnedSessionId, time: Date.now() })
                 return { type: 'success', sessionId: spawnedSessionId }
             }
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({ onDisk: true, store: 'legacy' })
             ;(engine as any).waitForSessionActive = async () => true
 
             const result = await engine.resumeSession(oldSession.id, 'default')
@@ -1593,6 +1596,115 @@ describe('session model', () => {
                 message: 'Resume session ID unavailable. Start a new session in this directory, or retry after the agent has initialized.',
                 code: 'resume_unavailable'
             })
+        } finally {
+            engine.stop()
+        }
+    })
+
+    it('refuses Cursor resume before spawning when the recorded chat store is missing', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            const session = engine.getOrCreateSession(
+                'cursor-missing-store',
+                {
+                    path: '/tmp/project',
+                    host: 'cursor-host',
+                    machineId: 'cursor-machine',
+                    flavor: 'cursor',
+                    cursorSessionId: 'cursor-thread-missing',
+                    cursorSessionProtocol: 'acp'
+                },
+                null,
+                'default'
+            )
+            engine.getOrCreateMachine(
+                'cursor-machine',
+                { host: 'cursor-host', platform: 'linux', happyCliVersion: '0.1.0' },
+                null,
+                'default'
+            )
+            engine.handleMachineAlive({ machineId: 'cursor-machine', time: Date.now() })
+
+            let spawnCalled = false
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async () => ({
+                onDisk: false,
+                store: null
+            })
+            ;(engine as any).rpcGateway.spawnSession = async () => {
+                spawnCalled = true
+                return { type: 'success', sessionId: session.id }
+            }
+
+            const result = await engine.resumeSession(session.id, 'default')
+
+            expect(result).toEqual({
+                type: 'error',
+                message: 'Cursor chat data is no longer available on the recorded machine',
+                code: 'resume_unavailable'
+            })
+            expect(spawnCalled).toBe(false)
+        } finally {
+            engine.stop()
+        }
+    })
+
+    it('probes Cursor chat data on the session recorded machine', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            const session = engine.getOrCreateSession(
+                'cursor-machine-scoped-store',
+                {
+                    path: '/remote/project',
+                    host: 'shared-host-label',
+                    machineId: 'recorded-machine',
+                    flavor: 'cursor',
+                    cursorSessionId: 'cursor-thread-remote',
+                    cursorSessionProtocol: 'acp'
+                },
+                null,
+                'default'
+            )
+            for (const machineId of ['other-machine', 'recorded-machine']) {
+                engine.getOrCreateMachine(
+                    machineId,
+                    { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                    null,
+                    'default'
+                )
+                engine.handleMachineAlive({ machineId, time: Date.now() })
+            }
+
+            let captured: unknown[] | null = null
+            ;(engine as any).rpcGateway.getCursorChatStoreStatus = async (...args: unknown[]) => {
+                captured = args
+                return { onDisk: true, store: 'acp' }
+            }
+
+            const result = await engine.getCursorChatStoreStatus(session.id, 'default')
+
+            expect(result).toEqual({
+                type: 'success',
+                status: { onDisk: true, store: 'acp' }
+            })
+            expect(captured as unknown).toEqual([
+                'recorded-machine',
+                '/remote/project',
+                'cursor-thread-remote'
+            ])
         } finally {
             engine.stop()
         }
