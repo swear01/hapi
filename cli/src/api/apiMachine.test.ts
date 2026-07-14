@@ -106,7 +106,7 @@ describe('ApiMachineClient cursor-chat-store-status handler', () => {
             await callCursorChatStoreStatus(client, machine.id, {
                 workspacePath: '/work/project',
                 cursorSessionId: 'cursor-session',
-                homeDir: '/home/recorded-owner'
+                homeDir: '  /home/recorded-owner  '
             })
 
             expect(inspectCursorChatStoreMock).toHaveBeenCalledWith({
@@ -119,7 +119,7 @@ describe('ApiMachineClient cursor-chat-store-status handler', () => {
         }
     })
 
-    it('falls back to the CLI process home for old or empty homeDir metadata', async () => {
+    it('falls back to the CLI process home for old or whitespace-only homeDir metadata', async () => {
         const machine = makeMachine('cursor-store-fallback-machine')
         const client = new ApiMachineClient('cli-token', machine)
 
@@ -131,7 +131,7 @@ describe('ApiMachineClient cursor-chat-store-status handler', () => {
             await callCursorChatStoreStatus(client, machine.id, {
                 workspacePath: '/work/project',
                 cursorSessionId: 'cursor-session-empty',
-                homeDir: ''
+                homeDir: '   '
             })
 
             expect(inspectCursorChatStoreMock).toHaveBeenNthCalledWith(1, {
