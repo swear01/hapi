@@ -288,6 +288,24 @@ describe('session list search helpers', () => {
         expect(sessionMatchesQuery(session, normalizeSearch('desktop'), 'desktop')).toBe(true)
         expect(sessionMatchesQuery(session, normalizeSearch('missing'), 'desktop')).toBe(false)
     })
+
+    it('matches the displayed worktree label and worktree path', () => {
+        const session = makeSession({
+            id: 'worktree-session',
+            metadata: {
+                path: '/work/hapi',
+                worktree: {
+                    basePath: '/work/hapi',
+                    branch: 'fix/sidebar-search',
+                    name: 'sidebar-search',
+                    worktreePath: '/work/hapi-worktrees/fix-sidebar-search'
+                }
+            }
+        })
+
+        expect(sessionMatchesQuery(session, normalizeSearch('sidebar-search'), 'desktop')).toBe(true)
+        expect(sessionMatchesQuery(session, normalizeSearch('hapi-worktrees'), 'desktop')).toBe(true)
+    })
 })
 
 describe('getVisibleSessionPreview', () => {
