@@ -40,6 +40,8 @@ export interface RunnerLocallyPersistedState {
   startedWithApiUrl?: string;
   startedWithMachineId?: string;
   startedWithCliApiTokenHash?: string;
+  // SHA-256 of canonicalized extra headers. Raw header values must never be persisted here.
+  startedWithExtraHeadersHash?: string;
   /**
    * Original process.argv.slice(2) of the runner process at start time, e.g.
    * ['runner', 'start-sync', '--workspace-root', '/home/user/code'].
