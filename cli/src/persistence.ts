@@ -19,6 +19,8 @@ interface Settings {
   cliApiToken?: string
   // API URL for server connections (priority: env HAPI_API_URL > this > default)
   apiUrl?: string
+  // Extra headers for CLI -> hub requests (priority: env HAPI_EXTRA_HEADERS_JSON > this)
+  extraHeaders?: unknown
   // Legacy field name (for migration, read-only)
   serverUrl?: string
 }
