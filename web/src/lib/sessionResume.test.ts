@@ -78,6 +78,17 @@ describe('sessionResume', () => {
         }), 5, false)).toBe(false)
     })
 
+    it('does not apply Cursor chat store status to other agent flavors', () => {
+        expect(inactiveSessionCanResume(makeSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                codexSessionId: 'codex-thread-1',
+            },
+        }), 5, false)).toBe(true)
+    })
+
     it('resolveAgentSessionIdFromMetadata still returns cursorSessionId regardless of protocol', () => {
         expect(resolveAgentSessionIdFromMetadata({
             path: '/p',
