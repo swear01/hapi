@@ -195,11 +195,16 @@ export class SyncEngine {
         return this.sessionCache.getSessions()
     }
 
-    private resolveOnlineMachineForSession(session: Session, namespace: string): Machine | null {
+    private resolveOnlineMachineForSession(
+        session: Session,
+        namespace: string,
+        options?: { strictMachineId?: boolean }
+    ): Machine | null {
         const onlineMachines = this.machineCache.getOnlineMachinesByNamespace(namespace)
         if (session.metadata?.machineId) {
             const exact = onlineMachines.find((machine) => machine.id === session.metadata?.machineId)
             if (exact) return exact
+            if (options?.strictMachineId) return null
         }
         if (session.metadata?.host) {
             const hostMatch = onlineMachines.find((machine) => machine.metadata?.host === session.metadata?.host)
@@ -227,7 +232,11 @@ export class SyncEngine {
             }
         }
 
-        const targetMachine = this.resolveOnlineMachineForSession(access.session, namespace)
+        const targetMachine = this.resolveOnlineMachineForSession(
+            access.session,
+            namespace,
+            { strictMachineId: true }
+        )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
         }
@@ -236,7 +245,8 @@ export class SyncEngine {
             const status = await this.rpcGateway.getCursorChatStoreStatus(
                 targetMachine.id,
                 metadata.path,
-                metadata.cursorSessionId
+                metadata.cursorSessionId,
+                metadata.homeDir
             )
             return { type: 'success', status }
         } catch (error) {
@@ -1227,7 +1237,11 @@ export class SyncEngine {
 
         const metadata = session.metadata!
 
-        const targetMachine = this.resolveOnlineMachineForSession(session, namespace)
+        const targetMachine = this.resolveOnlineMachineForSession(
+            session,
+            namespace,
+            { strictMachineId: flavor === 'cursor' }
+        )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
         }
@@ -1237,7 +1251,8 @@ export class SyncEngine {
                 const chatStatus = await this.rpcGateway.getCursorChatStoreStatus(
                     targetMachine.id,
                     directory,
-                    resumeToken
+                    resumeToken,
+                    metadata.homeDir
                 )
                 if (!chatStatus.onDisk) {
                     return {

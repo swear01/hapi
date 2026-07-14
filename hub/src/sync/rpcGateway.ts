@@ -216,12 +216,13 @@ export class RpcGateway {
     async getCursorChatStoreStatus(
         machineId: string,
         workspacePath: string,
-        cursorSessionId: string
+        cursorSessionId: string,
+        homeDir?: string
     ): Promise<RpcCursorChatStoreStatus> {
         const result = await this.machineRpc(
             machineId,
             RPC_METHODS.CursorChatStoreStatus,
-            { workspacePath, cursorSessionId }
+            { workspacePath, cursorSessionId, homeDir }
         )
         return CursorChatStoreStatusSchema.parse(result)
     }

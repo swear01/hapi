@@ -52,6 +52,7 @@ interface ListMachineDirectoryRequest {
 interface CursorChatStoreStatusRequest {
     workspacePath: string
     cursorSessionId: string
+    homeDir?: string
 }
 
 export function normalizeWindowsDriveRoot(path: string): string {
@@ -139,7 +140,9 @@ export class ApiMachineClient {
         this.rpcHandlerManager.registerHandler<CursorChatStoreStatusRequest, CursorChatStoreStatus>(
             RPC_METHODS.CursorChatStoreStatus,
             async (params) => await inspectCursorChatStore({
-                home: homedir(),
+                home: typeof params?.homeDir === 'string' && params.homeDir.length > 0
+                    ? params.homeDir
+                    : homedir(),
                 workspacePath: typeof params?.workspacePath === 'string' ? params.workspacePath : '',
                 cursorSessionId: typeof params?.cursorSessionId === 'string' ? params.cursorSessionId : ''
             })
