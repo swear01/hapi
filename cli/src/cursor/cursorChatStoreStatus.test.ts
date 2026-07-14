@@ -47,6 +47,37 @@ describe('inspectCursorChatStore', () => {
         })).resolves.toEqual({ onDisk: true, store: 'legacy' })
     })
 
+    it('finds a unique legacy store when the canonical workspace drawer is missing', async () => {
+        const home = await makeHome()
+        const store = join(home, '.cursor', 'chats', 'legacy-workspace-hash', 'cursor-3', 'store.db')
+        await mkdir(join(store, '..'), { recursive: true })
+        await writeFile(store, 'db')
+
+        await expect(inspectCursorChatStore({
+            home,
+            workspacePath: '/work/project-moved-since-chat-was-created',
+            cursorSessionId: 'cursor-3'
+        })).resolves.toEqual({ onDisk: true, store: 'legacy' })
+    })
+
+    it('reports missing when multiple non-canonical legacy stores are present', async () => {
+        const home = await makeHome()
+        const stores = [
+            join(home, '.cursor', 'chats', 'workspace-hash-a', 'cursor-4', 'store.db'),
+            join(home, '.cursor', 'chats', 'workspace-hash-b', 'cursor-4', 'store.db')
+        ]
+        for (const store of stores) {
+            await mkdir(join(store, '..'), { recursive: true })
+            await writeFile(store, 'db')
+        }
+
+        await expect(inspectCursorChatStore({
+            home,
+            workspacePath: '/work/unrelated-project',
+            cursorSessionId: 'cursor-4'
+        })).resolves.toEqual({ onDisk: false, store: null })
+    })
+
     it('reports missing without allowing cursorSessionId path traversal', async () => {
         const home = await makeHome()
 
