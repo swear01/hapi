@@ -159,6 +159,9 @@ export default {
   'session.action.export': '导出对话',
   'session.action.archive': '归档',
   'session.action.reopen': '重新打开',
+  'session.action.reopenCursorChecking': '正在检查记录设备上的 Cursor 聊天数据是否仍然可用。',
+  'session.action.reopenCursorMissing': '记录设备上的 Cursor 聊天数据已不可用。',
+  'session.action.reopenCursorCheckFailed': '无法验证记录设备上的 Cursor 聊天数据。',
   'session.action.delete': '删除',
   'session.action.copy': '复制',
 

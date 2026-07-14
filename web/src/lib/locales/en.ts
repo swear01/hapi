@@ -159,6 +159,9 @@ export default {
   'session.action.export': 'Export conversation',
   'session.action.archive': 'Archive',
   'session.action.reopen': 'Reopen',
+  'session.action.reopenCursorChecking': 'Checking whether Cursor chat data is still available on the recorded machine.',
+  'session.action.reopenCursorMissing': 'Cursor chat data is no longer available on the recorded machine.',
+  'session.action.reopenCursorCheckFailed': 'Could not verify Cursor chat data on the recorded machine.',
   'session.action.delete': 'Delete',
   'session.action.copy': 'Copy',
 

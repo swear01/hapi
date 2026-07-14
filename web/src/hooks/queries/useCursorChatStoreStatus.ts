@@ -11,6 +11,7 @@ export function useCursorChatStoreStatus(args: {
     enabled?: boolean
 }): {
     status: CursorChatStoreStatus | undefined
+    isApplicable: boolean
     isLoading: boolean
     error: string | null
 } {
@@ -46,6 +47,7 @@ export function useCursorChatStoreStatus(args: {
 
     return {
         status: query.data,
+        isApplicable: shouldProbe,
         isLoading: query.isLoading,
         error: query.error instanceof Error
             ? query.error.message

@@ -381,6 +381,7 @@ type SessionChatProps = {
     api: ApiClient
     session: Session
     cursorChatOnDisk?: boolean
+    reopenDisabledReason?: string
     messages: DecryptedMessage[]
     pendingMessages?: DecryptedMessage[]
     messagesWarning: string | null
@@ -1203,6 +1204,7 @@ function SessionChatInner(props: SessionChatProps) {
                 outlineActive={outlineOpen}
                 api={props.api}
                 canReopen={inactiveCanResume}
+                reopenDisabledReason={props.reopenDisabledReason}
                 onSessionDeleted={props.onBack}
                 onSessionReopened={(newSessionId) => {
                     navigate({

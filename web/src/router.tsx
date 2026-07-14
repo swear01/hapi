@@ -633,7 +633,11 @@ function SessionPage() {
         error: sessionError,
         refetch: refetchSession,
     } = useSession(api, sessionId)
-    const { status: cursorChatStoreStatus } = useCursorChatStoreStatus({ api, session })
+    const {
+        status: cursorChatStoreStatus,
+        isApplicable: cursorChatStoreApplicable,
+        error: cursorChatStoreError,
+    } = useCursorChatStoreStatus({ api, session })
     const {
         messages,
         pendingMessages,
@@ -729,6 +733,16 @@ function SessionPage() {
         })()
     }, [api, queryClient, navigate, addToast, t])
 
+    const cursorReopenDisabledReason = cursorChatStoreApplicable && cursorChatStoreStatus?.onDisk !== true
+        ? cursorChatStoreError
+            ? t('session.action.reopenCursorCheckFailed')
+            : cursorChatStoreStatus?.onDisk === false
+                ? t('session.action.reopenCursorMissing')
+                : t('session.action.reopenCursorChecking')
+        : undefined
+    const canOfferInactiveReopen = session
+        ? inactiveSessionCanResume(session, messages.length, cursorChatStoreStatus?.onDisk)
+        : false
     const rawSendError = sendErrors[sessionId] ?? null
     const sendError: ComposerSendError | null = rawSendError
         ? {
@@ -736,7 +750,7 @@ function SessionPage() {
             text: rawSendError.text,
             message: rawSendError.message,
             scheduledAt: rawSendError.scheduledAt,
-            action: rawSendError.code === 'session_inactive'
+            action: rawSendError.code === 'session_inactive' && canOfferInactiveReopen
                 ? {
                     label: t('chat.sendError.sessionInactive.action'),
                     onClick: () => reopenFromErrorAffordance(sessionId),
@@ -921,6 +935,7 @@ function SessionPage() {
             api={api}
             session={session}
             cursorChatOnDisk={cursorChatStoreStatus?.onDisk}
+            reopenDisabledReason={cursorReopenDisabledReason}
             messages={messages}
             pendingMessages={pendingMessages}
             messagesWarning={messagesWarning}

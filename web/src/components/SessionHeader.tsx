@@ -106,6 +106,7 @@ export function SessionHeader(props: {
     outlineActive?: boolean
     api: ApiClient | null
     canReopen?: boolean
+    reopenDisabledReason?: string
     onSessionDeleted?: () => void
     onSessionReopened?: (newSessionId: string) => void
 }) {
@@ -273,6 +274,7 @@ export function SessionHeader(props: {
                 onExport={() => setExportOpen(true)}
                 onArchive={() => setArchiveOpen(true)}
                 onReopen={props.canReopen === false ? undefined : handleReopen}
+                reopenDisabledReason={props.reopenDisabledReason}
                 onDelete={() => setDeleteOpen(true)}
                 anchorPoint={menuAnchorPoint}
                 menuId={menuId}

@@ -44,8 +44,8 @@ export function inactiveSessionCanResume(
     }
     if (resolveAgentSessionIdFromMetadata(session.metadata)) {
         const flavor = isKnownFlavor(session.metadata.flavor) ? session.metadata.flavor : 'claude'
-        if (flavor === 'cursor' && cursorChatOnDisk === false) {
-            return false
+        if (flavor === 'cursor') {
+            return cursorChatOnDisk === true
         }
         return true
     }
