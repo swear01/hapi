@@ -64,7 +64,18 @@ describe('sessionResume', () => {
                 flavor: 'cursor',
                 cursorSessionId: 'cursor-thread-1',
             },
-        }), 5)).toBe(true)
+        }), 5, true)).toBe(true)
+    })
+
+    it('conservatively rejects cursor resume until the chat store is verified', () => {
+        expect(inactiveSessionCanResume(makeSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'cursor',
+                cursorSessionId: 'cursor-thread-1',
+            },
+        }), 5)).toBe(false)
     })
 
     it('rejects cursor resume when the recorded chat store is missing on its machine', () => {
