@@ -47,6 +47,26 @@ describe('inspectCursorChatStore', () => {
         })).resolves.toEqual({ onDisk: true, store: 'legacy' })
     })
 
+    it('hashes the raw workspace path without trimming valid path bytes', async () => {
+        const home = await makeHome()
+        const workspacePath = '/work/project '
+        const workspaceHash = createHash('md5').update(workspacePath).digest('hex')
+        const stores = [
+            join(home, '.cursor', 'chats', workspaceHash, 'cursor-spaced-path', 'store.db'),
+            join(home, '.cursor', 'chats', 'stale-workspace-hash', 'cursor-spaced-path', 'store.db')
+        ]
+        for (const store of stores) {
+            await mkdir(join(store, '..'), { recursive: true })
+            await writeFile(store, 'db')
+        }
+
+        await expect(inspectCursorChatStore({
+            home,
+            workspacePath,
+            cursorSessionId: 'cursor-spaced-path'
+        })).resolves.toEqual({ onDisk: true, store: 'legacy' })
+    })
+
     it('finds a unique legacy store when the canonical workspace drawer is missing', async () => {
         const home = await makeHome()
         const store = join(home, '.cursor', 'chats', 'legacy-workspace-hash', 'cursor-3', 'store.db')
