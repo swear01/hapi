@@ -453,6 +453,22 @@ export function getSessionTitle(session: SessionSummary): string {
     return session.id.slice(0, 8)
 }
 
+export function getWorktreeSessionLabel(session: SessionSummary): string | null {
+    const worktree = session.metadata?.worktree
+    if (!worktree) {
+        return null
+    }
+
+    const name = worktree.name.trim()
+    if (name) {
+        return name
+    }
+
+    const path = (worktree.worktreePath ?? session.metadata?.path ?? '').replace(/[\\/]+$/, '')
+    const parts = path.split(/[\\/]+/).filter(Boolean)
+    return parts.at(-1) ?? null
+}
+
 function getTodoProgress(session: SessionSummary): { completed: number; total: number } | null {
     if (!session.todoProgress) return null
     if (session.todoProgress.completed === session.todoProgress.total) return null
@@ -626,6 +642,7 @@ function SessionItem(props: {
     })
 
     const sessionName = getSessionTitle(s)
+    const worktreeLabel = getWorktreeSessionLabel(s)
     const todoProgress = getTodoProgress(s)
     const attention = useMemo(
         () => showDetailedStatus
@@ -706,9 +723,14 @@ function SessionItem(props: {
                         </span>
                     </div>
                 </div>
-                {showPath ? (
-                    <div className="truncate text-xs text-[var(--app-hint)]">
-                        {s.metadata?.path ?? s.id}
+                {showPath || worktreeLabel ? (
+                    <div
+                        className="truncate text-xs text-[var(--app-hint)]"
+                        title={worktreeLabel
+                            ? s.metadata?.worktree?.worktreePath ?? s.metadata?.path
+                            : undefined}
+                    >
+                        {worktreeLabel ?? s.metadata?.path ?? s.id}
                     </div>
                 ) : null}
             </button>
