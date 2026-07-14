@@ -2714,8 +2714,11 @@ describe('codexRemoteLauncher', () => {
             message: 'Compaction completed'
         });
 
-        const compacted = { threadId: 'thread-1', turnId: 'compact-1' };
-        harness.dispatchNotification?.('thread/compacted', compacted);
+        harness.dispatchNotification?.('item/completed', {
+            threadId: 'thread-1',
+            turnId: 'compact-1',
+            item: { id: 'compact-item-1', type: 'contextCompaction' }
+        });
         harness.dispatchNotification?.('turn/completed', {
             threadId: 'thread-1',
             turn: { id: 'compact-1', status: 'completed' }
