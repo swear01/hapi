@@ -483,9 +483,11 @@ export function sessionMatchesQuery(session: SessionSummary, query: string, mach
     if (!query) return true
     const searchable = [
         getSessionTitle(session),
+        getWorktreeSessionLabel(session),
         session.id,
         session.metadata?.path,
         session.metadata?.worktree?.basePath,
+        session.metadata?.worktree?.worktreePath,
         session.metadata?.name,
         session.metadata?.summary?.text,
         session.metadata?.flavor,
