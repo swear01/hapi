@@ -67,6 +67,17 @@ describe('sessionResume', () => {
         }), 5)).toBe(true)
     })
 
+    it('rejects cursor resume when the recorded chat store is missing on its machine', () => {
+        expect(inactiveSessionCanResume(makeSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'cursor',
+                cursorSessionId: 'cursor-thread-1',
+            },
+        }), 5, false)).toBe(false)
+    })
+
     it('resolveAgentSessionIdFromMetadata still returns cursorSessionId regardless of protocol', () => {
         expect(resolveAgentSessionIdFromMetadata({
             path: '/p',
