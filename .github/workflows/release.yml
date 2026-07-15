@@ -13,6 +13,12 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Verify release commit is on main
+              run: |
+                  git fetch origin main:refs/remotes/origin/main
+                  git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
             - uses: oven-sh/setup-bun@v2
               with:
                   bun-version: 1.3.14
