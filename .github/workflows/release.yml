@@ -9,7 +9,7 @@ permissions:
     contents: write
 
 jobs:
-    release:
+    build:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
@@ -24,14 +24,17 @@ jobs:
                   bun-version: 1.3.14
             - run: bun install
             - run: bun run build:single-exe:all
-            - name: Package release artifacts
+            - name: Package non-macOS release artifacts
               run: |
                   cd cli/dist-exe
                   mkdir -p ../release-artifacts
 
                   for dir in bun-*/; do
                       target="${dir%/}"
-                      # bun-darwin-arm64 -> hapi-darwin-arm64
+                      if [[ "$target" == bun-darwin-* ]]; then
+                          continue
+                      fi
+
                       name="hapi-${target#bun-}"
                       name="${name/windows/win32}"
 
@@ -41,14 +44,96 @@ jobs:
                           tar -czvf "../release-artifacts/${name}.tar.gz" -C "$target" hapi
                       fi
                   done
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: unsigned-binaries
+                  path: cli/dist-exe/bun-*/hapi*
+                  if-no-files-found: error
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: unsigned-release-artifacts
+                  path: cli/release-artifacts/*
+                  if-no-files-found: error
 
-                  cd ../release-artifacts
+    sign-macos:
+        runs-on: macos-14
+        needs: build
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: unsigned-binaries
+                  path: cli/dist-exe
+            - name: Import local release signing certificate
+              env:
+                  SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+                  SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+              run: |
+                  test -n "$SIGNING_P12"
+                  test -n "$SIGNING_P12_PASSWORD"
+
+                  KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+                  KEYCHAIN_PATH="$RUNNER_TEMP/hapi-signing.keychain-db"
+                  printf '%s' "$SIGNING_P12" | openssl base64 -d -A > "$RUNNER_TEMP/hapi-signing.p12"
+
+                  security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+                  security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+                  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+                  security import "$RUNNER_TEMP/hapi-signing.p12" \
+                      -k "$KEYCHAIN_PATH" \
+                      -P "$SIGNING_P12_PASSWORD" \
+                      -T /usr/bin/codesign
+                  security set-key-partition-list \
+                      -S apple-tool:,apple: \
+                      -s \
+                      -k "$KEYCHAIN_PASSWORD" \
+                      "$KEYCHAIN_PATH"
+                  security list-keychains -d user -s "$KEYCHAIN_PATH"
+                  security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+            - name: Sign and package macOS release artifacts
+              run: |
+                  mkdir -p cli/release-artifacts
+
+                  for target in bun-darwin-arm64 bun-darwin-x64; do
+                      binary="cli/dist-exe/$target/hapi"
+                      chmod 0755 "$binary"
+                      codesign \
+                          --force \
+                          --options runtime \
+                          --identifier xyz.hapi.cli \
+                          --keychain "$RUNNER_TEMP/hapi-signing.keychain-db" \
+                          --sign "HAPI Local Release Signing" \
+                          "$binary"
+                      codesign --verify --strict --verbose=2 "$binary"
+                      codesign --display --requirements - "$binary" 2>&1 \
+                          | grep -F 'identifier "xyz.hapi.cli"'
+                      tar -czvf "cli/release-artifacts/hapi-${target#bun-}.tar.gz" \
+                          -C "cli/dist-exe/$target" hapi
+                  done
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: signed-macos-release-artifacts
+                  path: cli/release-artifacts/*
+                  if-no-files-found: error
+
+    release:
+        runs-on: ubuntu-latest
+        needs: [build, sign-macos]
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  pattern: '*-release-artifacts'
+                  path: cli/release-artifacts
+                  merge-multiple: true
+            - name: Create checksums
+              run: |
+                  cd cli/release-artifacts
                   sha256sum * > checksums.txt
             - name: Create Release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
                   gh release create "${GITHUB_REF#refs/tags/}" \
+                      --repo "$GITHUB_REPOSITORY" \
                       --title "Release ${GITHUB_REF#refs/tags/}" \
                       --generate-notes \
                       cli/release-artifacts/*
