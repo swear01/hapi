@@ -190,19 +190,26 @@ function findWebappDistDir(): { distDir: string; indexHtmlPath: string } {
     return { distDir, indexHtmlPath: join(distDir, 'index.html') }
 }
 
+export function getWebAssetCacheHeaders(path: string): Record<string, string> {
+    if (path.startsWith('/assets/')) {
+        return {
+            'Cache-Control': 'public, max-age=31536000, immutable'
+        }
+    }
+
+    return {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'CDN-Cache-Control': 'no-store',
+        'Cloudflare-CDN-Cache-Control': 'no-store'
+    }
+}
+
 function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
-    const headers: Record<string, string> = {
-        'Content-Type': asset.mimeType
-    }
-
-    if (asset.path === '/sw.js') {
-        headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
-        headers['CDN-Cache-Control'] = 'no-store'
-        headers['Cloudflare-CDN-Cache-Control'] = 'no-store'
-    }
-
     return new Response(Bun.file(asset.sourcePath), {
-        headers
+        headers: {
+            'Content-Type': asset.mimeType,
+            ...getWebAssetCacheHeaders(asset.path)
+        }
     })
 }
 
@@ -336,7 +343,14 @@ from GitHub Pages instead of through the relay tunnel.
         return app
     }
 
-    app.use('/assets/*', serveStatic({ root: distDir }))
+    app.use('/assets/*', serveStatic({
+        root: distDir,
+        onFound: (_path, c) => {
+            for (const [name, value] of Object.entries(getWebAssetCacheHeaders(c.req.path))) {
+                c.header(name, value)
+            }
+        }
+    }))
 
     app.use('*', async (c, next) => {
         if (c.req.path.startsWith('/api')) {
@@ -344,7 +358,14 @@ from GitHub Pages instead of through the relay tunnel.
             return
         }
 
-        return await serveStatic({ root: distDir })(c, next)
+        return await serveStatic({
+            root: distDir,
+            onFound: (_path, staticContext) => {
+                for (const [name, value] of Object.entries(getWebAssetCacheHeaders(staticContext.req.path))) {
+                    staticContext.header(name, value)
+                }
+            }
+        })(c, next)
     })
 
     app.get('*', async (c, next) => {
@@ -353,7 +374,15 @@ from GitHub Pages instead of through the relay tunnel.
             return
         }
 
-        return await serveStatic({ root: distDir, path: 'index.html' })(c, next)
+        return await serveStatic({
+            root: distDir,
+            path: 'index.html',
+            onFound: (_path, staticContext) => {
+                for (const [name, value] of Object.entries(getWebAssetCacheHeaders('/index.html'))) {
+                    staticContext.header(name, value)
+                }
+            }
+        })(c, next)
     })
 
     return app
