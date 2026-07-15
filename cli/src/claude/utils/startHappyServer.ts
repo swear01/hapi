@@ -16,9 +16,14 @@ import { detectImageMimeType, registerGeneratedImage } from "@/modules/common/ge
 
 type StartHappyServerOptions = {
     emitTitleSummary?: boolean;
+    enableChangeTitle?: boolean;
 };
 
-function createHapiMcpServer(client: ApiSessionClient, emitTitleSummary: boolean): McpServer {
+function createHapiMcpServer(
+    client: ApiSessionClient,
+    emitTitleSummary: boolean,
+    enableChangeTitle: boolean
+): McpServer {
     const handler = async (title: string) => {
         logger.debug('[hapiMCP] Changing title to:', title);
         try {
@@ -50,36 +55,38 @@ function createHapiMcpServer(client: ApiSessionClient, emitTitleSummary: boolean
         title: z.string().optional().describe('Optional display title or filename for the image'),
     });
 
-    mcp.registerTool<any, any>('change_title', {
-        description: 'Change the title of the current chat session',
-        title: 'Change Chat Title',
-        inputSchema: changeTitleInputSchema,
-    }, async (args: { title: string }) => {
-        const response = await handler(args.title);
-        logger.debug('[hapiMCP] Response:', response);
+    if (enableChangeTitle) {
+        mcp.registerTool<any, any>('change_title', {
+            description: 'Change the title of the current chat session',
+            title: 'Change Chat Title',
+            inputSchema: changeTitleInputSchema,
+        }, async (args: { title: string }) => {
+            const response = await handler(args.title);
+            logger.debug('[hapiMCP] Response:', response);
 
-        if (response.success) {
+            if (response.success) {
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: `Successfully changed chat title to: "${args.title}"`,
+                        },
+                    ],
+                    isError: false,
+                };
+            }
+
             return {
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Successfully changed chat title to: "${args.title}"`,
+                        text: `Failed to change chat title: ${response.error || 'Unknown error'}`,
                     },
                 ],
-                isError: false,
+                isError: true,
             };
-        }
-
-        return {
-            content: [
-                {
-                    type: 'text' as const,
-                    text: `Failed to change chat title: ${response.error || 'Unknown error'}`,
-                },
-            ],
-            isError: true,
-        };
-    });
+        });
+    }
 
     mcp.registerTool<any, any>('display_image', {
         description: 'Display a local image file inline in the current HAPI chat session',
@@ -161,11 +168,12 @@ function readMcpSessionId(req: IncomingMessage): string | undefined {
 
 export async function startHappyServer(client: ApiSessionClient, options: StartHappyServerOptions = {}) {
     const emitTitleSummary = options.emitTitleSummary ?? true;
+    const enableChangeTitle = options.enableChangeTitle ?? true;
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const mcps = new Map<string, McpServer>();
 
     const createMcpTransport = () => {
-        const mcp = createHapiMcpServer(client, emitTitleSummary);
+        const mcp = createHapiMcpServer(client, emitTitleSummary, enableChangeTitle);
         const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sessionId) => {
@@ -221,7 +229,7 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
 
     return {
         url: mcpUrl,
-        toolNames: ['change_title', 'display_image'],
+        toolNames: enableChangeTitle ? ['change_title', 'display_image'] : ['display_image'],
         stop: () => {
             logger.debug('[hapiMCP] Stopping server');
             for (const mcp of mcps.values()) {

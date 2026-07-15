@@ -9,6 +9,8 @@ const harness = vi.hoisted(() => ({
     loadSessionCalled: false,
     newSessionCalled: false,
     promptCalls: 0,
+    refreshSessionInfoCalls: [] as Array<{ sessionId: string; cwd: string }>,
+    bridgeOptions: null as { enableChangeTitle?: boolean } | null,
     backendArgs: null as { command: string; args?: string[] } | null,
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
@@ -98,6 +100,10 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             respondToPermission: vi.fn(async () => {}),
             onStderrError: vi.fn(),
             setUsageUpdateListener: vi.fn(),
+            setSessionInfoUpdateListener: vi.fn(),
+            refreshSessionInfo: vi.fn(async (sessionId: string, cwd: string) => {
+                harness.refreshSessionInfoCalls.push({ sessionId, cwd });
+            }),
             onPermissionRequest: vi.fn(),
             registerExtensionRequestHandler: vi.fn(),
             disconnect: vi.fn(async () => {})
@@ -119,10 +125,13 @@ vi.mock('@/agent/permissionAdapter', () => ({
 }));
 
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
-    buildHapiMcpBridge: async () => ({
-        server: { stop: () => {} },
-        mcpServers: {}
-    })
+    buildHapiMcpBridge: async (_client: unknown, options?: { enableChangeTitle?: boolean }) => {
+        harness.bridgeOptions = options ?? null;
+        return {
+            server: { stop: () => {} },
+            mcpServers: {}
+        };
+    }
 }));
 
 vi.mock('@/ui/ink/OpencodeDisplay', () => ({
@@ -184,6 +193,8 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.loadSessionCalled = false;
         harness.newSessionCalled = false;
         harness.promptCalls = 0;
+        harness.refreshSessionInfoCalls = [];
+        harness.bridgeOptions = null;
         harness.setConfigOptionCalls = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
@@ -204,6 +215,7 @@ describe('cursorAcpRemoteLauncher', () => {
 
         expect(createCursorAcpBackend).toHaveBeenCalled();
         expect(harness.backendArgs).toEqual({ command: 'agent', args: ['acp'] });
+        expect(harness.bridgeOptions).toEqual({ enableChangeTitle: false });
         expect(legacyLauncher).not.toHaveBeenCalled();
     });
 
@@ -767,5 +779,9 @@ describe('cursorAcpRemoteLauncher', () => {
         await cursorAcpRemoteLauncher(session);
 
         expect(harness.promptCalls).toBe(2);
+        expect(harness.refreshSessionInfoCalls).toEqual([
+            { sessionId: 'new-acp-session', cwd: '/tmp/project' },
+            { sessionId: 'new-acp-session', cwd: '/tmp/project' }
+        ]);
     });
 });
