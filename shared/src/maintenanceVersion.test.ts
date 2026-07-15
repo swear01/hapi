@@ -7,6 +7,10 @@ import { APP_VERSION } from './buildInfo'
 const releaseWorkflow = readFileSync(join(import.meta.dir, '../../.github/workflows/release.yml'), 'utf8')
 
 describe('maintenance release version', () => {
+    it('uses the next maintenance release number', () => {
+        expect(cliPackage.version).toBe('0.22.3.2')
+    })
+
     it('appends one numeric maintenance component to the upstream version', () => {
         const match = cliPackage.version.match(/^(\d+\.\d+\.\d+)\.(\d+)$/)
 
