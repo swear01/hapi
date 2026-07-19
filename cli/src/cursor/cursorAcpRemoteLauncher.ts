@@ -45,6 +45,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private unregisterModelApplyHandler: (() => void) | null = null;
     private modelApplySeq = 0;
     private promptInFlight = false;
+    private activePromptModeHash: string | null = null;
     /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
     private softSteerWaiters: Promise<void>[] = [];
     private acpSessionId: string | null = null;
@@ -229,6 +230,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.queue.restoreTakenItem(taken);
                     return { steered: false, error: 'Control commands cannot be steered' };
                 }
+                if (this.activePromptModeHash !== taken.item.modeHash) {
+                    session.queue.restoreTakenItem(taken);
+                    return { steered: false, error: 'Queued message mode differs from the active turn' };
+                }
 
                 // Ack the hub once the soft-steer request is kicked off — not when
                 // the concurrent session/prompt finishes. ACP treats that response as
@@ -249,9 +254,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 }
 
                 this.softSteerWaiters.push(steerDone);
-                void steerDone.finally(() => {
+                const removeWaiter = () => {
                     this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
-                });
+                };
+                void steerDone.then(removeWaiter, removeWaiter);
 
                 messageBuffer.addMessage(taken.item.message, 'user');
                 session.client.emitMessagesConsumed([localId], { steered: true });
@@ -308,6 +314,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
             session.onThinkingChange(true);
             this.promptInFlight = true;
+            this.activePromptModeHash = batch.hash;
 
             try {
                 await backend.prompt(acpSessionId, promptContent, (message) => {
@@ -330,6 +337,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     await Promise.allSettled(this.softSteerWaiters);
                     this.softSteerWaiters = [];
                 }
+                this.activePromptModeHash = null;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');

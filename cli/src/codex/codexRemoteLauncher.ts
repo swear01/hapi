@@ -1906,6 +1906,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     session.queue.restoreTakenItem(taken);
                     return { steered: false, error: 'Control commands cannot be steered' };
                 }
+                if (activeMessage?.hash !== taken.item.modeHash) {
+                    session.queue.restoreTakenItem(taken);
+                    return { steered: false, error: 'Queued message mode differs from the active turn' };
+                }
                 const batch: QueuedMessage = {
                     message: taken.item.message,
                     mode: taken.item.mode,
