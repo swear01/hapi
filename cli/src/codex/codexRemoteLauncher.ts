@@ -2447,9 +2447,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 && Boolean(activeMessage)
                 && Boolean(this.currentThreadId)
                 && sameThreadRetryAttempt < SAME_THREAD_MAX_RETRIES;
+            const allowStaleSameThreadTerminalRecovery = msgType === 'task_complete'
+                && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0);
             const allowSameThreadTerminalRecovery = msg.terminal_source === 'thread_status'
-                || sameThreadRetryAttempt > 0
-                || sameThreadCompactAttempt > 0;
+                || allowStaleSameThreadTerminalRecovery;
 
             const suppressReadyForThisTerminalEvent = isTerminalEvent
                 ? consumeInterruptedTurnReadySuppression(eventTurnId)
