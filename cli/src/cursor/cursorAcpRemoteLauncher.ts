@@ -258,9 +258,20 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
                 };
                 void steerDone.then(removeWaiter, removeWaiter);
-
-                messageBuffer.addMessage(taken.item.message, 'user');
-                session.client.emitMessagesConsumed([localId], { steered: true });
+                void steerDone.then(
+                    () => {
+                        messageBuffer.addMessage(taken.item.message, 'user');
+                        session.client.emitMessagesConsumed([localId], { steered: true });
+                    },
+                    (error) => {
+                        logger.debug('[cursor-acp] soft-steer failed', error);
+                        try {
+                            session.queue.restoreTakenItem(taken);
+                        } catch (restoreError) {
+                            logger.debug('[cursor-acp] soft-steer message could not be restored', restoreError);
+                        }
+                    }
+                );
                 return { steered: true };
             }
         );
