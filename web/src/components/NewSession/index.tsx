@@ -1023,12 +1023,16 @@ export function NewSession(props: {
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && opencodeModelsState.isLoading)
             ))
+    const fastModeSelectionPending = agent === 'codex'
+        && serviceTier === 'fast'
+        && codexModelsState.isLoading
     const canCreate = Boolean(
         machineId
         && trimmedDirectory
         && !isFormDisabled
         && !missingWorktreeDirectory
         && !isLaunchPreferenceValidationPending
+        && !fastModeSelectionPending
     )
 
     return (
