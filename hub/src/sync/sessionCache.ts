@@ -172,7 +172,7 @@ export class SessionCache {
             serviceTier: stored.serviceTier,
             permissionMode: existing?.permissionMode ?? metadata?.preferredPermissionMode,
             collaborationMode: existing?.collaborationMode,
-            personality: existing?.personality
+            personality: stored.personality
         }
 
         this.sessions.set(sessionId, session)
@@ -292,7 +292,14 @@ export class SessionCache {
         if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
         }
-        if (payload.personality !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'personality', t)) session.personality = payload.personality
+        if (payload.personality !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'personality', t)) {
+            if (payload.personality !== session.personality) {
+                this.store.sessions.setSessionPersonality(payload.sid, payload.personality, session.namespace, {
+                    touchUpdatedAt: false
+                })
+            }
+            session.personality = payload.personality
+        }
 
         const now = Date.now()
         const lastBroadcastAt = this.lastBroadcastAtBySessionId.get(session.id) ?? 0
@@ -556,6 +563,14 @@ export class SessionCache {
             this.markRuntimeConfigUpdated(sessionId, 'collaborationMode', appliedAt)
         }
         if (config.personality !== undefined) {
+            if (config.personality !== session.personality) {
+                const updated = this.store.sessions.setSessionPersonality(sessionId, config.personality, session.namespace, {
+                    touchUpdatedAt: false
+                })
+                if (!updated) {
+                    throw new Error('Failed to update session personality')
+                }
+            }
             session.personality = config.personality
             this.markRuntimeConfigUpdated(sessionId, 'personality', appliedAt)
         }
@@ -944,6 +959,15 @@ export class SessionCache {
             })
             if (!updated) {
                 throw new Error('Failed to preserve session service tier during merge')
+            }
+        }
+
+        if (newStored.personality === null && oldStored.personality !== null) {
+            const updated = this.store.sessions.setSessionPersonality(newSessionId, oldStored.personality, namespace, {
+                touchUpdatedAt: false
+            })
+            if (!updated) {
+                throw new Error('Failed to preserve session personality during merge')
             }
         }
 
