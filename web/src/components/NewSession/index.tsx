@@ -693,7 +693,16 @@ export function NewSession(props: {
         }
     }
 
-    const canCreate = Boolean(machineId && trimmedDirectory && !isFormDisabled && !missingWorktreeDirectory)
+    const fastModeSelectionPending = agent === 'codex'
+        && serviceTier === 'fast'
+        && codexModelsState.isLoading
+    const canCreate = Boolean(
+        machineId
+        && trimmedDirectory
+        && !isFormDisabled
+        && !missingWorktreeDirectory
+        && !fastModeSelectionPending
+    )
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
