@@ -1,4 +1,4 @@
-import type { AgentFlavor, CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
+import type { AgentFlavor, CodexCollaborationMode, CodexPersonality, PermissionMode } from '@hapi/protocol/types'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import {
     ArchiveCodexSessionRpcResponseSchema,
@@ -157,13 +157,14 @@ export class RpcGateway {
         effort?: string,
         permissionMode?: PermissionMode,
         serviceTier?: string,
-        existingSessionId?: string
+        existingSessionId?: string,
+        personality?: CodexPersonality
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         try {
             const result = await this.machineRpc(
                 machineId,
                 RPC_METHODS.SpawnHappySession,
-                { type: 'spawn-in-directory', directory, agent, model, modelReasoningEffort, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode, serviceTier, existingSessionId, sessionId: existingSessionId }
+                { type: 'spawn-in-directory', directory, agent, model, modelReasoningEffort, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode, serviceTier, existingSessionId, sessionId: existingSessionId, personality }
             )
             if (result && typeof result === 'object') {
                 const obj = result as Record<string, unknown>

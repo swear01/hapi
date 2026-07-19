@@ -1300,7 +1300,8 @@ export class SyncEngine {
             session.effort ?? undefined,
             preferredPermissionMode,
             session.serviceTier ?? undefined,
-            access.sessionId
+            access.sessionId,
+            session.personality ?? undefined
         )
 
         if (spawnResult.type !== 'success') {
