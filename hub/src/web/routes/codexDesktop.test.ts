@@ -885,6 +885,9 @@ describe('Codex Desktop import routes', () => {
             expect(result.success).toBe(true)
             const importedSessionId = result.success ? result.hapiSessionIds?.[0] : undefined
             expect(importedSessionId).toBeDefined()
+            if (!importedSessionId) {
+                throw new Error('Imported session id missing')
+            }
             expect(applied).toEqual([{
                 sessionId: importedSessionId,
                 config: { serviceTier: 'fast', collaborationMode: 'plan' }
