@@ -200,6 +200,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
 
         expect(JSON.stringify(harness.promptContents[0])).toContain('$name');
         expect(JSON.stringify(harness.promptContents[0])).toContain('skill_lookup');
+        expect(JSON.stringify(harness.promptContents[0])).toContain('hapi_display_image');
+        expect(JSON.stringify(harness.promptContents[0])).not.toContain('hapi_change_title');
         expect(JSON.stringify(harness.promptContents[1])).not.toContain('skill_lookup');
     });
 

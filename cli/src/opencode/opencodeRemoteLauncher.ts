@@ -11,8 +11,7 @@ import type { OpencodeMode, PermissionMode } from './types';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { createOpencodeBackend } from './utils/opencodeBackend';
 import { OpencodePermissionHandler } from './utils/permissionHandler';
-import { PLAN_MODE_INSTRUCTION } from './utils/systemPrompt';
-import { SKILL_LOOKUP_INSTRUCTION } from '@/modules/common/skillLookupInstruction';
+import { OPENCODE_NATIVE_TOOL_INSTRUCTION, PLAN_MODE_INSTRUCTION } from './utils/systemPrompt';
 import { resolveThoughtLevelEffort } from './thoughtLevelEffort';
 
 type OpencodeRemoteLauncherOptions = {
@@ -278,7 +277,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 messageText = `${PLAN_MODE_INSTRUCTION}\n\n${messageText}`;
             }
             if (!this.instructionsSent) {
-                messageText = `${SKILL_LOOKUP_INSTRUCTION}\n\n${messageText}`;
+                messageText = `${OPENCODE_NATIVE_TOOL_INSTRUCTION}\n\n${messageText}`;
                 this.instructionsSent = true;
             }
 
