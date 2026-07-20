@@ -10,6 +10,7 @@ const {
     renderMock,
     runCodexMock,
     runClaudeMock,
+    runGrokMock,
     runPiMock,
     assertCodexLocalSupportedMock,
     existsSyncMock
@@ -23,6 +24,7 @@ const {
     renderMock: vi.fn(),
     runCodexMock: vi.fn(async () => {}),
     runClaudeMock: vi.fn(async () => {}),
+    runGrokMock: vi.fn(async () => {}),
     runPiMock: vi.fn(async () => {}),
     assertCodexLocalSupportedMock: vi.fn(),
     existsSyncMock: vi.fn(() => true)
@@ -46,6 +48,7 @@ vi.mock('@/ui/ink/ResumeSessionPicker', () => ({
 }))
 vi.mock('@/codex/runCodex', () => ({ runCodex: runCodexMock }))
 vi.mock('@/claude/runClaude', () => ({ runClaude: runClaudeMock }))
+vi.mock('@/grok/runGrok', () => ({ runGrok: runGrokMock }))
 vi.mock('@/pi/runPi', () => ({ runPi: runPiMock }))
 vi.mock('@/codex/utils/codexVersion', () => ({ assertCodexLocalSupported: assertCodexLocalSupportedMock }))
 vi.mock('node:fs', () => ({ existsSync: existsSyncMock }))
@@ -75,6 +78,7 @@ describe('resumeCommand', () => {
         })
         runCodexMock.mockClear()
         runClaudeMock.mockClear()
+        runGrokMock.mockClear()
         runPiMock.mockClear()
         assertCodexLocalSupportedMock.mockClear()
         existsSyncMock.mockReturnValue(true)
@@ -140,6 +144,66 @@ describe('resumeCommand', () => {
             model: 'sonnet',
             effort: 'high'
         })
+    })
+
+    it('resumes a Grok target in the native local TUI', async () => {
+        getLocalResumeTargetMock.mockResolvedValue({
+            sessionId: 'hapi-session-grok',
+            flavor: 'grok',
+            directory: '/tmp/project',
+            machineId: 'machine-1',
+            active: false,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'grok-session-1',
+            model: 'grok-4.5',
+            effort: 'low',
+            permissionMode: 'plan'
+        })
+
+        await resumeCommand.run(createContext(['hapi-session-grok']))
+
+        expect(runGrokMock).toHaveBeenCalledWith({
+            existingSessionId: 'hapi-session-grok',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'grok-session-1',
+            startedBy: 'terminal',
+            permissionMode: 'plan',
+            startingMode: 'local',
+            model: 'grok-4.5',
+            effort: 'low'
+        })
+    })
+
+    it('rejects an active Gemini target before handoff (no longer supported, leaves running session alone)', async () => {
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+            throw new Error(`process.exit:${code ?? 'undefined'}`)
+        }) as never)
+
+        getLocalResumeTargetMock.mockResolvedValue({
+            sessionId: 'hapi-session-gemini',
+            flavor: 'gemini',
+            directory: '/tmp/project',
+            machineId: 'machine-1',
+            active: true,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'gemini-conv-1',
+            model: 'gemini-2.5-pro',
+            permissionMode: 'default'
+        })
+
+        try {
+            await expect(resumeCommand.run(createContext(['hapi-session-gemini']))).rejects.toThrow('process.exit:1')
+            // Regression (#953): the gemini guard must fire BEFORE handoff so an
+            // active Gemini session is not stopped and then left failing locally.
+            expect(handoffSessionToLocalMock).not.toHaveBeenCalled()
+            expect(consoleErrorSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('no longer supported'))
+        } finally {
+            consoleErrorSpy.mockRestore()
+            exitSpy.mockRestore()
+        }
     })
 
     it('fails before launching when the target belongs to another machine', async () => {
