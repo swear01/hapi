@@ -857,7 +857,7 @@ describe('Codex Desktop import routes', () => {
         }
     })
 
-    it('applies selected Fast and Plan config before an imported session is resumed', async () => {
+    it('applies selected Standard and Plan config before an imported session is resumed', async () => {
         const codexHome = mkdtempSync(join(tmpdir(), 'hapi-codex-home-config-test-'))
         const store = new Store(':memory:')
         const codexSessionId = '23232323-2323-4232-8232-232323232323'
@@ -878,7 +878,7 @@ describe('Codex Desktop import routes', () => {
                 store,
                 namespace: 'default',
                 getSyncEngine: () => engine,
-                serviceTier: 'fast',
+                serviceTier: 'standard',
                 collaborationMode: 'plan'
             })
 
@@ -890,7 +890,7 @@ describe('Codex Desktop import routes', () => {
             }
             expect(applied).toEqual([{
                 sessionId: importedSessionId,
-                config: { serviceTier: 'fast', collaborationMode: 'plan' }
+                config: { serviceTier: 'standard', collaborationMode: 'plan' }
             }])
         } finally {
             store.close()
