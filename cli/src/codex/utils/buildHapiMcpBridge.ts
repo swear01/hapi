@@ -45,6 +45,10 @@ export interface HapiMcpBridge {
 export interface HapiMcpBridgeOptions {
     emitTitleSummary?: boolean;
     enableChangeTitle?: boolean;
+    skillLookup?: {
+        workingDirectory: string;
+        flavor: string;
+    };
 }
 
 /**
@@ -60,9 +64,27 @@ export async function buildHapiMcpBridge(
 ): Promise<HapiMcpBridge> {
     const happyServer = await startHappyServer(client, {
         emitTitleSummary: options.emitTitleSummary,
-        enableChangeTitle: options.enableChangeTitle
+        enableChangeTitle: options.enableChangeTitle,
+        skillLookup: options.skillLookup
     });
-    const bridgeCommand = getHappyCliCommand(['mcp', '--url', happyServer.url]);
+    const bridgeCommand = getHappyCliCommand([
+        'mcp',
+        '--url',
+        happyServer.url,
+        '--tools',
+        happyServer.toolNames.join(',')
+    ]);
+    const tools: Record<string, McpServerToolConfig> = {};
+    if (options.enableChangeTitle !== false) {
+        tools.change_title = {
+            approval_mode: 'approve'
+        };
+    }
+    if (options.skillLookup) {
+        tools.skill_lookup = {
+            approval_mode: 'approve'
+        };
+    }
 
     return {
         server: {
@@ -73,13 +95,7 @@ export async function buildHapiMcpBridge(
             hapi: {
                 command: bridgeCommand.command,
                 args: bridgeCommand.args,
-                ...(options.enableChangeTitle === false ? {} : {
-                    tools: {
-                        change_title: {
-                            approval_mode: 'approve' as const
-                        }
-                    }
-                })
+                tools
             }
         }
     };

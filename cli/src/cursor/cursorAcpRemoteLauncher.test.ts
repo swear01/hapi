@@ -9,8 +9,7 @@ const harness = vi.hoisted(() => ({
     loadSessionCalled: false,
     newSessionCalled: false,
     promptCalls: 0,
-    refreshSessionInfoCalls: [] as Array<{ sessionId: string; cwd: string }>,
-    bridgeOptions: null as { enableChangeTitle?: boolean } | null,
+    prompts: [] as unknown[][],
     backendArgs: null as { command: string; args?: string[] } | null,
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
@@ -91,17 +90,16 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 }
                 return undefined;
             }),
-            prompt: vi.fn(async () => {
+            prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
                 harness.promptCalls++;
+                harness.prompts.push(content);
             }),
             cancelPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
             onStderrError: vi.fn(),
             setUsageUpdateListener: vi.fn(),
             setSessionInfoUpdateListener: vi.fn(),
-            refreshSessionInfo: vi.fn(async (sessionId: string, cwd: string) => {
-                harness.refreshSessionInfoCalls.push({ sessionId, cwd });
-            }),
+            refreshSessionInfo: vi.fn(async () => {}),
             onPermissionRequest: vi.fn(),
             registerExtensionRequestHandler: vi.fn(),
             disconnect: vi.fn(async () => {})
@@ -123,13 +121,10 @@ vi.mock('@/agent/permissionAdapter', () => ({
 }));
 
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
-    buildHapiMcpBridge: async (_client: unknown, options?: { enableChangeTitle?: boolean }) => {
-        harness.bridgeOptions = options ?? null;
-        return {
-            server: { stop: () => {} },
-            mcpServers: {}
-        };
-    }
+    buildHapiMcpBridge: async () => ({
+        server: { stop: () => {} },
+        mcpServers: {}
+    })
 }));
 
 vi.mock('@/ui/ink/OpencodeDisplay', () => ({
@@ -191,8 +186,7 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.loadSessionCalled = false;
         harness.newSessionCalled = false;
         harness.promptCalls = 0;
-        harness.refreshSessionInfoCalls = [];
-        harness.bridgeOptions = null;
+        harness.prompts = [];
         harness.setConfigOptionCalls = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
@@ -213,7 +207,6 @@ describe('cursorAcpRemoteLauncher', () => {
 
         expect(createCursorAcpBackend).toHaveBeenCalled();
         expect(harness.backendArgs).toEqual({ command: 'agent', args: ['acp'] });
-        expect(harness.bridgeOptions).toEqual({ enableChangeTitle: false });
         expect(legacyLauncher).not.toHaveBeenCalled();
     });
 
@@ -777,9 +770,8 @@ describe('cursorAcpRemoteLauncher', () => {
         await cursorAcpRemoteLauncher(session);
 
         expect(harness.promptCalls).toBe(2);
-        expect(harness.refreshSessionInfoCalls).toEqual([
-            { sessionId: 'new-acp-session', cwd: '/tmp/project' },
-            { sessionId: 'new-acp-session', cwd: '/tmp/project' }
-        ]);
+        expect(JSON.stringify(harness.prompts[0])).toContain('$name');
+        expect(JSON.stringify(harness.prompts[0])).toContain('skill_lookup');
+        expect(JSON.stringify(harness.prompts[1])).not.toContain('skill_lookup');
     });
 });
