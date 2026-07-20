@@ -25,7 +25,7 @@ import { validateWorkspaceDirectory } from './validateWorkspaceDirectory';
 import { join } from 'path';
 import { buildMachineMetadata } from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
-import { hashRunnerCliApiToken } from './runnerIdentity';
+import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
 import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
 
 export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
@@ -744,6 +744,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       startedWithApiUrl: configuration.apiUrl,
       startedWithMachineId: machineId,
       startedWithCliApiTokenHash: hashRunnerCliApiToken(configuration.cliApiToken),
+      startedWithExtraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders),
       startedWithArgv,
       startedWithVersionHandoffDisabled,
       runnerLogPath: logger.logFilePath
@@ -1021,6 +1022,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           startedWithApiUrl: fileState.startedWithApiUrl,
           startedWithMachineId: fileState.startedWithMachineId,
           startedWithCliApiTokenHash: fileState.startedWithCliApiTokenHash,
+          startedWithExtraHeadersHash: fileState.startedWithExtraHeadersHash,
           startedWithArgv,
           startedWithVersionHandoffDisabled,
           lastHeartbeat: new Date().toLocaleString(),
@@ -1090,13 +1092,15 @@ export function buildCliArgs(
     ? 'codex'
     : agent === 'cursor'
       ? 'cursor'
-      : agent === 'kimi'
-        ? 'kimi'
-        : agent === 'opencode'
-          ? 'opencode'
-          : agent === 'pi'
-            ? 'pi'
-            : 'claude';
+      : agent === 'grok'
+        ? 'grok'
+        : agent === 'kimi'
+          ? 'kimi'
+          : agent === 'opencode'
+            ? 'opencode'
+            : agent === 'pi'
+              ? 'pi'
+              : 'claude';
   const args = [agentCommand];
   if (options.resumeSessionId) {
     if (agent === 'codex') {
@@ -1111,10 +1115,16 @@ export function buildCliArgs(
     }
   }
   args.push('--hapi-starting-mode', 'remote', '--started-by', 'runner');
+  if (agent === 'codex') {
+    const existingSessionId = options.existingSessionId ?? options.sessionId;
+    if (existingSessionId) {
+      args.push('--existing-session-id', existingSessionId);
+    }
+  }
   if (options.model) {
     args.push('--model', options.model);
   }
-  if (options.effort && (agent === 'claude' || agent === 'pi')) {
+  if (options.effort && (agent === 'claude' || agent === 'grok' || agent === 'pi')) {
     args.push('--effort', options.effort);
   }
   if (options.modelReasoningEffort && (agent === 'codex' || agent === 'opencode')) {

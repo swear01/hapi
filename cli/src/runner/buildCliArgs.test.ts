@@ -101,6 +101,43 @@ describe('buildCliArgs', () => {
         expect(args).toContain('pragmatic')
     })
 
+    it('passes existing Hapi session id separately from Codex resume thread', () => {
+        const args = buildCliArgs('codex', {
+            directory: '/tmp',
+            resumeSessionId: 'codex-thread-1',
+            existingSessionId: 'hapi-session-1',
+            model: 'gpt-5.5',
+            modelReasoningEffort: 'low',
+        })
+        expect(args).toEqual([
+            'codex',
+            'resume',
+            'codex-thread-1',
+            '--hapi-starting-mode',
+            'remote',
+            '--started-by',
+            'runner',
+            '--existing-session-id',
+            'hapi-session-1',
+            '--model',
+            'gpt-5.5',
+            '--model-reasoning-effort',
+            'low',
+        ])
+    })
+
+    it('does not pass Codex-only existing session id flag to non-Codex agents', () => {
+        const args = buildCliArgs('claude', {
+            directory: '/tmp',
+            resumeSessionId: 'claude-session-1',
+            existingSessionId: 'hapi-session-1',
+        })
+        expect(args).toContain('--resume')
+        expect(args).toContain('claude-session-1')
+        expect(args).not.toContain('--existing-session-id')
+        expect(args).not.toContain('hapi-session-1')
+    })
+
     it('validates all known permission modes', () => {
         for (const mode of ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'plan', 'ask', 'debug', 'autoReview', 'read-only', 'safe-yolo', 'yolo']) {
             const args = buildCliArgs('claude', {
@@ -178,5 +215,25 @@ describe('buildCliArgs', () => {
         })
         expect(args).toContain('--effort')
         expect(args).toContain('high')
+    })
+
+    it('builds Grok runner resume, model, effort, and permission arguments', () => {
+        const args = buildCliArgs('grok', {
+            directory: '/tmp',
+            resumeSessionId: 'grok-session-1',
+            model: 'grok-4.5',
+            effort: 'low',
+            permissionMode: 'plan'
+        })
+
+        expect(args).toEqual([
+            'grok',
+            '--resume', 'grok-session-1',
+            '--hapi-starting-mode', 'remote',
+            '--started-by', 'runner',
+            '--model', 'grok-4.5',
+            '--effort', 'low',
+            '--permission-mode', 'plan'
+        ])
     })
 })

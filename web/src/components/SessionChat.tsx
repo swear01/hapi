@@ -62,6 +62,8 @@ import {
 } from '@/lib/sessionChatCursorModel'
 import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
+import { useGrokModels } from '@/hooks/queries/useGrokModels'
+import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
 import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeReasoningEffortOptions'
 import { useVoiceOptional } from '@/lib/voice-context'
@@ -69,6 +71,21 @@ import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voi
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
 
 type SessionModelSelection = { provider: string; modelId: string } | string | null
+
+export function resolvePiContextWindow(
+    models: PiModelSummary[] | undefined,
+    selectedModel: { provider: string; modelId: string } | null | undefined,
+    legacyModelId: string
+): number | undefined {
+    const model = selectedModel
+        ? models?.find((candidate) => (
+            candidate.provider === selectedModel.provider
+            && candidate.modelId === selectedModel.modelId
+        ))
+        : models?.find((candidate) => candidate.modelId === legacyModelId)
+
+    return model?.contextWindow
+}
 
 export async function applyModelChangeWithReasoningRollback(args: {
     model: SessionModelSelection
@@ -378,6 +395,8 @@ function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
 type SessionChatProps = {
     api: ApiClient
     session: Session
+    cursorChatOnDisk?: boolean
+    reopenDisabledReason?: string
     messages: DecryptedMessage[]
     pendingMessages?: DecryptedMessage[]
     messagesWarning: string | null
@@ -435,7 +454,11 @@ function SessionChatInner(props: SessionChatProps) {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const sessionInactive = !props.session.active
-    const inactiveCanResume = inactiveSessionCanResume(props.session, props.messages.length)
+    const inactiveCanResume = inactiveSessionCanResume(
+        props.session,
+        props.messages.length,
+        props.cursorChatOnDisk
+    )
     const terminalSupported = isRemoteTerminalSupported(props.session.metadata)
     const normalizedCacheRef = useRef<Map<string, { source: DecryptedMessage; normalized: NormalizedMessage | null }>>(new Map())
     const blocksByIdRef = useRef<Map<string, ChatBlock>>(new Map())
@@ -577,6 +600,27 @@ function SessionChatInner(props: SessionChatProps) {
             label: opencodeModel.name ?? opencodeModel.modelId
         }))
     }, [agentFlavor, opencodeModelsState.availableModels])
+    const grokModelsState = useGrokModels({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
+    })
+    const grokEffortState = useGrokReasoningEffortOptions({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
+    })
+    const grokModelOptions = useMemo(() => (
+        agentFlavor === 'grok'
+            ? [
+                { value: null, label: 'Default' },
+                ...grokModelsState.availableModels.map((model) => ({
+                    value: model.modelId,
+                    label: model.name ?? model.modelId
+                }))
+            ]
+            : undefined
+    ), [agentFlavor, grokModelsState.availableModels])
     const cursorModelsState = useCursorModels({
         api: props.api,
         sessionId: props.session.id,
@@ -625,6 +669,11 @@ function SessionChatInner(props: SessionChatProps) {
     // Provider-qualified selected model — disambiguates when two providers
     // share a modelId (hub persists this alongside the legacy modelId string).
     const piSelectedModel = piMetadata?.piSelectedModel as { provider: string; modelId: string } | null | undefined
+    const piModels = agentFlavor === 'pi' ? (piModelsState.availableModels.length > 0 ? piModelsState.availableModels : piCachedModels) : undefined
+    const piContextWindow = useMemo(() => {
+        if (agentFlavor !== 'pi' || !props.session.model) return undefined
+        return resolvePiContextWindow(piModels, piSelectedModel, props.session.model)
+    }, [agentFlavor, piModels, piSelectedModel, props.session.model])
     const cursorCatalogReadinessArgs = useMemo(() => ({
         sessionLoading: cursorModelsState.isLoading,
         machineLoading: machineCursorModelsState.isLoading,
@@ -1180,6 +1229,8 @@ function SessionChatInner(props: SessionChatProps) {
                 onToggleOutline={handleToggleOutline}
                 outlineActive={outlineOpen}
                 api={props.api}
+                canReopen={inactiveCanResume}
+                reopenDisabledReason={props.reopenDisabledReason}
                 onSessionDeleted={props.onBack}
                 onSessionReopened={(newSessionId) => {
                     navigate({
@@ -1303,6 +1354,8 @@ function SessionChatInner(props: SessionChatProps) {
                                     )
                                     : agentFlavor === 'opencode'
                                         ? opencodeModelOptions
+                                        : agentFlavor === 'grok'
+                                            ? grokModelOptions
                                         // Pi uses its own provider-qualified picker (piModels prop).
                                         // Feeding piModelOptions here would make the generic Ctrl/Cmd+M
                                         // cycler (getNextModelForFlavor) post a bare modelId string,
@@ -1311,7 +1364,7 @@ function SessionChatInner(props: SessionChatProps) {
                                         // so Pi model changes go through the dedicated picker only.
                                         : undefined
                         }
-                        piModels={agentFlavor === 'pi' ? (piModelsState.availableModels.length > 0 ? piModelsState.availableModels : piCachedModels) : undefined}
+                        piModels={piModels}
                         piSelectedModel={agentFlavor === 'pi' ? piSelectedModel : undefined}
                         availableModelReasoningEffortOptions={
                             agentFlavor === 'codex'
@@ -1320,6 +1373,11 @@ function SessionChatInner(props: SessionChatProps) {
                                     ? opencodeReasoningEffortState.options
                                     : undefined
                         }
+                        availableEffortOptions={
+                            agentFlavor === 'grok' && grokEffortState.options.length > 0
+                                ? grokEffortState.options
+                                : undefined
+                        }
                         active={props.session.active}
                         allowSendWhenInactive
                         thinking={props.session.thinking}
@@ -1327,7 +1385,7 @@ function SessionChatInner(props: SessionChatProps) {
                         backgroundTaskCount={props.session.backgroundTaskCount}
                         contextSize={reduced.latestUsage?.contextSize}
                         contextCacheRead={reduced.latestUsage?.cacheRead}
-                        contextWindow={reduced.latestUsage?.contextWindow}
+                        contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser
@@ -1369,6 +1427,10 @@ function SessionChatInner(props: SessionChatProps) {
                                         : undefined)
                                     : agentFlavor === 'pi'
                                         ? (props.session.active && !piModelsState.error ? handleModelChange : undefined)
+                                        : agentFlavor === 'grok'
+                                            ? (props.session.active && !controlledByUser && !grokModelsState.error
+                                                ? handleModelChange
+                                                : undefined)
                                         : handleModelChange
                         }
                         onModelEffortChange={
@@ -1388,7 +1450,13 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? handleModelReasoningEffortChange
                                 : undefined
                         }
-                        onEffortChange={handleEffortChange}
+                        onEffortChange={
+                            agentFlavor === 'grok'
+                                ? (props.session.active && !controlledByUser && grokEffortState.options.length > 0
+                                    ? handleEffortChange
+                                    : undefined)
+                                : handleEffortChange
+                        }
                         serviceTier={agentFlavor === 'codex' ? props.session.serviceTier : undefined}
                         onServiceTierChange={
                             agentFlavor === 'codex'

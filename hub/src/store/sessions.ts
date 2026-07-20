@@ -59,6 +59,7 @@ const SIMPLE_RESUME_TOKENS = [
     'codexSessionId',
     'geminiSessionId',
     'opencodeSessionId',
+    'grokSessionId',
     'cursorSessionId',
     'kimiSessionId'
 ] as const
@@ -238,7 +239,7 @@ export function getOrCreateSession(
             @model_reasoning_effort,
             @effort,
             NULL, NULL,
-            0, NULL, 0
+            0, @active_at, 0
         )
     `).run({
         id,
@@ -246,6 +247,9 @@ export function getOrCreateSession(
         namespace,
         created_at: now,
         updated_at: now,
+        // Never persist NULL — CLI SessionSchema requires numeric activeAt.
+        // Legacy rows may still be NULL; sessionCache coerces on read.
+        active_at: now,
         metadata: metadataJson,
         agent_state: agentStateJson,
         model: model ?? null,
@@ -563,6 +567,38 @@ export function setSessionEffort(
             effort,
             updated_at: now,
             touch_updated_at: touchUpdatedAt ? 1 : 0
+        })
+
+        return result.changes === 1
+    } catch {
+        return false
+    }
+}
+
+export function setSessionActive(
+    db: Database,
+    id: string,
+    active: boolean,
+    activeAt: number,
+    namespace: string
+): boolean {
+    try {
+        const result = db.prepare(`
+            UPDATE sessions
+            SET active = @active,
+                active_at = CASE
+                    WHEN active_at IS NULL OR active_at < @active_at THEN @active_at
+                    ELSE active_at
+                END,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
+              AND (active IS NOT @active OR active_at IS NULL OR active_at < @active_at)
+        `).run({
+            id,
+            namespace,
+            active: active ? 1 : 0,
+            active_at: activeAt
         })
 
         return result.changes === 1
