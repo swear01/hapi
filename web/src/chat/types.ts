@@ -192,6 +192,8 @@ export type UserTextBlock = {
     status?: MessageStatus
     originalText?: string
     meta?: unknown
+    /** True when this message was steered into an active turn (mid-turn). */
+    steered?: boolean
 }
 
 export type AgentTextBlock = {
