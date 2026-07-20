@@ -763,8 +763,8 @@ export function NewSession(props: {
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
-            const resolvedServiceTier = agent === 'codex' && showCodexFastMode && serviceTier === 'fast'
-                ? 'fast' as const
+            const resolvedServiceTier = agent === 'codex' && showCodexFastMode
+                ? serviceTier
                 : undefined
             const resolvedCollaborationMode = agent === 'codex' && collaborationMode !== 'default'
                 ? collaborationMode
@@ -778,7 +778,7 @@ export function NewSession(props: {
                     machineId: codexImportMachineId ?? machineId,
                     model: resolvedModel ?? null,
                     modelReasoningEffort: resolvedModelReasoningEffort ?? null,
-                    serviceTier: resolvedServiceTier ?? null,
+                    serviceTier: resolvedServiceTier,
                     collaborationMode: resolvedCollaborationMode ?? 'default',
                     yolo: yoloMode
                 })
