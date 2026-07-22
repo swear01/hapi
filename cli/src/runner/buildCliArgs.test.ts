@@ -92,6 +92,15 @@ describe('buildCliArgs', () => {
         expect(args).not.toContain('--service-tier')
     })
 
+    it('passes --personality through for resumed codex sessions', () => {
+        const args = buildCliArgs('codex', {
+            directory: '/tmp',
+            personality: 'pragmatic',
+        })
+        expect(args).toContain('--personality')
+        expect(args).toContain('pragmatic')
+    })
+
     it('passes existing Hapi session id separately from Codex resume thread', () => {
         const args = buildCliArgs('codex', {
             directory: '/tmp',
@@ -117,9 +126,7 @@ describe('buildCliArgs', () => {
         ])
     })
 
-
-
-    it('does not pass existing session id flag to agents that do not reuse HAPI rows', () => {
+    it('does not pass Codex-only existing session id flag to non-Codex agents', () => {
         const args = buildCliArgs('claude', {
             directory: '/tmp',
             resumeSessionId: 'claude-session-1',
