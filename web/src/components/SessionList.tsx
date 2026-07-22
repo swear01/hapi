@@ -5,7 +5,7 @@ import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useProjectGroupActions } from '@/hooks/mutations/useProjectGroupActions'
-import { getProjectGroupActionAvailability } from '@/lib/projectGroupActions'
+import { getProjectGroupActionAvailability, isOldInactiveSession } from '@/lib/projectGroupActions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { ProjectGroupActionMenu } from '@/components/ProjectGroupActionMenu'
 import { SessionExportDialog } from '@/components/SessionExportDialog'
@@ -364,6 +364,7 @@ function CopyPathButton({ path, className }: { path: string; className?: string 
 
 function ProjectGroupHeader(props: {
     group: SessionGroup
+    actionSessions: SessionSummary[]
     groupTitle: string
     isCollapsed: boolean
     onToggle: () => void
@@ -372,13 +373,15 @@ function ProjectGroupHeader(props: {
 }) {
     const { t } = useTranslation()
     const { haptic } = usePlatform()
-    const { group, groupTitle, isCollapsed, onToggle, onNewSessionInDirectory, api } = props
+    const { group, actionSessions, groupTitle, isCollapsed, onToggle, onNewSessionInDirectory, api } = props
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState({ x: 0, y: 0 })
     const [archiveAllOpen, setArchiveAllOpen] = useState(false)
+    const [cleanOldOpen, setCleanOldOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
-    const { archiveAll, deleteAll, isPending } = useProjectGroupActions(api, group.sessions)
-    const { canArchiveAll, canDelete } = getProjectGroupActionAvailability(group.sessions)
+    const { archiveAll, deleteAll, cleanOldSessions, isPending } = useProjectGroupActions(api, actionSessions)
+    const { canArchiveAll, canDelete } = getProjectGroupActionAvailability(actionSessions)
+    const oldSessionCount = actionSessions.filter(session => isOldInactiveSession(session)).length
     const canStartInGroupDirectory = group.directory !== 'Other'
     const longPressHandlers = useLongPress({
         onLongPress: (point) => {
@@ -438,9 +441,23 @@ function ProjectGroupHeader(props: {
                 onCopyPath={handleCopyPath}
                 onArchiveAll={() => setArchiveAllOpen(true)}
                 canArchiveAll={canArchiveAll}
+                onCleanOldSessions={() => setCleanOldOpen(true)}
+                oldSessionCount={oldSessionCount}
                 onDelete={() => setDeleteOpen(true)}
                 canDelete={canDelete}
                 anchorPoint={menuAnchorPoint}
+            />
+
+            <ConfirmDialog
+                isOpen={cleanOldOpen}
+                onClose={() => setCleanOldOpen(false)}
+                title={t('dialog.cleanOldSessions.title')}
+                description={t('dialog.cleanOldSessions.description', { name: group.displayName, count: oldSessionCount })}
+                confirmLabel={t('dialog.cleanOldSessions.confirm')}
+                confirmingLabel={t('dialog.cleanOldSessions.confirming')}
+                onConfirm={cleanOldSessions}
+                isPending={isPending}
+                destructive
             />
 
             <ConfirmDialog
@@ -459,7 +476,7 @@ function ProjectGroupHeader(props: {
                 isOpen={deleteOpen}
                 onClose={() => setDeleteOpen(false)}
                 title={t('dialog.deleteGroup.title')}
-                description={t('dialog.deleteGroup.description', { name: group.displayName, count: group.sessions.length })}
+                description={t('dialog.deleteGroup.description', { name: group.displayName, count: actionSessions.length })}
                 confirmLabel={t('dialog.deleteGroup.confirm')}
                 confirmingLabel={t('dialog.deleteGroup.confirming')}
                 onConfirm={deleteAll}
@@ -1200,6 +1217,10 @@ export function SessionList(props: {
         () => groupSessionsByDirectory(allSessions),
         [allSessions]
     )
+    const allGroupsByKey = useMemo(
+        () => new Map(allGroups.map(group => [group.key, group])),
+        [allGroups]
+    )
     const machineFilters = useMemo(
         () => groupByMachine(allGroups, resolveMachineLabel),
         [allGroups, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
@@ -1422,6 +1443,7 @@ export function SessionList(props: {
                         <div key={group.key}>
                             <ProjectGroupHeader
                                 group={group}
+                                actionSessions={allGroupsByKey.get(group.key)?.sessions ?? group.sessions}
                                 groupTitle={groupTitle}
                                 isCollapsed={isCollapsed}
                                 onToggle={() => toggleGroup(group.key, isCollapsed)}
