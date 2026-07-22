@@ -1,4 +1,5 @@
 import React from 'react';
+import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
@@ -12,7 +13,7 @@ import type { OpencodeMode, PermissionMode } from './types';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { createOpencodeBackend } from './utils/opencodeBackend';
 import { OpencodePermissionHandler } from './utils/permissionHandler';
-import { PLAN_MODE_INSTRUCTION, TITLE_INSTRUCTION } from './utils/systemPrompt';
+import { OPENCODE_NATIVE_TOOL_INSTRUCTION, PLAN_MODE_INSTRUCTION } from './utils/systemPrompt';
 import { resolveThoughtLevelEffort } from './thoughtLevelEffort';
 
 type OpencodeRemoteLauncherOptions = {
@@ -59,6 +60,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         const messageBuffer = this.messageBuffer;
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            enableChangeTitle: false,
             skillLookup: { workingDirectory: session.path, flavor: 'opencode' }
         });
         this.happyServer = happyServer;
@@ -67,6 +69,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
             cwd: session.path
         });
         this.backend = backend;
+        registerAcpSessionTitleSync(backend, session.client);
 
         backend.onStderrError((error) => {
             this.handleAcpStderrError(error);
@@ -276,7 +279,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 messageText = `${PLAN_MODE_INSTRUCTION}\n\n${messageText}`;
             }
             if (!this.instructionsSent) {
-                messageText = `${TITLE_INSTRUCTION}\n\n${messageText}`;
+                messageText = `${OPENCODE_NATIVE_TOOL_INSTRUCTION}\n\n${messageText}`;
                 this.instructionsSent = true;
             }
 
@@ -291,6 +294,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message);
                 });
+                void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[opencode-remote] prompt failed', error);
                 this.surfaceAgentError('OpenCode prompt failed. Check logs for details.');
