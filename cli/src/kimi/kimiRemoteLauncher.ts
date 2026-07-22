@@ -11,8 +11,6 @@ import type { PermissionMode } from './types';
 import { createKimiBackend } from './utils/kimiBackend';
 import { KimiPermissionHandler } from './utils/permissionHandler';
 import { resolveKimiRuntimeConfig } from './utils/config';
-import { SKILL_LOOKUP_INSTRUCTION } from '@/modules/common/skillLookupInstruction';
-
 class KimiRemoteLauncher extends RemoteLauncherBase {
     private readonly session: KimiSession;
     private readonly model?: string;
@@ -25,8 +23,6 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
     private currentBackendModel: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
     private lastDisplayedToolCall = new Map<string, string>();
-    private skillLookupInstructionSent = false;
-
     constructor(session: KimiSession, opts: { model?: string }) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
@@ -174,15 +170,11 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
             messageBuffer.addMessage(batch.message, 'user');
 
-            let messageText = batch.message;
-            if (!this.skillLookupInstructionSent && !messageText.trimStart().startsWith('/')) {
-                messageText = `${SKILL_LOOKUP_INSTRUCTION}\n\n${messageText}`;
-                this.skillLookupInstructionSent = true;
-            }
-
+            // skill_lookup discovery lives on the MCP tool description — do not
+            // prepend instructions onto user turns (prompt-injection false positive).
             const promptContent: PromptContent[] = [{
                 type: 'text',
-                text: messageText
+                text: batch.message
             }];
 
             session.onThinkingChange(true);
