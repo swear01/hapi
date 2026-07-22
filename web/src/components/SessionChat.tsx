@@ -1284,6 +1284,20 @@ function SessionChatInner(props: SessionChatProps) {
                                 </div>
                             </div>
                         ) : null}
+<<<<<<< HEAD
+=======
+                        <QueuedMessagesBar
+                            sessionId={props.session.id}
+                            api={props.api}
+                            sessionMetadata={props.session.metadata}
+                            isThinking={props.session.thinking}
+                            onEdit={({ pendingSchedule: restored }) => {
+                                // Restore the schedule so the clock button re-activates
+                                setPendingSchedule(restored)
+                            }}
+                        />
+                    </div>
+>>>>>>> 4b930e43 (carry: upstream PR #906)
 
                         <div className="px-3">
                             {/*
