@@ -119,6 +119,12 @@ describe('useProjectGroupActions - cleanOldSessions', () => {
             makeSession({ id: 'boundary', updatedAt: now - 7 * day - 1000 }),
             makeSession({ id: 'recent', updatedAt: now - 6 * day }),
             makeSession({ id: 'active-old', active: true, updatedAt: now - 20 * day }),
+            makeSession({
+                id: 'scheduled-old',
+                updatedAt: now - 20 * day,
+                futureScheduledMessageCount: 1,
+                nextScheduledAt: now + day
+            }),
         ]
 
         const { result } = renderHook(() => useProjectGroupActions(api, sessions), { wrapper: createWrapper() })

@@ -45,5 +45,9 @@ export function isOldInactiveSession(
     session: SessionSummary,
     now: number = Date.now()
 ): boolean {
-    return !session.active && session.updatedAt <= now - OLD_SESSION_AGE_MS
+    const hasFutureScheduledMessage = session.futureScheduledMessageCount > 0
+        || session.nextScheduledAt !== null
+    return !session.active
+        && !hasFutureScheduledMessage
+        && session.updatedAt <= now - OLD_SESSION_AGE_MS
 }
