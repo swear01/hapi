@@ -105,8 +105,14 @@ describe('isOldInactiveSession', () => {
         expect(isOldInactiveSession(makeSession({ id: 'old', updatedAt: now - 7 * 24 * 60 * 60 * 1000 }), now)).toBe(true)
     })
 
-    it('rejects recent inactive sessions and old active sessions', () => {
+    it('rejects recent inactive sessions, old active sessions, and scheduled sessions', () => {
         expect(isOldInactiveSession(makeSession({ id: 'recent', updatedAt: now - 6 * 24 * 60 * 60 * 1000 }), now)).toBe(false)
         expect(isOldInactiveSession(makeSession({ id: 'active', active: true, updatedAt: 0 }), now)).toBe(false)
+        expect(isOldInactiveSession(makeSession({
+            id: 'scheduled',
+            updatedAt: 0,
+            futureScheduledMessageCount: 1,
+            nextScheduledAt: now + 1000
+        }), now)).toBe(false)
     })
 })
