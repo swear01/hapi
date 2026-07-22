@@ -15,6 +15,7 @@ export interface SpawnSessionOptions {
     permissionMode?: string
     serviceTier?: string
     personality?: CodexPersonality
+    collaborationMode?: 'default' | 'plan'
     token?: string
     sessionType?: 'simple' | 'worktree'
     worktreeName?: string
