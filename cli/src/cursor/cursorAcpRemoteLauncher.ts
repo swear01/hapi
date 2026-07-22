@@ -30,11 +30,8 @@ import { cursorPassThroughStatusMessage, parseCursorSpecialCommand } from './cur
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
-<<<<<<< HEAD
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
-=======
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
->>>>>>> 4b930e43 (carry: upstream PR #906)
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
     private backend: ReturnType<typeof createCursorAcpBackend> | null = null;
