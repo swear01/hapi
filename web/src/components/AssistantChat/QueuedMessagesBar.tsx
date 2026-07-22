@@ -381,19 +381,14 @@ export function QueuedMessagesBar({
                                             disabled={!canSteer}
                                             onClick={handleSteer}
                                             onMouseDown={(e) => e.preventDefault()}
-                                            className="group/steer flex h-6 items-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
+                                            className="flex h-6 items-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
                                         >
                                             {isSteerPending ? (
                                                 <span className="flex h-6 w-6 items-center justify-center text-xs" aria-hidden="true">…</span>
                                             ) : (
-                                                <>
-                                                    <span className="flex h-6 w-6 shrink-0 items-center justify-center">
-                                                        <SteerIcon />
-                                                    </span>
-                                                    <span className="max-w-0 overflow-hidden whitespace-nowrap text-[10px] font-medium opacity-0 transition-[max-width,opacity,padding] duration-150 group-hover/steer:max-w-[5.5rem] group-hover/steer:pr-1.5 group-hover/steer:opacity-100">
-                                                        {t('queuedMessages.steerNow')}
-                                                    </span>
-                                                </>
+                                                <span className="flex h-6 w-6 shrink-0 items-center justify-center">
+                                                    <SteerIcon />
+                                                </span>
                                             )}
                                         </button>
                                     )}
