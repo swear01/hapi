@@ -9,12 +9,8 @@
 
 import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
-<<<<<<< HEAD
 import type { AgentFlavor, CodexCollaborationMode, CodexPersonality, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
-=======
-import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
->>>>>>> upstream/pr-906
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
 import type { Store, CancelQueuedMessageResult } from '../store'
@@ -881,6 +877,7 @@ export class SyncEngine {
         permissionMode?: PermissionMode,
         serviceTier?: string,
         personality?: CodexPersonality,
+        collaborationMode?: CodexCollaborationMode,
         existingSessionId?: string
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
@@ -897,6 +894,7 @@ export class SyncEngine {
             permissionMode,
             serviceTier,
             personality,
+            collaborationMode,
             existingSessionId
         )
     }
@@ -1370,6 +1368,7 @@ export class SyncEngine {
             preferredPermissionMode,
             session.serviceTier ?? undefined,
             session.personality ?? undefined,
+            session.collaborationMode ?? undefined,
             access.sessionId
         )
 
