@@ -1115,12 +1115,6 @@ export function buildCliArgs(
     }
   }
   args.push('--hapi-starting-mode', 'remote', '--started-by', 'runner');
-  if (agent === 'codex') {
-    const existingSessionId = options.existingSessionId ?? options.sessionId;
-    if (existingSessionId) {
-      args.push('--existing-session-id', existingSessionId);
-    }
-  }
   if (options.model) {
     args.push('--model', options.model);
   }

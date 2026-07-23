@@ -13,7 +13,6 @@ import {
     setSessionModelReasoningEffort,
     setSessionPersonality,
     setSessionServiceTier,
-    setSessionActive,
     setSessionTeamState,
     setSessionTodos,
     touchSessionUpdatedAt,
@@ -91,10 +90,6 @@ export class SessionStore {
 
     setSessionPersonality(id: string, personality: string | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {
         return setSessionPersonality(this.db, id, personality, namespace, options)
-    }
-
-    setSessionActive(id: string, active: boolean, activeAt: number, namespace: string): boolean {
-        return setSessionActive(this.db, id, active, activeAt, namespace)
     }
 
     touchSessionUpdatedAt(id: string, updatedAt: number, namespace: string): boolean {

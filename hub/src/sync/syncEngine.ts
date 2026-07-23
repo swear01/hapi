@@ -31,7 +31,6 @@ import {
     type RpcGeneratedImageResponse,
     type RpcListDirectoryResponse,
     type RpcListCodexModelsResponse,
-    type RpcArchiveCodexSessionResponse,
     type RpcListCursorModelsResponse,
     type RpcListOpencodeModelsResponse,
     type RpcListGrokModelsResponse,
@@ -875,8 +874,7 @@ export class SyncEngine {
         permissionMode?: PermissionMode,
         serviceTier?: string,
         personality?: CodexPersonality,
-        collaborationMode?: CodexCollaborationMode,
-        existingSessionId?: string
+        collaborationMode?: CodexCollaborationMode
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -892,8 +890,7 @@ export class SyncEngine {
             permissionMode,
             serviceTier,
             personality,
-            collaborationMode,
-            existingSessionId
+            collaborationMode
         )
     }
 
@@ -1346,12 +1343,9 @@ export class SyncEngine {
             }
         }
 
-        const metadataPermissionMode = session.metadata?.preferredPermissionMode
-        const preferredPermissionMode = metadataPermissionMode === 'yolo' && opts?.permissionMode === 'default'
-            ? metadataPermissionMode
-            : opts?.permissionMode
-                ?? session.permissionMode
-                ?? metadataPermissionMode
+        const preferredPermissionMode = opts?.permissionMode
+            ?? session.permissionMode
+            ?? session.metadata?.preferredPermissionMode
         const spawnResult = await this.rpcGateway.spawnSession(
             targetMachine.id,
             directory,
@@ -1366,8 +1360,7 @@ export class SyncEngine {
             preferredPermissionMode,
             session.serviceTier ?? undefined,
             session.personality ?? undefined,
-            session.collaborationMode ?? undefined,
-            access.sessionId
+            session.collaborationMode ?? undefined
         )
 
         if (spawnResult.type !== 'success') {
@@ -1410,7 +1403,6 @@ export class SyncEngine {
             }
         }
 
-        this.sessionCache.markSessionActive(spawnResult.sessionId)
         return { type: 'success', sessionId: spawnResult.sessionId }
     }
 
@@ -1767,14 +1759,6 @@ export class SyncEngine {
 
     async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {
         return await this.rpcGateway.listCodexModelsForMachine(machineId)
-    }
-
-    async listCodexSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]) {
-        return await this.rpcGateway.listCodexSessionsForMachine(machineId, cwd, sessionIds)
-    }
-
-    async archiveCodexSessionForMachine(machineId: string, sessionId: string): Promise<RpcArchiveCodexSessionResponse> {
-        return await this.rpcGateway.archiveCodexSessionForMachine(machineId, sessionId)
     }
 
     async listCursorModelsForSession(sessionId: string): Promise<RpcListCursorModelsResponse> {

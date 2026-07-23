@@ -157,5 +157,4 @@ describe('permission mode persistence', () => {
         expect(capturedSpawnPermissionMode).toBe('yolo')
         expect(configRpcCalls).toBe(0)
     })
-
 })

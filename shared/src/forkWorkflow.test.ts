@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const webappWorkflow = readFileSync(join(import.meta.dir, '../../.github/workflows/webapp.yml'), 'utf8')
@@ -42,5 +42,21 @@ describe('fork release workflow', () => {
         expect(releaseWorkflow).toContain('needs: [build, sign-macos]')
         expect(releaseWorkflow).toContain("pattern: '*-release-artifacts'")
         expect(releaseWorkflow).toContain('merge-multiple: true')
+    })
+})
+
+const repoRoot = join(import.meta.dir, '../..')
+const hubServer = readFileSync(join(repoRoot, 'hub/src/web/server.ts'), 'utf8')
+const webRouter = readFileSync(join(repoRoot, 'web/src/router.tsx'), 'utf8')
+const rpcMethods = readFileSync(join(import.meta.dir, 'rpcMethods.ts'), 'utf8')
+
+describe('maintained fork feature exclusions', () => {
+    it('does not include Codex session import', () => {
+        expect(hubServer).not.toContain('codexDesktopRoutes')
+        expect(webRouter).not.toContain('CodexSessionSyncDialog')
+        expect(rpcMethods).not.toContain('ListCodexSessions')
+        expect(existsSync(join(repoRoot, 'hub/src/web/routes/codexDesktop.ts'))).toBe(false)
+        expect(existsSync(join(repoRoot, 'web/src/components/CodexSessionSyncDialog.tsx'))).toBe(false)
+        expect(existsSync(join(repoRoot, 'web/src/lib/codexImportedSessions.ts'))).toBe(false)
     })
 })
