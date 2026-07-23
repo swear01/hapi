@@ -71,6 +71,40 @@ describe('machines routes', () => {
         expect(capturedPermissionMode).toBe('auto')
     })
 
+    it('forwards Codex collaboration mode in its dedicated spawn argument', async () => {
+        const machine = createMachine()
+        let capturedArgs: unknown[] = []
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            spawnSession: async (...args: unknown[]) => {
+                capturedArgs = args
+                return { type: 'success' as const, sessionId: 'session-1' }
+            }
+        } as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/machines/machine-1/spawn', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                directory: '/tmp/project',
+                agent: 'codex',
+                collaborationMode: 'plan'
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(capturedArgs[12]).toBeUndefined()
+        expect(capturedArgs[13]).toBe('plan')
+    })
+
     it('returns Codex models for an online machine', async () => {
         const machine = createMachine()
         const engine = {
