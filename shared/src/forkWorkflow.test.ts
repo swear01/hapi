@@ -27,6 +27,16 @@ describe('fork release workflow', () => {
         expect(releaseWorkflow).toContain('codesign --verify --strict --verbose=2')
     })
 
+    it('publishes curated maintenance notes instead of GitHub auto-generated history', () => {
+        expect(releaseWorkflow).toContain('notes_file=".github/release-notes/${tag}.md"')
+        expect(releaseWorkflow).toContain('test -s "$notes_file"')
+        expect(releaseWorkflow).toContain('- name: Verify maintained release notes')
+        expect(releaseWorkflow).toContain('Compared with the previous maintained release')
+        expect(releaseWorkflow).toContain('Compared with the official release')
+        expect(releaseWorkflow).toContain('--notes-file "$notes_file"')
+        expect(releaseWorkflow).not.toContain('--generate-notes')
+    })
+
     it('does not publish unsigned macOS binaries', () => {
         expect(releaseWorkflow).toContain('if [[ "$target" == bun-darwin-* ]]')
         expect(releaseWorkflow).toContain('needs: [build, sign-macos]')
