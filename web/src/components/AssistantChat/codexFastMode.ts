@@ -59,6 +59,14 @@ export function getEffectiveCodexServiceTier(
     return serviceTier ?? findActiveModel(sessionModel, models)?.defaultServiceTier
 }
 
+export function withEffectiveCodexServiceTier<T extends { model?: string | null; serviceTier?: string | null }>(
+    session: T,
+    models: ReadonlyArray<CodexModelCatalogEntry>
+): T {
+    const serviceTier = getEffectiveCodexServiceTier(session.serviceTier, session.model, models)
+    return serviceTier === session.serviceTier ? session : { ...session, serviceTier }
+}
+
 /**
  * The persisted null tier means the user has not chosen an override. The
  * current two-option control still needs a visible selection, so display that

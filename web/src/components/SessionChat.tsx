@@ -26,7 +26,7 @@ import {
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
-import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
+import { codexModelAdvertisesFastTier, withEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
@@ -547,6 +547,9 @@ function SessionChatInner(props: SessionChatProps) {
         sessionId: props.session.id,
         enabled: agentFlavor === 'codex' && props.session.active && !controlledByUser
     })
+    const displaySession = agentFlavor === 'codex'
+        ? withEffectiveCodexServiceTier(props.session, codexModelsState.models)
+        : props.session
     const codexModelOptions = useMemo(() => {
         if (agentFlavor !== 'codex') {
             return undefined
@@ -1208,7 +1211,7 @@ function SessionChatInner(props: SessionChatProps) {
     return (
         <div className="flex h-full min-h-0 flex-col">
             <SessionHeader
-                session={props.session}
+                session={displaySession}
                 onBack={props.onBack}
                 onToggleFiles={props.session.metadata?.path ? handleToggleFiles : undefined}
                 filesActive={false}
@@ -1446,13 +1449,7 @@ function SessionChatInner(props: SessionChatProps) {
                                     : undefined)
                                 : handleEffortChange
                         }
-                        serviceTier={agentFlavor === 'codex'
-                            ? getEffectiveCodexServiceTier(
-                                props.session.serviceTier,
-                                props.session.model,
-                                codexModelsState.models
-                            )
-                            : undefined}
+                        serviceTier={agentFlavor === 'codex' ? displaySession.serviceTier : undefined}
                         onServiceTierChange={
                             agentFlavor === 'codex'
                                 && props.session.active

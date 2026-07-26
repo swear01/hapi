@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
     codexModelAdvertisesFastTier,
     getEffectiveCodexServiceTier,
+    withEffectiveCodexServiceTier,
     getDisplayedCodexServiceTier,
     isFastServiceTier
 } from './codexFastMode'
@@ -53,6 +54,17 @@ describe('isFastServiceTier', () => {
         expect(isFastServiceTier(null)).toBe(false)
         expect(isFastServiceTier(undefined)).toBe(false)
         expect(isFastServiceTier('standard')).toBe(false)
+    })
+})
+
+describe('withEffectiveCodexServiceTier', () => {
+    it('gives every display consumer the catalog-default tier without overriding an explicit session tier', () => {
+        const modelsWithDefault = models.map((model) => (
+            model.id === 'gpt-5.5' ? { ...model, defaultServiceTier: 'priority' } : model
+        ))
+
+        expect(withEffectiveCodexServiceTier({ model: null, serviceTier: null }, modelsWithDefault).serviceTier).toBe('priority')
+        expect(withEffectiveCodexServiceTier({ model: null, serviceTier: 'standard' }, modelsWithDefault).serviceTier).toBe('standard')
     })
 })
 
