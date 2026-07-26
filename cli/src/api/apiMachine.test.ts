@@ -278,14 +278,12 @@ describe('ApiMachineClient listOpencodeModelsForCwd handler', () => {
 })
 
 describe('ApiMachineClient listGrokModelsForCwd handler', () => {
-describe('ApiMachineClient SpawnHappySession handler', () => {
     let workspaceRoot: string
 
     beforeEach(() => {
         ioMock.mockReset()
         listGrokModelsForCwdMock.mockReset()
         workspaceRoot = mkdtempSync(join(tmpdir(), 'hapi-grok-machine-ws-'))
-        workspaceRoot = mkdtempSync(join(tmpdir(), 'hapi-machine-spawn-'))
     })
 
     afterEach(() => {
@@ -424,6 +422,20 @@ describe('ApiMachineClient Codex transcript handlers', () => {
         }
     })
 
+})
+
+describe('ApiMachineClient SpawnHappySession handler', () => {
+    let workspaceRoot: string
+
+    beforeEach(() => {
+        ioMock.mockReset()
+        workspaceRoot = mkdtempSync(join(tmpdir(), 'hapi-machine-spawn-'))
+    })
+
+    afterEach(() => {
+        rmSync(workspaceRoot, { recursive: true, force: true })
+    })
+
     async function callSpawnHappySession(
         client: ApiMachineClient,
         machineId: string,
@@ -469,7 +481,6 @@ describe('ApiMachineClient Codex transcript handlers', () => {
             client.shutdown()
         }
     })
-})
 })
 
 describe('ApiMachineClient keepAlive lifecycle', () => {
