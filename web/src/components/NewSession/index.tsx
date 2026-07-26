@@ -632,6 +632,11 @@ export function NewSession(props: {
     )
 
 
+    const handleAgentChange = useCallback((newAgent: AgentType) => {
+        preserveRestoredDraftRef.current = false
+        setAgent(newAgent)
+    }, [])
+
     const handleMachineChange = useCallback((newMachineId: string) => {
         preserveRestoredDraftRef.current = false
         setMachineId(newMachineId)
