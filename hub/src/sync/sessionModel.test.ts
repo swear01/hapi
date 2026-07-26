@@ -1190,6 +1190,8 @@ describe('session model', () => {
                 _effort?: string,
                 _permissionMode?: string,
                 _serviceTier?: string,
+                _personality?: string,
+                _collaborationMode?: string,
                 existingSessionId?: string
             ) => {
                 capturedExistingSessionId = existingSessionId
@@ -1268,6 +1270,8 @@ describe('session model', () => {
                 _effort?: string,
                 _permissionMode?: string,
                 _serviceTier?: string,
+                _personality?: string,
+                _collaborationMode?: string,
                 existingSessionId?: string
             ) => {
                 expect(existingSessionId).toBe(oldSession.id)
