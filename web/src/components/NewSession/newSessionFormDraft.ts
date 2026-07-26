@@ -1,11 +1,10 @@
 import {
     CREATABLE_AGENT_FLAVORS,
     GROK_PERMISSION_MODES,
+    type CodexCollaborationMode,
     type GrokPermissionMode
 } from '@hapi/protocol'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
-import { CREATABLE_AGENT_FLAVORS, type CodexCollaborationMode } from '@hapi/protocol'
-import type { AgentType, ClaudeEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 
 const DRAFT_STORAGE_KEY = 'hapi:new-session-form-draft'
 

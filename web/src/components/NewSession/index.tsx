@@ -967,12 +967,6 @@ export function NewSession(props: {
                 return
             }
 
-            const resolvedServiceTier = agent === 'codex' && showCodexFastMode && serviceTier === 'fast'
-                ? 'fast' as const
-                : undefined
-            const resolvedCollaborationMode = agent === 'codex' && collaborationMode !== 'default'
-                ? collaborationMode
-                : undefined
             const result = await spawnSession({
                 machineId,
                 directory: trimmedDirectory,

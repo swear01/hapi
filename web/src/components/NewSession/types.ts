@@ -15,8 +15,6 @@ export type CodexReasoningEffort = string
 // Grok reports effort values dynamically through ACP, while Claude uses the
 // fixed ClaudeEffortLevel catalog.
 export type LaunchEffort = string
-export type CodexReasoningEffort = 'default' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-export type ClaudeEffort = 'auto' | ClaudeEffortLevel
 export type NewSessionServiceTier = 'standard' | 'fast'
 
 function modelPresetOptions<TModel extends string>(
