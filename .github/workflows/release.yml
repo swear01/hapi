@@ -3,7 +3,7 @@ name: Release
 on:
     push:
         tags:
-            - 'v*'
+            - 'v*.*.*.*'
 
 permissions:
     contents: write
@@ -19,6 +19,11 @@ jobs:
               run: |
                   git fetch origin main:refs/remotes/origin/main
                   git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+            - name: Validate maintenance release tag
+              run: |
+                  TAG_VERSION="${GITHUB_REF_NAME#v}"
+                  CLI_VERSION="$(node -p "require('./cli/package.json').version")"
+                  test "$TAG_VERSION" = "$CLI_VERSION"
             - name: Verify maintained release notes
               run: |
                   tag="${GITHUB_REF#refs/tags/}"
@@ -150,10 +155,3 @@ jobs:
                       --title "Release $tag" \
                       --notes-file "$notes_file" \
                       cli/release-artifacts/*
-            - name: Update Homebrew formula
-              continue-on-error: true
-              env:
-                  GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-              run: |
-                  VERSION="${GITHUB_REF#refs/tags/v}"
-                  cd cli && bun run update-homebrew-formula --version "$VERSION" --push
