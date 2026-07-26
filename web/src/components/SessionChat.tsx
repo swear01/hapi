@@ -26,7 +26,7 @@ import {
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
-import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
+import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
@@ -1446,7 +1446,13 @@ function SessionChatInner(props: SessionChatProps) {
                                     : undefined)
                                 : handleEffortChange
                         }
-                        serviceTier={agentFlavor === 'codex' ? props.session.serviceTier : undefined}
+                        serviceTier={agentFlavor === 'codex'
+                            ? getEffectiveCodexServiceTier(
+                                props.session.serviceTier,
+                                props.session.model,
+                                codexModelsState.models
+                            )
+                            : undefined}
                         onServiceTierChange={
                             agentFlavor === 'codex'
                                 && props.session.active
