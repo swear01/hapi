@@ -141,6 +141,8 @@ describe('buildCliArgs', () => {
         expect(args).toContain('hapi-session-991')
         expect(args).toContain('--resume')
         expect(args).toContain('cursor-csid-1')
+    })
+
     it('passes --personality through for resumed codex sessions', () => {
         const args = buildCliArgs('codex', {
             directory: '/tmp',

@@ -232,6 +232,8 @@ describe('runCodex', () => {
         })
 
         expect(harness.bootstrapArgs[0]).not.toHaveProperty('lazy')
+    })
+
     it('restores persisted personality into keepalive and app-server mode', async () => {
         harness.sessionInfo = { serviceTier: null, personality: 'friendly' }
 
