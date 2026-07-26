@@ -150,7 +150,8 @@ export class RpcGateway {
         permissionMode?: PermissionMode,
         serviceTier?: string,
         personality?: CodexPersonality,
-        collaborationMode?: CodexCollaborationMode
+        collaborationMode?: CodexCollaborationMode,
+        existingSessionId?: string
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         try {
             const result = await this.machineRpc(
@@ -170,7 +171,8 @@ export class RpcGateway {
                     permissionMode,
                     serviceTier,
                     personality,
-                    collaborationMode
+                    collaborationMode,
+                    sessionId: existingSessionId
                 }
             )
             if (result && typeof result === 'object') {

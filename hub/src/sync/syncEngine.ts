@@ -1362,7 +1362,8 @@ export class SyncEngine {
             preferredPermissionMode,
             session.serviceTier ?? undefined,
             session.personality ?? undefined,
-            session.collaborationMode ?? undefined
+            session.collaborationMode ?? undefined,
+            flavor === 'cursor' && metadata.cursorSessionProtocol === 'acp' ? access.sessionId : undefined
         )
 
         if (spawnResult.type !== 'success') {
