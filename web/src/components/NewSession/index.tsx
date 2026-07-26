@@ -1,9 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { CodexLocalSessionSummary, Machine } from '@/types/api'
-import type { GrokPermissionMode } from '@hapi/protocol'
-import type { Machine } from '@/types/api'
-import type { CodexCollaborationMode } from '@hapi/protocol'
+import type { CodexCollaborationMode, GrokPermissionMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
@@ -36,8 +34,7 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
-import type { AgentType, ClaudeEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { CollaborationModeSelector } from './CollaborationModeSelector'
@@ -1196,6 +1193,9 @@ export function NewSession(props: {
                 agent={agent}
                 value={grokPermissionMode}
                 autoPermissionModeSupported={grokModelsState.autoPermissionModeSupported}
+                isDisabled={isFormDisabled}
+                onChange={setGrokPermissionMode}
+            />
             <CollaborationModeSelector
                 agent={agent}
                 value={collaborationMode}
@@ -1207,11 +1207,6 @@ export function NewSession(props: {
                 value={serviceTier}
                 isDisabled={isFormDisabled}
                 onChange={setServiceTier}
-            />
-            <YoloToggle
-                yoloMode={yoloMode}
-                isDisabled={isFormDisabled}
-                onChange={setGrokPermissionMode}
             />
             {agent !== 'grok' ? (
                 <YoloToggle

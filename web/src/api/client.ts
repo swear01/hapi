@@ -629,7 +629,7 @@ export class ApiClient {
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
         effort?: string,
-        permissionMode?: PermissionMode
+        permissionMode?: PermissionMode,
         serviceTier?: 'fast' | 'standard',
         collaborationMode?: 'default' | 'plan'
     ): Promise<SpawnResponse> {
@@ -644,7 +644,7 @@ export class ApiClient {
                 sessionType,
                 worktreeName,
                 effort,
-                permissionMode
+                permissionMode,
                 serviceTier,
                 collaborationMode
             })
