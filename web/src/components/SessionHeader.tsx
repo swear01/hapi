@@ -90,6 +90,7 @@ function MoreVerticalIcon(props: { className?: string }) {
 
 export function SessionHeader(props: {
     session: Session
+    serviceTier?: string | null
     onBack: () => void
     onToggleFiles?: () => void
     filesActive?: boolean
@@ -113,7 +114,7 @@ export function SessionHeader(props: {
         ? formatCodexReasoningLabel(session.modelReasoningEffort)
         : null
     // Match expected Fast badge semantics (#1004): only explicit service tier, no effort/model heuristics.
-    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(session.serviceTier)
+    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(props.serviceTier ?? session.serviceTier)
     const codexSessionId = session.metadata?.flavor === 'codex'
         ? session.metadata.codexSessionId?.trim() || null
         : null
