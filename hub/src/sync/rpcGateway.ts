@@ -157,14 +157,13 @@ export class RpcGateway {
         effort?: string,
         permissionMode?: PermissionMode,
         serviceTier?: string,
-        existingSessionId?: string
+        existingSessionId?: string,
         collaborationMode?: CodexCollaborationMode
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         try {
             const result = await this.machineRpc(
                 machineId,
                 RPC_METHODS.SpawnHappySession,
-                { type: 'spawn-in-directory', directory, agent, model, modelReasoningEffort, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode, serviceTier, existingSessionId, sessionId: existingSessionId }
                 {
                     type: 'spawn-in-directory',
                     directory,
@@ -178,6 +177,8 @@ export class RpcGateway {
                     effort,
                     permissionMode,
                     serviceTier,
+                    existingSessionId,
+                    sessionId: existingSessionId,
                     collaborationMode
                 }
             )
