@@ -813,8 +813,8 @@ export class SyncEngine {
         effort?: string,
         permissionMode?: PermissionMode,
         serviceTier?: string,
-        personality?: CodexPersonality,
-        existingSessionId?: string
+        existingSessionId?: string,
+        personality?: CodexPersonality
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -829,8 +829,8 @@ export class SyncEngine {
             effort,
             permissionMode,
             serviceTier,
-            personality,
-            existingSessionId
+            existingSessionId,
+            personality
         )
     }
 
@@ -1302,8 +1302,8 @@ export class SyncEngine {
             session.effort ?? undefined,
             preferredPermissionMode,
             session.serviceTier ?? undefined,
-            session.personality ?? undefined,
-            access.sessionId
+            access.sessionId,
+            session.personality ?? undefined
         )
 
         if (spawnResult.type !== 'success') {

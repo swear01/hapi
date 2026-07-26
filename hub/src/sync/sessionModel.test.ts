@@ -645,8 +645,8 @@ describe('session model', () => {
                 effort?: string,
                 _permissionMode?: string,
                 _serviceTier?: string,
-                personality?: string,
-                _existingSessionId?: string
+                _existingSessionId?: string,
+                personality?: string
             ) => {
                 capturedModel = model
                 capturedModelReasoningEffort = modelReasoningEffort
