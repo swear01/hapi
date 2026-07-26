@@ -51,7 +51,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private activePromptModeHash: string | null = null;
     /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
     private softSteerWaiters: Promise<void>[] = [];
-    private acpSessionId: string | null = null;
     /** True when ACP process was spawned with `--auto-review`. */
     private spawnedWithAutoReview = false;
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
