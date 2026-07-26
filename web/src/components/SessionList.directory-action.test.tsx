@@ -321,4 +321,29 @@ describe('SessionList collapse behavior', () => {
             expect(getProjectPanel().getAttribute('data-open')).toBe('true')
         })
     })
+
+    it('keeps the previous selected path open when selection moves', async () => {
+        const sessions = [
+            makeSession({
+                id: 'session-first',
+                updatedAt: 100,
+                metadata: { path: '/work/first', name: 'First task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-second',
+                updatedAt: 90,
+                metadata: { path: '/work/second', name: 'Second task', flavor: 'codex' },
+            })
+        ]
+        const { rerender } = render(renderSessionList(sessions, 'session-first'))
+        const firstPanel = screen.getByTitle('/work/first').nextElementSibling
+
+        expect(firstPanel?.getAttribute('data-open')).toBe('true')
+
+        rerender(renderSessionList(sessions, 'session-second'))
+
+        await waitFor(() => {
+            expect(firstPanel?.getAttribute('data-open')).toBe('true')
+        })
+    })
 })
