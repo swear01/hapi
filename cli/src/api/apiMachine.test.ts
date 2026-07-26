@@ -470,6 +470,7 @@ describe('ApiMachineClient Codex transcript handlers', () => {
         }
     })
 })
+})
 
 describe('ApiMachineClient keepAlive lifecycle', () => {
     beforeEach(() => {
