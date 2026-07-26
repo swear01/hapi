@@ -1302,8 +1302,8 @@ export class SyncEngine {
             session.effort ?? undefined,
             preferredPermissionMode,
             session.serviceTier ?? undefined,
-            access.sessionId,
-            session.personality ?? undefined
+            session.personality ?? undefined,
+            access.sessionId
         )
 
         if (spawnResult.type !== 'success') {
