@@ -283,15 +283,16 @@ export function expandSelectedSessionCollapseOverrides(
     const next = new Map(overrides)
     let changed = false
 
-    // Expand project group if collapsed. Project and machine keys use true = collapsed.
-    if (overrides.has(group.key) && overrides.get(group.key)) {
-        next.delete(group.key)
+    // Keep auto-expanded paths open after selection moves so content above the
+    // clicked row does not collapse and displace the sidebar viewport.
+    if (overrides.get(group.key) !== false) {
+        next.set(group.key, false)
         changed = true
     }
 
     const machineKey = `machine::${group.machineId ?? UNKNOWN_MACHINE_ID}`
-    if (overrides.has(machineKey) && overrides.get(machineKey)) {
-        next.delete(machineKey)
+    if (overrides.get(machineKey) !== false) {
+        next.set(machineKey, false)
         changed = true
     }
 
