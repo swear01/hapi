@@ -158,6 +158,8 @@ describe('buildCliArgs', () => {
         expect(args).toContain('hapi-session-991')
         expect(args).toContain('--resume')
         expect(args).toContain('cursor-csid-1')
+    })
+
     it('does not pass --collaboration-mode for non-codex agents', () => {
         const args = buildCliArgs('claude', {
             directory: '/tmp',

@@ -419,6 +419,11 @@ describe('ApiMachineClient Codex transcript handlers', () => {
 
             expect(result).toEqual({ success: false, error: 'Codex session is outside workspace roots' })
             expect(existsSync(outsideFile)).toBe(true)
+        } finally {
+            client.shutdown()
+        }
+    })
+
     async function callSpawnHappySession(
         client: ApiMachineClient,
         machineId: string,
