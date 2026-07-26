@@ -8,7 +8,7 @@ const releaseWorkflow = readFileSync(join(import.meta.dir, '../../.github/workfl
 
 describe('maintenance release version', () => {
     it('uses the requested maintenance release number', () => {
-        expect(cliPackage.version).toBe('0.23.4.2')
+        expect(cliPackage.version).toBe('0.23.4.3')
     })
 
     it('appends one numeric maintenance component to the upstream version', () => {
