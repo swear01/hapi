@@ -204,6 +204,7 @@ export class Store {
                 model_reasoning_effort TEXT,
                 effort TEXT,
                 service_tier TEXT,
+                personality TEXT,
                 todos TEXT,
                 todos_updated_at INTEGER,
                 team_state TEXT,
@@ -547,6 +548,15 @@ export class Store {
         // Repair v13 databases produced before the divergent v12 migrations
         // were reconciled. Both underlying migrations are idempotent.
         this.migrateFromV12ToV13()
+
+
+    private migrateFromV14ToV15(): void {
+        const columns = this.getSessionColumnNames()
+        if (columns.size === 0) return
+        if (!columns.has('personality')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
+        }
+    }
     }
 
     /**
