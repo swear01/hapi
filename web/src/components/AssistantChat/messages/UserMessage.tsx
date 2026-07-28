@@ -7,9 +7,11 @@ import { UserBubbleContent, getUserBubbleClassName, shouldShowMessageStatus } fr
 import { CliOutputBlock } from '@/components/CliOutputBlock'
 import { getConversationMessageAnchorId } from '@/chat/outline'
 import { MessageActions } from '@/components/AssistantChat/messages/MessageActions'
+import { useTranslation } from '@/lib/use-translation'
 
 export function HappyUserMessage() {
     const ctx = useHappyChatContext()
+    const { t } = useTranslation()
     const role = useAssistantState(({ message }) => message.role)
     const messageId = useAssistantState(({ message }) => message.id)
     const elementId = getConversationMessageAnchorId(messageId)
@@ -32,6 +34,9 @@ export function HappyUserMessage() {
         const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.attachments
     })
+    const steered = useAssistantState(({ message }) =>
+        (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.steered === true
+    )
     const isCliOutput = useAssistantState(({ message }) => {
         const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'cli-output'
@@ -82,6 +87,14 @@ export function HappyUserMessage() {
                         </div>
                     )}
                 </div>
+                {steered ? (
+                    <div
+                        title={t('queuedMessages.steeredBadgeTitle')}
+                        className="mt-1 text-right text-[10px] leading-none text-[var(--app-hint)]"
+                    >
+                        {t('queuedMessages.steeredBadge')}
+                    </div>
+                ) : null}
             </div>
             <MessageActions align="end" copyText={hasText ? text : undefined} messageElementId={elementId} />
         </MessagePrimitive.Root>
