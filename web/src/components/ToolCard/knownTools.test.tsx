@@ -43,6 +43,19 @@ describe('formatTerminalCommandTitle', () => {
 
         expect(presentation.title).toBe('Inspect repository status')
     })
+
+    it('shortens a native title that only repeats the raw command', () => {
+        const presentation = getToolPresentation({
+            toolName: 'run_shell_command',
+            input: { command: 'ls -la /tmp' },
+            result: null,
+            childrenCount: 0,
+            description: 'ls -la /tmp',
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('ls')
+    })
 })
 
 describe('getToolPresentation — unknown tool semantic title + subtitle dedup', () => {

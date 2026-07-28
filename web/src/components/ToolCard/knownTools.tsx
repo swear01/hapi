@@ -65,7 +65,9 @@ function getTerminalCommand(input: unknown): string | null {
 }
 
 function getTerminalTitle(opts: ToolOpts): string {
-    return opts.description ?? formatTerminalCommandTitle(getTerminalCommand(opts.input)) ?? 'Terminal'
+    const command = getTerminalCommand(opts.input)
+    if (opts.description && opts.description !== command) return opts.description
+    return formatTerminalCommandTitle(command) ?? opts.description ?? 'Terminal'
 }
 
 function getTerminalSubtitle(opts: ToolOpts): string | null {
