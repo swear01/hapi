@@ -43,7 +43,7 @@ const harness = vi.hoisted(() => ({
     failNextCompact: false,
     deferCompactCompletion: false,
     deferThreadStatusNotifications: false,
-    emitStaleTaskCompleteAfterRetry: false,
+    staleTerminalAfterRecovery: null as null | 'retry' | 'compact',
     emitChildThreadEvents: false,
     emitChildUsageEvents: false,
     emitChildGoalEvent: false,
@@ -889,32 +889,18 @@ vi.mock('./codexAppServerClient', () => {
                 }
             }
 
-            if (harness.emitStaleTaskCompleteAfterRetry && harness.startTurnThreadIds.length === 2) {
+            if (harness.staleTerminalAfterRecovery && harness.startTurnThreadIds.length === 2) {
                 const assistantMessage = {
                     item: {
-                        id: 'stale-retry-message',
+                        id: `stale-${harness.staleTerminalAfterRecovery}-message`,
                         type: 'agentMessage',
-                        content: [{ type: 'text', text: 'done after retry' }]
+                        content: [{ type: 'text', text: `done after ${harness.staleTerminalAfterRecovery}` }]
                     },
                     threadId,
                     turnId: 'turn-1'
                 };
                 harness.notifications.push({ method: 'item/completed', params: assistantMessage });
                 this.notificationHandler?.('item/completed', assistantMessage);
-
-                const usage = {
-                    tokenUsage: {
-                        thread_id: threadId,
-                        turn_id: 'turn-1',
-                        last_token_usage: {
-                            input_tokens: 10,
-                            output_tokens: 2
-                        },
-                        model_context_window: 200_000
-                    }
-                };
-                harness.notifications.push({ method: 'thread/tokenUsage/updated', params: usage });
-                this.notificationHandler?.('thread/tokenUsage/updated', usage);
 
                 const staleCompleted = {
                     msg: {
@@ -1167,7 +1153,7 @@ describe('codexRemoteLauncher', () => {
         harness.failNextCompact = false;
         harness.deferCompactCompletion = false;
         harness.deferThreadStatusNotifications = false;
-        harness.emitStaleTaskCompleteAfterRetry = false;
+        harness.staleTerminalAfterRecovery = null;
         harness.emitChildThreadEvents = false;
         harness.emitChildUsageEvents = false;
         harness.emitChildGoalEvent = false;
@@ -1590,38 +1576,6 @@ describe('codexRemoteLauncher', () => {
         expect(session.thinking).toBe(false);
     });
 
-    it('emits ready when same-thread retry completes with a stale terminal turn id', async () => {
-        harness.remainingThreadSystemErrors = 1;
-        harness.emitStaleTaskCompleteAfterRetry = true;
-        const {
-            session,
-            sessionEvents,
-            codexMessages,
-            rpcHandlers
-        } = createSessionStub(['first message']);
-
-        const running = codexRemoteLauncher(session as never);
-        const timeout = new Promise<'timeout'>((resolve) => {
-            setTimeout(() => resolve('timeout'), 500);
-        });
-        const result = await Promise.race([running, timeout]);
-        if (result === 'timeout') {
-            await rpcHandlers.get('switch')?.({});
-            await running;
-        }
-
-        expect(result).toBe('exit');
-        expect(harness.startThreadIds).toEqual(['thread-1']);
-        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
-        expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
-        expect(codexMessages).toContainEqual(expect.objectContaining({
-            type: 'message',
-            message: 'done after retry'
-        }));
-        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
-        expect(session.thinking).toBe(false);
-    });
-
     it('still retries a generic systemError when an empty failed turn completion confirms it', async () => {
         harness.remainingThreadSystemErrors = 1;
         harness.emitFailedCompletionAfterThreadSystemError = true;
@@ -1989,6 +1943,23 @@ describe('codexRemoteLauncher', () => {
         });
     });
 
+    it('emits ready when same-thread retry completes with a stale terminal turn id', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.staleTerminalAfterRecovery = 'retry';
+        const { session, sessionEvents, codexMessages } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'message',
+            message: 'done after retry'
+        }));
+        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
     it('compacts the same thread before retrying context-window overflow', async () => {
         harness.remainingThreadSystemErrors = 1;
         harness.nextThreadSystemErrorMessage = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
@@ -2006,6 +1977,25 @@ describe('codexRemoteLauncher', () => {
             type: 'message',
             message: "Task failed: Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
         });
+        expect(session.thinking).toBe(false);
+    });
+
+    it('emits ready when same-thread compact recovery completes with a stale terminal turn id', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.nextThreadSystemErrorMessage = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
+        harness.staleTerminalAfterRecovery = 'compact';
+        const { session, sessionEvents, codexMessages } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.compactThreadIds).toEqual(['thread-1']);
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'message',
+            message: 'done after compact'
+        }));
+        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(session.thinking).toBe(false);
     });
 
