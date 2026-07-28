@@ -1,5 +1,6 @@
 import React from 'react';
 import { randomUUID } from 'node:crypto';
+import { lstat, readFile } from 'node:fs/promises';
 
 import { CodexAppServerClient } from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
@@ -13,14 +14,13 @@ import type { CodexSession } from './session';
 import type { EnhancedMode } from './loop';
 import { hasCodexCliOverrides } from './utils/codexCliOverrides';
 import { AppServerEventConverter } from './utils/appServerEventConverter';
-import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
+import { detectImageMimeType, registerGeneratedImage } from '@/modules/common/generatedImages';
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerConfig';
 import type { ThreadGoal, ThreadGoalStatus } from './appServerTypes';
 import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { extractErrorInfo } from '@/utils/errorUtils';
-import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import {
     RemoteLauncherBase,
     type RemoteLauncherDisplayContext,
@@ -28,17 +28,32 @@ import {
 } from '@/modules/common/remote/RemoteLauncherBase';
 
 
-
-async function registerGeneratedImageFromPathWrapper(args: { id: string; path: string; fileName?: string | null }): Promise<Awaited<ReturnType<typeof registerGeneratedImageFromPath>> | null> {
-    const image = await registerGeneratedImageFromPath({
-        id: args.id,
-        path: args.path,
-        fileName: args.fileName
-    });
-    if (!image) {
-        logger.debug('[CodexRemoteLauncher] Failed to register generated image from path');
+async function registerGeneratedImageFromPath(args: { id: string; path: string; fileName?: string | null }): Promise<ReturnType<typeof registerGeneratedImage> | null> {
+    try {
+        const info = await lstat(args.path);
+        if (!info.isFile()) {
+            throw new Error('Path is not a regular file');
+        }
+        const maxImageBytes = 25 * 1024 * 1024;
+        if (info.size > maxImageBytes) {
+            throw new Error('Image is too large to display inline');
+        }
+        const bytes = await readFile(args.path);
+        const mimeType = detectImageMimeType(bytes);
+        if (!mimeType) {
+            throw new Error('Unsupported image content');
+        }
+        return registerGeneratedImage({
+            id: args.id,
+            path: args.path,
+            fileName: args.fileName,
+            mimeType,
+            bytes
+        });
+    } catch (error) {
+        logger.debug('[CodexRemoteLauncher] Failed to register generated image:', error instanceof Error ? error.message : String(error));
+        return null;
     }
-    return image;
 }
 
 type HappyServer = Awaited<ReturnType<typeof buildHapiMcpBridge>>['server'];
@@ -1878,75 +1893,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             signal.addEventListener('abort', finish, { once: true });
         });
 
-        // Non-interrupting mid-turn inject via app-server `turn/steer`.
-        // Returns false when the turn ended or is review/compact (not steerable).
-        const trySteerActiveTurn = async (batch: QueuedMessage): Promise<boolean> => {
-            const threadId = this.currentThreadId;
-            const turnId = this.currentTurnId;
-            if (!threadId || !turnId || !turnInFlight) {
-                return false;
-            }
-            try {
-                await appServerClient.steerTurn({
-                    threadId,
-                    input: [{ type: 'text', text: batch.message }],
-                    expectedTurnId: turnId
-                }, { signal: this.abortController.signal });
-                messageBuffer.addMessage(batch.message, 'user');
-                logger.debug(`[Codex] Steered active turn ${turnId}`);
-                return true;
-            } catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                logger.debug(`[Codex] turn/steer failed (${detail})`);
-                return false;
-            }
-        };
-
-        // Per-message steer from the waiting queue (web "Steer" button).
-        session.client.rpcHandlerManager.registerHandler(
-            RPC_METHODS.SteerQueuedMessage,
-            async (payload: unknown) => {
-                const localId = typeof (payload as { localId?: unknown } | null)?.localId === 'string'
-                    ? (payload as { localId: string }).localId
-                    : '';
-                if (!localId) {
-                    return { steered: false, error: 'Missing localId' };
-                }
-                if (!turnInFlight || !this.currentThreadId || !this.currentTurnId) {
-                    return { steered: false, error: 'No active steerable turn' };
-                }
-                // Reserve before awaiting turn/steer so the main loop cannot
-                // collect the same row for turn/start while steer is in flight.
-                const taken = session.queue.takeByLocalId(localId);
-                if (!taken) {
-                    return { steered: false, error: 'Message not in queue' };
-                }
-                const isControlCommand = Boolean(taken.item.isolate)
-                    || Boolean(parseCodexSpecialCommand(taken.item.message).type);
-                if (isControlCommand) {
-                    session.queue.restoreTakenItem(taken);
-                    return { steered: false, error: 'Control commands cannot be steered' };
-                }
-                if (activeMessage?.hash !== taken.item.modeHash) {
-                    session.queue.restoreTakenItem(taken);
-                    return { steered: false, error: 'Queued message mode differs from the active turn' };
-                }
-                const batch: QueuedMessage = {
-                    message: taken.item.message,
-                    mode: taken.item.mode,
-                    isolate: Boolean(taken.item.isolate),
-                    hash: taken.item.modeHash
-                };
-                const steered = await trySteerActiveTurn(batch);
-                if (!steered) {
-                    session.queue.restoreTakenItem(taken);
-                    return { steered: false, error: 'Active turn is not steerable' };
-                }
-                session.client.emitMessagesConsumed([localId], { steered: true });
-                return { steered: true };
-            }
-        );
-
         const clearCompactRecovery = (recovery: typeof compactRecovery) => {
             if (!recovery) {
                 return;
@@ -2499,23 +2445,19 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 return;
             }
 
-            const isStaleSameThreadRecoveryTerminal = isTerminalEvent
-                && turnInFlight
-                && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0)
-                && Boolean(eventTurnId)
-                && Boolean(this.currentTurnId)
-                && eventTurnId !== this.currentTurnId
-                && Boolean(eventThreadId)
-                && eventThreadId === this.currentThreadId;
+            const allowSameThreadTerminalRecovery = msg.terminal_source === 'thread_status'
+                || sameThreadRetryAttempt > 0
+                || sameThreadCompactAttempt > 0;
 
-            if (
-                isTerminalEvent
-                && eventTurnId
-                && eventTurnId === lastFinalizedTurnId
-                && !isStaleSameThreadRecoveryTerminal
-            ) {
-                logger.debug(`[Codex] Ignoring duplicate terminal event for turn ${eventTurnId}`);
-                return;
+            if (isTerminalEvent && eventTurnId && eventTurnId === lastFinalizedTurnId) {
+                const isSameThreadRecoveryTerminal = allowSameThreadTerminalRecovery
+                    && Boolean(eventThreadId)
+                    && Boolean(this.currentThreadId)
+                    && eventThreadId === this.currentThreadId;
+                if (!isSameThreadRecoveryTerminal) {
+                    logger.debug(`[Codex] Ignoring duplicate terminal event for turn ${eventTurnId}`);
+                    return;
+                }
             }
 
             if (msgType === 'task_started') {
@@ -2686,10 +2628,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 && Boolean(activeMessage)
                 && Boolean(this.currentThreadId)
                 && sameThreadRetryAttempt < SAME_THREAD_MAX_RETRIES;
-            const allowStaleSameThreadTerminalRecovery = msgType === 'task_complete'
-                && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0);
-            const allowSameThreadTerminalRecovery = msg.terminal_source === 'thread_status'
-                || allowStaleSameThreadTerminalRecovery;
 
             const suppressReadyForThisTerminalEvent = isTerminalEvent
                 ? consumeInterruptedTurnReadySuppression(eventTurnId)
@@ -2877,7 +2815,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const imageId = randomUUID();
                 const savedPath = asString(msg.saved_path ?? msg.savedPath);
                 if (savedPath) {
-                    const image = await registerGeneratedImageFromPathWrapper({
+                    const image = await registerGeneratedImageFromPath({
                         id: imageId,
                         path: savedPath,
                         fileName: asString(msg.file_name ?? msg.fileName)
@@ -2891,12 +2829,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         sourceImageId,
                         fileName: image.fileName,
                         mimeType: image.mimeType,
-                        id: randomUUID(),
-                        source: {
-                            ingress: 'tool_result',
-                            flavor: 'codex',
-                            toolCallId: asString(msg.call_id ?? msg.callId),
-                        },
+                        id: randomUUID()
                     });
                 }
             }
@@ -3878,10 +3811,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         }
 
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
-        this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
-            steered: false,
-            error: 'Session ending'
-        }));
 
         if (this.happyServer) {
             this.happyServer.stop();

@@ -12,9 +12,9 @@ export function shouldIgnoreTerminalEvent(input: TerminalEventGuardInput): boole
     const allowAnonymousTerminalEvent = input.allowAnonymousTerminalEvent === true;
     const allowMatchingThreadIdTerminalEvent = input.allowMatchingThreadIdTerminalEvent === true;
     const hasMatchingThreadId = Boolean(
-        input.eventThreadId &&
-        input.currentThreadId &&
-        input.eventThreadId === input.currentThreadId
+        input.eventThreadId
+        && input.currentThreadId
+        && input.eventThreadId === input.currentThreadId
     );
 
     if (input.eventTurnId) {
@@ -25,10 +25,7 @@ export function shouldIgnoreTerminalEvent(input: TerminalEventGuardInput): boole
     }
 
     if (input.currentTurnId) {
-        if (
-            allowMatchingThreadIdTerminalEvent &&
-            hasMatchingThreadId
-        ) {
+        if (allowMatchingThreadIdTerminalEvent && hasMatchingThreadId) {
             return false;
         }
         return true;
