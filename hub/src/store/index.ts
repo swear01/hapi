@@ -547,7 +547,7 @@ export class Store {
         // Repair v13 databases produced before the divergent v12 migrations
         // were reconciled. Both underlying migrations are idempotent.
         this.migrateFromV12ToV13()
-
+    }
 
     private migrateFromV14ToV15(): void {
         const columns = this.getSessionColumnNames()
@@ -555,7 +555,6 @@ export class Store {
         if (!columns.has('personality')) {
             this.db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
         }
-    }
     }
 
     private getSessionColumnNames(): Set<string> {
