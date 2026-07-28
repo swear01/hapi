@@ -19,6 +19,7 @@ export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
         chat: t(`settings.chat.enterBehavior.${composerEnterBehavior}`),
         voice: t('settings.hub.voice.summary'),
         machines: t('settings.hub.machines.summary'),
+        storage: t('settings.storage.summary'),
         about: `v${__APP_VERSION__}`,
     }
 
