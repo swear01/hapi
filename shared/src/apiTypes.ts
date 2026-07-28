@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
     AttachmentMetadataSchema,
     CodexCollaborationModeSchema,
+    CodexPersonalitySchema,
     DecryptedMessageSchema,
     MachineSchema,
     PermissionModeSchema,
@@ -190,6 +191,10 @@ export const SessionCollaborationModeRequestSchema = z.object({
 })
 
 export type SessionCollaborationModeRequest = z.infer<typeof SessionCollaborationModeRequestSchema>
+
+export const SessionPersonalityRequestSchema = z.object({
+    personality: CodexPersonalitySchema.nullable()
+}).strict()
 
 export const SessionModelRequestSchema = z.object({
     model: z.union([

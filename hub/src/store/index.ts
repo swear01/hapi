@@ -29,7 +29,7 @@ export { ScratchlistStore } from './scratchlistStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 
-const SCHEMA_VERSION: number = 14
+const SCHEMA_VERSION: number = 15
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -141,6 +141,7 @@ export class Store {
             11: () => this.migrateFromV11ToV12(),
             12: () => this.migrateFromV12ToV13(),
             13: () => this.migrateFromV13ToV14(),
+            14: () => this.migrateFromV14ToV15(),
         })
 
         if (currentVersion === 0) {
@@ -203,6 +204,7 @@ export class Store {
                 model_reasoning_effort TEXT,
                 effort TEXT,
                 service_tier TEXT,
+                personality TEXT,
                 todos TEXT,
                 todos_updated_at INTEGER,
                 team_state TEXT,
@@ -545,6 +547,15 @@ export class Store {
         // Repair v13 databases produced before the divergent v12 migrations
         // were reconciled. Both underlying migrations are idempotent.
         this.migrateFromV12ToV13()
+
+
+    private migrateFromV14ToV15(): void {
+        const columns = this.getSessionColumnNames()
+        if (columns.size === 0) return
+        if (!columns.has('personality')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
+        }
+    }
     }
 
     private getSessionColumnNames(): Set<string> {
