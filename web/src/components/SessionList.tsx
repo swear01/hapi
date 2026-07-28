@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useLongPress } from '@/hooks/useLongPress'
-import { usePlatform } from '@/hooks/usePlatform'
 import type { SessionSummary } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { useLongPress } from '@/hooks/useLongPress'
@@ -295,6 +293,13 @@ export function expandSelectedSessionCollapseOverrides(
     const next = new Map(overrides)
     next.set(group.key, false)
     return next
+}
+
+const stopRowPressPropagation = {
+    onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
+    onMouseUp: (e: React.MouseEvent) => e.stopPropagation(),
+    onTouchStart: (e: React.TouchEvent) => e.stopPropagation(),
+    onTouchEnd: (e: React.TouchEvent) => e.stopPropagation(),
 }
 
 function groupByMachine(

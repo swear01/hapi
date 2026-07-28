@@ -53,7 +53,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
     private softSteerWaiters: Promise<void>[] = [];
     private softSteerEpoch = 0;
-    private acpSessionId: string | null = null;
     /** True when ACP process was spawned with `--auto-review`. */
     private spawnedWithAutoReview = false;
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
