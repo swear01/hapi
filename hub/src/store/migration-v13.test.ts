@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Store } from './index'
 
-describe('Store V12/V13→V14 schema reconciliation', () => {
+describe('Store V12/V13→V15 schema reconciliation', () => {
     it('fresh DB has both reconciled tables', () => {
         const store = new Store(':memory:')
         expect(tableExists(store, 'message_epochs')).toBe(true)
