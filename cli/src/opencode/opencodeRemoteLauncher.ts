@@ -2,6 +2,8 @@ import React from 'react';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
+import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
+import { isAcpStallStderrError } from '@/agent/backends/acp/acpStderrErrors';
 import { convertAgentMessage } from '@/agent/messageConverter';
 import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types';
 import { RemoteLauncherBase, type RemoteLauncherDisplayContext, type RemoteLauncherExitReason } from '@/modules/common/remote/RemoteLauncherBase';
@@ -32,6 +34,8 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendEffort: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
     private setEffortSupported: boolean | undefined = undefined;
+    private activeAcpSessionId: string | null = null;
+    private stallCancellationRequested = false;
 
     constructor(
         session: OpencodeSession,
@@ -69,9 +73,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         registerAcpSessionTitleSync(backend, session.client);
 
         backend.onStderrError((error) => {
-            logger.debug('[opencode-remote] stderr error', error);
-            session.sendSessionEvent({ type: 'message', message: error.message });
-            messageBuffer.addMessage(error.message, 'status');
+            this.handleAcpStderrError(error);
         });
 
         await backend.initialize();
@@ -104,6 +106,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
             });
         }
         session.onSessionFound(acpSessionId);
+        this.activeAcpSessionId = acpSessionId;
 
         // Seed currentBackendModel from the ACP session metadata so the first
         // batch — whose model the hub mirrors from the just-discovered session —
@@ -286,6 +289,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 text: messageText
             }];
 
+            this.stallCancellationRequested = false;
             session.onThinkingChange(true);
 
             try {
@@ -295,11 +299,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[opencode-remote] prompt failed', error);
-                session.sendSessionEvent({
-                    type: 'message',
-                    message: 'OpenCode prompt failed. Check logs for details.'
-                });
-                messageBuffer.addMessage('OpenCode prompt failed', 'status');
+                this.surfaceAgentError('OpenCode prompt failed. Check logs for details.');
             } finally {
                 session.onThinkingChange(false);
                 await this.permissionHandler?.cancelAll('Prompt finished');
@@ -326,6 +326,35 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         if (this.happyServer) {
             this.happyServer.stop();
             this.happyServer = null;
+        }
+    }
+
+    private handleAcpStderrError(error: AcpStderrError): void {
+        logger.debug('[opencode-remote] stderr error', error);
+        this.surfaceAgentError(error.message);
+        if (isAcpStallStderrError(error) && !this.stallCancellationRequested) {
+            this.stallCancellationRequested = true;
+            void this.clearStalledPrompt();
+        }
+    }
+
+    private surfaceAgentError(message: string): void {
+        this.session.sendAgentMessage({ type: 'error', message });
+        this.messageBuffer.addMessage(message, 'status');
+    }
+
+    private async clearStalledPrompt(): Promise<void> {
+        const backend = this.backend;
+        const sessionId = this.activeAcpSessionId;
+        if (!backend || !sessionId) {
+            return;
+        }
+
+        this.session.onThinkingChange(false);
+        try {
+            await backend.cancelPrompt(sessionId);
+        } catch (error) {
+            logger.debug('[opencode-remote] cancelPrompt after stderr failed', error);
         }
     }
 
