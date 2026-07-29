@@ -39,7 +39,8 @@ export const RPC_METHODS = {
     ListGrokReasoningEffortOptions: 'listGrokReasoningEffortOptions',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
-    SteerQueuedMessage: 'steer-queued-message'
+    SteerQueuedMessage: 'steer-queued-message',
+    RunnerSelfUpgrade: 'runner-self-upgrade',
 } as const
 
 export type RpcMethod = typeof RPC_METHODS[keyof typeof RPC_METHODS]
