@@ -10,6 +10,7 @@ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useScratchlistCount } from '@/lib/use-scratchlist-count'
 import { formatReopenError } from '@/lib/reopenError'
+import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
 import { formatCodexReasoningLabel, shouldShowCodexReasoningLabel } from '@/lib/codexStatusLabels'
 import { getSessionAgentLabel, getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { resolveCodexModel } from '@/lib/codexModelCapabilities'
@@ -164,6 +165,7 @@ export function SessionHeader(props: {
         try {
             const result = await reopenSession()
             if (result.sessionId && result.sessionId !== session.id) {
+                retargetSharePendingTransfer(session.id, result.sessionId)
                 onSessionReopened?.(result.sessionId)
             }
         } catch (error) {
