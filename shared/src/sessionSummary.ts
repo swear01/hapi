@@ -38,7 +38,9 @@ export type SessionSummaryMetadata = {
     flavor?: string | null
     worktree?: WorktreeMetadata
     agentSessionId?: string
+    claudeSessionId?: string
     lifecycleState?: string
+    hapiMcpUrl?: string
 }
 
 export type SessionSummary = {
