@@ -1,6 +1,7 @@
 import { useTranslation } from '@/lib/use-translation'
 import { getComposerEnterBehaviorOptions, useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { getTerminalToolDisplayModeOptions, useTerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
+import { getToolGroupingModeOptions, useToolGroupingMode } from '@/hooks/useToolGroupingMode'
 import {
     getChatSurfaceColorPickerValue,
     getChatSurfaceColorPresetOptions,
@@ -48,6 +49,7 @@ export default function SettingsChatPage() {
     const { t } = useTranslation()
     const { composerEnterBehavior, setComposerEnterBehavior } = useComposerEnterBehavior()
     const { terminalToolDisplayMode, setTerminalToolDisplayMode } = useTerminalToolDisplayMode()
+    const { toolGroupingMode, setToolGroupingMode } = useToolGroupingMode()
     const { toolGroupBackground, userMessageBackground, setToolGroupBackground, setUserMessageBackground } = useChatSurfaceColors()
     return (
         <SettingsPageContent description={t('settings.chat.description')}>
@@ -66,6 +68,12 @@ export default function SettingsChatPage() {
                     value={terminalToolDisplayMode}
                     options={getTerminalToolDisplayModeOptions().map((option) => ({ value: option.value, label: t(option.labelKey) }))}
                     onChange={setTerminalToolDisplayMode}
+                />
+                <SettingsChoiceGroup
+                    label={t('settings.chat.toolGrouping')}
+                    value={toolGroupingMode}
+                    options={getToolGroupingModeOptions().map((option) => ({ value: option.value, label: t(option.labelKey) }))}
+                    onChange={setToolGroupingMode}
                 />
             </SettingsSection>
             <SettingsSection title={t('settings.chat.colors')}>

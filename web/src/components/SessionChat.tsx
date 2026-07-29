@@ -52,6 +52,7 @@ import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
 import { TeamPanel } from '@/components/TeamPanel'
 import { usePlatform } from '@/hooks/usePlatform'
+import { useToolGroupingMode } from '@/hooks/useToolGroupingMode'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModels } from '@/hooks/queries/useCursorModels'
@@ -453,6 +454,7 @@ function SessionChatInner(props: SessionChatProps) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
     const navigate = useNavigate()
+    const { toolGroupingMode } = useToolGroupingMode()
     const sessionInactive = !props.session.active
     const inactiveCanResume = inactiveSessionCanResume(
         props.session,
@@ -979,9 +981,10 @@ function SessionChatInner(props: SessionChatProps) {
     const visibleBlocks = useMemo(
         () => buildVisibleChatBlocks(reconciled.blocks, {
             hasMoreMessages: props.hasMoreMessages,
-            previousGroups: visibleGroupsRef.current
+            previousGroups: visibleGroupsRef.current,
+            groupingMode: toolGroupingMode
         }),
-        [reconciled.blocks, props.hasMoreMessages]
+        [reconciled.blocks, props.hasMoreMessages, toolGroupingMode]
     )
 
     useEffect(() => {

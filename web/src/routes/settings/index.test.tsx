@@ -122,6 +122,14 @@ vi.mock('@/hooks/useTerminalToolDisplayMode', () => ({
     ],
 }))
 
+vi.mock('@/hooks/useToolGroupingMode', () => ({
+    useToolGroupingMode: () => ({ toolGroupingMode: 'grouped', setToolGroupingMode: vi.fn() }),
+    getToolGroupingModeOptions: () => [
+        { value: 'grouped', labelKey: 'settings.chat.toolGrouping.grouped' },
+        { value: 'classified', labelKey: 'settings.chat.toolGrouping.classified' },
+    ],
+}))
+
 vi.mock('@/hooks/useChatSurfaceColors', () => ({
     useChatSurfaceColors: () => ({
         toolGroupBackground: 'default',
@@ -244,6 +252,8 @@ describe('responsive settings pages', () => {
         renderPage(<SettingsChatPage />)
         fireEvent.click(screen.getByRole('radio', { name: 'Insert newline' }))
         expect(setComposerEnterBehavior).toHaveBeenCalledWith('newline')
+        expect(screen.getByRole('radio', { name: 'Grouped' })).toBeInTheDocument()
+        expect(screen.getByRole('radio', { name: 'Grouped' })).toBeChecked()
         expect(screen.getByText('Grouped Tool Use Background')).toBeInTheDocument()
     })
 

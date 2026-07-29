@@ -6,6 +6,7 @@ import { isRequestUserInputToolName } from '@/components/ToolCard/requestUserInp
 import { getInputStringAny } from '@/lib/toolInputUtils'
 
 export type ToolGroupActionKind = 'read' | 'search' | 'command' | 'mutation' | 'web' | 'other'
+export type ToolGroupingMode = 'grouped' | 'classified'
 
 export type ToolGroupSummary = {
     totalTools: number
@@ -41,6 +42,7 @@ export type VisibleChatBlock = ChatBlock | ToolGroupBlock
 type ToolGroupingOptions = {
     hasMoreMessages: boolean
     previousGroups?: ToolGroupBlock[]
+    groupingMode?: ToolGroupingMode
 }
 
 const PLAN_TOOL_NAMES = new Set([
@@ -203,20 +205,20 @@ function isInteractiveToolBlock(block: ToolCallBlock): boolean {
         || isRequestUserInputToolName(block.tool.name)
 }
 
-export function isEligibleForToolGrouping(block: ToolCallBlock): boolean {
+export function isEligibleForToolGrouping(block: ToolCallBlock, groupingMode: ToolGroupingMode = 'classified'): boolean {
     if (isSubagentToolName(block.tool.name)) return false
     if (PLAN_TOOL_NAMES.has(block.tool.name)) return false
     if (MILESTONE_TOOL_NAMES.has(block.tool.name)) return false
     if (isInteractiveToolBlock(block)) return false
-    if (block.tool.name === 'CodexBash' && getCodexCommandActions(block).length > 0) {
+    if (groupingMode === 'classified' && block.tool.name === 'CodexBash' && getCodexCommandActions(block).length > 0) {
         return isCodexExplorationTool(block)
     }
     return true
 }
 
-function getGroupingFamily(block: ToolCallBlock): 'default' | 'codex-exploration' | null {
-    if (!isEligibleForToolGrouping(block)) return null
-    return isCodexExplorationTool(block) ? 'codex-exploration' : 'default'
+function getGroupingFamily(block: ToolCallBlock, groupingMode: ToolGroupingMode): 'default' | 'codex-exploration' | null {
+    if (!isEligibleForToolGrouping(block, groupingMode)) return null
+    return groupingMode === 'classified' && isCodexExplorationTool(block) ? 'codex-exploration' : 'default'
 }
 
 function createToolGroupId(
@@ -247,6 +249,7 @@ export function buildVisibleChatBlocks(
 ): VisibleChatBlock[] {
     const visibleBlocks: VisibleChatBlock[] = []
     const previousGroups = options.previousGroups ?? []
+    const groupingMode = options.groupingMode ?? 'classified'
 
     for (let index = 0; index < blocks.length; index += 1) {
         const block = blocks[index]
@@ -254,7 +257,7 @@ export function buildVisibleChatBlocks(
             visibleBlocks.push(block)
             continue
         }
-        const groupingFamily = getGroupingFamily(block)
+        const groupingFamily = getGroupingFamily(block, groupingMode)
         if (!groupingFamily) {
             visibleBlocks.push(block)
             continue
@@ -264,7 +267,7 @@ export function buildVisibleChatBlocks(
         let cursor = index + 1
         while (cursor < blocks.length) {
             const candidate = blocks[cursor]
-            if (candidate.kind !== 'tool-call' || getGroupingFamily(candidate) !== groupingFamily) {
+            if (candidate.kind !== 'tool-call' || getGroupingFamily(candidate, groupingMode) !== groupingFamily) {
                 break
             }
             tools.push(candidate)
