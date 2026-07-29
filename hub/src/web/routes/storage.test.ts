@@ -13,6 +13,16 @@ afterEach(async () => {
 })
 
 describe('GET /api/storage/sqlite', () => {
+    function createApp(dbPath: string, namespace = 'default') {
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', namespace)
+            await next()
+        })
+        app.route('/api', createStorageRoutes(dbPath))
+        return app
+    }
+
     it('returns the database and existing sidecar sizes', async () => {
         const directory = await mkdtemp(join(tmpdir(), 'hapi-storage-'))
         directories.push(directory)
@@ -21,8 +31,7 @@ describe('GET /api/storage/sqlite', () => {
             writeFile(dbPath, Buffer.alloc(10)),
             writeFile(`${dbPath}-wal`, Buffer.alloc(20)),
         ])
-        const app = new Hono<WebAppEnv>()
-        app.route('/api', createStorageRoutes(dbPath))
+        const app = createApp(dbPath)
 
         const response = await app.request('/api/storage/sqlite')
 
@@ -35,5 +44,12 @@ describe('GET /api/storage/sqlite', () => {
             shmBytes: 0,
             totalBytes: 30,
         })
+    })
+
+    it('rejects non-default namespaces', async () => {
+        const response = await createApp('/unused/hapi.db', 'tenant').request('/api/storage/sqlite')
+
+        expect(response.status).toBe(403)
+        expect(await response.json()).toEqual({ error: 'Storage usage is only available to the hub owner' })
     })
 })

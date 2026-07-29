@@ -32,7 +32,11 @@ export default function SettingsStoragePage() {
                         <SettingsRow label={t('settings.storage.database')} trailing={<span className="text-[var(--app-hint)]">{formatFileSize(query.data.databaseBytes)}</span>} />
                         <SettingsRow label={t('settings.storage.wal')} trailing={<span className="text-[var(--app-hint)]">{formatFileSize(query.data.walBytes)}</span>} />
                         <SettingsRow label={t('settings.storage.shm')} trailing={<span className="text-[var(--app-hint)]">{formatFileSize(query.data.shmBytes)}</span>} />
-                        <SettingsRow label={t('settings.storage.path')} trailing={<code className="max-w-80 truncate text-xs text-[var(--app-hint)]">{query.data.path}</code>} />
+                        <SettingsRow label={t('settings.storage.path')} trailing={
+                            <code className="block max-w-[min(20rem,55vw)] truncate text-xs text-[var(--app-hint)]" title={query.data.path}>
+                                {query.data.path}
+                            </code>
+                        } />
                     </>
                 ) : null}
             </SettingsSection>

@@ -16,6 +16,9 @@ export function createStorageRoutes(dbPath: string): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
     app.get('/storage/sqlite', async (c) => {
+        if (c.get('namespace') !== 'default') {
+            return c.json({ error: 'Storage usage is only available to the hub owner' }, 403)
+        }
         c.header('Cache-Control', 'no-store')
         try {
             const [databaseBytes, walBytes, shmBytes] = await Promise.all([
