@@ -11,7 +11,9 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useScratchlistCount } from '@/lib/use-scratchlist-count'
 import { formatReopenError } from '@/lib/reopenError'
 import { formatCodexReasoningLabel, shouldShowCodexReasoningLabel } from '@/lib/codexStatusLabels'
-import { getSessionModelLabel } from '@/lib/sessionModelLabel'
+import { getSessionAgentLabel, getSessionModelLabel } from '@/lib/sessionModelLabel'
+import { resolveCodexModel } from '@/lib/codexModelCapabilities'
+import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useTranslation } from '@/lib/use-translation'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
@@ -110,8 +112,17 @@ export function SessionHeader(props: {
     const { session, api, onSessionDeleted, onSessionReopened } = props
     const title = useMemo(() => getSessionTitle(session), [session])
     const worktreeBranch = session.metadata?.worktree?.branch
-    const modelLabel = getSessionModelLabel(session)
     const agentFlavor = session.metadata?.flavor ?? null
+    const codexModelsState = useCodexModels({
+        api,
+        machineId: session.metadata?.machineId ?? null,
+        enabled: agentFlavor === 'codex' && session.active && session.agentState?.controlledByUser !== true
+    })
+    const codexModelDisplayName = agentFlavor === 'codex'
+        ? resolveCodexModel(codexModelsState.models, session.model)?.displayName
+        : null
+    const modelLabel = getSessionModelLabel(session, codexModelDisplayName)
+    const agentLabel = getSessionAgentLabel(session)
     const reasoningLabel = shouldShowCodexReasoningLabel(agentFlavor)
         ? formatCodexReasoningLabel(session.modelReasoningEffort)
         : null
@@ -247,7 +258,7 @@ export function SessionHeader(props: {
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)]">
                             <span className="inline-flex items-center gap-1">
                                 <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
-                                {session.metadata?.flavor?.trim() || 'unknown'}
+                                {agentLabel}
                             </span>
                             {modelLabel ? (
                                 <span>
