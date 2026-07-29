@@ -39,6 +39,7 @@ export type {
     GeminiPermissionMode,
     GrokPermissionMode,
     KimiPermissionMode,
+    CopilotPermissionMode,
     OpencodePermissionMode,
     PermissionMode,
     PermissionModeOption,

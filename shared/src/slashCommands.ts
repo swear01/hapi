@@ -51,6 +51,12 @@ export const BUILTIN_SLASH_COMMANDS = {
     cursor: [
         { name: 'compress', description: 'Compress conversation context to free window space (pass-through to Cursor agent)', source: 'builtin' },
     ],
+    copilot: [
+        { name: 'plan', description: 'Start plan mode for structured implementation planning', source: 'builtin' },
+        { name: 'context', description: 'Show current context usage', source: 'builtin' },
+        { name: 'model', description: 'Show or switch the active model', source: 'builtin' },
+        { name: 'usage', description: 'Show session usage metrics', source: 'builtin' },
+    ],
 } as const satisfies Record<string, readonly SlashCommand[]>
 
 export function getBuiltinSlashCommands(agent: string): SlashCommand[] {

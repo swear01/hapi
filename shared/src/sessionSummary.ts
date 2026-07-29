@@ -123,6 +123,7 @@ export function toSessionSummary(session: Session): SessionSummary {
             ?? session.metadata.grokSessionId
             ?? session.metadata.cursorSessionId
             ?? session.metadata.kimiSessionId
+            ?? session.metadata.copilotSessionId
             ?? undefined,
         lifecycleState: session.metadata.lifecycleState
     } : null

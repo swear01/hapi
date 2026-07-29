@@ -1132,6 +1132,7 @@ async uploadScratchlistAttachment(
         if (flavor === 'grok') return metadata.grokSessionId ?? null
         if (flavor === 'cursor') return metadata.cursorSessionId ?? null
         if (flavor === 'kimi') return metadata.kimiSessionId ?? null
+        if (flavor === 'copilot') return metadata.copilotSessionId ?? null
         if (flavor === 'pi') return metadata.piSessionId ?? null
 
         return metadata.claudeSessionId ?? this.recoverClaudeSessionIdFromMessages(session.id, namespace)
@@ -1925,6 +1926,7 @@ async uploadScratchlistAttachment(
             && (prev?.cursorSessionId ?? null) === (next.cursorSessionId ?? null)
             && (prev?.piSessionId ?? null) === (next.piSessionId ?? null)
             && (prev?.kimiSessionId ?? null) === (next.kimiSessionId ?? null)
+            && (prev?.copilotSessionId ?? null) === (next.copilotSessionId ?? null)
     }
 
     private canRunCursorDedup(session: Session): boolean {
