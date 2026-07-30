@@ -103,6 +103,20 @@ export async function runCopilot(opts: {
         logger.debug(`[copilot] Synced session config for keepalive: permissionMode=${currentPermissionMode}, agentMode=${currentAgentMode}, model=${resolvedModel}`);
     };
 
+    const buildMode = (): CopilotMode => ({
+        permissionMode: currentPermissionMode,
+        model: resolvedModel ?? undefined,
+        agentMode: currentAgentMode
+    });
+
+    /** Wake the remote loop so agent-mode changes apply via setMode without a fake prompt. */
+    const wakeForAgentMode = () => {
+        if (sessionWrapperRef.current?.mode !== 'remote') {
+            return;
+        }
+        messageQueue.pushIsolated('', buildMode());
+    };
+
     const preparingLocalIds = new Set<string>();
     const cancelledBeforeEnqueue = new Set<string>();
     let userMessageChain: Promise<void> = Promise.resolve();
@@ -114,11 +128,6 @@ export async function runCopilot(opts: {
                 if (!localId) return false;
                 return cancelledBeforeEnqueue.delete(localId);
             };
-            const buildMode = (): CopilotMode => ({
-                permissionMode: currentPermissionMode,
-                model: resolvedModel ?? undefined,
-                agentMode: currentAgentMode
-            });
             const pushPlain = () => {
                 const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
                 messageQueue.push(formattedText, buildMode(), localId);
@@ -136,6 +145,7 @@ export async function runCopilot(opts: {
                 });
 
                 if (slash.kind !== 'passthrough') {
+                    let agentModeChanged = false;
                     if (slash.updates) {
                         if (slash.updates.permissionMode !== undefined) {
                             currentPermissionMode = slash.updates.permissionMode;
@@ -145,6 +155,7 @@ export async function runCopilot(opts: {
                             resolvedModel = sessionModel;
                         }
                         if (slash.updates.agentMode !== undefined) {
+                            agentModeChanged = slash.updates.agentMode !== currentAgentMode;
                             currentAgentMode = slash.updates.agentMode;
                         }
                         syncSessionMode();
@@ -159,6 +170,9 @@ export async function runCopilot(opts: {
                                 message: slash.message,
                                 id: randomUUID()
                             });
+                        }
+                        if (agentModeChanged) {
+                            wakeForAgentMode();
                         }
                         sessionWrapperRef.current?.onThinkingChange(false);
                         return;
@@ -236,15 +250,20 @@ export async function runCopilot(opts: {
             applied.model = sessionModel;
         }
 
+        let agentModeChanged = false;
         if (config.copilotAgentMode !== undefined) {
             if (!isCopilotAgentMode(config.copilotAgentMode)) {
                 throw new Error('Invalid copilot agent mode');
             }
+            agentModeChanged = config.copilotAgentMode !== currentAgentMode;
             currentAgentMode = config.copilotAgentMode;
             applied.copilotAgentMode = currentAgentMode;
         }
 
         syncSessionMode();
+        if (agentModeChanged) {
+            wakeForAgentMode();
+        }
         return { applied };
     });
 
