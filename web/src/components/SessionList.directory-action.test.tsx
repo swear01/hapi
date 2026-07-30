@@ -387,6 +387,37 @@ describe('SessionList collapse behavior', () => {
         })
     })
 
+    it('blocks group deletion when a deduplicated session was not archived', () => {
+        const sessions = [
+            makeSession({
+                id: 'archived-visible',
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    name: 'Archived session',
+                    flavor: 'codex',
+                    agentSessionId: 'shared-agent-id',
+                    lifecycleState: 'archived'
+                }
+            }),
+            makeSession({
+                id: 'completed-hidden',
+                updatedAt: 200,
+                metadata: {
+                    path: '/work/hapi',
+                    flavor: 'codex',
+                    agentSessionId: 'shared-agent-id'
+                }
+            })
+        ]
+
+        render(renderSessionList(sessions, 'archived-visible'))
+
+        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
+
+        expect(screen.getByRole('menuitem', { name: 'Delete Group' })).toBeDisabled()
+    })
+
     it('keeps the configured session preview fold while searching', () => {
         localStorage.setItem('hapi-session-preview-limit', '2')
         const sessions = Array.from({ length: 4 }, (_, index) => makeSession({

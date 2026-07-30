@@ -124,4 +124,12 @@ describe('isOldInactiveSession', () => {
             nextScheduledAt: now + 1000
         }), now)).toBe(false)
     })
+
+    it('rejects an old session with recently updated scratchlist data', () => {
+        expect(isOldInactiveSession(makeSession({
+            id: 'scratchlist-recent',
+            updatedAt: 0,
+            scratchlistUpdatedAt: now - 24 * 60 * 60 * 1000
+        }), now)).toBe(false)
+    })
 })

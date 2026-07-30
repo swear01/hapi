@@ -90,12 +90,14 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             })
         const scheduledCounts = engine.getFutureScheduledMessageCounts(sessionRecords.map((session) => session.id))
         const nextScheduledAt = engine.getNextScheduledAtBySessionIds(sessionRecords.map((session) => session.id))
+        const scratchlistUpdatedAt = engine.getScratchlistUpdatedAtBySessionIds(sessionRecords.map((session) => session.id))
         const sessions = sessionRecords.map((session) => {
             const summary = toSessionSummary(session)
             return {
                 ...summary,
                 futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
-                nextScheduledAt: nextScheduledAt.get(session.id) ?? null
+                nextScheduledAt: nextScheduledAt.get(session.id) ?? null,
+                scratchlistUpdatedAt: scratchlistUpdatedAt.get(session.id)
             }
         })
 

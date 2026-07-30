@@ -1217,9 +1217,12 @@ export function SessionList(props: {
         () => groupSessionsByDirectory(allSessions),
         [allSessions]
     )
-    const allGroupsByKey = useMemo(
-        () => new Map(allGroups.map(group => [group.key, group])),
-        [allGroups]
+    const actionGroupsByKey = useMemo(
+        () => new Map(
+            groupSessionsByDirectory(props.sessions)
+                .map(group => [group.key, group.sessions] as const)
+        ),
+        [props.sessions]
     )
     const machineFilters = useMemo(
         () => groupByMachine(allGroups, resolveMachineLabel),
@@ -1443,7 +1446,7 @@ export function SessionList(props: {
                         <div key={group.key}>
                             <ProjectGroupHeader
                                 group={group}
-                                actionSessions={allGroupsByKey.get(group.key)?.sessions ?? group.sessions}
+                                actionSessions={actionGroupsByKey.get(group.key) ?? group.sessions}
                                 groupTitle={groupTitle}
                                 isCollapsed={isCollapsed}
                                 onToggle={() => toggleGroup(group.key, isCollapsed)}

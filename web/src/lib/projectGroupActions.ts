@@ -48,7 +48,11 @@ export function isOldInactiveSession(
 ): boolean {
     const hasFutureScheduledMessage = session.futureScheduledMessageCount > 0
         || session.nextScheduledAt !== null
+    const lastUserDataUpdateAt = Math.max(
+        session.updatedAt,
+        session.scratchlistUpdatedAt ?? 0
+    )
     return !session.active
         && !hasFutureScheduledMessage
-        && session.updatedAt <= now - OLD_SESSION_AGE_MS
+        && lastUserDataUpdateAt <= now - OLD_SESSION_AGE_MS
 }

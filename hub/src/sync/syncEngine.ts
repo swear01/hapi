@@ -275,6 +275,10 @@ export class SyncEngine {
         return this.store.messages.minFutureScheduledAtBySessionIds(sessionIds, now)
     }
 
+    getScratchlistUpdatedAtBySessionIds(sessionIds: string[]): Map<string, number> {
+        return this.store.scratchlist.maxUpdatedAtBySessionIds(sessionIds)
+    }
+
     getSession(sessionId: string): Session | undefined {
         return this.sessionCache.getSession(sessionId) ?? this.sessionCache.refreshSession(sessionId) ?? undefined
     }
