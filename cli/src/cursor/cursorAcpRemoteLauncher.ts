@@ -34,6 +34,15 @@ import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsShared
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+
+export function isCurrentSoftSteerCallback(
+    currentEpoch: number,
+    callbackEpoch: number,
+    shouldExit: boolean
+): boolean {
+    return currentEpoch === callbackEpoch && !shouldExit;
+}
+
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
     private backend: ReturnType<typeof createCursorAcpBackend> | null = null;
@@ -55,6 +64,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private promptInFlight = false;
     /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
     private softSteerWaiters: Promise<void>[] = [];
+    /** Invalidates soft-steer callbacks after abort or launcher cleanup. */
+    private softSteerEpoch = 0;
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
@@ -256,6 +267,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Queued message mode differs from the active turn' };
                 }
 
+                const steerEpoch = this.softSteerEpoch;
                 // Ack the hub once the soft-steer request is kicked off — not when
                 // the concurrent session/prompt finishes. ACP treats that response as
                 // turn completion, which can exceed the hub's 30s Socket.IO RPC timeout
@@ -281,11 +293,17 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 void steerDone.then(removeWaiter, removeWaiter);
                 void steerDone.then(
                     () => {
+                        if (!isCurrentSoftSteerCallback(this.softSteerEpoch, steerEpoch, this.shouldExit)) {
+                            return;
+                        }
                         messageBuffer.addMessage(taken.item.message, 'user');
                         session.client.emitMessagesConsumed([localId], { steered: true });
                     },
                     (error) => {
                         logger.debug('[cursor-acp] soft-steer failed', error);
+                        if (!isCurrentSoftSteerCallback(this.softSteerEpoch, steerEpoch, this.shouldExit)) {
+                            return;
+                        }
                         try {
                             session.queue.restoreTakenItem(taken);
                         } catch (restoreError) {
@@ -384,6 +402,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     protected async cleanup(): Promise<void> {
+        this.softSteerEpoch++;
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
         this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
             steered: false,
@@ -659,6 +678,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async handleAbort(): Promise<void> {
+        this.softSteerEpoch++;
         const backend = this.backend;
         const sessionId = this.acpSessionId ?? this.session.sessionId;
         if (backend && sessionId) {

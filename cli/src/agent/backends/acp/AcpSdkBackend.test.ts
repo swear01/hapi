@@ -1172,6 +1172,42 @@ describe('AcpSdkBackend', () => {
         }]);
     });
 
+    it('beginSoftSteerPrompt drains buffered output after completion', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+            waitForSessionUpdateQuiet: (quietMs: number, timeoutMs: number) => Promise<void>;
+            drainLateBuffers: () => Promise<void>;
+            messageHandler: { drainBuffers: () => void } | null;
+        };
+        const events: string[] = [];
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequest: async () => {
+                events.push('request');
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+        backendInternal.waitForSessionUpdateQuiet = async () => {
+            events.push('quiet');
+        };
+        backendInternal.messageHandler = {
+            drainBuffers: () => events.push('drain')
+        };
+        backendInternal.drainLateBuffers = async () => {
+            events.push('late');
+        };
+
+        await backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+
+        expect(events).toEqual(['request', 'quiet', 'drain', 'late', 'drain']);
+    });
+
     it('beginSoftSteerPrompt returns a pending promise without blocking the caller', async () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         let resolvePrompt: ((value: unknown) => void) | null = null;

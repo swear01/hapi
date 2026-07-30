@@ -609,10 +609,23 @@ export class AcpSdkBackend implements AgentBackend {
             throw new Error('No active ACP prompt to soft-steer into');
         }
 
-        const pending = this.transport.sendRequest('session/prompt', {
-            sessionId,
-            prompt: content
-        }, { timeoutMs: Infinity }).then(() => undefined);
+        const transport = this.transport;
+        const pending = (async () => {
+            try {
+                await transport.sendRequest('session/prompt', {
+                    sessionId,
+                    prompt: content
+                }, { timeoutMs: Infinity });
+            } finally {
+                await this.waitForSessionUpdateQuiet(
+                    AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
+                    AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
+                );
+                this.messageHandler?.drainBuffers();
+                await this.drainLateBuffers();
+                this.messageHandler?.drainBuffers();
+            }
+        })();
 
         void pending.catch((error) => {
             logger.warn('[ACP] soft-steer session/prompt failed', error);
