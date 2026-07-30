@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@/types/api'
 import type { ApiClient } from '@/api/client'
@@ -8,6 +8,7 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { useScratchlistCount } from '@/lib/use-scratchlist-count'
 import { formatReopenError } from '@/lib/reopenError'
 import { formatCodexReasoningLabel, shouldShowCodexReasoningLabel } from '@/lib/codexStatusLabels'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
@@ -18,6 +19,28 @@ import { getSessionTitle } from '@/lib/sessionTitle'
 import { useToast } from '@/lib/toast-context'
 import { queryKeys } from '@/lib/query-keys'
 import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
+import { useMachines } from '@/hooks/queries/useMachines'
+import { useMachineLabels } from '@/hooks/useMachineLabels'
+import { formatAbsoluteDateTime, formatRelativeTime } from '@/lib/relativeTime'
+
+/** Same preference order as session-list chips: display label → host → short id. */
+export function resolveSessionHeaderMachineLabel(
+    session: Session,
+    labelsById: Record<string, string>
+): string | null {
+    const machineId = session.metadata?.machineId?.trim() || null
+    if (machineId && labelsById[machineId]) {
+        return labelsById[machineId]
+    }
+    const host = session.metadata?.host?.trim()
+    if (host) {
+        return host
+    }
+    if (machineId) {
+        return machineId.slice(0, 8)
+    }
+    return null
+}
 
 function FilesIcon(props: { className?: string }) {
     return (
@@ -90,6 +113,7 @@ function MoreVerticalIcon(props: { className?: string }) {
 
 export function SessionHeader(props: {
     session: Session
+    serviceTier?: string | null
     onBack: () => void
     onToggleFiles?: () => void
     filesActive?: boolean
@@ -113,10 +137,31 @@ export function SessionHeader(props: {
         ? formatCodexReasoningLabel(session.modelReasoningEffort)
         : null
     // Match expected Fast badge semantics (#1004): only explicit service tier, no effort/model heuristics.
-    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(session.serviceTier)
+    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(props.serviceTier ?? session.serviceTier)
     const codexSessionId = session.metadata?.flavor === 'codex'
         ? session.metadata.codexSessionId?.trim() || null
         : null
+    const { machines } = useMachines(api, Boolean(api))
+    const machineLabelsById = useMachineLabels(machines)
+    const machineLabel = useMemo(
+        () => resolveSessionHeaderMachineLabel(session, machineLabelsById),
+        [session, machineLabelsById]
+    )
+    const lastActiveAt = session.activeAt || session.updatedAt || session.createdAt
+    // Relative labels cross minute/hour boundaries without new patches; tick
+    // once a minute so "just now" does not freeze forever on inactive sessions.
+    const [relativeTimeTick, setRelativeTimeTick] = useState(0)
+    useEffect(() => {
+        const timer = window.setInterval(() => {
+            setRelativeTimeTick((tick) => tick + 1)
+        }, 60_000)
+        return () => window.clearInterval(timer)
+    }, [])
+    const ageLabel = useMemo(
+        () => (lastActiveAt > 0 ? formatRelativeTime(lastActiveAt, t) : null),
+        [lastActiveAt, t, relativeTimeTick]
+    )
+    const ageAbsolute = lastActiveAt > 0 ? formatAbsoluteDateTime(lastActiveAt) : null
 
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -134,6 +179,11 @@ export function SessionHeader(props: {
         session.metadata?.flavor ?? null
     )
     const [reopenError, setReopenError] = useState<string | null>(null)
+    // tiann/hapi#893: surface the scratchlist entry count in the
+    // delete-confirm copy so the operator knows what cascades when they
+    // confirm. Read-only hook reuses the cache filled by SessionChat -
+    // no extra network when both components are mounted.
+    const scratchlistCount = useScratchlistCount(session.id, api)
 
     const handleDelete = async () => {
         await deleteSession()
@@ -238,9 +288,19 @@ export function SessionHeader(props: {
                         </div>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)]">
                             <span className="inline-flex items-center gap-1">
-                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0" />
+                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
                                 {session.metadata?.flavor?.trim() || 'unknown'}
                             </span>
+                            {machineLabel ? (
+                                <span data-testid="session-header-machine" className="truncate max-w-[12rem]" title={machineLabel}>
+                                    {t('session.item.machine')}: {machineLabel}
+                                </span>
+                            ) : null}
+                            {ageLabel ? (
+                                <span data-testid="session-header-age" title={ageAbsolute ?? undefined}>
+                                    {ageLabel}
+                                </span>
+                            ) : null}
                             {modelLabel ? (
                                 <span>
                                     {t(modelLabel.key)}: {modelLabel.value}
@@ -307,6 +367,8 @@ export function SessionHeader(props: {
             <SessionActionMenu
                 isOpen={menuOpen}
                 onClose={() => setMenuOpen(false)}
+                sessionId={session.id}
+                sessionTitle={title}
                 sessionActive={session.active}
                 onRename={() => setRenameOpen(true)}
                 onExport={() => setExportOpen(true)}
@@ -363,7 +425,16 @@ export function SessionHeader(props: {
                 isOpen={deleteOpen}
                 onClose={() => setDeleteOpen(false)}
                 title={t('dialog.delete.title')}
-                description={t('dialog.delete.description', { name: title })}
+                description={
+                    scratchlistCount > 0
+                        ? `${t('dialog.delete.description', { name: title })} ${t(
+                            scratchlistCount === 1
+                                ? 'dialog.delete.scratchlist.one'
+                                : 'dialog.delete.scratchlist.other',
+                            { n: String(scratchlistCount) }
+                        )}`
+                        : t('dialog.delete.description', { name: title })
+                }
                 confirmLabel={t('dialog.delete.confirm')}
                 confirmingLabel={t('dialog.delete.confirming')}
                 onConfirm={handleDelete}

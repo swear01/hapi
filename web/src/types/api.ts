@@ -1,4 +1,5 @@
 import type {
+    CodexCollaborationMode,
     DecryptedMessage as ProtocolDecryptedMessage,
     Machine,
     RunnerState,
@@ -100,6 +101,8 @@ export type FileSearchItem = {
     filePath: string
     fullPath: string
     fileType: 'file' | 'folder'
+    size?: number
+    modified?: number
 }
 
 export type FileSearchResponse = {
@@ -217,6 +220,8 @@ export type CodexDesktopSyncRequest = {
     machineId?: string | null
     model?: string | null
     modelReasoningEffort?: string | null
+    serviceTier?: string | null
+    collaborationMode?: CodexCollaborationMode
     yolo?: boolean
 }
 

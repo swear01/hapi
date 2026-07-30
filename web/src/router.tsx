@@ -27,24 +27,28 @@ import { isTelegramApp } from '@/hooks/useTelegram'
 import { useSidebarResize } from '@/hooks/useSidebarResize'
 import { useMessages } from '@/hooks/queries/useMessages'
 import { useMachines } from '@/hooks/queries/useMachines'
+import { useMachineLabels } from '@/hooks/useMachineLabels'
 import { useSession } from '@/hooks/queries/useSession'
 import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
+import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { useSendMessage, type SendErrorInfo } from '@/hooks/mutations/useSendMessage'
 import type { ComposerSendError } from '@/components/AssistantChat/HappyComposer'
 import { ApiError } from '@/api/client'
 import { queryKeys } from '@/lib/query-keys'
 import { useToast } from '@/lib/toast-context'
 import { useTranslation } from '@/lib/use-translation'
-import { fetchLatestMessages, seedMessageWindowFromSession } from '@/lib/message-window-store'
+import { seedMessageWindowFromSession, syncTailMessages } from '@/lib/message-window-store'
 import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import { markSessionSeen } from '@/lib/sessionLastSeen'
 import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
 import { clearCodexImportedSession, markCodexSessionsImported } from '@/lib/codexImportedSessions'
-import type { Machine, CodexDuplicateSessionGroup, CodexLocalSessionSummary } from '@/types/api'
+import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary } from '@/types/api'
 import FilesPage from '@/routes/sessions/files'
 import FilePage from '@/routes/sessions/file'
 import TerminalPage from '@/routes/sessions/terminal'
@@ -56,7 +60,9 @@ import SettingsChatPage from '@/routes/settings/chat'
 import SettingsVoicePage from '@/routes/settings/voice'
 import SettingsVoiceVoicesPage from '@/routes/settings/voice-voices'
 import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
+import SettingsMachinesPage from '@/routes/settings/machines'
 import SettingsAboutPage from '@/routes/settings/about'
+import SettingsStoragePage from '@/routes/settings/storage'
 import SharePage from '@/routes/share'
 import { setSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer } from '@/lib/shareTransfer'
@@ -115,9 +121,10 @@ function CodexImportIcon(props: { className?: string }) {
             strokeLinejoin="round"
             className={props.className}
         >
-            {/* 中文注释：入口图标改成纯更新箭头，弱化“聊天”含义，避免用户误解成会话本身而不是导入动作。 */}
-            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-            <path d="M21 3v6h-6" />
+            {/* 中文注释：导入图标使用“下载进托盘”样式，与刷新按钮的循环箭头区分开，避免两个相邻按钮看起来一样。 */}
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
         </svg>
     )
 }
@@ -136,8 +143,8 @@ function RefreshIcon(props: { className?: string }) {
             strokeLinejoin="round"
             className={props.className}
         >
-            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-            <path d="M21 3v6h-6" />
+            <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
+            <path d="M21 3v5h-5" />
         </svg>
     )
 }
@@ -181,12 +188,6 @@ function SettingsIcon(props: { className?: string }) {
     )
 }
 
-function getMachineTitle(machine: Machine): string {
-    if (machine.metadata?.displayName) return machine.metadata.displayName
-    if (machine.metadata?.host) return machine.metadata.host
-    return machine.id.slice(0, 8)
-}
-
 function SessionsPage() {
     const { api } = useAppContext()
     const navigate = useNavigate()
@@ -204,6 +205,7 @@ function SessionsPage() {
     const [isSyncConfirmOpen, setIsSyncConfirmOpen] = useState(false)
     const [isRestartingCodexDesktop, setIsRestartingCodexDesktop] = useState(false)
     const [pendingDuplicateSessionIds, setPendingDuplicateSessionIds] = useState<string[]>([])
+    const [pendingDuplicateHapiSessionIds, setPendingDuplicateHapiSessionIds] = useState<string[]>([])
     const [duplicateSessionGroups, setDuplicateSessionGroups] = useState<CodexDuplicateSessionGroup[]>([])
     const [isDuplicateMergeConfirmOpen, setIsDuplicateMergeConfirmOpen] = useState(false)
     const [isMergingDuplicateSessions, setIsMergingDuplicateSessions] = useState(false)
@@ -230,16 +232,7 @@ function SessionsPage() {
         })()
     }, [addToast, refetch, t])
 
-    const projectCount = useMemo(() => new Set(sessions.map(s =>
-        s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other'
-    )).size, [sessions])
-    const machineLabelsById = useMemo(() => {
-        const labels: Record<string, string> = {}
-        for (const machine of machines) {
-            labels[machine.id] = getMachineTitle(machine)
-        }
-        return labels
-    }, [machines])
+    const machineLabelsById = useMachineLabels(machines)
     const machinesById = useMemo(() => {
         const byId: Record<string, typeof machines[number]> = {}
         for (const machine of machines) {
@@ -312,6 +305,7 @@ function SessionsPage() {
         // 中文注释：重复会话确认框关闭时一并清空“本次选中导入”的上下文，确保后续检测不会误用上一轮的 codexSessionId。
         setIsDuplicateMergeConfirmOpen(false)
         setPendingDuplicateSessionIds([])
+        setPendingDuplicateHapiSessionIds([])
         setDuplicateSessionGroups([])
     }, [])
 
@@ -367,7 +361,9 @@ function SessionsPage() {
 
             const redirectTarget = selectedSessionId
                 ? result.merged.find((group) => group.removedSessionIds?.includes(selectedSessionId))
-                : undefined
+                    ?? result.merged.find((group) => Boolean(group.canonicalSessionId))
+                : result.merged.find((group) => Boolean(group.canonicalSessionId))
+            const redirectSessionId = redirectTarget?.canonicalSessionId ?? pendingDuplicateHapiSessionIds[0]
 
             closeDuplicateMergeDialog()
             await Promise.all([
@@ -381,10 +377,10 @@ function SessionsPage() {
             ])
             await refetch()
 
-            if (redirectTarget?.canonicalSessionId) {
+            if (redirectSessionId) {
                 navigate({
                     to: '/sessions/$sessionId',
-                    params: { sessionId: redirectTarget.canonicalSessionId }
+                    params: { sessionId: redirectSessionId }
                 })
             }
         } catch (error) {
@@ -408,6 +404,7 @@ function SessionsPage() {
         isMergingDuplicateSessions,
         navigate,
         normalizeCodexScriptError,
+        pendingDuplicateHapiSessionIds,
         pendingDuplicateSessionIds,
         queryClient,
         refetch,
@@ -475,6 +472,7 @@ function SessionsPage() {
             await refetch()
 
             setPendingDuplicateSessionIds([])
+            setPendingDuplicateHapiSessionIds(result.hapiSessionIds ?? [])
             setDuplicateSessionGroups([])
             setIsDuplicateMergeConfirmOpen(false)
             try {
@@ -489,6 +487,7 @@ function SessionsPage() {
 
                 if (duplicateResult.duplicates.length > 0) {
                     setPendingDuplicateSessionIds(sessionIds)
+                    setPendingDuplicateHapiSessionIds(result.hapiSessionIds ?? [])
                     setDuplicateSessionGroups(duplicateResult.duplicates)
                     setIsDuplicateMergeConfirmOpen(true)
                 }
@@ -529,6 +528,7 @@ function SessionsPage() {
         refetch,
         setDuplicateSessionGroups,
         setIsDuplicateMergeConfirmOpen,
+        setPendingDuplicateHapiSessionIds,
         setPendingDuplicateSessionIds,
         t
     ])
@@ -537,14 +537,11 @@ function SessionsPage() {
         <>
             <div className="flex h-full min-h-0">
             <div
-                className={`${isSessionsIndex ? 'flex' : 'hidden lg:flex'} w-full shrink-0 flex-col bg-[var(--app-bg)]`}
+                className={`${isSessionsIndex ? 'flex' : 'hidden split:flex'} w-full shrink-0 flex-col bg-[var(--app-bg)]`}
                 style={{ '--sidebar-w': `${sidebar.width}px` } as React.CSSProperties}
             >
-                <div className="bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
-                    <div className="mx-auto w-full max-w-content flex items-center justify-between px-3 py-2">
-                        <div className="text-xs text-[var(--app-hint)]">
-                            {t('sessions.count', { n: sessions.length, m: projectCount })}
-                        </div>
+                <div className="session-list-scrollbar-offset shrink-0 bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
+                    <div className="mx-auto flex w-full max-w-content items-center justify-end px-2 py-2">
                         <div className="flex items-center gap-2">
                             <button
                                 type="button"
@@ -587,7 +584,7 @@ function SessionsPage() {
                             <button
                                 type="button"
                                 onClick={() => navigate({ to: '/sessions/new' })}
-                                className="session-list-new-button p-1.5 rounded-full text-[var(--app-link)] transition-colors"
+                                className="session-list-new-button flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-link)] transition-colors"
                                 title={t('sessions.new')}
                             >
                                 <PlusIcon className="h-5 w-5" />
@@ -596,7 +593,7 @@ function SessionsPage() {
                     </div>
                 </div>
 
-                <div className="app-scroll-y flex-1 min-h-0 desktop-scrollbar-left">
+                <div className="flex min-h-0 flex-1 flex-col">
                     {error ? (
                         <div className="mx-auto w-full max-w-content px-3 py-2">
                             <div className="text-sm text-red-600">{error}</div>
@@ -624,12 +621,12 @@ function SessionsPage() {
 
             {/* Resize handle - desktop only */}
             <div
-                className="sidebar-resize-handle hidden lg:block shrink-0"
+                className="sidebar-resize-handle hidden split:block shrink-0"
                 data-dragging={sidebar.isDragging || undefined}
                 onPointerDown={sidebar.onPointerDown}
             />
 
-            <div className={`${isSessionsIndex ? 'hidden lg:flex' : 'flex'} min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
+            <div className={`${isSessionsIndex ? 'hidden split:flex' : 'flex'} min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
                 <div className="flex-1 min-h-0">
                     <Outlet />
                 </div>
@@ -716,17 +713,16 @@ function SessionPage() {
     } = useCursorChatStoreStatus({ api, session })
     const {
         messages,
-        pendingMessages,
         warning: messagesWarning,
-        isLoading: messagesLoading,
+        isSyncingTail: messagesSyncingTail,
         isLoadingMore: messagesLoadingMore,
         hasMore: messagesHasMore,
         loadMore: loadMoreMessages,
         refetch: refetchMessages,
-        pendingCount,
+        viewMode: messagesViewMode,
         messagesVersion,
-        flushPending,
-        setAtBottom,
+        historyVersion,
+        setViewMode,
     } = useMessages(api, sessionId)
 
     // Tracks the most recent send the hub rejected (4xx/5xx/network), keyed
@@ -919,7 +915,7 @@ function SessionPage() {
                                 queryKey: queryKeys.session(resolvedSessionId),
                                 queryFn: () => api.getSession(resolvedSessionId),
                             }),
-                            fetchLatestMessages(api, resolvedSessionId),
+                            syncTailMessages(api, resolvedSessionId),
                         ])
                     } catch {
                     }
@@ -960,13 +956,76 @@ function SessionPage() {
     const {
         getSuggestions: getSkillSuggestions,
     } = useSkills(api, sessionId)
+    // Same list + search matcher as sidebar / share picker (tiann/hapi#1213).
+    const { sessions: allSessions } = useSessions(api)
+    const { machines: mentionMachines } = useMachines(api, true)
+    const mentionMachineLabelsById = useMachineLabels(mentionMachines)
+    // Same fallbacks as share picker / SessionList search.
+    const resolveMentionMachineLabel = useCallback((machineId: string | null) => {
+        if (machineId && mentionMachineLabelsById[machineId]) {
+            return mentionMachineLabelsById[machineId]
+        }
+        if (machineId) {
+            return machineId.slice(0, 8)
+        }
+        return t('machine.unknown')
+    }, [mentionMachineLabelsById, t])
 
     const getAutocompleteSuggestions = useCallback(async (query: string) => {
+        if (query.startsWith('@')) {
+            const search = query.slice(1)
+            // v1: plain-text expansion (same grammar as Copy reference).
+            // v2: segmented rich composer with inline session tokens (#1215).
+            // Match via sessionMatchesQuery (share/sidebar); label/insert via getSessionTitle.
+            const sessionHits = matchSessionsForMention(allSessions, search, {
+                excludeId: sessionId,
+                limit: 20,
+                resolveMachineLabel: resolveMentionMachineLabel,
+            }).map((s) => {
+                const title = getSessionTitle(s)
+                const mentionText = buildSessionReferenceText(title, s.id)
+                const idPrefix = s.id.slice(0, 8)
+                return {
+                    key: `session:${s.id}`,
+                    text: mentionText,
+                    label: `@${title || idPrefix}`,
+                    description: s.active
+                        ? `Session · ${idPrefix} · active`
+                        : `Session · ${idPrefix}`,
+                }
+            })
+
+            const fileHits: Suggestion[] = []
+            if (agentType === 'codex' && api && sessionId) {
+                const response = await api.searchSessionFiles(sessionId, search, 50)
+                if (response.success && response.files) {
+                    for (const file of response.files) {
+                        const mentionText = `@"${file.fullPath.replace(/(["\\])/g, '\\$1')}"`
+                        fileHits.push({
+                            key: mentionText,
+                            text: mentionText,
+                            label: `@${file.fileName}`,
+                            description: file.filePath || file.fullPath,
+                        })
+                    }
+                }
+            }
+
+            return [...sessionHits, ...fileHits]
+        }
         if (query.startsWith('$')) {
             return await getSkillSuggestions(query)
         }
         return await getSlashSuggestions(query)
-    }, [getSkillSuggestions, getSlashSuggestions])
+    }, [
+        agentType,
+        api,
+        sessionId,
+        allSessions,
+        resolveMentionMachineLabel,
+        getSkillSuggestions,
+        getSlashSuggestions,
+    ])
 
     const refreshSelectedSession = useCallback(() => {
         void refetchSession()
@@ -1020,20 +1079,19 @@ function SessionPage() {
             cursorChatOnDisk={cursorChatStoreStatus?.onDisk}
             reopenDisabledReason={cursorReopenDisabledReason}
             messages={messages}
-            pendingMessages={pendingMessages}
             messagesWarning={messagesWarning}
             hasMoreMessages={messagesHasMore}
-            isLoadingMessages={messagesLoading}
+            isSyncingTail={messagesSyncingTail}
             isLoadingMoreMessages={messagesLoadingMore}
             isSending={isSending}
-            pendingCount={pendingCount}
+            viewMode={messagesViewMode}
             messagesVersion={messagesVersion}
+            historyVersion={historyVersion}
             onBack={goBack}
             onRefresh={refreshSelectedSession}
             onLoadMore={loadMoreMessages}
             onSend={sendMessage}
-            onFlushPending={flushPending}
-            onAtBottomChange={setAtBottom}
+            onViewModeChange={setViewMode}
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}
             availableSlashCommands={slashCommands}
@@ -1237,15 +1295,21 @@ const sessionDetailRoute = createRoute({
 const sessionFilesRoute = createRoute({
     getParentRoute: () => sessionDetailRoute,
     path: 'files',
-    validateSearch: (search: Record<string, unknown>): { tab?: 'changes' | 'directories' } => {
+    validateSearch: (search: Record<string, unknown>): { tab?: 'changes' | 'directories'; query?: string } => {
         const tabValue = typeof search.tab === 'string' ? search.tab : undefined
         const tab = tabValue === 'directories'
             ? 'directories'
             : tabValue === 'changes'
                 ? 'changes'
                 : undefined
+        const query = typeof search.query === 'string' && search.query.length > 0
+            ? search.query
+            : undefined
 
-        return tab ? { tab } : {}
+        return {
+            ...(tab ? { tab } : {}),
+            ...(query ? { query } : {}),
+        }
     },
     component: FilesPage,
 })
@@ -1260,6 +1324,7 @@ type SessionFileSearch = {
     path: string
     staged?: boolean
     tab?: 'changes' | 'directories'
+    query?: string
 }
 
 const sessionFileRoute = createRoute({
@@ -1279,6 +1344,9 @@ const sessionFileRoute = createRoute({
             : tabValue === 'changes'
                 ? 'changes'
                 : undefined
+        const query = typeof search.query === 'string' && search.query.length > 0
+            ? search.query
+            : undefined
 
         const result: SessionFileSearch = { path }
         if (staged !== undefined) {
@@ -1286,6 +1354,9 @@ const sessionFileRoute = createRoute({
         }
         if (tab !== undefined) {
             result.tab = tab
+        }
+        if (query !== undefined) {
+            result.query = query
         }
         return result
     },
@@ -1381,10 +1452,22 @@ const settingsVoiceAdvancedRoute = createRoute({
     component: SettingsVoiceAdvancedPage,
 })
 
+const settingsMachinesRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'machines',
+    component: SettingsMachinesPage,
+})
+
 const settingsAboutRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'about',
     component: SettingsAboutPage,
+})
+
+const settingsStorageRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'storage',
+    component: SettingsStoragePage,
 })
 
 // Web Share Target landing route. Service worker (`web/src/sw.ts`)
@@ -1426,6 +1509,8 @@ export const routeTree = rootRoute.addChildren([
         settingsVoiceRoute,
         settingsVoiceVoicesRoute,
         settingsVoiceAdvancedRoute,
+        settingsMachinesRoute,
+        settingsStorageRoute,
         settingsAboutRoute,
     ]),
     shareRoute,

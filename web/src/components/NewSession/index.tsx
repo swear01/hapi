@@ -1,7 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { CodexLocalSessionSummary, Machine } from '@/types/api'
-import type { GrokPermissionMode } from '@hapi/protocol'
+import type { CodexCollaborationMode, GrokPermissionMode } from '@hapi/protocol'
+import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
 import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
@@ -16,6 +17,7 @@ import { useRecentPaths } from '@/hooks/useRecentPaths'
 import { useTranslation } from '@/lib/use-translation'
 import { getCodexModelReasoningEfforts } from '@/lib/codexModelCapabilities'
 import {
+    buildNewSessionCursorModelCatalog,
     buildNewSessionCursorPickerState,
     isCursorEffortWireAllowed,
     resolveCursorBaseFromWire,
@@ -32,11 +34,13 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
+import { CollaborationModeSelector } from './CollaborationModeSelector'
 import { DirectorySection } from './DirectorySection'
 import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
+import { FastModeSelector } from './FastModeSelector'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
 import { OpencodeModelSelector } from './OpencodeModelSelector'
@@ -46,8 +50,11 @@ import { buildGrokEffortOptions, buildGrokModelOptions, shouldEnableGrokModelDis
 import { ReasoningEffortSelector } from './ReasoningEffortSelector'
 import {
     loadPreferredAgent,
+    loadPreferredLaunchSettings,
     loadPreferredYoloMode,
+    resolvePreferredLaunchSettings,
     savePreferredAgent,
+    savePreferredLaunchSettings,
     savePreferredYoloMode,
 } from './preferences'
 import { SessionTypeSelector } from './SessionTypeSelector'
@@ -124,6 +131,9 @@ export function NewSession(props: {
     const pendingCursorBaseRef = useRef<string | null>(null)
     const [effort, setEffort] = useState<LaunchEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
+    const [opencodeSelectedModel, setOpencodeSelectedModel] = useState<string | null>(null)
+    const [serviceTier, setServiceTier] = useState<NewSessionServiceTier>('standard')
+    const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>('default')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
     const [grokPermissionMode, setGrokPermissionMode] = useState<GrokPermissionMode>('default')
     const [sessionType, setSessionType] = useState<SessionType>('simple')
@@ -137,8 +147,11 @@ export function NewSession(props: {
     const [codexImportError, setCodexImportError] = useState<string | null>(null)
     const [isImportingCodexSession, setIsImportingCodexSession] = useState(false)
     const [isCodexImportDialogOpen, setIsCodexImportDialogOpen] = useState(false)
-    const isFormDisabled = Boolean(isPending || props.isLoading || isImportingCodexSession)
+    const [isCreating, setIsCreating] = useState(false)
+    const createInFlightRef = useRef(false)
+    const isFormDisabled = Boolean(isCreating || isPending || props.isLoading || isImportingCodexSession)
     const worktreeInputRef = useRef<HTMLInputElement>(null)
+    const preserveRestoredDraftRef = useRef(false)
 
     useEffect(() => {
         if (sessionType === 'worktree') {
@@ -147,9 +160,14 @@ export function NewSession(props: {
     }, [sessionType])
 
     useEffect(() => {
+        if (preserveRestoredDraftRef.current) {
+            return
+        }
         setEffort('auto')
         setModelReasoningEffort('default')
         setGrokPermissionMode('default')
+        setServiceTier('standard')
+        setCollaborationMode('default')
         if (agent !== 'cursor') {
             setModel('auto')
             setCursorSelectedBase('auto')
@@ -206,11 +224,17 @@ export function NewSession(props: {
             return
         }
         restoredFromBrowseRef.current = true
+        preserveRestoredDraftRef.current = true
         setAgent(draft.agent)
         setModel(draft.model)
         setCursorSelectedBase(draft.cursorSelectedBase)
         setEffort(draft.effort)
         setModelReasoningEffort(draft.modelReasoningEffort)
+        setOpencodeSelectedModel(
+            draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
+        )
+        setServiceTier(draft.serviceTier)
+        setCollaborationMode(draft.collaborationMode)
         setYoloMode(draft.yoloMode)
         setGrokPermissionMode(draft.grokPermissionMode)
         setSessionType(draft.sessionType)
@@ -249,7 +273,6 @@ export function NewSession(props: {
         machineId,
         enabled: agent === 'codex' && Boolean(machineId)
     })
-    const [opencodeSelectedModel, setOpencodeSelectedModel] = useState<string | null>(null)
     const runnerSpawnError = useMemo(
         () => formatRunnerSpawnError(selectedMachine),
         [selectedMachine]
@@ -287,6 +310,35 @@ export function NewSession(props: {
         }
         setModelReasoningEffort('default')
     }, [agent, codexSupportedReasoningEfforts, modelReasoningEffort])
+
+    useEffect(() => {
+        if (
+            agent !== 'codex'
+            || model === 'auto'
+            || codexModelsState.isLoading
+            || codexModelsState.error
+        ) {
+            return
+        }
+        if (!codexModelsState.models.some((candidate) => candidate.id === model)) {
+            setModel('auto')
+        }
+    }, [agent, codexModelsState.error, codexModelsState.isLoading, codexModelsState.models, model])
+    const showCodexFastMode = agent === 'codex'
+        && !codexModelsState.error
+        && codexModelAdvertisesFastTier(model === 'auto' ? null : model, codexModelsState.models)
+
+    useEffect(() => {
+        // Wait for the Codex model catalog to settle before clearing Fast;
+        // otherwise Browse → remount restores serviceTier: 'fast' and this
+        // effect would wipe it while models are still loading.
+        if (agent === 'codex' && codexModelsState.isLoading) {
+            return
+        }
+        if (!showCodexFastMode && serviceTier !== 'standard') {
+            setServiceTier('standard')
+        }
+    }, [agent, codexModelsState.isLoading, showCodexFastMode, serviceTier])
     const cursorModelsState = useCursorModelsForMachine({
         api: props.api,
         machineId,
@@ -300,6 +352,42 @@ export function NewSession(props: {
         ),
         [cursorModelsState.availableModels, cursorModelsState.cliModelSkus, model]
     )
+    const availableCursorCatalog = useMemo(
+        () => buildNewSessionCursorModelCatalog(
+            cursorModelsState.availableModels,
+            'auto',
+            cursorModelsState.cliModelSkus
+        ),
+        [cursorModelsState.availableModels, cursorModelsState.cliModelSkus]
+    )
+
+    useEffect(() => {
+        if (
+            agent !== 'cursor'
+            || cursorModelsState.isLoading
+            || cursorModelsState.error
+        ) {
+            return
+        }
+        if (model !== 'auto' && !availableCursorCatalog.wireToBase.has(model)) {
+            setModel('auto')
+            setCursorSelectedBase('auto')
+            return
+        }
+        if (
+            cursorSelectedBase !== 'auto'
+            && !availableCursorCatalog.variantsByBase.has(cursorSelectedBase)
+        ) {
+            setCursorSelectedBase('auto')
+        }
+    }, [
+        agent,
+        availableCursorCatalog,
+        cursorModelsState.error,
+        cursorModelsState.isLoading,
+        cursorSelectedBase,
+        model
+    ])
 
     const cursorBaseSelectValue = useMemo(
         () => resolveNewSessionCursorBaseSelectValue(cursorPicker, cursorSelectedBase),
@@ -464,21 +552,105 @@ export function NewSession(props: {
         }
     }, [agent, grokPermissionMode, grokModelsState.autoPermissionModeSupported])
     useEffect(() => {
-        // Auto-pick the OpenCode default model when discovery finishes, so the
-        // form has a sensible value if the user hits Enter without scrolling.
-        if (agent !== 'opencode') return
-        if (opencodeSelectedModel !== null) return
-        const fallback = opencodeModelsState.currentModelId
+        // Restore a remembered model when it is still advertised for this cwd;
+        // otherwise auto-pick the backend default.
+        if (
+            agent !== 'opencode'
+            || deferredDirectoryExists !== true
+            || opencodeModelsState.isLoading
+            || opencodeModelsState.error
+        ) {
+            return
+        }
+        if (
+            opencodeSelectedModel !== null
+            && opencodeModelsState.availableModels.some(
+                (candidate) => candidate.modelId === opencodeSelectedModel
+            )
+        ) {
+            return
+        }
+        const rememberedModel = machineId
+            ? loadPreferredLaunchSettings(machineId, 'opencode')?.model
+            : null
+        const rememberedModelAvailable = rememberedModel
+            && rememberedModel !== 'auto'
+            && opencodeModelsState.availableModels.some(
+                (candidate) => candidate.modelId === rememberedModel
+            )
+        const fallback = (rememberedModelAvailable ? rememberedModel : null)
+            ?? opencodeModelsState.currentModelId
             ?? opencodeModelsState.availableModels[0]?.modelId
             ?? null
-        if (fallback) {
-            setOpencodeSelectedModel(fallback)
-        }
-    }, [agent, opencodeSelectedModel, opencodeModelsState.currentModelId, opencodeModelsState.availableModels])
+        setOpencodeSelectedModel(fallback)
+    }, [
+        agent,
+        deferredDirectoryExists,
+        opencodeModelsState.availableModels,
+        opencodeModelsState.currentModelId,
+        opencodeModelsState.error,
+        opencodeModelsState.isLoading,
+        opencodeSelectedModel,
+        machineId
+    ])
     useEffect(() => {
         // Reset selection when agent / machine / directory changes; new probe = new defaults.
+        if (preserveRestoredDraftRef.current) {
+            return
+        }
         setOpencodeSelectedModel(null)
     }, [agent, machineId, deferredDirectory])
+
+    useEffect(() => {
+        if (!machineId || preserveRestoredDraftRef.current) {
+            return
+        }
+
+        const preferred = resolvePreferredLaunchSettings(
+            agent,
+            loadPreferredLaunchSettings(machineId, agent)
+        )
+
+        setModel(agent === 'opencode' ? 'auto' : preferred.model)
+        setCursorSelectedBase(preferred.cursorSelectedBase)
+        setEffort(preferred.effort)
+        setModelReasoningEffort(preferred.modelReasoningEffort)
+        setOpencodeSelectedModel(
+            agent === 'opencode' && preferred.model !== 'auto' ? preferred.model : null
+        )
+    }, [agent, machineId])
+
+    useEffect(() => {
+        if (
+            agent !== 'grok'
+            || deferredDirectoryExists !== true
+            || grokModelsState.isLoading
+            || grokModelsState.error
+        ) {
+            return
+        }
+        if (
+            model !== 'auto'
+            && !grokModelsState.availableModels.some((candidate) => candidate.modelId === model)
+        ) {
+            setModel('auto')
+        }
+        if (
+            effort !== 'auto'
+            && !grokEffortOptions.some((option) => option.value === effort)
+        ) {
+            setEffort('auto')
+        }
+    }, [
+        agent,
+        deferredDirectoryExists,
+        effort,
+        grokEffortOptions,
+        grokModelsState.availableModels,
+        grokModelsState.error,
+        grokModelsState.isLoading,
+        model
+    ])
 
     const currentDirectoryExists = trimmedDirectory ? pathExistence[trimmedDirectory] : undefined
     const needsDirectoryCreationWarning = sessionType === 'simple' && trimmedDirectory !== '' && currentDirectoryExists === false
@@ -559,7 +731,13 @@ export function NewSession(props: {
         [codexImportSessions, selectedCodexImportSessionId]
     )
 
+    const handleAgentChange = useCallback((newAgent: AgentType) => {
+        preserveRestoredDraftRef.current = false
+        setAgent(newAgent)
+    }, [])
+
     const handleMachineChange = useCallback((newMachineId: string) => {
+        preserveRestoredDraftRef.current = false
         setMachineId(newMachineId)
         setModel('auto')
         setCursorSelectedBase('auto')
@@ -610,11 +788,13 @@ export function NewSession(props: {
         }
         saveNewSessionFormDraft({
             agent,
-            model,
+            model: agent === 'opencode' ? (opencodeSelectedModel ?? 'auto') : model,
             cursorSelectedBase,
             machineId,
             effort,
             modelReasoningEffort,
+            serviceTier,
+            collaborationMode,
             yoloMode,
             grokPermissionMode,
             sessionType,
@@ -625,10 +805,13 @@ export function NewSession(props: {
         props.onChooseFolder,
         agent,
         model,
+        opencodeSelectedModel,
         cursorSelectedBase,
         machineId,
         effort,
         modelReasoningEffort,
+        serviceTier,
+        collaborationMode,
         yoloMode,
         grokPermissionMode,
         sessionType,
@@ -696,8 +879,10 @@ export function NewSession(props: {
     }, [suggestions, selectedIndex, moveUp, moveDown, clearSuggestions, handleSuggestionSelect])
 
     async function handleCreate() {
-        if (!machineId || !trimmedDirectory) return
+        if (!machineId || !trimmedDirectory || createInFlightRef.current) return
 
+        createInFlightRef.current = true
+        setIsCreating(true)
         setError(null)
         try {
             const existsResult = await checkPathsExists([trimmedDirectory])
@@ -735,6 +920,18 @@ export function NewSession(props: {
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
+            const preferredLaunchSettings = {
+                model: agent === 'opencode' ? (opencodeSelectedModel ?? 'auto') : model,
+                cursorSelectedBase,
+                effort,
+                modelReasoningEffort
+            }
+            const resolvedServiceTier = agent === 'codex' && showCodexFastMode
+                ? serviceTier
+                : undefined
+            const resolvedCollaborationMode = agent === 'codex' && collaborationMode !== 'default'
+                ? collaborationMode
+                : undefined
 
             if (agent === 'codex' && selectedCodexImportSession) {
                 setIsImportingCodexSession(true)
@@ -744,6 +941,8 @@ export function NewSession(props: {
                     machineId: codexImportMachineId ?? machineId,
                     model: resolvedModel ?? null,
                     modelReasoningEffort: resolvedModelReasoningEffort ?? null,
+                    serviceTier: resolvedServiceTier,
+                    collaborationMode: resolvedCollaborationMode ?? 'default',
                     yolo: yoloMode
                 })
                 if (result.success) {
@@ -759,6 +958,7 @@ export function NewSession(props: {
                     )
                     haptic.notification('success')
                     markCodexSessionsImported([selectedCodexImportSession.id])
+                    savePreferredLaunchSettings(machineId, agent, preferredLaunchSettings)
                     clearNewSessionFormDraft()
                     setLastUsedMachineId(machineId)
                     addRecentPath(machineId, trimmedDirectory)
@@ -781,11 +981,14 @@ export function NewSession(props: {
                 yolo: agent === 'grok' ? undefined : yoloMode,
                 permissionMode: agent === 'grok' ? grokPermissionMode : undefined,
                 sessionType,
-                worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined
+                worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined,
+                serviceTier: resolvedServiceTier,
+                collaborationMode: resolvedCollaborationMode
             })
 
             if (result.type === 'success') {
                 haptic.notification('success')
+                savePreferredLaunchSettings(machineId, agent, preferredLaunchSettings)
                 clearNewSessionFormDraft()
                 setLastUsedMachineId(machineId)
                 addRecentPath(machineId, trimmedDirectory)
@@ -799,10 +1002,44 @@ export function NewSession(props: {
             setIsImportingCodexSession(false)
             haptic.notification('error')
             setError(e instanceof Error ? e.message : 'Failed to create session')
+        } finally {
+            createInFlightRef.current = false
+            setIsCreating(false)
         }
     }
 
-    const canCreate = Boolean(machineId && trimmedDirectory && !isFormDisabled && !missingWorktreeDirectory)
+    const isLaunchPreferenceValidationPending =
+        (agent === 'codex'
+            && (model !== 'auto' || modelReasoningEffort !== 'default')
+            && codexModelsState.isLoading)
+        || (agent === 'cursor'
+            && (model !== 'auto' || cursorSelectedBase !== 'auto')
+            && cursorModelsState.isLoading)
+        || (agent === 'grok'
+            && deferredDirectory !== ''
+            && (model !== 'auto' || effort !== 'auto')
+            && (
+                deferredDirectoryExists === undefined
+                || (deferredDirectoryExists === true && grokModelsState.isLoading)
+            ))
+        || (agent === 'opencode'
+            && deferredDirectory !== ''
+            && opencodeSelectedModel !== null
+            && (
+                deferredDirectoryExists === undefined
+                || (deferredDirectoryExists === true && opencodeModelsState.isLoading)
+            ))
+    const fastModeSelectionPending = agent === 'codex'
+        && serviceTier === 'fast'
+        && codexModelsState.isLoading
+    const canCreate = Boolean(
+        machineId
+        && trimmedDirectory
+        && !isFormDisabled
+        && !missingWorktreeDirectory
+        && !isLaunchPreferenceValidationPending
+        && !fastModeSelectionPending
+    )
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
@@ -845,7 +1082,7 @@ export function NewSession(props: {
             <AgentSelector
                 agent={agent}
                 isDisabled={isFormDisabled}
-                onAgentChange={setAgent}
+                onAgentChange={handleAgentChange}
             />
             {agent === 'codex' ? (
                 <CodexImportSelectButton
@@ -960,6 +1197,18 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onChange={setGrokPermissionMode}
             />
+            <CollaborationModeSelector
+                agent={agent}
+                value={collaborationMode}
+                isDisabled={isFormDisabled}
+                onChange={setCollaborationMode}
+            />
+            <FastModeSelector
+                visible={showCodexFastMode}
+                value={serviceTier}
+                isDisabled={isFormDisabled}
+                onChange={setServiceTier}
+            />
             {agent !== 'grok' ? (
                 <YoloToggle
                     yoloMode={yoloMode}
@@ -975,7 +1224,7 @@ export function NewSession(props: {
             ) : null}
 
             <ActionButtons
-                isPending={isPending || isImportingCodexSession}
+                isPending={isCreating || isPending || isImportingCodexSession}
                 canCreate={canCreate}
                 isDisabled={isFormDisabled}
                 createLabel={createLabel}

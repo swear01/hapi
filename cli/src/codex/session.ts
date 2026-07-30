@@ -18,11 +18,11 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
     readonly codexCliOverrides?: CodexCliOverrides;
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
-    readonly replayTranscriptHistoryOnStart: boolean;
     readonly sourceSessionId?: string;
     localLaunchFailure: LocalLaunchFailure | null = null;
 
     private transcriptPathCallbacks: Array<(path: string) => void> = [];
+    private transcriptHistoryReplayPending: boolean;
 
     constructor(opts: {
         api: ApiClient;
@@ -71,13 +71,21 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         this.codexCliOverrides = opts.codexCliOverrides;
         this.startedBy = opts.startedBy;
         this.startingMode = opts.startingMode;
-        this.replayTranscriptHistoryOnStart = opts.replayTranscriptHistoryOnStart ?? false;
+        this.transcriptHistoryReplayPending = opts.replayTranscriptHistoryOnStart ?? false;
         this.sourceSessionId = opts.sourceSessionId;
         this.permissionMode = opts.permissionMode;
         this.model = opts.model;
         this.modelReasoningEffort = opts.modelReasoningEffort;
         this.collaborationMode = opts.collaborationMode;
         this.personality = opts.personality;
+    }
+
+    shouldReplayTranscriptHistory(): boolean {
+        return this.transcriptHistoryReplayPending;
+    }
+
+    markTranscriptHistoryReplayConsumed(): void {
+        this.transcriptHistoryReplayPending = false;
     }
 
     onTranscriptPathFound(path: string): void {
