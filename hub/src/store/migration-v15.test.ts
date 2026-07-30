@@ -6,23 +6,23 @@ import { tmpdir } from 'node:os'
 import { Store } from './index'
 
 /**
- * Tests for V14→V15 schema migration: adds `session_scratchlist.attachments`
- * for tiann/hapi#921 (scratchlist v2.2 hub attachment storage).
+ * Tests for the V14→V16 schema migrations: adds `session_scratchlist.attachments`
+ * and `sessions.personality`.
  *
  * Ladder: V11→V12 = session_scratchlist (#896), V12–V14 = message_epochs
- * reconciliation, V14→V15 = attachments column (#921).
+ * reconciliation, V14→V15 = attachments column (#921), V15→V16 = personality.
  */
-describe('Store V14→V15 migration: scratchlist attachments column', () => {
-    it('fresh DB has session_scratchlist.attachments', () => {
+describe('Store V14→V16 migrations: scratchlist attachments and personality', () => {
+    it('fresh DB has session_scratchlist.attachments and sessions.personality', () => {
         const store = new Store(':memory:')
-        const cols = getColumns(store, 'session_scratchlist')
-        expect(cols).toContain('attachments')
-        expect(getUserVersion(store)).toBe(15)
+        expect(getColumns(store, 'session_scratchlist')).toContain('attachments')
+        expect(getColumns(store, 'sessions')).toContain('personality')
+        expect(getUserVersion(store)).toBe(16)
         store.close()
     })
 
-    it('V14 text-only scratchlist migrates to V15 and gains attachments column', () => {
-        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v14-to-v15-'))
+    it('V14 text-only scratchlist migrates to V16 and gains attachments and personality', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v14-to-v16-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
         try {
@@ -34,17 +34,17 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
             db.close()
 
             store = new Store(dbPath)
-            const cols = getColumns(store, 'session_scratchlist')
-            expect(cols).toContain('attachments')
-            expect(getUserVersion(store)).toBe(15)
+            expect(getColumns(store, 'session_scratchlist')).toContain('attachments')
+            expect(getColumns(store, 'sessions')).toContain('personality')
+            expect(getUserVersion(store)).toBe(16)
         } finally {
             store?.close()
             rmSync(dir, { recursive: true, force: true })
         }
     })
 
-    it('V15 DB reopen is idempotent: schema unchanged', () => {
-        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v15-idempotent-'))
+    it('V16 DB reopen is idempotent: schema unchanged', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v16-idempotent-'))
         const dbPath = join(dir, 'test.db')
         let store1: Store | undefined
         let store2: Store | undefined
@@ -52,11 +52,12 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
             store1 = new Store(dbPath)
             const cols1 = getColumns(store1, 'session_scratchlist')
             expect(cols1).toContain('attachments')
+            expect(getColumns(store1, 'sessions')).toContain('personality')
 
             store2 = new Store(dbPath)
             const cols2 = getColumns(store2, 'session_scratchlist')
             expect(cols2).toEqual(cols1)
-            expect(getUserVersion(store2)).toBe(15)
+            expect(getUserVersion(store2)).toBe(16)
         } finally {
             store2?.close()
             store1?.close()

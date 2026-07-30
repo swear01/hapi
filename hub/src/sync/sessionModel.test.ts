@@ -1071,6 +1071,8 @@ describe('session model', () => {
                 effort?: string,
                 _permissionMode?: string,
                 _serviceTier?: string,
+                _existingSessionId?: string,
+                _collaborationMode?: string,
                 personality?: string
             ) => {
                 capturedModel = model

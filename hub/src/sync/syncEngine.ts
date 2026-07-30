@@ -1093,9 +1093,9 @@ async uploadScratchlistAttachment(
         effort?: string,
         permissionMode?: PermissionMode,
         serviceTier?: string,
-        personality?: CodexPersonality,
         existingSessionId?: string,
-        collaborationMode?: CodexCollaborationMode
+        collaborationMode?: CodexCollaborationMode,
+        personality?: CodexPersonality
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -1110,9 +1110,9 @@ async uploadScratchlistAttachment(
             effort,
             permissionMode,
             serviceTier,
-            personality,
             existingSessionId,
-            collaborationMode
+            collaborationMode,
+            personality
         )
     }
 
@@ -1586,9 +1586,9 @@ async uploadScratchlistAttachment(
             session.effort ?? undefined,
             preferredPermissionMode,
             session.serviceTier ?? undefined,
-            session.personality ?? undefined,
             access.sessionId,
-            session.collaborationMode ?? undefined
+            session.collaborationMode ?? undefined,
+            session.personality ?? undefined
         )
 
         if (spawnResult.type !== 'success') {
