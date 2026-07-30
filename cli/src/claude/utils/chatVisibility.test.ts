@@ -13,6 +13,7 @@ describe('isClaudeChatVisibleMessage', () => {
         expect(isClaudeChatVisibleMessage({ type: 'system', subtype: 'api_error' })).toBe(true)
         expect(isClaudeChatVisibleMessage({ type: 'system', subtype: 'microcompact_boundary' })).toBe(true)
         expect(isClaudeChatVisibleMessage({ type: 'system', subtype: 'compact_boundary' })).toBe(true)
+        expect(isClaudeChatVisibleMessage({ type: 'system', subtype: 'away_summary' })).toBe(true)
     })
 
     it('keeps conversation messages visible', () => {
@@ -23,5 +24,9 @@ describe('isClaudeChatVisibleMessage', () => {
 
     it('hides rate_limit_event messages from chat delivery', () => {
         expect(isClaudeChatVisibleMessage({ type: 'rate_limit_event' } as any)).toBe(false)
+    })
+
+    it('hides tool_progress heartbeat messages from chat delivery', () => {
+        expect(isClaudeChatVisibleMessage({ type: 'tool_progress' } as any)).toBe(false)
     })
 })

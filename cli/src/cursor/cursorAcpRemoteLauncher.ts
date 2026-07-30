@@ -12,18 +12,31 @@ import {
 import { OpencodeDisplay } from '@/ui/ink/OpencodeDisplay';
 import type { CursorSession } from './session';
 import type { PermissionMode } from './loop';
-import { createCursorAcpBackend, CURSOR_ACP_REQUIRED_MESSAGE } from './utils/cursorAcpBackend';
+import {
+    createCursorAcpBackend,
+    CURSOR_ACP_REQUIRED_MESSAGE,
+    resolveCursorNativeWorktreePath
+} from './utils/cursorAcpBackend';
 import { setCursorAcpModelsSnapshot } from './utils/cursorAcpModelsBridge';
 import { buildCursorModelsSnapshotFromAcp } from './utils/cursorAcpModelsSnapshot';
 import { CursorExtensionAdapter } from './utils/cursorExtensionAdapter';
-import { applyCursorAcpMode, applyCursorAcpModel, wireIdForCursorSessionState } from './utils/cursorModeConfig';
+import {
+    applyCursorAcpMode,
+    applyCursorAcpModel,
+    isCursorAutoReviewMode,
+    resolveCursorModeAfterPlanApproval,
+    wireIdForCursorSessionState
+} from './utils/cursorModeConfig';
+import { CURSOR_PLAN_CONTINUE } from './utils/cursorPlanContinue';
+import { cursorPassThroughStatusMessage, parseCursorSpecialCommand } from './cursorSpecialCommands';
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
-
+import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
     private backend: ReturnType<typeof createCursorAcpBackend> | null = null;
+    private acpSessionId: string | null = null;
     private permissionAdapter: PermissionAdapter | null = null;
     private extensionAdapter: CursorExtensionAdapter | null = null;
     private happyServer: { stop: () => void } | null = null;
@@ -33,7 +46,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendModel: string | null = null;
     private unregisterModelApplyHandler: (() => void) | null = null;
     private modelApplySeq = 0;
-
+    /** True when ACP process was spawned with `--auto-review`. */
+    private spawnedWithAutoReview = false;
+    /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
+    private autoReviewSlashQueued = false;
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
@@ -54,16 +70,31 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
 
-        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client);
+        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            enableChangeTitle: false,
+            skillLookup: { workingDirectory: session.path, flavor: 'cursor' }
+        });
         this.happyServer = happyServer;
 
-        const backend = createCursorAcpBackend({ cwd: session.path, model: session.model });
+        const autoReview = isCursorAutoReviewMode(session.getPermissionMode() as PermissionMode);
+        this.spawnedWithAutoReview = autoReview;
+        const backend = createCursorAcpBackend({
+            cwd: session.path,
+            model: session.model,
+            autoReview,
+            worktree: session.cursorWorktree,
+            addDirs: session.cursorAddDirs
+        });
         this.backend = backend;
+        registerAcpSessionTitleSync(backend, session.client);
+        this.recordCursorNativeWorktreeMetadata();
 
         backend.setUsageUpdateListener((message) => this.handleAgentMessage(message));
 
+        let recentStderrHint: string | null = null;
         backend.onStderrError((error) => {
             logger.debug('[cursor-acp] stderr error', error);
+            recentStderrHint = error.raw || error.message;
             const converted = convertAgentMessage({ type: 'error', message: error.message });
             if (converted) {
                 session.sendAgentMessage(converted);
@@ -75,6 +106,20 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             await backend.initialize();
         } catch (error) {
             const errMsg = error instanceof Error ? error.message : String(error);
+            const modelRejection = extractCannotUseThisModelMessage(errMsg)
+                ?? extractCannotUseThisModelMessage(recentStderrHint);
+            if (modelRejection) {
+                const fullMsg = classifyCursorAcpLoadError(error, {
+                    recentStderr: recentStderrHint,
+                    action: 'start'
+                });
+                const converted = convertAgentMessage({ type: 'error', message: fullMsg });
+                if (converted) {
+                    session.sendAgentMessage(converted);
+                }
+                messageBuffer.addMessage(fullMsg, 'status');
+                throw new Error(fullMsg);
+            }
             const fullMsg = `${CURSOR_ACP_REQUIRED_MESSAGE} (${errMsg})`;
             const converted = convertAgentMessage({ type: 'error', message: fullMsg });
             if (converted) {
@@ -89,7 +134,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const extensionAdapter = new CursorExtensionAdapter(
             session.client,
             backend,
-            (message) => this.handleAgentMessage(message)
+            (message) => this.handleAgentMessage(message),
+            () => this.handleCreatePlanAccepted()
         );
         this.extensionAdapter = extensionAdapter;
 
@@ -115,9 +161,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 });
             } catch (error) {
                 logger.warn('[cursor-acp] session/load failed', formatAcpLoadError(error));
-                throw new Error(
-                    'Failed to resume Cursor ACP session. Legacy stream-json sessions cannot be loaded via ACP.'
-                );
+                throw new Error(classifyCursorAcpLoadError(error, { recentStderr: recentStderrHint }));
             }
         } else if (resumeSessionId) {
             throw new Error(
@@ -129,9 +173,22 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 mcpServers: mcpServerList
             });
         }
+        this.acpSessionId = acpSessionId;
 
         if (acpSessionId !== resumeSessionId) {
             session.onSessionFoundWithProtocol(acpSessionId, 'acp');
+            // tiann/hapi#913: block until the metadata write that pins
+            // `cursorSessionId` reaches the hub DB before we drop into
+            // `runMainLoop`. If SIGTERM (hub-restart cascade) lands during
+            // the first turn without this gate, the only durable handle
+            // linking the session to its on-disk ACP store is lost and the
+            // session strands. The resume path at lines 98-100 already
+            // relies on the latency of `backend.loadSession()` to flush the
+            // same write; the fresh-session path has no such cover.
+            const flushed = await session.client.flushMetadata();
+            if (!flushed) {
+                logger.warn(`[cursor-acp] cursorSessionId metadata write did not ACK within 5s; session may be unrecoverable if killed before the lock drains (acpSessionId=${acpSessionId})`);
+            }
         }
 
         session.client.emitSessionReady();
@@ -197,8 +254,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
             await applyCursorAcpMode(backend, acpSessionId, batch.mode.permissionMode as PermissionMode);
             this.applyDisplayMode(batch.mode.permissionMode as PermissionMode);
+
+            const specialCommand = parseCursorSpecialCommand(batch.message);
+            if (specialCommand.type === 'pass-through') {
+                messageBuffer.addMessage(cursorPassThroughStatusMessage(specialCommand.command), 'status');
+            }
             messageBuffer.addMessage(batch.message, 'user');
 
+            // skill_lookup discovery lives on the MCP tool description — do not
+            // prepend instructions onto user turns (prompt-injection false positive).
             const promptContent: PromptContent[] = [{
                 type: 'text',
                 text: batch.message
@@ -210,6 +274,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message) => {
                     this.handleAgentMessage(message);
                 });
+                void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
@@ -258,6 +323,35 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         setCursorAcpModelsSnapshot(null);
     }
 
+    private handleCreatePlanAccepted(): void {
+        const backend = this.backend;
+        const acpSessionId = this.acpSessionId;
+        if (!backend || !acpSessionId) {
+            logger.warn('[cursor-acp] CreatePlan accepted but ACP session is not ready; skip continue handoff');
+            return;
+        }
+
+        const session = this.session;
+        const executeMode = resolveCursorModeAfterPlanApproval(
+            session.getPermissionMode() as PermissionMode
+        ) as PermissionMode;
+
+        // Leave plan/ask for an executable mode, then queue a continue prompt so
+        // Yes means "keep going on the user task" (Claude ExitPlanMode parallel).
+        session.setPermissionMode(executeMode);
+        void applyCursorAcpMode(backend, acpSessionId, executeMode).then(() => {
+            this.applyDisplayMode(executeMode);
+        });
+
+        session.queue.unshiftIsolated(CURSOR_PLAN_CONTINUE, {
+            permissionMode: executeMode,
+            model: session.model
+        });
+        logger.debug('[cursor-acp] CreatePlan accepted — queued continue prompt', {
+            executeMode
+        });
+    }
+
     private handleAgentMessage(message: AgentMessage): void {
         const converted = convertAgentMessage(message);
         if (converted) {
@@ -303,6 +397,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             void applyCursorAcpMode(backend, acpSessionId, mode).then(() => {
                 this.applyDisplayMode(mode);
             });
+            this.maybeQueueAutoReviewSlash(mode);
         };
 
         this.unregisterModelApplyHandler = session.registerModelApplyHandler(async (model) => (
@@ -423,6 +518,52 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
+    /**
+     * Mid-session Auto-review: ACP has no config option, so when the process was
+     * not spawned with `--auto-review`, queue an isolated `/auto-review` slash once.
+     */
+    private maybeQueueAutoReviewSlash(mode: PermissionMode): void {
+        if (!isCursorAutoReviewMode(mode)) {
+            return;
+        }
+        if (this.spawnedWithAutoReview || this.autoReviewSlashQueued) {
+            return;
+        }
+        this.autoReviewSlashQueued = true;
+        this.session.queue.pushIsolated(
+            '/auto-review',
+            {
+                permissionMode: mode,
+                model: this.session.model
+            }
+        );
+        this.messageBuffer.addMessage(cursorPassThroughStatusMessage('auto-review'), 'status');
+    }
+
+    private recordCursorNativeWorktreeMetadata(): void {
+        const worktree = this.session.cursorWorktree;
+        if (worktree === undefined || worktree === false) {
+            return;
+        }
+        const name = typeof worktree === 'string' ? worktree.trim() : '';
+        if (!name) {
+            this.messageBuffer.addMessage('Cursor native worktree enabled', 'status');
+            return;
+        }
+        const worktreePath = resolveCursorNativeWorktreePath(this.session.path, name);
+        this.session.client.updateMetadata((metadata) => ({
+            ...metadata,
+            worktree: {
+                basePath: this.session.path,
+                branch: name,
+                name,
+                worktreePath,
+                createdAt: Date.now()
+            }
+        }));
+        this.messageBuffer.addMessage(`Cursor worktree: ${worktreePath}`, 'status');
+    }
+
     private async handleAbort(): Promise<void> {
         const backend = this.backend;
         const sessionId = this.session.sessionId;
@@ -451,6 +592,62 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 }
 
+const CANNOT_USE_THIS_MODEL_RE = /Cannot use this model:\s*.+/i;
+
+/**
+ * Operator-facing ACP failure text. Prefer Cursor's model-rejection stderr;
+ * never invent a legacy stream-json diagnosis for unrelated failures.
+ */
+export function classifyCursorAcpLoadError(
+    error: unknown,
+    options?: { recentStderr?: string | null; action?: 'resume' | 'start' }
+): string {
+    const action = options?.action ?? 'resume';
+    const prefix = action === 'start'
+        ? 'Failed to start Cursor ACP session'
+        : 'Failed to resume Cursor ACP session';
+
+    const detailSources = [
+        // Prefer the close Error (accumulated stderr) over live onStderrError hints,
+        // which may have seen only the first fragment of a split rejection line.
+        error instanceof Error ? error.message : null,
+        error instanceof Error ? String((error as Error & { stderr?: unknown }).stderr ?? '') : null,
+        error instanceof Error && error.cause instanceof Error ? error.cause.message : null,
+        options?.recentStderr,
+        typeof error === 'string' ? error : null
+    ].filter((value): value is string => Boolean(value && value.trim()));
+
+    for (const source of detailSources) {
+        const modelRejection = extractCannotUseThisModelMessage(source);
+        if (modelRejection) {
+            return `${prefix}: ${modelRejection}`;
+        }
+    }
+
+    const detail = error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+            ? error
+            : String(error);
+    const trimmed = detail.trim() || 'unknown error';
+    if (new RegExp(`^${prefix}:`, 'i').test(trimmed)) {
+        return trimmed;
+    }
+    return `${prefix}: ${trimmed}`;
+}
+
+function extractCannotUseThisModelMessage(text: string | null | undefined): string | null {
+    if (!text) {
+        return null;
+    }
+    const match = text.match(CANNOT_USE_THIS_MODEL_RE);
+    if (!match) {
+        return null;
+    }
+    // Keep Cursor's Available models hint when present; do not invent a catalog.
+    return match[0].trim().replace(/\s+/g, ' ');
+}
+
 function formatAcpLoadError(error: unknown): Record<string, unknown> {
     if (error instanceof Error) {
         const record: Record<string, unknown> = {
@@ -464,6 +661,10 @@ function formatAcpLoadError(error: unknown): Record<string, unknown> {
         const data = (error as Error & { data?: unknown }).data;
         if (data !== undefined) {
             record.data = data;
+        }
+        const stderr = (error as Error & { stderr?: unknown }).stderr;
+        if (stderr !== undefined) {
+            record.stderr = stderr;
         }
         const cause = error.cause;
         if (cause !== undefined) {

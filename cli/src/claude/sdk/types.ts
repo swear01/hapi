@@ -17,6 +17,13 @@ export interface SDKMessage {
 export interface SDKUserMessage extends SDKMessage {
     type: 'user'
     parent_tool_use_id?: string
+    /**
+     * Set by Claude Code on user-role messages it injects itself (skill bodies,
+     * compact continuation summaries) rather than relaying from the human. The
+     * on-disk transcript spells the same thing `isMeta`.
+     */
+    isSynthetic?: boolean
+    isMeta?: boolean
     message: {
         role: 'user'
         content: string | Array<{
@@ -53,6 +60,13 @@ export interface SDKSystemMessage extends SDKMessage {
     cwd?: string
     tools?: string[]
     slash_commands?: string[]
+    /**
+     * Present on `subtype: 'status'` messages that report a /compact outcome.
+     * Claude emits a `status: 'compacting'` message first, then a second one
+     * carrying the result.
+     */
+    compact_result?: string
+    compact_error?: string
 }
 
 export interface SDKResultMessage extends SDKMessage {

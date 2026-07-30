@@ -7,6 +7,11 @@ import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
 import { extractBackgroundTaskDelta } from './backgroundTasks'
 
 const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
+// tiann/hapi#919: metadata writers (renameSession, clearSessionArchiveMetadata,
+// restoreSessionArchiveMetadata) retry on version-mismatch with a fresh cache
+// snapshot. Cap retries so genuine concurrent contention still surfaces to the
+// HTTP caller as 409 instead of spinning forever.
+const METADATA_RETRY_ATTEMPTS = 5
 type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode'
 
 export class SessionCache {
@@ -70,9 +75,19 @@ export class SessionCache {
         namespace: string,
         model?: string,
         effort?: string,
-        modelReasoningEffort?: string
+        modelReasoningEffort?: string,
+        requestedId?: string
     ): Session {
-        const stored = this.store.sessions.getOrCreateSession(tag, metadata, agentState, namespace, model, effort, modelReasoningEffort)
+        const stored = this.store.sessions.getOrCreateSession(
+            tag,
+            metadata,
+            agentState,
+            namespace,
+            model,
+            effort,
+            modelReasoningEffort,
+            requestedId
+        )
         return this.refreshSession(stored.id) ?? (() => { throw new Error('Failed to load session') })()
     }
 
@@ -135,7 +150,13 @@ export class SessionCache {
             createdAt: stored.createdAt,
             updatedAt: stored.updatedAt,
             active: existing?.active ?? stored.active,
-            activeAt: existing?.activeAt ?? (stored.activeAt ?? stored.createdAt),
+            // Legacy / idle rows may still have active_at NULL in SQLite.
+            // Public Session.activeAt is always a number for CLI Zod parse.
+            activeAt: existing?.activeAt
+                ?? stored.activeAt
+                ?? stored.updatedAt
+                ?? stored.createdAt
+                ?? 0,
             metadata,
             metadataVersion: stored.metadataVersion,
             agentState,
@@ -162,6 +183,32 @@ export class SessionCache {
         const sessions = this.store.sessions.getSessions()
         for (const session of sessions) {
             this.refreshSession(session.id)
+        }
+    }
+
+    markSessionActive(sessionId: string, time: number = Date.now()): void {
+        const t = clampAliveTime(time) ?? Date.now()
+        const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+        if (!session) return
+
+        const wasActive = session.active
+        session.active = true
+        session.activeAt = Math.max(session.activeAt, t)
+
+        this.lastBroadcastAtBySessionId.set(session.id, Date.now())
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId: session.id,
+            namespace: session.namespace,
+            data: {
+                active: true,
+                activeAt: session.activeAt,
+                thinking: session.thinking
+            } satisfies SessionPatch
+        })
+
+        if (!wasActive) {
+            this.refreshSession(sessionId)
         }
     }
 
@@ -369,6 +416,35 @@ export class SessionCache {
         })
     }
 
+    /**
+     * tiann/hapi#893 (scratchlist v2): emit a `session-updated` SSE patch
+     * carrying `scratchlistUpdatedAt` so other clients viewing the same
+     * session refetch the entries query. Called by `SyncEngine` after
+     * any successful scratchlist mutation. The timestamp is the trigger,
+     * not the payload - clients use it as a change-detection token and
+     * pull entries via the dedicated REST query.
+     *
+     * Per operator decision (see brief): piggyback on `session-updated`
+     * rather than introduce a new event type, because scratchlist
+     * mutations are exceedingly rare relative to keep-alive patches.
+     *
+     * Resolves the namespace from the in-memory session map (or the DB
+     * row as a fallback) so the SSE manager can scope the broadcast
+     * correctly even if the cache is cold.
+     */
+    emitScratchlistChanged(sessionId: string, updatedAt: number = Date.now()): void {
+        const cached = this.sessions.get(sessionId)
+        const namespace = cached?.namespace
+            ?? this.store.sessions.getSession(sessionId)?.namespace
+        if (!namespace) return
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId,
+            namespace,
+            data: { scratchlistUpdatedAt: updatedAt } satisfies SessionPatch
+        })
+    }
+
     handleSessionEnd(payload: { sid: string; time: number }): void {
         const t = clampAliveTime(payload.time) ?? Date.now()
 
@@ -380,6 +456,7 @@ export class SessionCache {
         }
 
         session.active = false
+        this.store.sessions.setSessionActive(session.id, false, t, session.namespace)
         session.thinking = false
         session.thinkingAt = t
         session.backgroundTaskCount = 0
@@ -400,6 +477,7 @@ export class SessionCache {
             if (!session.active) continue
             if (now - session.activeAt <= sessionTimeoutMs) continue
             session.active = false
+            this.store.sessions.setSessionActive(session.id, false, now, session.namespace)
             session.thinking = false
             this.pendingThinkingUntilBySessionId.delete(session.id)
             expired.push(session.id)
@@ -522,32 +600,105 @@ export class SessionCache {
         return updatedAt !== undefined && payloadTime < updatedAt
     }
 
+    /**
+     * tiann/hapi#916: hub-side write of the archive-metadata fields normally
+     * authored by the CLI's `archiveAndClose`. Called by `syncEngine.archiveSession`
+     * when the kill-RPC fails because the CLI is unreachable (e.g. the
+     * hub-restart cascade already killed it). Without this, the route would
+     * either 500 (pre-fix) or silently return ok=true while leaving
+     * `lifecycleState=running` on disk — both confuse the operator.
+     *
+     * Idempotent: if `lifecycleState` is already `archived` we return without
+     * touching the row to avoid resetting `lifecycleStateSince`. Best-effort:
+     * if every retry hits `version-mismatch` (genuine contention) the original
+     * `archiveSession` flow still marks the session inactive in cache via
+     * `handleSessionEnd`, just without flipping the persisted lifecycle.
+     */
+    markSessionArchivedFromHub(sessionId: string, reason: string): void {
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) return
+            const current = session.metadata
+            if (!current) return
+            if (current.lifecycleState === 'archived') {
+                return
+            }
+
+            const next: Record<string, unknown> = {
+                ...current,
+                lifecycleState: 'archived',
+                lifecycleStateSince: Date.now(),
+                archivedBy: 'hub',
+                archiveReason: reason
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                // tiann/hapi#916 review feedback: persistence failure must
+                // surface so the route returns 5xx. Silently returning here
+                // would let `/archive` claim success while the row stays
+                // unarchived in the DB.
+                throw new Error('Failed to archive session metadata from hub')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+
+            this.refreshSession(sessionId)
+        }
+
+        // tiann/hapi#916 review feedback: exhausted retries means we never
+        // got a successful write. Match the renameSession / mergeSessions
+        // contract and surface this as an error so non-RPC failures stay
+        // 5xx per the issue's acceptance criteria.
+        throw new Error('Session was modified concurrently while archiving from hub')
+    }
+
     async renameSession(sessionId: string, name: string): Promise<void> {
-        const session = this.sessions.get(sessionId)
-        if (!session) {
-            throw new Error('Session not found')
+        // tiann/hapi#919: retry-with-refresh on version-mismatch instead of
+        // throwing on the first contention. Mirrors the good pattern in
+        // mergeSessions (~L780) and in syncEngine's metadata helpers. Without
+        // this, a stale cache snapshot produces forever-409 on PATCH /sessions/:id
+        // until some unrelated event triggers a refresh.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                throw new Error('Session not found')
+            }
+
+            const currentMetadata = session.metadata ?? { path: '', host: '' }
+            const newMetadata = { ...currentMetadata, name }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                newMetadata,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to update session metadata')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+
+            this.refreshSession(sessionId)
         }
 
-        const currentMetadata = session.metadata ?? { path: '', host: '' }
-        const newMetadata = { ...currentMetadata, name }
-
-        const result = this.store.sessions.updateSessionMetadata(
-            sessionId,
-            newMetadata,
-            session.metadataVersion,
-            session.namespace,
-            { touchUpdatedAt: false }
-        )
-
-        if (result.result === 'error') {
-            throw new Error('Failed to update session metadata')
-        }
-
-        if (result.result === 'version-mismatch') {
-            throw new Error('Session was modified concurrently. Please try again.')
-        }
-
-        this.refreshSession(sessionId)
+        throw new Error('Session was modified concurrently. Please try again.')
     }
 
     /**
@@ -563,52 +714,59 @@ export class SessionCache {
      * No-op when metadata is null (callers should pre-check).
      */
     async clearSessionArchiveMetadata(sessionId: string): Promise<{ cursorSessionProtocol?: 'acp' | 'stream-json' }> {
-        const session = this.sessions.get(sessionId)
-        if (!session) {
-            throw new Error('Session not found')
-        }
-
-        const currentMetadata = session.metadata
-        if (!currentMetadata) {
-            throw new Error('Session metadata missing')
-        }
-
-        const next: Record<string, unknown> = { ...currentMetadata }
-        delete next.lifecycleState
-        delete next.archivedBy
-        delete next.archiveReason
-        next.lifecycleStateSince = Date.now()
-
-        let cursorSessionProtocol: 'acp' | 'stream-json' | undefined
-        if (currentMetadata.flavor === 'cursor') {
-            const existing = currentMetadata.cursorSessionProtocol
-            if (existing === 'acp' || existing === 'stream-json') {
-                cursorSessionProtocol = existing
-            } else if (currentMetadata.cursorSessionId) {
-                // Pre-#799 default: presence of cursorSessionId without protocol means stream-json.
-                cursorSessionProtocol = 'stream-json'
-                next.cursorSessionProtocol = 'stream-json'
+        // tiann/hapi#919: retry-with-refresh on version-mismatch. The reopen
+        // flow runs this on every archived-session resume — a stale snapshot
+        // here used to forever-409 the only reopen affordance.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                throw new Error('Session not found')
             }
+
+            const currentMetadata = session.metadata
+            if (!currentMetadata) {
+                throw new Error('Session metadata missing')
+            }
+
+            const next: Record<string, unknown> = { ...currentMetadata }
+            delete next.lifecycleState
+            delete next.archivedBy
+            delete next.archiveReason
+            next.lifecycleStateSince = Date.now()
+
+            let cursorSessionProtocol: 'acp' | 'stream-json' | undefined
+            if (currentMetadata.flavor === 'cursor') {
+                const existing = currentMetadata.cursorSessionProtocol
+                if (existing === 'acp' || existing === 'stream-json') {
+                    cursorSessionProtocol = existing
+                } else if (currentMetadata.cursorSessionId) {
+                    // Pre-#799 default: presence of cursorSessionId without protocol means stream-json.
+                    cursorSessionProtocol = 'stream-json'
+                    next.cursorSessionProtocol = 'stream-json'
+                }
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to update session metadata')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return cursorSessionProtocol ? { cursorSessionProtocol } : {}
+            }
+
+            this.refreshSession(sessionId)
         }
 
-        const result = this.store.sessions.updateSessionMetadata(
-            sessionId,
-            next,
-            session.metadataVersion,
-            session.namespace,
-            { touchUpdatedAt: false }
-        )
-
-        if (result.result === 'error') {
-            throw new Error('Failed to update session metadata')
-        }
-
-        if (result.result === 'version-mismatch') {
-            throw new Error('Session was modified concurrently. Please try again.')
-        }
-
-        this.refreshSession(sessionId)
-        return cursorSessionProtocol ? { cursorSessionProtocol } : {}
+        throw new Error('Session was modified concurrently. Please try again.')
     }
 
     /**
@@ -632,50 +790,59 @@ export class SessionCache {
             lifecycleStateSince?: number
         }
     ): Promise<void> {
-        const session = this.sessions.get(sessionId)
-        if (!session) return
-        const current = session.metadata
-        if (!current) return
+        // tiann/hapi#919: retry-with-refresh on version-mismatch. This is the
+        // /reopen rollback path — if it fails the session is left in a
+        // half-cleared archive state, so making it robust to a stale snapshot
+        // matters more here than for the other two.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) return
+            const current = session.metadata
+            if (!current) return
 
-        const next: Record<string, unknown> = { ...current }
-        if (snapshot.lifecycleState !== undefined) {
-            next.lifecycleState = snapshot.lifecycleState
-        } else {
-            delete next.lifecycleState
-        }
-        if (snapshot.archivedBy !== undefined) {
-            next.archivedBy = snapshot.archivedBy
-        } else {
-            delete next.archivedBy
-        }
-        if (snapshot.archiveReason !== undefined) {
-            next.archiveReason = snapshot.archiveReason
-        } else {
-            delete next.archiveReason
-        }
-        if (snapshot.lifecycleStateSince !== undefined) {
-            next.lifecycleStateSince = snapshot.lifecycleStateSince
-        } else {
-            delete next.lifecycleStateSince
+            const next: Record<string, unknown> = { ...current }
+            if (snapshot.lifecycleState !== undefined) {
+                next.lifecycleState = snapshot.lifecycleState
+            } else {
+                delete next.lifecycleState
+            }
+            if (snapshot.archivedBy !== undefined) {
+                next.archivedBy = snapshot.archivedBy
+            } else {
+                delete next.archivedBy
+            }
+            if (snapshot.archiveReason !== undefined) {
+                next.archiveReason = snapshot.archiveReason
+            } else {
+                delete next.archiveReason
+            }
+            if (snapshot.lifecycleStateSince !== undefined) {
+                next.lifecycleStateSince = snapshot.lifecycleStateSince
+            } else {
+                delete next.lifecycleStateSince
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to restore archive metadata')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+
+            this.refreshSession(sessionId)
         }
 
-        const result = this.store.sessions.updateSessionMetadata(
-            sessionId,
-            next,
-            session.metadataVersion,
-            session.namespace,
-            { touchUpdatedAt: false }
-        )
-
-        if (result.result === 'error') {
-            throw new Error('Failed to restore archive metadata')
-        }
-
-        if (result.result === 'version-mismatch') {
-            throw new Error('Session was modified concurrently during reopen rollback')
-        }
-
-        this.refreshSession(sessionId)
+        throw new Error('Session was modified concurrently during reopen rollback')
     }
 
     async deleteSession(sessionId: string): Promise<void> {
@@ -688,6 +855,10 @@ export class SessionCache {
             throw new Error('Cannot delete active session')
         }
 
+        const scratchlistAttachments = this.store.scratchlist
+            .list(sessionId)
+            .flatMap((entry) => entry.attachments)
+
         const deleted = this.store.sessions.deleteSession(sessionId, session.namespace)
         if (!deleted) {
             throw new Error('Failed to delete session')
@@ -697,6 +868,16 @@ export class SessionCache {
         this.lastBroadcastAtBySessionId.delete(sessionId)
         this.todoBackfillAttemptedSessionIds.delete(sessionId)
         this.pendingThinkingUntilBySessionId.delete(sessionId)
+
+        void import('../scratchlistAttachments/storage').then(async ({
+            deleteScratchlistAttachmentFiles,
+            deleteScratchlistSessionAttachmentDir,
+            getHapiHomeDir,
+        }) => {
+            const hapiHome = getHapiHomeDir()
+            await deleteScratchlistAttachmentFiles(hapiHome, scratchlistAttachments)
+            await deleteScratchlistSessionAttachmentDir(hapiHome, session.namespace, sessionId)
+        })
 
         this.publisher.emit({ type: 'session-removed', sessionId, namespace: session.namespace })
     }
@@ -739,6 +920,57 @@ export class SessionCache {
                 this.publisher.emit({ type: 'messages-invalidated', sessionId: oldSessionId, namespace })
             }
             this.publisher.emit({ type: 'messages-invalidated', sessionId: newSessionId, namespace })
+        }
+
+        // tiann/hapi#920: transfer scratchlist rows BEFORE the
+        // deleteSession() call below fires `ON DELETE CASCADE` on
+        // `session_scratchlist.session_id`. Without this step every
+        // dedup (#448 agent-id collision) and every resume-of-inactive
+        // path (`syncEngine.resumeSession` -> here) silently destroys
+        // the operator's per-session notes, contradicting the v2.0
+        // promise that scratchlist survives reloads.
+        const movedScratchlist = this.store.scratchlist.transfer(oldSessionId, newSessionId)
+        if (movedScratchlist.moved > 0) {
+            // Attachment hub paths embed the old session id. Re-key files +
+            // metadata so quota/resolve stay correct on the consolidated id.
+            const {
+                getHapiHomeDir,
+                moveScratchlistAttachmentFilesForSession,
+                deleteScratchlistSessionAttachmentDir,
+            } = await import('../scratchlistAttachments/storage')
+            const hapiHome = getHapiHomeDir()
+            for (const entry of this.store.scratchlist.list(newSessionId)) {
+                if (entry.attachments.length === 0) continue
+                const attachments = await moveScratchlistAttachmentFilesForSession(
+                    hapiHome,
+                    namespace,
+                    oldSessionId,
+                    newSessionId,
+                    entry.attachments,
+                )
+                if (attachments.some((att, i) => att.path !== entry.attachments[i]?.path)) {
+                    this.store.scratchlist.update(newSessionId, entry.entryId, { attachments })
+                }
+            }
+            // Collided SQL losers + orphan uploads still under the old dir.
+            await deleteScratchlistSessionAttachmentDir(hapiHome, namespace, oldSessionId)
+            // Rows landed on the consolidated session - invalidate so
+            // any client on the new id refetches.
+            this.emitScratchlistChanged(newSessionId)
+        } else if (movedScratchlist.collided > 0) {
+            // Every old entry lost the PK race — drop leftover hub blobs.
+            const { getHapiHomeDir, deleteScratchlistSessionAttachmentDir } = await import(
+                '../scratchlistAttachments/storage'
+            )
+            await deleteScratchlistSessionAttachmentDir(getHapiHomeDir(), namespace, oldSessionId)
+        }
+        if (!options.deleteOldSession && (movedScratchlist.moved > 0 || movedScratchlist.collided > 0)) {
+            // HAPI Bot PR #896: when every old entry collides (moved=0,
+            // collided>0) the transfer still deletes rows from the
+            // still-alive old session. Emit even when moved=0 so web
+            // clients viewing the old id drop stale cache entries that
+            // would 404 on edit/delete.
+            this.emitScratchlistChanged(oldSessionId)
         }
 
         const mergedMetadata = this.mergeSessionMetadata(oldStored.metadata, newStored.metadata)
@@ -988,11 +1220,12 @@ export class SessionCache {
 
     private extractAgentSessionId(
         metadata: NonNullable<Session['metadata']>
-    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'cursorSessionId' | 'piSessionId'; value: string } | null {
+    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId'; value: string } | null {
         if (metadata.codexSessionId) return { field: 'codexSessionId', value: metadata.codexSessionId }
         if (metadata.claudeSessionId) return { field: 'claudeSessionId', value: metadata.claudeSessionId }
         if (metadata.geminiSessionId) return { field: 'geminiSessionId', value: metadata.geminiSessionId }
         if (metadata.opencodeSessionId) return { field: 'opencodeSessionId', value: metadata.opencodeSessionId }
+        if (metadata.grokSessionId) return { field: 'grokSessionId', value: metadata.grokSessionId }
         if (metadata.cursorSessionId) return { field: 'cursorSessionId', value: metadata.cursorSessionId }
         if (metadata.piSessionId) return { field: 'piSessionId', value: metadata.piSessionId }
         return null

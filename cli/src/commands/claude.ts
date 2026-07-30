@@ -57,7 +57,12 @@ export const claudeCommand: CommandDefinition = {
                     throw new Error('Missing --model value')
                 }
                 options.model = model
-                unknownArgs.push('--model', model)
+            } else if (arg.startsWith('--model=')) {
+                const model = arg.slice('--model='.length)
+                if (!model) {
+                    throw new Error('Missing --model value')
+                }
+                options.model = model
             } else if (arg === '--effort') {
                 const effort = args[++i]
                 if (!effort) {
@@ -88,7 +93,6 @@ ${chalk.bold('Usage:')}
   hapi auth              Manage authentication
   hapi codex             Start Codex mode
   hapi cursor            Start Cursor Agent mode
-  hapi gemini            Start Gemini ACP mode
   hapi opencode          Start OpenCode ACP mode
   hapi resume [id]       Resume an existing HAPI session locally
   hapi mcp               Start MCP stdio bridge
