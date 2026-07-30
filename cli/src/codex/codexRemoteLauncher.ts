@@ -1951,11 +1951,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const isControlCommand = Boolean(taken.item.isolate)
                     || Boolean(parseCodexSpecialCommand(taken.item.message).type);
                 if (isControlCommand) {
-                    session.queue.restoreTakenItem(taken);
+                    session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Control commands cannot be steered' };
                 }
                 if (activeMessage?.hash !== taken.item.modeHash) {
-                    session.queue.restoreTakenItem(taken);
+                    session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Queued message mode differs from the active turn' };
                 }
                 const batch: QueuedMessage = {
@@ -1970,8 +1970,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Steer cancelled' };
                 }
                 if (!steered) {
-                    session.queue.restoreTakenItem(taken);
+                    if (!session.queue.restoreReservation(taken)) {
+                        return { steered: false, error: 'Steer cancelled' };
+                    }
                     return { steered: false, error: 'Active turn is not steerable' };
+                }
+                if (!session.queue.commitReservation(taken)) {
+                    return { steered: false, error: 'Steer cancelled' };
                 }
                 session.client.emitMessagesConsumed([localId], { steered: true });
                 return { steered: true };

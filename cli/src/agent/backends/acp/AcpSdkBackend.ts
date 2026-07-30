@@ -74,6 +74,7 @@ export class AcpSdkBackend implements AgentBackend {
     private initializeResult: AcpInitializeResult | null = null;
     private setModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
+    private activePromptRequests = 0;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -492,7 +493,7 @@ export class AcpSdkBackend implements AgentBackend {
         );
         this.messageHandler?.drainBuffers();
         this.messageHandler = new AcpMessageHandler(onUpdate, { textChunkMode: this.options.textChunkMode });
-        this.isProcessingMessage = true;
+        this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
@@ -556,8 +557,7 @@ export class AcpSdkBackend implements AgentBackend {
                 }
             } finally {
                 this.promptUsageCallback = null;
-                this.isProcessingMessage = false;
-                this.notifyResponseComplete();
+                this.finishPromptRequest();
             }
         }
     }
@@ -589,10 +589,15 @@ export class AcpSdkBackend implements AgentBackend {
             throw new Error('No active ACP prompt to soft-steer into');
         }
 
-        await this.transport.sendRequest('session/prompt', {
-            sessionId,
-            prompt: content
-        }, { timeoutMs: Infinity });
+        this.beginPromptRequest();
+        try {
+            await this.transport.sendRequest('session/prompt', {
+                sessionId,
+                prompt: content
+            }, { timeoutMs: Infinity });
+        } finally {
+            this.finishPromptRequest();
+        }
     }
 
     /**
@@ -611,19 +616,24 @@ export class AcpSdkBackend implements AgentBackend {
 
         const transport = this.transport;
         const pending = (async () => {
+            this.beginPromptRequest();
             try {
                 await transport.sendRequest('session/prompt', {
                     sessionId,
                     prompt: content
                 }, { timeoutMs: Infinity });
             } finally {
-                await this.waitForSessionUpdateQuiet(
-                    AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
-                    AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
-                );
-                this.messageHandler?.drainBuffers();
-                await this.drainLateBuffers();
-                this.messageHandler?.drainBuffers();
+                try {
+                    await this.waitForSessionUpdateQuiet(
+                        AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
+                        AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
+                    );
+                    this.messageHandler?.drainBuffers();
+                    await this.drainLateBuffers();
+                    this.messageHandler?.drainBuffers();
+                } finally {
+                    this.finishPromptRequest();
+                }
             }
         })();
 
@@ -673,7 +683,7 @@ export class AcpSdkBackend implements AgentBackend {
      * Useful for checking if it's safe to perform session operations.
      */
     get processingMessage(): boolean {
-        return this.isProcessingMessage;
+        return this.activePromptRequests > 0;
     }
 
     getLastSessionUpdateAt(): number {
@@ -687,7 +697,7 @@ export class AcpSdkBackend implements AgentBackend {
      * like session swap or sending task_complete.
      */
     async waitForResponseComplete(): Promise<void> {
-        if (!this.isProcessingMessage) {
+        if (this.activePromptRequests === 0) {
             return;
         }
         return new Promise<void>((resolve) => {
@@ -704,6 +714,7 @@ export class AcpSdkBackend implements AgentBackend {
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
+        this.activePromptRequests = 0;
         this.isProcessingMessage = false;
         this.sessionModelsMetadata.clear();
         this.initialAvailableCommands.clear();
@@ -917,6 +928,19 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         return await responsePromise;
+    }
+
+    private beginPromptRequest(): void {
+        this.activePromptRequests++;
+        this.isProcessingMessage = true;
+    }
+
+    private finishPromptRequest(): void {
+        this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
+        this.isProcessingMessage = this.activePromptRequests > 0;
+        if (!this.isProcessingMessage) {
+            this.notifyResponseComplete();
+        }
     }
 
     private notifyResponseComplete(): void {

@@ -1,12 +1,18 @@
 import { logger } from "@/ui/logger";
 
-interface QueueItem<T> {
+export interface QueueItem<T> {
     message: string;
     mode: T;
     modeHash: string;
     localId?: string;
     isolate?: boolean; // If true, this message must be processed alone
 }
+
+export type QueueReservation<T> = {
+    item: QueueItem<T>;
+    index: number;
+    cancelled: boolean;
+};
 
 /**
  * A mode-aware message queue that stores messages with their modes.
@@ -19,6 +25,7 @@ export class MessageQueue2<T> {
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
     onBatchConsumed: ((localIds: string[]) => void) | null = null;
     modeHasher: (mode: T) => string;
+    private readonly reservations = new Map<string, QueueReservation<T>>();
 
     constructor(
         modeHasher: (mode: T) => string,
@@ -264,8 +271,13 @@ export class MessageQueue2<T> {
     cancelByLocalId(localId: string): boolean {
         if (!localId) return false;
         const idx = this.queue.findIndex(item => item.localId === localId);
-        if (idx === -1) return false;
-        this.queue.splice(idx, 1);
+        if (idx !== -1) {
+            this.queue.splice(idx, 1);
+            return true;
+        }
+        const reservation = this.reservations.get(localId);
+        if (!reservation) return false;
+        reservation.cancelled = true;
         return true;
     }
 
@@ -282,30 +294,61 @@ export class MessageQueue2<T> {
      * or null if not found. Pair with {@link restoreTakenItem} when an async
      * operation may need to put the item back in order.
      */
-    takeByLocalId(localId: string): { item: QueueItem<T>; index: number } | null {
+    takeByLocalId(localId: string): QueueReservation<T> | null {
         if (!localId) return null;
         const idx = this.queue.findIndex(item => item.localId === localId);
         if (idx === -1) return null;
         const [item] = this.queue.splice(idx, 1);
         if (!item) return null;
-        return { item, index: idx };
+        const reservation: QueueReservation<T> = { item, index: idx, cancelled: false };
+        if (item.localId) {
+            this.reservations.set(item.localId, reservation);
+        }
+        return reservation;
     }
 
     /**
      * Re-insert an item previously removed by {@link takeByLocalId} at its
      * original index (clamped if the queue shrank).
      */
-    restoreTakenItem(taken: { item: QueueItem<T>; index: number }): void {
+    restoreReservation(reservation: QueueReservation<T>): boolean {
+        if (reservation.cancelled) {
+            return false;
+        }
         if (this.closed) {
             throw new Error('Cannot restore into closed queue');
         }
-        const idx = Math.max(0, Math.min(taken.index, this.queue.length));
-        this.queue.splice(idx, 0, taken.item);
+        if (reservation.item.localId) {
+            if (this.reservations.get(reservation.item.localId) !== reservation) {
+                return false;
+            }
+            this.reservations.delete(reservation.item.localId);
+        }
+        const idx = Math.max(0, Math.min(reservation.index, this.queue.length));
+        this.queue.splice(idx, 0, reservation.item);
         if (this.waiter) {
             const waiter = this.waiter;
             this.waiter = null;
             waiter(true);
         }
+        return true;
+    }
+
+    commitReservation(reservation: QueueReservation<T>): boolean {
+        if (reservation.cancelled) {
+            return false;
+        }
+        if (reservation.item.localId) {
+            if (this.reservations.get(reservation.item.localId) !== reservation) {
+                return false;
+            }
+            this.reservations.delete(reservation.item.localId);
+        }
+        return true;
+    }
+
+    restoreTakenItem(taken: QueueReservation<T>): void {
+        this.restoreReservation(taken);
     }
 
     /**
@@ -314,6 +357,10 @@ export class MessageQueue2<T> {
     reset(): void {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
+        for (const reservation of this.reservations.values()) {
+            reservation.cancelled = true;
+        }
+        this.reservations.clear();
         this.closed = false;
 
         // Clear waiter without calling it since we're not closing
@@ -326,6 +373,10 @@ export class MessageQueue2<T> {
     close(): void {
         logger.debug(`[MessageQueue2] close() called`);
         this.closed = true;
+        for (const reservation of this.reservations.values()) {
+            reservation.cancelled = true;
+        }
+        this.reservations.clear();
 
         // Notify any waiting caller
         if (this.waiter) {

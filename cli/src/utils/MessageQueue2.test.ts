@@ -571,6 +571,17 @@ describe('MessageQueue2', () => {
             expect(queue.queue[0].message).toBe('msg-no-id');
             expect(queue.queue[1].message).toBe('msg-no-id-2');
         });
+
+        it('cancels a taken reservation so a failed steer cannot restore it', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg', 'local', 'id-a');
+            const reservation = queue.takeByLocalId('id-a');
+
+            expect(queue.cancelByLocalId('id-a')).toBe(true);
+            expect(reservation?.cancelled).toBe(true);
+            expect(queue.restoreReservation(reservation!)).toBe(false);
+            expect(queue.size()).toBe(0);
+        });
     });
 
     describe('takeByLocalId / peekByLocalId', () => {
@@ -608,6 +619,15 @@ describe('MessageQueue2', () => {
             expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-c']);
             queue.restoreTakenItem(taken!);
             expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-b', 'id-c']);
+        });
+
+        it('commits a reservation so it can no longer be cancelled', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg', 'local', 'id-a');
+            const reservation = queue.takeByLocalId('id-a');
+
+            expect(queue.commitReservation(reservation!)).toBe(true);
+            expect(queue.cancelByLocalId('id-a')).toBe(false);
         });
 
         it('restoreTakenItem wakes a waiter parked on an empty queue', async () => {

@@ -1240,6 +1240,42 @@ describe('AcpSdkBackend', () => {
         expect(settled).toBe(true);
     });
 
+    it('keeps response completion pending until a concurrent soft steer settles', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let resolvePrompt: ((value: unknown) => void) | null = null;
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null;
+            isProcessingMessage: boolean;
+            activePromptRequests: number;
+            finishPromptRequest: () => void;
+            waitForSessionUpdateQuiet: () => Promise<void>;
+            drainLateBuffers: () => Promise<void>;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.activePromptRequests = 1;
+        backendInternal.transport = {
+            sendRequest: () => new Promise((resolve) => { resolvePrompt = resolve; }),
+            close: async () => {}
+        };
+        backendInternal.waitForSessionUpdateQuiet = async () => {};
+        backendInternal.drainLateBuffers = async () => {};
+
+        const pendingSteer = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+        let responseComplete = false;
+        const responseWait = backend.waitForResponseComplete().then(() => { responseComplete = true; });
+
+        backendInternal.finishPromptRequest();
+        await Promise.resolve();
+        expect(backend.processingMessage).toBe(true);
+        expect(responseComplete).toBe(false);
+
+        resolvePrompt!({ stopReason: 'end_turn' });
+        await pendingSteer;
+        await responseWait;
+        expect(backend.processingMessage).toBe(false);
+        expect(responseComplete).toBe(true);
+    });
+
     it('softSteerPrompt awaits session/prompt completion', async () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         let resolvePrompt: ((value: unknown) => void) | null = null;

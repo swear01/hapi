@@ -259,11 +259,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 const isControlCommand = Boolean(taken.item.isolate)
                     || parseCursorSpecialCommand(taken.item.message).type !== null;
                 if (isControlCommand) {
-                    session.queue.restoreTakenItem(taken);
+                    session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Control commands cannot be steered' };
                 }
                 if (this.activePromptModeHash !== taken.item.modeHash) {
-                    session.queue.restoreTakenItem(taken);
+                    session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Queued message mode differs from the active turn' };
                 }
 
@@ -282,7 +282,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     }]);
                 } catch (error) {
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
-                    session.queue.restoreTakenItem(taken);
+                    session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
 
@@ -296,6 +296,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         if (!isCurrentSoftSteerCallback(this.softSteerEpoch, steerEpoch, this.shouldExit)) {
                             return;
                         }
+                        if (!session.queue.commitReservation(taken)) {
+                            return;
+                        }
                         messageBuffer.addMessage(taken.item.message, 'user');
                         session.client.emitMessagesConsumed([localId], { steered: true });
                     },
@@ -305,7 +308,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                             return;
                         }
                         try {
-                            session.queue.restoreTakenItem(taken);
+                            session.queue.restoreReservation(taken);
                         } catch (restoreError) {
                             logger.debug('[cursor-acp] soft-steer message could not be restored', restoreError);
                         }
