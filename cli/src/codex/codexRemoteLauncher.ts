@@ -216,6 +216,14 @@ function stripAnsi(value: string): string {
     return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
+export function isCurrentSteerHandler(
+    currentEpoch: number,
+    handlerEpoch: number,
+    shouldExit: boolean
+): boolean {
+    return currentEpoch === handlerEpoch && !shouldExit;
+}
+
 class CodexRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CodexSession;
     private readonly appServerClient: CodexAppServerClient;
@@ -224,6 +232,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     private diffProcessor: DiffProcessor | null = null;
     private happyServer: HappyServer | null = null;
     private abortController: AbortController = new AbortController();
+    /** Invalidates queued-message steer handlers after abort or cleanup. */
+    private steerEpoch = 0;
     private currentThreadId: string | null = null;
     private currentTurnId: string | null = null;
     private readonly activeChildTurns = new Map<string, string>();
@@ -279,6 +289,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async handleAbort(): Promise<void> {
+        this.steerEpoch++;
         logger.debug('[Codex] Abort requested - stopping current task');
         try {
             await this.interruptActiveTurns('abort');
@@ -1953,7 +1964,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     isolate: Boolean(taken.item.isolate),
                     hash: taken.item.modeHash
                 };
+                const steerEpoch = this.steerEpoch;
                 const steered = await trySteerActiveTurn(batch);
+                if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
                 if (!steered) {
                     session.queue.restoreTakenItem(taken);
                     return { steered: false, error: 'Active turn is not steerable' };
@@ -3863,6 +3878,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
+        this.steerEpoch++;
         this.appServerClient.setStderrHandler(null);
         try {
             await this.appServerClient.disconnect();
