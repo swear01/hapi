@@ -15,6 +15,9 @@ export type CursorModelCatalog = {
     wireToBase: Map<string, string>
 }
 
+/** User-facing label for Cursor automatic model selection (`auto` / ACP `default[]`). */
+export const CURSOR_AUTO_MODEL_LABEL = 'Auto'
+
 /** Base model id before ACP wire suffix, e.g. `composer-2.5[fast=true]` → `composer-2.5`. */
 export function cursorModelBaseId(modelId: string): string {
     const trimmed = modelId.trim()
@@ -185,7 +188,7 @@ export function buildCursorModelCatalog(
         .sort((a, b) => a[1].localeCompare(b[1], undefined, { sensitivity: 'base' }))
 
     const baseOptions: CursorModelOption[] = [
-        { value: defaultValue, label: 'Default' },
+        { value: defaultValue, label: CURSOR_AUTO_MODEL_LABEL },
         ...sortedBaseEntries.map(([baseId, label]) => ({ value: baseId, label }))
     ]
 
@@ -312,7 +315,7 @@ export function buildFlatCursorModelPickerOptions(
     }
 
     return [
-        { value: defaultValue ?? 'auto', label: 'Default' },
+        { value: defaultValue ?? 'auto', label: CURSOR_AUTO_MODEL_LABEL },
         ...rows
     ]
 }
