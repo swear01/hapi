@@ -2260,7 +2260,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 return;
             }
 
-            const isStaleSameThreadRecoveryTerminal = isTerminalEvent
+            const isStaleSameThreadRecoveryTerminal = msgType === 'task_complete'
                 && turnInFlight
                 && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0)
                 && Boolean(eventTurnId)
