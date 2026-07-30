@@ -114,7 +114,7 @@ export function useAnchoredMenu(opts: {
 
     const menuStyle: CSSProperties | undefined = menuPosition
         ? {
-            top: menuPosition.top,
+            top: `max(${menuPosition.top}px, calc(env(safe-area-inset-top) + 8px))`,
             left: menuPosition.left,
             transformOrigin: menuPosition.transformOrigin
         }

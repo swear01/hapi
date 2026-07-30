@@ -74,10 +74,19 @@ describe('getProjectGroupActionAvailability', () => {
         expect(canDelete).toBe(false)
     })
 
-    it('allows delete when every session is inactive', () => {
+    it('blocks delete for inactive sessions that were not archived', () => {
         const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
             archived('a'),
             completedStub('b')
+        ])
+        expect(canArchiveAll).toBe(false)
+        expect(canDelete).toBe(false)
+    })
+
+    it('allows delete only when every session is archived', () => {
+        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
+            archived('a'),
+            archived('b')
         ])
         expect(canArchiveAll).toBe(false)
         expect(canDelete).toBe(true)
