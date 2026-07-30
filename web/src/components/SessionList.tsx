@@ -389,6 +389,9 @@ function ProjectGroupHeader(props: {
             setMenuAnchorPoint(point)
             setMenuOpen(true)
         },
+        onClick: () => {
+            if (!menuOpen) onToggle()
+        },
         threshold: 500
     })
 
@@ -401,9 +404,6 @@ function ProjectGroupHeader(props: {
             <div
                 {...longPressHandlers}
                 className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
-                onClick={() => {
-                    if (!menuOpen) onToggle()
-                }}
                 style={{ WebkitTouchCallout: 'none' }}
                 title={group.directory}
             >
