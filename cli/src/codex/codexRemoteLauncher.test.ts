@@ -43,6 +43,7 @@ const harness = vi.hoisted(() => ({
     emitStaleTaskCompleteAfterRetry: false,
     emitStaleTaskFailedAfterRetry: false,
     emitStaleThreadStatusFailureAfterRetry: false,
+    emitFirstTurnTaskCompleteAfterSecondRetry: false,
     emitChildThreadEvents: false,
     emitChildUsageEvents: false,
     emitChildGoalEvent: false,
@@ -903,6 +904,19 @@ vi.mock('./codexAppServerClient', () => {
                 await new Promise((resolve) => setTimeout(resolve, 300));
             }
 
+            if (harness.emitFirstTurnTaskCompleteAfterSecondRetry && harness.startTurnThreadIds.length === 3) {
+                const staleCompleted = {
+                    msg: {
+                        type: 'task_complete',
+                        thread_id: threadId,
+                        turn_id: 'turn-1'
+                    }
+                };
+                harness.notifications.push({ method: 'codex/event/task_complete', params: staleCompleted });
+                this.notificationHandler?.('codex/event/task_complete', staleCompleted);
+                await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+
             const completed = { status: 'Completed', turn: { id: turnId } };
             harness.notifications.push({ method: 'turn/completed', params: completed });
             this.notificationHandler?.('turn/completed', completed);
@@ -1136,6 +1150,7 @@ describe('codexRemoteLauncher', () => {
         harness.emitStaleTaskCompleteAfterRetry = false;
         harness.emitStaleTaskFailedAfterRetry = false;
         harness.emitStaleThreadStatusFailureAfterRetry = false;
+        harness.emitFirstTurnTaskCompleteAfterSecondRetry = false;
         harness.emitChildThreadEvents = false;
         harness.emitChildUsageEvents = false;
         harness.emitChildGoalEvent = false;
@@ -1607,6 +1622,19 @@ describe('codexRemoteLauncher', () => {
 
         expect(exitReason).toBe('exit');
         expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('ignores a first-turn completion while the second retry is running', async () => {
+        harness.remainingThreadSystemErrors = 2;
+        harness.emitFirstTurnTaskCompleteAfterSecondRetry = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1', 'thread-1']);
+        expect(sessionEvents.filter((event) => event.type === 'ready')).toHaveLength(1);
         expect(session.thinking).toBe(false);
     });
 
