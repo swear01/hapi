@@ -11,7 +11,7 @@ import type { PermissionMode } from './types';
 import { createCopilotBackend } from './utils/copilotBackend';
 import { CopilotPermissionHandler } from './utils/permissionHandler';
 import { resolveCopilotRuntimeConfig } from './utils/config';
-import { copilotAgentModeSlash, getCopilotAgentModeLabel, type CopilotAgentMode } from '@hapi/protocol';
+import { getCopilotAgentModeLabel, type CopilotAgentMode } from '@hapi/protocol';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { buildCopilotModelsResponseFromBackend } from '@/modules/common/copilotModels';
 
@@ -28,6 +28,7 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
     private currentAgentMode: CopilotAgentMode = 'interactive';
     private currentBackendModel: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
+    private setModeSupported: boolean | undefined = undefined;
     private readonly lastDisplayedToolCall = new Map<string, string>();
 
     constructor(session: CopilotSession, opts: { model?: string }) {
@@ -59,7 +60,8 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
 
         const runtimeConfig = resolveCopilotRuntimeConfig({ model: this.model });
 
-        const backend = createCopilotBackend();
+        this.currentAgentMode = session.getAgentMode();
+        const backend = createCopilotBackend({ agentMode: this.currentAgentMode });
         this.backend = backend;
         registerAcpSessionTitleSync(backend, session.client);
 
@@ -121,9 +123,9 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
         }
         this.applyDisplayMode(session.getPermissionMode() as PermissionMode, effectiveModel ?? undefined);
-        this.currentAgentMode = session.getAgentMode();
         this.applyDisplayAgentMode(this.currentAgentMode);
-        this.maybeQueueAgentModeSlash(this.currentAgentMode);
+        // Resume / session metadata may not inherit spawn `--mode`; apply via ACP set_mode.
+        await this.applyBackendAgentMode(backend, acpSessionId, this.currentAgentMode);
 
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListCopilotModels, async () => {
             return await buildCopilotModelsResponseFromBackend(acpSessionId, backend, session.path);
@@ -178,13 +180,22 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
                 }
             }
 
-            if (batch.mode.agentMode && batch.mode.agentMode !== this.currentAgentMode) {
-                this.currentAgentMode = batch.mode.agentMode;
-                this.applyDisplayAgentMode(batch.mode.agentMode);
-                this.maybeQueueAgentModeSlash(batch.mode.agentMode);
+            const desiredAgentMode = batch.mode.agentMode ?? session.getAgentMode();
+            if (desiredAgentMode !== this.currentAgentMode) {
+                await this.applyBackendAgentMode(backend, acpSessionId, desiredAgentMode);
             }
 
             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
+
+            // Empty isolated tick wakes the loop so set-session-config / slash mode
+            // changes apply immediately without inventing a user prompt.
+            if (batch.message.length === 0) {
+                if (session.queue.size() === 0 && !this.shouldExit) {
+                    sendReady();
+                }
+                continue;
+            }
+
             messageBuffer.addMessage(batch.message, 'user');
 
             const promptContent: PromptContent[] = [{
@@ -333,16 +344,39 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
-    private maybeQueueAgentModeSlash(agentMode: CopilotAgentMode): void {
-        const slash = copilotAgentModeSlash(agentMode);
-        if (!slash) {
+    private async applyBackendAgentMode(
+        backend: ReturnType<typeof createCopilotBackend>,
+        sessionId: string,
+        agentMode: CopilotAgentMode
+    ): Promise<void> {
+        this.currentAgentMode = agentMode;
+        this.applyDisplayAgentMode(agentMode);
+
+        if (this.setModeSupported === false) {
             return;
         }
-        this.session.queue.pushIsolated(slash, {
-            permissionMode: this.session.getPermissionMode() as PermissionMode,
-            model: this.session.getModel() ?? undefined,
-            agentMode
-        });
+
+        try {
+            await backend.setMode(sessionId, agentMode);
+            this.setModeSupported = true;
+            logger.debug(`[copilot-remote] Applied agent mode via setMode: ${agentMode}`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/method not found|does not support session\/set_mode|no mode config option/i.test(message)) {
+                this.setModeSupported = false;
+                logger.warn('[copilot-remote] Copilot CLI build does not support set_mode; agent mode changes require restart');
+                this.session.sendSessionEvent({
+                    type: 'message',
+                    message: 'This Copilot CLI build does not support agent mode switching. Restart the session to apply Plan or Autopilot.'
+                });
+                return;
+            }
+            logger.warn('[copilot-remote] Failed to apply agent mode', error);
+            this.session.sendSessionEvent({
+                type: 'message',
+                message: `Failed to switch Copilot agent mode to ${getCopilotAgentModeLabel(agentMode)}: ${message}`
+            });
+        }
     }
 
     private async handleAbort(): Promise<void> {

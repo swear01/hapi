@@ -1,4 +1,5 @@
 import { AcpSdkBackend } from '@/agent/backends/acp';
+import type { CopilotAgentMode } from '@hapi/protocol';
 
 function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     const result: Record<string, string> = {};
@@ -10,10 +11,19 @@ function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     return result;
 }
 
-export function createCopilotBackend(): AcpSdkBackend {
+/** ACP process args. Non-interactive modes use `--mode` so Plan/Autopilot apply at spawn. */
+export function buildCopilotAcpArgs(opts?: { agentMode?: CopilotAgentMode }): string[] {
+    const args = ['--acp', '--stdio'];
+    if (opts?.agentMode && opts.agentMode !== 'interactive') {
+        args.push('--mode', opts.agentMode);
+    }
+    return args;
+}
+
+export function createCopilotBackend(opts?: { agentMode?: CopilotAgentMode }): AcpSdkBackend {
     return new AcpSdkBackend({
         command: process.env.COPILOT_CLI_PATH ?? 'copilot',
-        args: ['--acp', '--stdio'],
+        args: buildCopilotAcpArgs(opts),
         env: filterEnv(process.env)
     });
 }

@@ -44,14 +44,3 @@ export function normalizeCopilotAgentMode(value: unknown): CopilotAgentMode {
     return isCopilotAgentMode(value) ? value : 'interactive'
 }
 
-/** Slash sent to Copilot CLI when entering a non-interactive agent mode. */
-export function copilotAgentModeSlash(mode: CopilotAgentMode): string | null {
-    switch (mode) {
-        case 'interactive':
-            return null
-        case 'plan':
-            return '/plan'
-        case 'autopilot':
-            return '/autopilot'
-    }
-}

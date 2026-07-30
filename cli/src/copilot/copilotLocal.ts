@@ -22,10 +22,8 @@ export async function copilotLocal(opts: {
     if (opts.yolo) {
         args.push('--allow-all');
     }
-    if (opts.agentMode === 'plan') {
-        args.push('--plan');
-    } else if (opts.agentMode === 'autopilot') {
-        args.push('--autopilot');
+    if (opts.agentMode && opts.agentMode !== 'interactive') {
+        args.push('--mode', opts.agentMode);
     }
 
     logger.debug(`[CopilotLocal] Spawning copilot with args: ${JSON.stringify(args)}`);

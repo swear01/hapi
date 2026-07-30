@@ -1592,7 +1592,8 @@ async uploadScratchlistAttachment(
             preferredPermissionMode,
             session.serviceTier ?? undefined,
             access.sessionId,
-            session.collaborationMode ?? undefined
+            session.collaborationMode ?? undefined,
+            session.copilotAgentMode ?? undefined
         )
 
         if (spawnResult.type !== 'success') {
