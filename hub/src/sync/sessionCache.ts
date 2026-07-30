@@ -1056,15 +1056,6 @@ export class SessionCache {
             }
         }
 
-        if (newStored.personality === null && oldStored.personality !== null) {
-            const updated = this.store.sessions.setSessionPersonality(newSessionId, oldStored.personality, namespace, {
-                touchUpdatedAt: false
-            })
-            if (!updated) {
-                throw new Error('Failed to preserve session personality during merge')
-            }
-        }
-
         if (oldStored.todos !== null && oldStored.todosUpdatedAt !== null) {
             this.store.sessions.setSessionTodos(
                 newSessionId,

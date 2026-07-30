@@ -247,6 +247,30 @@ describe('session model', () => {
         expect(store.sessions.getSession(newSession.id)?.serviceTier).toBe('fast')
     })
 
+    it('preserves the target default personality when merging resumed sessions', async () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+
+        const oldSession = cache.getOrCreateSession(
+            'session-personality-old',
+            { path: '/tmp/project', host: 'localhost', flavor: 'codex' },
+            null,
+            'default'
+        )
+        store.sessions.setSessionPersonality(oldSession.id, 'friendly', 'default')
+        const newSession = cache.getOrCreateSession(
+            'session-personality-new',
+            { path: '/tmp/project', host: 'localhost', flavor: 'codex' },
+            null,
+            'default'
+        )
+
+        await cache.mergeSessions(oldSession.id, newSession.id, 'default')
+
+        expect(store.sessions.getSession(newSession.id)?.personality).toBeNull()
+    })
+
     it('persists applied session model updates, including clear-to-auto', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []
