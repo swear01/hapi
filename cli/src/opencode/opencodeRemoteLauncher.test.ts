@@ -574,8 +574,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         });
         harness.stderrHandler!({
             type: 'quota_exceeded',
-            message: 'API quota exceeded. Please check your billing or wait for quota reset.',
-            raw: 'quota exceeded for provider'
+            message: 'Retrying after quota error.',
+            raw: 'retrying in 30 seconds'
         });
 
         expect(session.thinking).toBe(false);
