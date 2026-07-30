@@ -2449,8 +2449,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 && sameThreadRetryAttempt < SAME_THREAD_MAX_RETRIES;
             const allowStaleSameThreadTerminalRecovery = msgType === 'task_complete'
                 && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0);
-            const allowSameThreadTerminalRecovery = msg.terminal_source === 'thread_status'
-                || allowStaleSameThreadTerminalRecovery;
 
             const suppressReadyForThisTerminalEvent = isTerminalEvent
                 ? consumeInterruptedTurnReadySuppression(eventTurnId)
@@ -2464,7 +2462,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     allowAnonymousTerminalEvent,
                     eventThreadId,
                     currentThreadId: this.currentThreadId,
-                    allowMatchingThreadIdTerminalEvent: allowSameThreadTerminalRecovery
+                    allowMatchingThreadIdTerminalEvent: msg.terminal_source === 'thread_status',
+                    allowMismatchedTurnIdTerminalEvent: allowStaleSameThreadTerminalRecovery
                 })) {
                     logger.debug(
                         `[Codex] Ignoring terminal event ${msgType} without matching turn context; ` +

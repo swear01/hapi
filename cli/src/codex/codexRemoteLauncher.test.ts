@@ -42,6 +42,7 @@ const harness = vi.hoisted(() => ({
     deferThreadStatusNotifications: false,
     emitStaleTaskCompleteAfterRetry: false,
     emitStaleTaskFailedAfterRetry: false,
+    emitStaleThreadStatusFailureAfterRetry: false,
     emitChildThreadEvents: false,
     emitChildUsageEvents: false,
     emitChildGoalEvent: false,
@@ -891,6 +892,17 @@ vi.mock('./codexAppServerClient', () => {
                 this.notificationHandler?.('codex/event/task_failed', staleFailed);
             }
 
+            if (harness.emitStaleThreadStatusFailureAfterRetry && harness.startTurnThreadIds.length === 2) {
+                const staleThreadStatus = {
+                    thread: { id: threadId },
+                    turnId: 'turn-1',
+                    status: { type: 'systemError' }
+                };
+                harness.notifications.push({ method: 'thread/status/changed', params: staleThreadStatus });
+                this.notificationHandler?.('thread/status/changed', staleThreadStatus);
+                await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+
             const completed = { status: 'Completed', turn: { id: turnId } };
             harness.notifications.push({ method: 'turn/completed', params: completed });
             this.notificationHandler?.('turn/completed', completed);
@@ -1123,6 +1135,7 @@ describe('codexRemoteLauncher', () => {
         harness.deferThreadStatusNotifications = false;
         harness.emitStaleTaskCompleteAfterRetry = false;
         harness.emitStaleTaskFailedAfterRetry = false;
+        harness.emitStaleThreadStatusFailureAfterRetry = false;
         harness.emitChildThreadEvents = false;
         harness.emitChildUsageEvents = false;
         harness.emitChildGoalEvent = false;
@@ -1582,6 +1595,18 @@ describe('codexRemoteLauncher', () => {
         expect(exitReason).toBe('exit');
         expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('ignores a stale thread-status failure after retry has started', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitStaleThreadStatusFailureAfterRetry = true;
+        const { session } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
         expect(session.thinking).toBe(false);
     });
 
