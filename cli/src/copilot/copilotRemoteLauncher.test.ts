@@ -3,11 +3,16 @@ import type { CopilotSession } from './session';
 import { CopilotRemoteLauncher } from './copilotRemoteLauncher';
 
 type LauncherInternals = {
-    backend: { setMode: (sessionId: string, mode: string) => Promise<void> } | null;
+    backend: {
+        setMode: (sessionId: string, mode: string) => Promise<void>;
+        setModel?: (sessionId: string, model: string) => Promise<void>;
+    } | null;
     activeSessionId: string | null;
     currentAgentMode: string;
     displayAgentMode: string | null;
     applyInitialAgentMode: () => Promise<void>;
+    currentBackendModel: string | null;
+    applyQueuedModel: (model: string) => Promise<string | null>;
 };
 
 function createLauncher(setMode: (sessionId: string, mode: string) => Promise<void>) {
@@ -57,5 +62,20 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
 
         expect(internals.currentAgentMode).toBe('interactive');
         expect(internals.displayAgentMode).toBe('interactive');
+    });
+
+    it('applies Auto after an explicit model selection', async () => {
+        const setModel = vi.fn().mockResolvedValue(undefined);
+        const { internals } = createLauncher(vi.fn().mockResolvedValue(undefined));
+        internals.backend = {
+            setMode: vi.fn().mockResolvedValue(undefined),
+            setModel
+        };
+        internals.currentBackendModel = 'gpt-5.6';
+
+        await expect(internals.applyQueuedModel('auto')).resolves.toBe('auto');
+
+        expect(setModel).toHaveBeenCalledWith('copilot-session', 'auto');
+        expect(internals.currentBackendModel).toBe('auto');
     });
 });

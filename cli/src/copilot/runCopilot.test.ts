@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CopilotSession } from './session';
-import { applyCopilotSlashAgentMode } from './runCopilot';
+import { applyCopilotSlashAgentMode, resolveCopilotQueueModel } from './runCopilot';
 
 describe('applyCopilotSlashAgentMode', () => {
     it('rejects without changing the caller mode when Copilot rejects a slash update', async () => {
@@ -14,5 +14,12 @@ describe('applyCopilotSlashAgentMode', () => {
 
         expect(publishedMode).toBe('interactive');
         expect(activeSession.applyRemoteAgentMode).toHaveBeenCalledWith('plan');
+    });
+});
+
+describe('resolveCopilotQueueModel', () => {
+    it('preserves Auto as an explicit model update', () => {
+        expect(resolveCopilotQueueModel('gpt-5.6')).toBe('gpt-5.6');
+        expect(resolveCopilotQueueModel(null)).toBe('auto');
     });
 });

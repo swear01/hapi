@@ -33,6 +33,10 @@ export async function applyCopilotSlashAgentMode(
     return nextAgentMode;
 }
 
+export function resolveCopilotQueueModel(model: string | null): string {
+    return model ?? 'auto';
+}
+
 export async function runCopilot(opts: {
     startedBy?: 'runner' | 'terminal';
     startingMode?: 'local' | 'remote';
@@ -163,7 +167,7 @@ export async function runCopilot(opts: {
                         }
                         if (slash.updates.model !== undefined) {
                             sessionModel = slash.updates.model;
-                            resolvedModel = sessionModel;
+                            resolvedModel = resolveCopilotQueueModel(sessionModel);
                         }
                         syncSessionMode();
                     }
@@ -250,7 +254,7 @@ export async function runCopilot(opts: {
 
         if (config.model !== undefined) {
             sessionModel = resolveModel(config.model);
-            resolvedModel = sessionModel;
+            resolvedModel = resolveCopilotQueueModel(sessionModel);
             applied.model = sessionModel;
         }
 

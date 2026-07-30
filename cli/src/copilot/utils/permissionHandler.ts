@@ -24,17 +24,26 @@ function deriveToolInput(request: PermissionRequest): unknown {
     return request.rawOutput;
 }
 
-function pickOptionId(request: PermissionRequest, preferredKinds: string[]): string | null {
+function pickOptionId(
+    request: PermissionRequest,
+    preferredKinds: string[],
+    fallbackToFirstOption = true
+): string | null {
     for (const kind of preferredKinds) {
         const match = request.options.find((option) => option.kind === kind);
         if (match) {
             return match.optionId;
         }
     }
-    return request.options.length > 0 ? request.options[0].optionId : null;
+    return fallbackToFirstOption && request.options.length > 0
+        ? request.options[0].optionId
+        : null;
 }
 
-function mapDecisionToOutcome(request: PermissionRequest, decision: PermissionResponseMessage['decision']): PermissionResponse {
+export function mapCopilotPermissionDecision(
+    request: PermissionRequest,
+    decision: PermissionResponseMessage['decision']
+): PermissionResponse {
     if (decision === 'abort') {
         return { outcome: 'cancelled' };
     }
@@ -49,7 +58,7 @@ function mapDecisionToOutcome(request: PermissionRequest, decision: PermissionRe
         return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' };
     }
 
-    const optionId = pickOptionId(request, ['reject_once', 'reject_always']);
+    const optionId = pickOptionId(request, ['reject_once', 'reject_always'], false);
     return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' };
 }
 
@@ -95,7 +104,7 @@ export class CopilotPermissionHandler extends BasePermissionHandler<PermissionRe
         toolInput: unknown,
         decision: AutoApprovalDecision
     ): Promise<void> {
-        const outcome = mapDecisionToOutcome(request, decision);
+        const outcome = mapCopilotPermissionDecision(request, decision);
         await this.backend.respondToPermission(request.sessionId, request, outcome);
 
         this.client.updateAgentState((currentState) => ({
@@ -134,7 +143,7 @@ export class CopilotPermissionHandler extends BasePermissionHandler<PermissionRe
         }
 
         if (pendingRequest) {
-            const outcome = mapDecisionToOutcome(pendingRequest, decision);
+            const outcome = mapCopilotPermissionDecision(pendingRequest, decision);
             await this.backend.respondToPermission(pendingRequest.sessionId, pendingRequest, outcome);
         }
 

@@ -152,34 +152,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
             }
 
             if (batch.mode.model && batch.mode.model !== this.currentBackendModel) {
-                if (!backend.setModel || this.setModelSupported === false) {
-                    batch.mode.model = this.currentBackendModel ?? undefined;
-                } else {
-                    logger.debug(`[copilot-remote] Switching model inline: ${this.currentBackendModel} -> ${batch.mode.model}`);
-                    try {
-                        await backend.setModel(acpSessionId, batch.mode.model);
-                        this.currentBackendModel = batch.mode.model;
-                        this.setModelSupported = true;
-                    } catch (error) {
-                        const message = error instanceof Error ? error.message : String(error);
-                        const methodNotFound = /method not found/i.test(message);
-                        if (methodNotFound && this.setModelSupported === undefined) {
-                            this.setModelSupported = false;
-                            logger.warn('[copilot-remote] Copilot CLI build does not support set_session_model; inline switching disabled for this session');
-                            session.sendSessionEvent({
-                                type: 'message',
-                                message: 'This Copilot CLI build does not support inline model switching. Restart the session to apply a different model.'
-                            });
-                        } else {
-                            logger.warn('[copilot-remote] Inline model switch failed', error);
-                            session.sendSessionEvent({
-                                type: 'message',
-                                message: `Failed to switch model to ${batch.mode.model}. Continuing with ${this.currentBackendModel}.`
-                            });
-                        }
-                        batch.mode.model = this.currentBackendModel ?? undefined;
-                    }
-                }
+                batch.mode.model = await this.applyQueuedModel(batch.mode.model) ?? undefined;
             }
 
             const desiredAgentMode = batch.mode.agentMode ?? session.getAgentMode();
@@ -399,6 +372,43 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
             // switching must not prevent startup from reflecting that initial mode.
             this.currentAgentMode = requestedMode;
             this.applyDisplayAgentMode(requestedMode);
+        }
+    }
+
+    private async applyQueuedModel(model: string): Promise<string | null> {
+        const backend = this.backend;
+        const sessionId = this.activeSessionId;
+        if (!backend || !sessionId) {
+            throw new Error('Copilot model switching is unavailable before the remote session is ready');
+        }
+        if (!backend.setModel || this.setModelSupported === false) {
+            return this.currentBackendModel;
+        }
+
+        logger.debug(`[copilot-remote] Switching model inline: ${this.currentBackendModel} -> ${model}`);
+        try {
+            await backend.setModel(sessionId, model);
+            this.currentBackendModel = model;
+            this.setModelSupported = true;
+            return model;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const methodNotFound = /method not found/i.test(message);
+            if (methodNotFound && this.setModelSupported === undefined) {
+                this.setModelSupported = false;
+                logger.warn('[copilot-remote] Copilot CLI build does not support set_session_model; inline switching disabled for this session');
+                this.session.sendSessionEvent({
+                    type: 'message',
+                    message: 'This Copilot CLI build does not support inline model switching. Restart the session to apply a different model.'
+                });
+            } else {
+                logger.warn('[copilot-remote] Inline model switch failed', error);
+                this.session.sendSessionEvent({
+                    type: 'message',
+                    message: `Failed to switch model to ${model}. Continuing with ${this.currentBackendModel}.`
+                });
+            }
+            return this.currentBackendModel;
         }
     }
 

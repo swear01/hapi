@@ -2719,6 +2719,30 @@ describe('session model', () => {
             expect(messages.length).toBeGreaterThanOrEqual(1)
         })
 
+        it('merges duplicate when copilotSessionId collides', async () => {
+            const store = new Store(':memory:')
+            const events: SyncEvent[] = []
+            const cache = new SessionCache(store, createPublisher(events))
+
+            const s1 = cache.getOrCreateSession(
+                'copilot-tag-1',
+                { path: '/tmp/project', host: 'localhost', flavor: 'copilot', copilotSessionId: 'copilot-thread-X' },
+                null,
+                'default'
+            )
+            const s2 = cache.getOrCreateSession(
+                'copilot-tag-2',
+                { path: '/tmp/project', host: 'localhost', flavor: 'copilot', copilotSessionId: 'copilot-thread-X' },
+                null,
+                'default'
+            )
+
+            await cache.deduplicateByAgentSessionId(s2.id)
+
+            expect(cache.getSession(s1.id)).toBeUndefined()
+            expect(cache.getSession(s2.id)).toBeDefined()
+        })
+
         it('preserves sessions with different agent session IDs', async () => {
             const store = new Store(':memory:')
             const events: SyncEvent[] = []
