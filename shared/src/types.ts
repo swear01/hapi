@@ -47,3 +47,4 @@ export type {
 } from './modes'
 
 export type { ClaudeModelPreset, GeminiModelPreset } from './models'
+export type { CopilotAgentMode } from './copilotModes'

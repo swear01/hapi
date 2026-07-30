@@ -112,6 +112,8 @@ vi.mock('./DirectorySection', () => ({ DirectorySection: () => null }))
 vi.mock('./MachineSelector', () => ({ MachineSelector: () => null }))
 vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
 vi.mock('./GrokPermissionModeSelector', () => ({ GrokPermissionModeSelector: () => null }))
+vi.mock('./CodexFamilyPermissionModeSelector', () => ({ CodexFamilyPermissionModeSelector: () => null }))
+vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
 vi.mock('./YoloToggle', () => ({ YoloToggle: () => null }))
 vi.mock('./OpencodeModelSelector', () => ({ OpencodeModelSelector: () => null }))
 vi.mock('./LaunchEffortSelector', () => ({
@@ -347,7 +349,9 @@ describe('NewSession launch preferences', () => {
             modelReasoningEffort: 'max',
             serviceTier: 'standard',
             collaborationMode: 'default',
+            copilotAgentMode: 'interactive',
             yoloMode: false,
+            codexFamilyPermissionMode: 'default',
             grokPermissionMode: 'default',
             sessionType: 'simple',
             worktreeName: ''

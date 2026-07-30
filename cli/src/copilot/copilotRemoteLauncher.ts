@@ -11,6 +11,9 @@ import type { PermissionMode } from './types';
 import { createCopilotBackend } from './utils/copilotBackend';
 import { CopilotPermissionHandler } from './utils/permissionHandler';
 import { resolveCopilotRuntimeConfig } from './utils/config';
+import { copilotAgentModeSlash, getCopilotAgentModeLabel, type CopilotAgentMode } from '@hapi/protocol';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import { buildCopilotModelsResponseFromBackend } from '@/modules/common/copilotModels';
 
 class CopilotRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CopilotSession;
@@ -21,6 +24,8 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
     private abortController = new AbortController();
     private displayModel: string | null = null;
     private displayPermissionMode: PermissionMode | null = null;
+    private displayAgentMode: CopilotAgentMode | null = null;
+    private currentAgentMode: CopilotAgentMode = 'interactive';
     private currentBackendModel: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
     private readonly lastDisplayedToolCall = new Map<string, string>();
@@ -116,6 +121,13 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
         }
         this.applyDisplayMode(session.getPermissionMode() as PermissionMode, effectiveModel ?? undefined);
+        this.currentAgentMode = session.getAgentMode();
+        this.applyDisplayAgentMode(this.currentAgentMode);
+        this.maybeQueueAgentModeSlash(this.currentAgentMode);
+
+        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListCopilotModels, async () => {
+            return await buildCopilotModelsResponseFromBackend(acpSessionId, backend, session.path);
+        });
 
         this.setupAbortHandlers(session.client.rpcHandlerManager, {
             onAbort: () => this.handleAbort(),
@@ -164,6 +176,12 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
                         batch.mode.model = this.currentBackendModel ?? undefined;
                     }
                 }
+            }
+
+            if (batch.mode.agentMode && batch.mode.agentMode !== this.currentAgentMode) {
+                this.currentAgentMode = batch.mode.agentMode;
+                this.applyDisplayAgentMode(batch.mode.agentMode);
+                this.maybeQueueAgentModeSlash(batch.mode.agentMode);
             }
 
             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
@@ -305,6 +323,26 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
             this.displayModel = model;
             this.messageBuffer.addMessage(`[MODEL:${model}]`, 'system');
         }
+    }
+
+    private applyDisplayAgentMode(agentMode: CopilotAgentMode): void {
+        if (agentMode !== this.displayAgentMode) {
+            this.displayAgentMode = agentMode;
+            this.messageBuffer.addMessage(`[AGENT_MODE:${agentMode}]`, 'system');
+            this.messageBuffer.addMessage(`Copilot agent mode: ${getCopilotAgentModeLabel(agentMode)}`, 'status');
+        }
+    }
+
+    private maybeQueueAgentModeSlash(agentMode: CopilotAgentMode): void {
+        const slash = copilotAgentModeSlash(agentMode);
+        if (!slash) {
+            return;
+        }
+        this.session.queue.pushIsolated(slash, {
+            permissionMode: this.session.getPermissionMode() as PermissionMode,
+            model: this.session.getModel() ?? undefined,
+            agentMode
+        });
     }
 
     private async handleAbort(): Promise<void> {

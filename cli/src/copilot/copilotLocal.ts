@@ -1,12 +1,15 @@
 import { logger } from '@/ui/logger';
 import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard';
 
+import type { CopilotAgentMode } from '@hapi/protocol';
+
 export async function copilotLocal(opts: {
     path: string;
     sessionId: string | null;
     abort: AbortSignal;
     model?: string;
     yolo?: boolean;
+    agentMode?: CopilotAgentMode;
 }): Promise<void> {
     const args: string[] = [];
 
@@ -18,6 +21,11 @@ export async function copilotLocal(opts: {
     }
     if (opts.yolo) {
         args.push('--allow-all');
+    }
+    if (opts.agentMode === 'plan') {
+        args.push('--plan');
+    } else if (opts.agentMode === 'autopilot') {
+        args.push('--autopilot');
     }
 
     logger.debug(`[CopilotLocal] Spawning copilot with args: ${JSON.stringify(args)}`);

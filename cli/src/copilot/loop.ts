@@ -5,6 +5,7 @@ import { CopilotSession } from './session';
 import { copilotLocalLauncher } from './copilotLocalLauncher';
 import { copilotRemoteLauncher } from './copilotRemoteLauncher';
 import { ApiClient, ApiSessionClient } from '@/lib';
+import type { CopilotAgentMode } from '@hapi/protocol';
 import type { CopilotMode, PermissionMode } from './types';
 
 interface CopilotLoopOptions {
@@ -17,6 +18,7 @@ interface CopilotLoopOptions {
     api: ApiClient;
     permissionMode?: PermissionMode;
     model?: string;
+    copilotAgentMode?: CopilotAgentMode;
     resumeSessionId?: string;
     onSessionReady?: (session: CopilotSession) => void;
 }
@@ -37,7 +39,8 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
         mode: startingMode,
         startedBy,
         startingMode,
-        permissionMode: opts.permissionMode ?? 'default'
+        permissionMode: opts.permissionMode ?? 'default',
+        agentMode: opts.copilotAgentMode ?? 'interactive'
     });
 
     if (opts.resumeSessionId) {

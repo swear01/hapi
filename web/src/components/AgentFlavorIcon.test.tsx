@@ -3,9 +3,8 @@ import { render } from '@testing-library/react'
 import { AGENT_FLAVORS } from '@hapi/protocol'
 import { AgentFlavorIcon } from './AgentFlavorIcon'
 
-// Flavors backed by a @lobehub/icons brand logo. 'pi' and 'copilot' have no
-// logo in the package and intentionally fall back to the letter badge.
-const LOGO_FLAVORS = AGENT_FLAVORS.filter((f) => f !== 'pi' && f !== 'copilot')
+// Flavors backed by a @lobehub/icons brand logo. 'pi' has no logo and falls back to a letter badge.
+const LOGO_FLAVORS = AGENT_FLAVORS.filter((f) => f !== 'pi')
 
 function getWrapper(container: HTMLElement): HTMLElement {
     const wrapper = container.querySelector('span')
@@ -38,13 +37,11 @@ describe('AgentFlavorIcon', () => {
         expect(badge.className).toContain('text-white')
     })
 
-    it('keeps the "GH" letter badge for the copilot flavor (no brand logo available)', () => {
+    it('renders the GitHub mark SVG for the copilot flavor', () => {
         const { container } = render(<AgentFlavorIcon flavor="copilot" />)
-        const badge = getWrapper(container)
-        expect(container.querySelector('svg')).toBeNull()
-        expect(badge.textContent).toBe('GH')
-        expect(badge.className).toContain('bg-[#24292f]')
-        expect(badge.className).toContain('text-white')
+        const svg = container.querySelector('svg')
+        expect(svg).not.toBeNull()
+        expect(getWrapper(container).className).not.toContain('rounded-sm')
     })
 
     it.each([null, undefined, '', '   ', 'mystery-cli'])(

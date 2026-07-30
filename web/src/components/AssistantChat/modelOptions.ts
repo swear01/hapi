@@ -127,7 +127,10 @@ export function getModelOptionsForFlavor(
         return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)
     }
     if (flavor === 'copilot') {
-        return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)
+        if (customOptions && customOptions.length > 0) {
+            return withCurrentModelOption(customOptions, currentModel)
+        }
+        return withCurrentModelOption([{ value: 'auto', label: 'Auto' }], currentModel)
     }
     if (flavor === 'grok') {
         return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)

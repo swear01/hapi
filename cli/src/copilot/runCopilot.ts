@@ -1,4 +1,5 @@
 import { logger } from '@/ui/logger';
+import { randomUUID } from 'node:crypto';
 import { copilotLoop } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
@@ -9,17 +10,20 @@ import type { CopilotMode, PermissionMode } from './types';
 import { bootstrapExistingSession, bootstrapSession } from '@/agent/sessionFactory';
 import { registerLocalHandoffHandler } from '@/agent/localHandoff';
 import { createModeChangeHandler, createRunnerLifecycle, setControlledByUser } from '@/agent/runnerLifecycle';
-import { isPermissionModeAllowedForFlavor } from '@hapi/protocol';
+import { isCopilotAgentMode, isPermissionModeAllowedForFlavor } from '@hapi/protocol';
 import { PermissionModeSchema } from '@hapi/protocol/schemas';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { resolveCopilotRuntimeConfig } from './utils/config';
+import { listSlashCommands } from '@/modules/common/slashCommands';
+import { resolveCopilotSlashCommand } from './utils/slashCommands';
 
 export async function runCopilot(opts: {
     startedBy?: 'runner' | 'terminal';
     startingMode?: 'local' | 'remote';
     permissionMode?: PermissionMode;
     model?: string;
+    copilotAgentMode?: import('@hapi/protocol').CopilotAgentMode;
     resumeSessionId?: string;
     existingSessionId?: string;
     workingDirectory?: string;
@@ -66,11 +70,13 @@ export async function runCopilot(opts: {
 
     const messageQueue = new MessageQueue2<CopilotMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
-        model: mode.model
+        model: mode.model,
+        agentMode: mode.agentMode
     }));
 
     const sessionWrapperRef: { current: CopilotSession | null } = { current: null };
     let currentPermissionMode: PermissionMode = opts.permissionMode ?? 'default';
+    let currentAgentMode = opts.copilotAgentMode ?? 'interactive';
     let sessionModel: string | null = persistedModel ?? null;
     let resolvedModel = sessionModel ?? runtimeConfig.model ?? null;
 
@@ -91,24 +97,107 @@ export async function runCopilot(opts: {
         }
         sessionInstance.setPermissionMode(currentPermissionMode);
         sessionInstance.setModel(sessionModel);
+        sessionInstance.setAgentMode(currentAgentMode);
         sessionInstance.pushKeepAlive();
 
-        logger.debug(`[copilot] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${resolvedModel}`);
+        logger.debug(`[copilot] Synced session config for keepalive: permissionMode=${currentPermissionMode}, agentMode=${currentAgentMode}, model=${resolvedModel}`);
     };
 
+    const preparingLocalIds = new Set<string>();
+    const cancelledBeforeEnqueue = new Set<string>();
+    let userMessageChain: Promise<void> = Promise.resolve();
+
     session.onUserMessage((message, localId) => {
-        const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
-        const mode: CopilotMode = {
-            permissionMode: currentPermissionMode,
-            model: resolvedModel ?? undefined
-        };
-        messageQueue.push(formattedText, mode, localId);
+        if (localId) preparingLocalIds.add(localId);
+        userMessageChain = userMessageChain.then(async () => {
+            const wasCancelled = (): boolean => {
+                if (!localId) return false;
+                return cancelledBeforeEnqueue.delete(localId);
+            };
+            const buildMode = (): CopilotMode => ({
+                permissionMode: currentPermissionMode,
+                model: resolvedModel ?? undefined,
+                agentMode: currentAgentMode
+            });
+            const pushPlain = () => {
+                const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
+                messageQueue.push(formattedText, buildMode(), localId);
+            };
+            try {
+                if (wasCancelled()) return;
+                let text = message.content.text;
+                const commands = await listSlashCommands('copilot', workingDirectory).catch(() => []);
+                if (wasCancelled()) return;
+                const slash = resolveCopilotSlashCommand(text, {
+                    commands,
+                    permissionMode: currentPermissionMode,
+                    model: sessionModel,
+                    agentMode: currentAgentMode
+                });
+
+                if (slash.kind !== 'passthrough') {
+                    if (slash.updates) {
+                        if (slash.updates.permissionMode !== undefined) {
+                            currentPermissionMode = slash.updates.permissionMode;
+                        }
+                        if (slash.updates.model !== undefined) {
+                            sessionModel = slash.updates.model;
+                            resolvedModel = sessionModel;
+                        }
+                        if (slash.updates.agentMode !== undefined) {
+                            currentAgentMode = slash.updates.agentMode;
+                        }
+                        syncSessionMode();
+                    }
+                    if (slash.kind === 'handled') {
+                        if (localId) {
+                            session.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+                        }
+                        if (slash.message) {
+                            session.sendAgentMessage({
+                                type: 'message',
+                                message: slash.message,
+                                id: randomUUID()
+                            });
+                        }
+                        sessionWrapperRef.current?.onThinkingChange(false);
+                        return;
+                    }
+                    if (slash.message) {
+                        session.sendAgentMessage({
+                            type: 'message',
+                            message: slash.message,
+                            id: randomUUID()
+                        });
+                    }
+                    text = slash.text;
+                }
+
+                const formattedText = formatMessageWithAttachments(text, message.content.attachments);
+                messageQueue.push(formattedText, buildMode(), localId);
+            } catch (error) {
+                logger.debug('[copilot] Failed to handle user message', error);
+                if (!wasCancelled()) {
+                    pushPlain();
+                }
+            } finally {
+                if (localId) {
+                    preparingLocalIds.delete(localId);
+                    cancelledBeforeEnqueue.delete(localId);
+                }
+            }
+        }).catch((error) => {
+            logger.debug('[copilot] User message handler chain failed', error);
+        });
     });
 
     session.onCancelQueuedMessage((localId) => {
-        const removed = messageQueue.cancelByLocalId(localId);
-        logger.debug(`[copilot] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
-        return removed;
+        const removedFromQueue = messageQueue.cancelByLocalId(localId);
+        if (!removedFromQueue && preparingLocalIds.has(localId)) {
+            cancelledBeforeEnqueue.add(localId);
+        }
+        logger.debug(`[copilot] cancelByLocalId(${localId}): ${removedFromQueue ? 'removed' : 'not found (best-effort)'}`);
+        return removedFromQueue || cancelledBeforeEnqueue.has(localId);
     });
 
     const resolvePermissionMode = (value: unknown): PermissionMode => {
@@ -133,7 +222,7 @@ export async function runCopilot(opts: {
         if (!payload || typeof payload !== 'object') {
             throw new Error('Invalid session config payload');
         }
-        const config = payload as { permissionMode?: unknown; model?: unknown };
+        const config = payload as { permissionMode?: unknown; model?: unknown; copilotAgentMode?: unknown };
         const applied: Record<string, unknown> = {};
 
         if (config.permissionMode !== undefined) {
@@ -145,6 +234,14 @@ export async function runCopilot(opts: {
             sessionModel = resolveModel(config.model);
             resolvedModel = sessionModel;
             applied.model = sessionModel;
+        }
+
+        if (config.copilotAgentMode !== undefined) {
+            if (!isCopilotAgentMode(config.copilotAgentMode)) {
+                throw new Error('Invalid copilot agent mode');
+            }
+            currentAgentMode = config.copilotAgentMode;
+            applied.copilotAgentMode = currentAgentMode;
         }
 
         syncSessionMode();
@@ -163,6 +260,7 @@ export async function runCopilot(opts: {
             api,
             permissionMode: currentPermissionMode,
             model: runtimeConfig.model,
+            copilotAgentMode: currentAgentMode,
             resumeSessionId: opts.resumeSessionId,
             onModeChange: createModeChangeHandler(session),
             onSessionReady: (instance) => {

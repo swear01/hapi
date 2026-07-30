@@ -1141,6 +1141,9 @@ export function buildCliArgs(
   if (options.collaborationMode && options.collaborationMode !== 'default' && agent === 'codex') {
     args.push('--collaboration-mode', options.collaborationMode);
   }
+  if (options.copilotAgentMode && options.copilotAgentMode !== 'interactive' && agent === 'copilot') {
+    args.push('--copilot-agent-mode', options.copilotAgentMode);
+  }
   // Pi RPC mode has no permission switching; never pass these flags to it
   // (the Pi parser rejects --permission-mode and ignores --yolo).
   if (agent !== 'pi') {

@@ -10,7 +10,7 @@ interface CopilotDisplayProps {
     onSwitchToLocal?: () => void;
 }
 
-function extractTag(messages: BufferedMessage[], tag: 'MODEL' | 'MODE'): string | null {
+function extractTag(messages: BufferedMessage[], tag: 'MODEL' | 'MODE' | 'AGENT_MODE'): string | null {
     const prefix = `[${tag}:`;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
@@ -37,6 +37,7 @@ export const CopilotDisplay: React.FC<CopilotDisplayProps> = ({
     const [messages, setMessages] = useState<BufferedMessage[]>([]);
     const [model, setModel] = useState<string | null>(null);
     const [permissionMode, setPermissionMode] = useState<string | null>(null);
+    const [agentMode, setAgentMode] = useState<string | null>(null);
     const { confirmationMode, actionInProgress } = useSwitchControls({
         onExit,
         onSwitch: onSwitchToLocal
@@ -57,6 +58,10 @@ export const CopilotDisplay: React.FC<CopilotDisplayProps> = ({
             const nextMode = extractTag(newMessages, 'MODE');
             if (nextMode) {
                 setPermissionMode(nextMode);
+            }
+            const nextAgentMode = extractTag(newMessages, 'AGENT_MODE');
+            if (nextAgentMode) {
+                setAgentMode(nextAgentMode);
             }
         });
 
@@ -95,6 +100,9 @@ export const CopilotDisplay: React.FC<CopilotDisplayProps> = ({
             return false;
         }
         if (msg.type === 'system' && msg.content.startsWith('[MODE:')) {
+            return false;
+        }
+        if (msg.type === 'system' && msg.content.startsWith('[AGENT_MODE:')) {
             return false;
         }
         return true;
@@ -169,9 +177,10 @@ export const CopilotDisplay: React.FC<CopilotDisplayProps> = ({
                             Copilot running {onSwitchToLocal ? '(Space to switch to local, Ctrl-C to exit)' : '(Ctrl-C to exit)'}
                         </Text>
                     )}
-                    {(model || permissionMode) && (
+                    {(model || permissionMode || agentMode) && (
                         <Text color="gray" dimColor>
-                            {model ? `Model: ${model}` : 'Model: default'}
+                            {model ? `Model: ${model}` : 'Model: auto'}
+                            {agentMode ? ` | Mode: ${agentMode}` : ''}
                             {permissionMode ? ` | Permission: ${permissionMode}` : ''}
                         </Text>
                     )}

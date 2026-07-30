@@ -2,6 +2,7 @@ import { ApiClient, ApiSessionClient } from '@/lib';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { AgentSessionBase } from '@/agent/sessionBase';
 import type { CopilotMode, PermissionMode } from './types';
+import type { CopilotAgentMode } from '@hapi/protocol';
 import type { LocalLaunchExitReason } from '@/agent/localLaunchPolicy';
 
 type LocalLaunchFailure = {
@@ -26,6 +27,7 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
         startedBy: 'runner' | 'terminal';
         startingMode: 'local' | 'remote';
         permissionMode?: PermissionMode;
+        agentMode?: CopilotAgentMode;
     }) {
         super({
             api: opts.api,
@@ -48,7 +50,10 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
         this.startedBy = opts.startedBy;
         this.startingMode = opts.startingMode;
         this.permissionMode = opts.permissionMode;
+        this.agentMode = opts.agentMode ?? 'interactive';
     }
+
+    agentMode: CopilotAgentMode;
 
     setPermissionMode = (mode: PermissionMode): void => {
         this.permissionMode = mode;
@@ -56,6 +61,20 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
 
     setModel = (model: string | null): void => {
         this.model = model;
+    };
+
+    setAgentMode = (mode: CopilotAgentMode): void => {
+        this.agentMode = mode;
+    };
+
+    getAgentMode = (): CopilotAgentMode => this.agentMode;
+
+    pushKeepAlive = (): void => {
+        this.client.keepAlive(this.thinking, this.mode, {
+            permissionMode: this.permissionMode,
+            model: this.model,
+            copilotAgentMode: this.agentMode
+        });
     };
 
     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {

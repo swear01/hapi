@@ -1,5 +1,5 @@
 import { AgentStateSchema, MetadataSchema, TeamStateSchema } from '@hapi/protocol/schemas'
-import type { CodexCollaborationMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
+import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
 import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
@@ -12,7 +12,7 @@ const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
 // snapshot. Cap retries so genuine concurrent contention still surfaces to the
 // HTTP caller as 409 instead of spinning forever.
 const METADATA_RETRY_ATTEMPTS = 5
-type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode'
+type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode' | 'copilotAgentMode'
 
 export class SessionCache {
     private readonly sessions: Map<string, Session> = new Map()
@@ -171,7 +171,8 @@ export class SessionCache {
             effort: stored.effort,
             serviceTier: stored.serviceTier,
             permissionMode: existing?.permissionMode ?? metadata?.preferredPermissionMode,
-            collaborationMode: existing?.collaborationMode
+            collaborationMode: existing?.collaborationMode,
+            copilotAgentMode: existing?.copilotAgentMode
         }
 
         this.sessions.set(sessionId, session)
@@ -223,6 +224,7 @@ export class SessionCache {
         effort?: string | null
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
+        copilotAgentMode?: CopilotAgentMode
     }): void {
         const t = clampAliveTime(payload.time)
         if (!t) return
@@ -238,6 +240,7 @@ export class SessionCache {
         const previousEffort = session.effort
         const previousServiceTier = session.serviceTier
         const previousCollaborationMode = session.collaborationMode
+        const previousCopilotAgentMode = session.copilotAgentMode
         const pendingThinkingUntil = this.pendingThinkingUntilBySessionId.get(session.id) ?? 0
         const requestedThinking = Boolean(payload.thinking)
         const hubNow = Date.now()
@@ -289,6 +292,9 @@ export class SessionCache {
         if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
         }
+        if (payload.copilotAgentMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'copilotAgentMode', t)) {
+            session.copilotAgentMode = payload.copilotAgentMode
+        }
 
         const now = Date.now()
         const lastBroadcastAt = this.lastBroadcastAtBySessionId.get(session.id) ?? 0
@@ -298,6 +304,7 @@ export class SessionCache {
             || previousEffort !== session.effort
             || previousServiceTier !== session.serviceTier
             || previousCollaborationMode !== session.collaborationMode
+            || previousCopilotAgentMode !== session.copilotAgentMode
         const shouldBroadcast = (!wasActive && session.active)
             || (wasThinking !== session.thinking)
             || modeChanged
@@ -317,7 +324,8 @@ export class SessionCache {
                     modelReasoningEffort: session.modelReasoningEffort,
                     effort: session.effort,
                     serviceTier: session.serviceTier,
-                    collaborationMode: session.collaborationMode
+                    collaborationMode: session.collaborationMode,
+                    copilotAgentMode: session.copilotAgentMode
                 } satisfies SessionPatch
             })
         }
@@ -500,6 +508,7 @@ export class SessionCache {
             effort?: string | null
             serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
+            copilotAgentMode?: CopilotAgentMode
         }
     ): void {
         const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
@@ -576,6 +585,10 @@ export class SessionCache {
         if (config.collaborationMode !== undefined) {
             session.collaborationMode = config.collaborationMode
             this.markRuntimeConfigUpdated(sessionId, 'collaborationMode', appliedAt)
+        }
+        if (config.copilotAgentMode !== undefined) {
+            session.copilotAgentMode = config.copilotAgentMode
+            this.markRuntimeConfigUpdated(sessionId, 'copilotAgentMode', appliedAt)
         }
 
         this.publisher.emit({ type: 'session-updated', sessionId, data: session })

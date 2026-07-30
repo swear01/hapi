@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { CodexLocalSessionSummary, Machine } from '@/types/api'
-import type { CodexCollaborationMode, GrokPermissionMode } from '@hapi/protocol'
+import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
@@ -40,6 +40,8 @@ import { AgentSelector } from './AgentSelector'
 import { CollaborationModeSelector } from './CollaborationModeSelector'
 import { DirectorySection } from './DirectorySection'
 import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
+import { CodexFamilyPermissionModeSelector } from './CodexFamilyPermissionModeSelector'
+import { CopilotAgentModeSelector } from './CopilotAgentModeSelector'
 import { FastModeSelector } from './FastModeSelector'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
@@ -59,6 +61,7 @@ import {
 } from './preferences'
 import { SessionTypeSelector } from './SessionTypeSelector'
 import { YoloToggle } from './YoloToggle'
+import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
 import { formatRunnerSpawnError } from '../../utils/formatRunnerSpawnError'
 import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
@@ -134,7 +137,9 @@ export function NewSession(props: {
     const [opencodeSelectedModel, setOpencodeSelectedModel] = useState<string | null>(null)
     const [serviceTier, setServiceTier] = useState<NewSessionServiceTier>('standard')
     const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>('default')
+    const [copilotAgentMode, setCopilotAgentMode] = useState<CopilotAgentMode>('interactive')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
+    const [codexFamilyPermissionMode, setCodexFamilyPermissionMode] = useState<PermissionMode>('default')
     const [grokPermissionMode, setGrokPermissionMode] = useState<GrokPermissionMode>('default')
     const [sessionType, setSessionType] = useState<SessionType>('simple')
     const [worktreeName, setWorktreeName] = useState('')
@@ -166,8 +171,10 @@ export function NewSession(props: {
         setEffort('auto')
         setModelReasoningEffort('default')
         setGrokPermissionMode('default')
+        setCodexFamilyPermissionMode('default')
         setServiceTier('standard')
         setCollaborationMode('default')
+        setCopilotAgentMode('interactive')
         if (agent !== 'cursor') {
             setModel('auto')
             setCursorSelectedBase('auto')
@@ -235,7 +242,9 @@ export function NewSession(props: {
         )
         setServiceTier(draft.serviceTier)
         setCollaborationMode(draft.collaborationMode)
+        setCopilotAgentMode(draft.copilotAgentMode)
         setYoloMode(draft.yoloMode)
+        setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
         setGrokPermissionMode(draft.grokPermissionMode)
         setSessionType(draft.sessionType)
         setWorktreeName(draft.worktreeName)
@@ -795,7 +804,9 @@ export function NewSession(props: {
             modelReasoningEffort,
             serviceTier,
             collaborationMode,
+            copilotAgentMode,
             yoloMode,
+            codexFamilyPermissionMode,
             grokPermissionMode,
             sessionType,
             worktreeName
@@ -812,7 +823,9 @@ export function NewSession(props: {
         modelReasoningEffort,
         serviceTier,
         collaborationMode,
+        copilotAgentMode,
         yoloMode,
+        codexFamilyPermissionMode,
         grokPermissionMode,
         sessionType,
         worktreeName,
@@ -933,6 +946,8 @@ export function NewSession(props: {
                 ? collaborationMode
                 : undefined
 
+            const usesCodexFamilyPermissions = usesCodexFamilyPermissionModes(agent)
+
             if (agent === 'codex' && selectedCodexImportSession) {
                 setIsImportingCodexSession(true)
                 const result = await props.api.syncCodexSession({
@@ -943,7 +958,7 @@ export function NewSession(props: {
                     modelReasoningEffort: resolvedModelReasoningEffort ?? null,
                     serviceTier: resolvedServiceTier,
                     collaborationMode: resolvedCollaborationMode ?? 'default',
-                    yolo: yoloMode
+                    yolo: codexFamilyPermissionMode === 'yolo'
                 })
                 if (result.success) {
                     const importedSessionId = result.hapiSessionIds?.[0]
@@ -954,7 +969,9 @@ export function NewSession(props: {
                     // 这里立刻 resume，避免进入会话页时先看到离线，等首条消息才触发启动。
                     const resumedSessionId = await props.api.resumeSession(
                         importedSessionId,
-                        yoloMode ? { permissionMode: 'yolo' } : undefined
+                        codexFamilyPermissionMode !== 'default'
+                            ? { permissionMode: codexFamilyPermissionMode }
+                            : undefined
                     )
                     haptic.notification('success')
                     markCodexSessionsImported([selectedCodexImportSession.id])
@@ -978,12 +995,17 @@ export function NewSession(props: {
                 model: resolvedModel,
                 effort: resolvedEffort,
                 modelReasoningEffort: resolvedModelReasoningEffort,
-                yolo: agent === 'grok' ? undefined : yoloMode,
-                permissionMode: agent === 'grok' ? grokPermissionMode : undefined,
+                yolo: agent === 'grok' || usesCodexFamilyPermissions ? undefined : yoloMode,
+                permissionMode: agent === 'grok'
+                    ? grokPermissionMode
+                    : usesCodexFamilyPermissions
+                        ? codexFamilyPermissionMode
+                        : undefined,
                 sessionType,
                 worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined,
                 serviceTier: resolvedServiceTier,
-                collaborationMode: resolvedCollaborationMode
+                collaborationMode: resolvedCollaborationMode,
+                copilotAgentMode: agent === 'copilot' ? copilotAgentMode : undefined
             })
 
             if (result.type === 'success') {
@@ -1197,11 +1219,23 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onChange={setGrokPermissionMode}
             />
+            <CodexFamilyPermissionModeSelector
+                agent={agent}
+                value={codexFamilyPermissionMode}
+                isDisabled={isFormDisabled}
+                onChange={setCodexFamilyPermissionMode}
+            />
             <CollaborationModeSelector
                 agent={agent}
                 value={collaborationMode}
                 isDisabled={isFormDisabled}
                 onChange={setCollaborationMode}
+            />
+            <CopilotAgentModeSelector
+                agent={agent}
+                value={copilotAgentMode}
+                isDisabled={isFormDisabled}
+                onChange={setCopilotAgentMode}
             />
             <FastModeSelector
                 visible={showCodexFastMode}
@@ -1209,7 +1243,7 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onChange={setServiceTier}
             />
-            {agent !== 'grok' ? (
+            {agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) ? (
                 <YoloToggle
                     yoloMode={yoloMode}
                     isDisabled={isFormDisabled}
