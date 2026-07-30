@@ -319,7 +319,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
         }]);
     });
 
-    test('parses stall signatures split across stderr chunks and flushes the final record on close', () => {
+    test('parses stall signatures split across stderr chunks without waiting for close', () => {
         const transport = new AcpStdioTransport({ command: 'opencode' });
         const seen: Array<{ type: string; message: string; raw: string }> = [];
         transport.onStderrError((error) => {
@@ -339,11 +339,18 @@ describe('AcpStdioTransport closed stdin writes', () => {
             handler('2 stream closed with error code CANCEL (0x8)');
         }
 
-        expect(seen).toEqual([{
-            type: 'unknown',
-            message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
-            raw: 'provider unavailable, retrying in 30 seconds'
-        }]);
+        expect(seen).toEqual([
+            {
+                type: 'unknown',
+                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
+                raw: 'provider unavailable, retrying in 30 seconds'
+            },
+            {
+                type: 'unknown',
+                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
+                raw: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
+            }
+        ]);
 
         for (const handler of spawnState.closeHandlers) {
             handler(1, null);

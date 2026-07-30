@@ -121,6 +121,7 @@ export class AcpStdioTransport {
             const text = raw.trim();
             logger.debug(`[ACP][stderr] ${text}`);
             this.parseStderrRecords(raw);
+            this.flushActionableStderrTail();
         });
 
         // Block new stdin writes as soon as the process exits, but defer markClosed
@@ -424,6 +425,14 @@ export class AcpStdioTransport {
             if (text) {
                 this.parseStderrError(text);
             }
+        }
+    }
+
+    private flushActionableStderrTail(): void {
+        const pending = this.stderrParseBuffer.trim();
+        if (matchesAcpRetryBackoff(pending) || matchesAcpHttp2Cancel(pending)) {
+            this.stderrParseBuffer = '';
+            this.parseStderrError(pending);
         }
     }
 
