@@ -127,7 +127,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
         }
         this.applyDisplayMode(session.getPermissionMode() as PermissionMode, effectiveModel ?? undefined);
         // Resume / session metadata may not inherit spawn `--mode`; apply via ACP set_mode.
-        await this.applyAgentMode(this.currentAgentMode);
+        await this.applyInitialAgentMode();
 
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListCopilotModels, async () => {
             return await buildCopilotModelsResponseFromBackend(acpSessionId, backend, session.path);
@@ -189,8 +189,8 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
 
             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
 
-            // Empty isolated tick wakes the loop so set-session-config / slash mode
-            // changes apply immediately without inventing a user prompt.
+            // Empty isolated ticks can update non-mode session config without
+            // inventing a user prompt.
             if (batch.message.length === 0) {
                 if (session.queue.size() === 0 && !this.shouldExit) {
                     sendReady();
@@ -385,6 +385,21 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
 
         this.currentAgentMode = agentMode;
         this.applyDisplayAgentMode(agentMode);
+    }
+
+    private async applyInitialAgentMode(): Promise<void> {
+        const requestedMode = this.currentAgentMode;
+        try {
+            await this.applyAgentMode(requestedMode);
+        } catch (error) {
+            if (this.setModeSupported !== false) {
+                throw error;
+            }
+            // The Copilot process was spawned with --mode, so unavailable runtime
+            // switching must not prevent startup from reflecting that initial mode.
+            this.currentAgentMode = requestedMode;
+            this.applyDisplayAgentMode(requestedMode);
+        }
     }
 
     private async handleAbort(): Promise<void> {

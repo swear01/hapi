@@ -7,6 +7,7 @@ type LauncherInternals = {
     activeSessionId: string | null;
     currentAgentMode: string;
     displayAgentMode: string | null;
+    applyInitialAgentMode: () => Promise<void>;
 };
 
 function createLauncher(setMode: (sessionId: string, mode: string) => Promise<void>) {
@@ -46,5 +47,15 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
 
         expect(setMode).toHaveBeenCalledTimes(1);
         expect(internals.currentAgentMode).toBe('interactive');
+    });
+
+    it('continues startup when runtime mode switching is unsupported', async () => {
+        const setMode = vi.fn().mockRejectedValue(new Error('Method not found'));
+        const { internals } = createLauncher(setMode);
+
+        await expect(internals.applyInitialAgentMode()).resolves.toBeUndefined();
+
+        expect(internals.currentAgentMode).toBe('interactive');
+        expect(internals.displayAgentMode).toBe('interactive');
     });
 });

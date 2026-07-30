@@ -18,6 +18,21 @@ import { resolveCopilotRuntimeConfig } from './utils/config';
 import { listSlashCommands } from '@/modules/common/slashCommands';
 import { resolveCopilotSlashCommand } from './utils/slashCommands';
 
+export async function applyCopilotSlashAgentMode(
+    currentAgentMode: import('@hapi/protocol').CopilotAgentMode,
+    nextAgentMode: import('@hapi/protocol').CopilotAgentMode | undefined,
+    activeSession: CopilotSession | null
+): Promise<import('@hapi/protocol').CopilotAgentMode> {
+    if (nextAgentMode === undefined || nextAgentMode === currentAgentMode) {
+        return currentAgentMode;
+    }
+    if (!activeSession) {
+        throw new Error('Copilot remote session is not ready for agent mode switching');
+    }
+    await activeSession.applyRemoteAgentMode(nextAgentMode);
+    return nextAgentMode;
+}
+
 export async function runCopilot(opts: {
     startedBy?: 'runner' | 'terminal';
     startingMode?: 'local' | 'remote';
@@ -137,18 +152,18 @@ export async function runCopilot(opts: {
                 });
 
                 if (slash.kind !== 'passthrough') {
-                    let agentModeChanged = false;
                     if (slash.updates) {
+                        currentAgentMode = await applyCopilotSlashAgentMode(
+                            currentAgentMode,
+                            slash.updates.agentMode,
+                            sessionWrapperRef.current
+                        );
                         if (slash.updates.permissionMode !== undefined) {
                             currentPermissionMode = slash.updates.permissionMode;
                         }
                         if (slash.updates.model !== undefined) {
                             sessionModel = slash.updates.model;
                             resolvedModel = sessionModel;
-                        }
-                        if (slash.updates.agentMode !== undefined) {
-                            agentModeChanged = slash.updates.agentMode !== currentAgentMode;
-                            currentAgentMode = slash.updates.agentMode;
                         }
                         syncSessionMode();
                     }
@@ -162,9 +177,6 @@ export async function runCopilot(opts: {
                                 message: slash.message,
                                 id: randomUUID()
                             });
-                        }
-                        if (agentModeChanged) {
-                            messageQueue.pushIsolated('', buildMode());
                         }
                         sessionWrapperRef.current?.onThinkingChange(false);
                         return;
