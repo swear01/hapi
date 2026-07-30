@@ -319,6 +319,50 @@ describe('AcpStdioTransport closed stdin writes', () => {
         }]);
     });
 
+    test('parses stall signatures split across stderr chunks and flushes the final record on close', () => {
+        const transport = new AcpStdioTransport({ command: 'opencode' });
+        const seen: Array<{ type: string; message: string; raw: string }> = [];
+        transport.onStderrError((error) => {
+            seen.push(error);
+        });
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const stderrHandlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (chunk: string) => void);
+
+        for (const handler of stderrHandlers) {
+            handler('provider unavailable, retry');
+            handler('ing in 30 seconds\n');
+            handler('Error: T: [canceled] http/');
+            handler('2 stream closed with error code CANCEL (0x8)');
+        }
+
+        expect(seen).toEqual([{
+            type: 'unknown',
+            message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
+            raw: 'provider unavailable, retrying in 30 seconds'
+        }]);
+
+        for (const handler of spawnState.closeHandlers) {
+            handler(1, null);
+        }
+
+        expect(seen).toEqual([
+            {
+                type: 'unknown',
+                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
+                raw: 'provider unavailable, retrying in 30 seconds'
+            },
+            {
+                type: 'unknown',
+                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
+                raw: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
+            }
+        ]);
+    });
+
     test('rejects pending requests when stdin.write throws', async () => {
         spawnState.stdinWrite.mockImplementation(() => {
             throw new Error('WritableIterable is closed');

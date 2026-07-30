@@ -62,6 +62,7 @@ export class AcpStdioTransport {
     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
     private buffer = '';
     private recentStderr = '';
+    private stderrParseBuffer = '';
     private emittedModelRejection = false;
     private nextId = 1;
     private protocolError: Error | null = null;
@@ -119,15 +120,7 @@ export class AcpStdioTransport {
             }
             const text = raw.trim();
             logger.debug(`[ACP][stderr] ${text}`);
-            this.parseStderrError(text);
-            // If this chunk alone missed a split keyword/id, retry against the window.
-            if (
-                text
-                && !/Cannot use this model:\s*\S/i.test(text)
-                && /Cannot use this model:\s*\S/i.test(this.recentStderr)
-            ) {
-                this.parseStderrError(this.stderrForCloseError() ?? this.recentStderr);
-            }
+            this.parseStderrRecords(raw);
         });
 
         // Block new stdin writes as soon as the process exits, but defer markClosed
@@ -144,6 +137,7 @@ export class AcpStdioTransport {
         // classify the failure — Node may fire 'exit' before the last stderr 'data'.
         this.process.on('close', (code, signal) => {
             this.releaseAgentCliGuard();
+            this.flushStderrParseBuffer();
             const stderr = this.stderrForCloseError();
             let message = `ACP process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
             if (stderr) {
@@ -420,6 +414,25 @@ export class AcpStdioTransport {
         return source.length > AcpStdioTransport.CLOSE_STDERR_CAP
             ? source.slice(0, AcpStdioTransport.CLOSE_STDERR_CAP)
             : source;
+    }
+
+    private parseStderrRecords(raw: string): void {
+        const lines = (this.stderrParseBuffer + raw).split(/\r?\n/);
+        this.stderrParseBuffer = lines.pop() ?? '';
+        for (const line of lines) {
+            const text = line.trim();
+            if (text) {
+                this.parseStderrError(text);
+            }
+        }
+    }
+
+    private flushStderrParseBuffer(): void {
+        const text = this.stderrParseBuffer.trim();
+        this.stderrParseBuffer = '';
+        if (text) {
+            this.parseStderrError(text);
+        }
     }
 
     private parseStderrError(text: string): void {
