@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => ({
     notification: vi.fn(),
     checkPathsExists: vi.fn(),
     codexModelsLoading: false,
-    directoryExists: undefined as boolean | undefined
+    directoryExists: undefined as boolean | undefined,
+    copilotModels: [] as Array<{ modelId: string; name?: string }>
 }))
 
 vi.mock('@/lib/use-translation', () => ({
@@ -102,6 +103,14 @@ vi.mock('@/hooks/queries/useGrokModelsForCwd', () => ({
         error: null
     })
 }))
+vi.mock('@/hooks/queries/useCopilotModelsForCwd', () => ({
+    useCopilotModelsForCwd: () => ({
+        availableModels: mocks.copilotModels,
+        currentModelId: null,
+        isLoading: false,
+        error: null
+    })
+}))
 vi.mock('../../utils/formatRunnerSpawnError', () => ({
     formatRunnerSpawnError: () => null
 }))
@@ -122,10 +131,17 @@ vi.mock('./LaunchEffortSelector', () => ({
     )
 }))
 vi.mock('./ModelSelector', () => ({
-    ModelSelector: (props: { model: string; onModelChange: (model: string) => void }) => (
-        <button type="button" data-testid="model" onClick={() => props.onModelChange('gpt-5.6-terra')}>
-            {props.model}
-        </button>
+    ModelSelector: (props: {
+        model: string
+        options?: Array<{ value: string; label: string }>
+        onModelChange: (model: string) => void
+    }) => (
+        <>
+            <button type="button" data-testid="model" onClick={() => props.onModelChange('gpt-5.6-terra')}>
+                {props.model}
+            </button>
+            <div data-testid="model-options">{props.options?.map((option) => option.label).join(',')}</div>
+        </>
     )
 }))
 vi.mock('./ReasoningEffortSelector', () => ({
@@ -159,6 +175,7 @@ describe('NewSession launch preferences', () => {
         mocks.checkPathsExists.mockImplementation(async () => ({ 'C:\\repo': mocks.directoryExists }))
         mocks.codexModelsLoading = false
         mocks.directoryExists = true
+        mocks.copilotModels = []
         savePreferredAgent('codex')
     })
 
@@ -184,6 +201,30 @@ describe('NewSession launch preferences', () => {
         await waitFor(() => {
             expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-sol')
             expect(screen.getByTestId('reasoning')).toHaveTextContent('xhigh')
+        })
+    })
+
+    it('shows discovered Copilot models for the selected directory', async () => {
+        mocks.copilotModels = [
+            { modelId: 'gpt-5.6', name: 'GPT-5.6' },
+            { modelId: 'auto', name: 'Auto' }
+        ]
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByLabelText('Copilot'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('model-options')).toHaveTextContent('Auto,GPT-5.6')
         })
     })
 

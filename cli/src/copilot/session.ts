@@ -14,6 +14,7 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     localLaunchFailure: LocalLaunchFailure | null = null;
+    private remoteAgentModeApplier: ((mode: CopilotAgentMode) => Promise<void>) | null = null;
 
     constructor(opts: {
         api: ApiClient;
@@ -68,6 +69,17 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
     };
 
     getAgentMode = (): CopilotAgentMode => this.agentMode;
+
+    setRemoteAgentModeApplier = (applier: ((mode: CopilotAgentMode) => Promise<void>) | null): void => {
+        this.remoteAgentModeApplier = applier;
+    };
+
+    applyRemoteAgentMode = async (mode: CopilotAgentMode): Promise<void> => {
+        if (!this.remoteAgentModeApplier) {
+            throw new Error('Copilot agent mode switching is unavailable for this session');
+        }
+        await this.remoteAgentModeApplier(mode);
+    };
 
     pushKeepAlive = (): void => {
         this.client.keepAlive(this.thinking, this.mode, {

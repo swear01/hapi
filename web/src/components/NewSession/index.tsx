@@ -10,6 +10,7 @@ import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
 import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd'
 import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
+import { useCopilotModelsForCwd } from '@/hooks/queries/useCopilotModelsForCwd'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
@@ -539,6 +540,24 @@ export function NewSession(props: {
             cwdExists: deferredDirectoryExists,
         })
     })
+    const copilotModelsState = useCopilotModelsForCwd({
+        api: props.api,
+        machineId,
+        cwd: deferredDirectory,
+        enabled: agent === 'copilot' && deferredDirectoryExists === true
+    })
+    const copilotModelOptions = useMemo(
+        () => [
+            { value: 'auto', label: 'Auto' },
+            ...copilotModelsState.availableModels
+                .filter((candidate) => candidate.modelId !== 'auto')
+                .map((candidate) => ({
+                    value: candidate.modelId,
+                    label: candidate.name ?? candidate.modelId
+                }))
+        ],
+        [copilotModelsState.availableModels]
+    )
     const grokModelOptions = useMemo(
         () => buildGrokModelOptions(grokModelsState.availableModels),
         [grokModelsState.availableModels]
@@ -658,6 +677,25 @@ export function NewSession(props: {
         grokModelsState.availableModels,
         grokModelsState.error,
         grokModelsState.isLoading,
+        model
+    ])
+    useEffect(() => {
+        if (
+            agent === 'copilot'
+            && deferredDirectoryExists === true
+            && !copilotModelsState.isLoading
+            && !copilotModelsState.error
+            && model !== 'auto'
+            && !copilotModelsState.availableModels.some((candidate) => candidate.modelId === model)
+        ) {
+            setModel('auto')
+        }
+    }, [
+        agent,
+        copilotModelsState.availableModels,
+        copilotModelsState.error,
+        copilotModelsState.isLoading,
+        deferredDirectoryExists,
         model
     ])
 
@@ -1180,19 +1218,25 @@ export function NewSession(props: {
                                 ? codexModelOptions
                                 : agent === 'grok'
                                     ? grokModelOptions
+                                    : agent === 'copilot'
+                                        ? copilotModelOptions
                                 : undefined
                         }
                         isDisabled={
                             isFormDisabled
                             || (agent === 'codex' && Boolean(codexModelsState.error))
                             || (agent === 'grok' && Boolean(grokModelsState.error))
+                            || (agent === 'copilot' && Boolean(copilotModelsState.error))
                         }
                         isLoading={(agent === 'codex' && codexModelsState.isLoading)
-                            || (agent === 'grok' && grokModelsState.isLoading)}
+                            || (agent === 'grok' && grokModelsState.isLoading)
+                            || (agent === 'copilot' && copilotModelsState.isLoading)}
                         error={agent === 'codex' && codexModelsState.error
                             ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`
                             : agent === 'grok' && grokModelsState.error
                                 ? `${t('newSession.model.loadFailed')}: ${grokModelsState.error}`
+                                : agent === 'copilot' && copilotModelsState.error
+                                    ? `${t('newSession.model.loadFailed')}: ${copilotModelsState.error}`
                                 : null}
                         onModelChange={setModel}
                     />

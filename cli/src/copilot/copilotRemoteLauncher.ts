@@ -15,7 +15,7 @@ import { getCopilotAgentModeLabel, type CopilotAgentMode } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { buildCopilotModelsResponseFromBackend } from '@/modules/common/copilotModels';
 
-class CopilotRemoteLauncher extends RemoteLauncherBase {
+export class CopilotRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CopilotSession;
     private readonly model?: string;
     private backend: ReturnType<typeof createCopilotBackend> | null = null;
@@ -29,6 +29,7 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
     private currentBackendModel: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
     private setModeSupported: boolean | undefined = undefined;
+    private activeSessionId: string | null = null;
     private readonly lastDisplayedToolCall = new Map<string, string>();
 
     constructor(session: CopilotSession, opts: { model?: string }) {
@@ -101,6 +102,8 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
             });
         }
         session.onSessionFound(acpSessionId);
+        this.activeSessionId = acpSessionId;
+        session.setRemoteAgentModeApplier((agentMode) => this.applyAgentMode(agentMode));
 
         this.permissionHandler = new CopilotPermissionHandler(
             session.client,
@@ -123,9 +126,8 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
         }
         this.applyDisplayMode(session.getPermissionMode() as PermissionMode, effectiveModel ?? undefined);
-        this.applyDisplayAgentMode(this.currentAgentMode);
         // Resume / session metadata may not inherit spawn `--mode`; apply via ACP set_mode.
-        await this.applyBackendAgentMode(backend, acpSessionId, this.currentAgentMode);
+        await this.applyAgentMode(this.currentAgentMode);
 
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListCopilotModels, async () => {
             return await buildCopilotModelsResponseFromBackend(acpSessionId, backend, session.path);
@@ -182,7 +184,7 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
 
             const desiredAgentMode = batch.mode.agentMode ?? session.getAgentMode();
             if (desiredAgentMode !== this.currentAgentMode) {
-                await this.applyBackendAgentMode(backend, acpSessionId, desiredAgentMode);
+                await this.applyAgentMode(desiredAgentMode);
             }
 
             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
@@ -230,6 +232,8 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+        this.session.setRemoteAgentModeApplier(null);
+        this.activeSessionId = null;
 
         if (this.permissionHandler) {
             await this.permissionHandler.cancelAll('Session ended');
@@ -344,16 +348,14 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
-    private async applyBackendAgentMode(
-        backend: ReturnType<typeof createCopilotBackend>,
-        sessionId: string,
-        agentMode: CopilotAgentMode
-    ): Promise<void> {
-        this.currentAgentMode = agentMode;
-        this.applyDisplayAgentMode(agentMode);
-
+    public async applyAgentMode(agentMode: CopilotAgentMode): Promise<void> {
+        const backend = this.backend;
+        const sessionId = this.activeSessionId;
+        if (!backend || !sessionId) {
+            throw new Error('Copilot agent mode switching is unavailable before the remote session is ready');
+        }
         if (this.setModeSupported === false) {
-            return;
+            throw new Error('This Copilot CLI build does not support agent mode switching');
         }
 
         try {
@@ -369,14 +371,20 @@ class CopilotRemoteLauncher extends RemoteLauncherBase {
                     type: 'message',
                     message: 'This Copilot CLI build does not support agent mode switching. Restart the session to apply Plan or Autopilot.'
                 });
-                return;
+            }
+            if (this.setModeSupported === false) {
+                throw error;
             }
             logger.warn('[copilot-remote] Failed to apply agent mode', error);
             this.session.sendSessionEvent({
                 type: 'message',
                 message: `Failed to switch Copilot agent mode to ${getCopilotAgentModeLabel(agentMode)}: ${message}`
             });
+            throw error;
         }
+
+        this.currentAgentMode = agentMode;
+        this.applyDisplayAgentMode(agentMode);
     }
 
     private async handleAbort(): Promise<void> {

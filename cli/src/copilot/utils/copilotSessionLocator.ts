@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { parse as parseYaml } from 'yaml';
 import { logger } from '@/ui/logger';
 
 export type LocatedCopilotSession = {
@@ -36,11 +37,19 @@ function normalizePath(path: string): string {
 
 /** Minimal workspace.yaml field extraction (id + cwd). */
 export function parseCopilotWorkspaceYaml(content: string): { id?: string; cwd?: string } {
-    const id = /^id:\s*(.+)\s*$/m.exec(content)?.[1]?.trim();
-    const cwd = /^cwd:\s*(.+)\s*$/m.exec(content)?.[1]?.trim();
+    let parsed: unknown;
+    try {
+        parsed = parseYaml(content);
+    } catch {
+        return {};
+    }
+    if (!parsed || typeof parsed !== 'object') {
+        return {};
+    }
+    const { id, cwd } = parsed as { id?: unknown; cwd?: unknown };
     return {
-        id: id || undefined,
-        cwd: cwd || undefined
+        id: typeof id === 'string' ? id : undefined,
+        cwd: typeof cwd === 'string' ? cwd : undefined
     };
 }
 

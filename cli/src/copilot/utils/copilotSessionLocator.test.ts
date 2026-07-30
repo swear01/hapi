@@ -29,6 +29,16 @@ describe('parseCopilotWorkspaceYaml', () => {
             cwd: '/home/ubuntu/hapi'
         });
     });
+
+    it('unquotes special characters in cwd values', () => {
+        expect(parseCopilotWorkspaceYaml([
+            'id: abc-123',
+            'cwd: "/home/ubuntu/project #1"'
+        ].join('\n'))).toEqual({
+            id: 'abc-123',
+            cwd: '/home/ubuntu/project #1'
+        });
+    });
 });
 
 describe('createCopilotSessionLocator', () => {
@@ -63,6 +73,35 @@ describe('createCopilotSessionLocator', () => {
             'client_name: github/cli'
         ].join('\n'));
 
+        await vi.waitFor(() => {
+            expect(located).toHaveBeenCalledWith({
+                sessionId,
+                sessionDir
+            });
+        }, { timeout: 2000 });
+    });
+
+    it('locates a session with a quoted cwd containing special characters', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'copilot-locator-'));
+        const sessionId = 'quoted-cwd';
+        const sessionDir = join(root, sessionId);
+        const cwd = '/work/project #1';
+        const located = vi.fn();
+        const locator = createCopilotSessionLocator({
+            cwd,
+            startupTimestampMs: Date.now() - 1000,
+            sessionStateRoot: root,
+            intervalMs: 50,
+            onLocated: located
+        });
+        locators.push(locator);
+
+        await locator.ready;
+        await mkdir(sessionDir, { recursive: true });
+        await writeFile(join(sessionDir, 'workspace.yaml'), [
+            `id: ${sessionId}`,
+            `cwd: "${cwd}"`
+        ].join('\n'));
         await vi.waitFor(() => {
             expect(located).toHaveBeenCalledWith({
                 sessionId,

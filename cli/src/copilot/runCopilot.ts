@@ -109,14 +109,6 @@ export async function runCopilot(opts: {
         agentMode: currentAgentMode
     });
 
-    /** Wake the remote loop so agent-mode changes apply via setMode without a fake prompt. */
-    const wakeForAgentMode = () => {
-        if (sessionWrapperRef.current?.mode !== 'remote') {
-            return;
-        }
-        messageQueue.pushIsolated('', buildMode());
-    };
-
     const preparingLocalIds = new Set<string>();
     const cancelledBeforeEnqueue = new Set<string>();
     let userMessageChain: Promise<void> = Promise.resolve();
@@ -172,7 +164,7 @@ export async function runCopilot(opts: {
                             });
                         }
                         if (agentModeChanged) {
-                            wakeForAgentMode();
+                            messageQueue.pushIsolated('', buildMode());
                         }
                         sessionWrapperRef.current?.onThinkingChange(false);
                         return;
@@ -250,20 +242,22 @@ export async function runCopilot(opts: {
             applied.model = sessionModel;
         }
 
-        let agentModeChanged = false;
         if (config.copilotAgentMode !== undefined) {
             if (!isCopilotAgentMode(config.copilotAgentMode)) {
                 throw new Error('Invalid copilot agent mode');
             }
-            agentModeChanged = config.copilotAgentMode !== currentAgentMode;
-            currentAgentMode = config.copilotAgentMode;
+            if (config.copilotAgentMode !== currentAgentMode) {
+                const activeSession = sessionWrapperRef.current;
+                if (!activeSession) {
+                    throw new Error('Copilot remote session is not ready for agent mode switching');
+                }
+                await activeSession.applyRemoteAgentMode(config.copilotAgentMode);
+                currentAgentMode = config.copilotAgentMode;
+            }
             applied.copilotAgentMode = currentAgentMode;
         }
 
         syncSessionMode();
-        if (agentModeChanged) {
-            wakeForAgentMode();
-        }
         return { applied };
     });
 
