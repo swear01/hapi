@@ -554,6 +554,28 @@ describe('session model', () => {
         expect(cache.getSession(session.id)?.collaborationMode).toBe('default')
     })
 
+    it('ignores invalid personality values from session-alive events', () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+        const session = cache.getOrCreateSession(
+            'session-personality-heartbeat',
+            { path: '/tmp/project', host: 'localhost', flavor: 'codex' },
+            null,
+            'default'
+        )
+
+        cache.handleSessionAlive({
+            sid: session.id,
+            time: Date.now(),
+            thinking: false,
+            personality: 'invalid' as never
+        })
+
+        expect(cache.getSession(session.id)?.personality).toBeNull()
+        expect(store.sessions.getSession(session.id)?.personality).toBeNull()
+    })
+
     it('touches session updatedAt when new message activity is recorded', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []

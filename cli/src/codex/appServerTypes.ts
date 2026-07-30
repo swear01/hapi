@@ -1,3 +1,5 @@
+import type { CodexPersonality } from '@hapi/protocol/modes';
+
 export type ApprovalPolicyPreset = 'untrusted' | 'on-failure' | 'on-request' | 'never';
 
 export type ApprovalPolicy =
@@ -92,7 +94,7 @@ export interface ThreadStartParams {
     config?: Record<string, unknown>;
     baseInstructions?: string;
     developerInstructions?: string;
-    personality?: string;
+    personality?: CodexPersonality | null;
     /** Client-supplied analytics classification persisted with the thread. */
     threadSource?: string;
     ephemeral?: boolean;
@@ -121,7 +123,7 @@ export interface ThreadResumeParams {
     config?: Record<string, unknown>;
     baseInstructions?: string;
     developerInstructions?: string;
-    personality?: string;
+    personality?: CodexPersonality | null;
 }
 
 export interface ThreadResumeResponse {
@@ -213,7 +215,7 @@ export interface TurnStartParams {
     serviceTier?: string | null;
     effort?: ReasoningEffort;
     summary?: ReasoningSummary;
-    personality?: string;
+    personality?: CodexPersonality | null;
     outputSchema?: unknown;
     collaborationMode?: CollaborationMode;
 }

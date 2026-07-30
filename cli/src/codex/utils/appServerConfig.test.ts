@@ -165,7 +165,7 @@ describe('appServerConfig', () => {
         });
     });
 
-    it('passes personality to thread and turn params only when selected', () => {
+    it('passes selected and default personalities to thread and turn params', () => {
         const thread = buildThreadStartParams({
             cwd: '/workspace/project',
             mode: { permissionMode: 'default', collaborationMode: 'default', personality: 'friendly' },
@@ -175,14 +175,14 @@ describe('appServerConfig', () => {
             threadId: 'thread-1', message: 'hello', cwd: '/workspace/project',
             mode: { permissionMode: 'default', collaborationMode: 'default', model: 'gpt-5.5', personality: 'pragmatic' }
         });
-        const unset = buildTurnStartParams({
+        const defaultPersonality = buildTurnStartParams({
             threadId: 'thread-1', message: 'hello', cwd: '/workspace/project',
             mode: { permissionMode: 'default', collaborationMode: 'default', model: 'gpt-5.5', personality: null }
         });
 
         expect(thread.personality).toBe('friendly');
         expect(turn.personality).toBe('pragmatic');
-        expect('personality' in unset).toBe(false);
+        expect(defaultPersonality.personality).toBeNull();
     });
 
     it('translates Fast to the advertised app-server tier (priority) in thread params', () => {

@@ -566,6 +566,7 @@ export type CodexModelSummary = {
     defaultReasoningEffort?: string | null
     defaultServiceTier?: string | null
     supportedReasoningEfforts?: string[]
+    supportsPersonality?: boolean
     /** Service tier ids advertised for this model in the current auth/plan context (e.g. 'fast'). */
     serviceTiers?: string[]
 }

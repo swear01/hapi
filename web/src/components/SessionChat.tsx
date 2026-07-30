@@ -25,6 +25,7 @@ import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import {
     getCodexModelReasoningEfforts,
+    resolveCodexModel,
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
@@ -598,6 +599,8 @@ function SessionChatInner(props: SessionChatProps) {
             : undefined,
         [agentFlavor, codexModelsState.models, props.session.model]
     )
+    const codexPersonalitySupported = agentFlavor === 'codex'
+        && resolveCodexModel(codexModelsState.models, props.session.model)?.supportsPersonality === true
     const codexReasoningEffortOptions = useMemo(
         () => codexSupportedReasoningEfforts?.map((value) => ({ value })),
         [codexSupportedReasoningEfforts]
@@ -1378,7 +1381,7 @@ function SessionChatInner(props: SessionChatProps) {
                         onClearSchedule={() => setPendingSchedule(null)}
                         permissionMode={props.session.permissionMode}
                         collaborationMode={codexCollaborationModeSupported ? props.session.collaborationMode : undefined}
-                        personality={codexCollaborationModeSupported ? props.session.personality : undefined}
+                        personality={codexPersonalitySupported ? props.session.personality : undefined}
                         threadGoal={reduced.latestGoal}
                         model={props.session.model}
                         modelReasoningEffort={agentFlavor === 'codex' || agentFlavor === 'opencode' ? props.session.modelReasoningEffort : undefined}
@@ -1435,7 +1438,7 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? handleCollaborationModeChange
                                 : undefined
                         }
-                        onPersonalityChange={codexCollaborationModeSupported && props.session.active && !controlledByUser ? handlePersonalityChange : undefined}
+                        onPersonalityChange={codexPersonalitySupported && props.session.active && !controlledByUser ? handlePersonalityChange : undefined}
                         onPermissionModeChange={handlePermissionModeChange}
                         selectedModelBase={
                             agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'

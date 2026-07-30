@@ -212,7 +212,7 @@ export function buildThreadStartParams(args: {
     if (args.mode.model) {
         params.model = args.mode.model;
     }
-    if (args.mode.personality) {
+    if (args.mode.personality !== undefined) {
         params.personality = args.mode.personality;
     }
 
@@ -266,7 +266,7 @@ export function buildTurnStartParams(args: {
         : args.mode?.collaborationMode;
     const model = args.overrides?.model ?? args.mode?.model;
     const modelReasoningEffort = args.mode?.modelReasoningEffort;
-    if (args.mode?.personality) {
+    if (args.mode?.personality !== undefined) {
         params.personality = args.mode.personality;
     }
 

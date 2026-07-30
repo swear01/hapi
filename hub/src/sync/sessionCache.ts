@@ -1,4 +1,4 @@
-import { AgentStateSchema, MetadataSchema, TeamStateSchema } from '@hapi/protocol/schemas'
+import { AgentStateSchema, CodexPersonalitySchema, MetadataSchema, TeamStateSchema } from '@hapi/protocol/schemas'
 import type { CodexCollaborationMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
 import { clampAliveTime } from './aliveTime'
@@ -292,13 +292,20 @@ export class SessionCache {
         if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
         }
-        if (payload.personality !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'personality', t)) {
-            if (payload.personality !== session.personality) {
-                this.store.sessions.setSessionPersonality(payload.sid, payload.personality, session.namespace, {
+        const personality = payload.personality === undefined
+            ? undefined
+            : CodexPersonalitySchema.nullable().safeParse(payload.personality)
+        if (
+            personality !== undefined
+            && personality.success
+            && !this.isStaleRuntimeKeepAlive(session.id, 'personality', t)
+        ) {
+            if (personality.data !== session.personality) {
+                this.store.sessions.setSessionPersonality(payload.sid, personality.data, session.namespace, {
                     touchUpdatedAt: false
                 })
             }
-            session.personality = payload.personality
+            session.personality = personality.data
         }
 
         const now = Date.now()
