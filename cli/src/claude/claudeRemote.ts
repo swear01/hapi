@@ -31,7 +31,7 @@ export async function claudeRemote(opts: {
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
-    onSessionFound: (id: string) => void,
+    onSessionFound: (id: string, extras?: { forkedFrom?: string }) => void,
     onThinkingChange?: (thinking: boolean) => void,
     onMessage: (message: SDKMessage) => void,
     onFirstResult?: (initialMessage: string) => void,
@@ -79,6 +79,13 @@ export async function claudeRemote(opts: {
         });
     }
     process.env.DISABLE_AUTOUPDATER = '1';
+
+    // Message-level Fork current passes `--fork-session` via claudeArgs from the runner.
+    const forkSession = Boolean(opts.claudeArgs?.includes('--fork-session'));
+    if (forkSession) {
+        logger.debug(`[claudeRemote] --fork-session requested via claudeArgs`);
+    }
+    const forkedFrom = forkSession ? startFrom : null;
 
     // Get initial message
     let initial;
@@ -131,6 +138,7 @@ export async function claudeRemote(opts: {
     const sdkOptions: Options = {
         cwd: opts.path,
         resume: startFrom ?? undefined,
+        forkSession,
         mcpServers: opts.mcpServers,
         permissionMode: initial.mode.permissionMode,
         model: initial.mode.model,
@@ -256,7 +264,10 @@ export async function claudeRemote(opts: {
                     const projectDir = getProjectPath(opts.path);
                     const found = await awaitFileExist(join(projectDir, `${systemInit.session_id}.jsonl`));
                     logger.debug(`[claudeRemote] Session file found: ${systemInit.session_id} ${found}`);
-                    opts.onSessionFound(systemInit.session_id);
+                    const extras = forkedFrom && forkedFrom !== systemInit.session_id
+                        ? { forkedFrom }
+                        : undefined;
+                    opts.onSessionFound(systemInit.session_id, extras);
                 }
             }
 

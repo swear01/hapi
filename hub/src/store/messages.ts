@@ -701,3 +701,70 @@ export function mergeSessionMessages(
         throw error
     }
 }
+
+/**
+ * Truncate transcript at/after the message with `localId`, optionally replacing
+ * the removed suffix with `replacement` messages. Bumps message epoch so web
+ * clients reset their window.
+ */
+export function truncateMessagesFromLocalId(
+    db: Database,
+    sessionId: string,
+    localId: string,
+    replacement: Array<{
+        content: unknown
+        localId?: string | null
+        createdAt?: number
+        invokedAt?: number | null
+    }> = []
+): { deleted: number; inserted: number; epoch: number } {
+    return db.transaction(() => {
+        const target = db.prepare(`
+            SELECT id, seq, COALESCE(invoked_at, created_at) AS position_at
+            FROM messages
+            WHERE session_id = ? AND local_id = ?
+            LIMIT 1
+        `).get(sessionId, localId) as { id: string; seq: number; position_at: number } | undefined
+
+        if (!target) {
+            throw new Error(`Message not found for localId: ${localId}`)
+        }
+
+        const deleted = db.prepare(`
+            DELETE FROM messages
+            WHERE session_id = ?
+              AND (
+                COALESCE(invoked_at, created_at) > ?
+                OR (COALESCE(invoked_at, created_at) = ? AND seq >= ?)
+              )
+        `).run(sessionId, target.position_at, target.position_at, target.seq)
+
+        let inserted = 0
+        for (const message of replacement) {
+            const now = Date.now()
+            const msgSeqRow = db.prepare(
+                'SELECT COALESCE(MAX(seq), 0) + 1 AS nextSeq FROM messages WHERE session_id = ?'
+            ).get(sessionId) as { nextSeq: number }
+            const id = randomUUID()
+            const createdAt = message.createdAt ?? now
+            const invokedAt = message.invokedAt === undefined ? createdAt : message.invokedAt
+            const rowLocalId = message.localId ?? null
+            db.prepare(`
+                INSERT INTO messages (id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+            `).run(
+                id,
+                sessionId,
+                JSON.stringify(message.content),
+                createdAt,
+                msgSeqRow.nextSeq,
+                rowLocalId,
+                invokedAt
+            )
+            inserted += 1
+        }
+
+        const epoch = bumpMessageEpoch(db, sessionId)
+        return { deleted: deleted.changes, inserted, epoch }
+    })()
+}

@@ -453,6 +453,54 @@ function SessionChatInner(props: SessionChatProps) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
     const navigate = useNavigate()
+    const [historyActionPending, setHistoryActionPending] = useState(false)
+
+    const latestCompletedBoundaryId = useMemo(() => {
+        for (let i = props.messages.length - 1; i >= 0; i -= 1) {
+            const message = props.messages[i]
+            if (!message) continue
+            // Prefer latest assistant; else latest completed user message.
+            const content = message.content as { role?: string } | undefined
+            const role = content && typeof content === 'object' && 'role' in content
+                ? content.role
+                : undefined
+            if (role === 'agent' || role === 'assistant') return message.id
+        }
+        for (let i = props.messages.length - 1; i >= 0; i -= 1) {
+            const message = props.messages[i]
+            if (!message) continue
+            const content = message.content as { role?: string } | undefined
+            const role = content && typeof content === 'object' && 'role' in content
+                ? content.role
+                : undefined
+            if (role === 'user' && message.invokedAt != null) return message.id
+        }
+        return null
+    }, [props.messages])
+
+    const isLatestCompletedBoundary = useCallback((messageId: string) => {
+        return latestCompletedBoundaryId === messageId
+    }, [latestCompletedBoundaryId])
+
+    const onForkConversation = useCallback(async (messageLocalId?: string) => {
+        setHistoryActionPending(true)
+        try {
+            const result = await props.api.forkConversation(props.session.id, messageLocalId)
+            await navigate({ to: '/sessions/$sessionId', params: { sessionId: result.sessionId } })
+        } finally {
+            setHistoryActionPending(false)
+        }
+    }, [navigate, props.api, props.session.id])
+
+    const onRewindConversation = useCallback(async (messageLocalId: string) => {
+        setHistoryActionPending(true)
+        try {
+            await props.api.rewindConversation(props.session.id, messageLocalId)
+            props.onRefresh()
+        } finally {
+            setHistoryActionPending(false)
+        }
+    }, [props.api, props.onRefresh, props.session.id])
     const sessionInactive = !props.session.active
     const inactiveCanResume = inactiveSessionCanResume(
         props.session,
@@ -1295,6 +1343,10 @@ function SessionChatInner(props: SessionChatProps) {
                         disabled={sessionInactive}
                         onRefresh={props.onRefresh}
                         onRetryMessage={props.onRetryMessage}
+                        historyActionPending={historyActionPending}
+                        onForkConversation={onForkConversation}
+                        onRewindConversation={onRewindConversation}
+                        isLatestCompletedBoundary={isLatestCompletedBoundary}
                         onViewModeChange={props.onViewModeChange}
                         isSyncingTail={props.isSyncingTail}
                         messagesWarning={props.messagesWarning}

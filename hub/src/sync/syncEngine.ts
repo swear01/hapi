@@ -12,6 +12,7 @@ import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpReq
 import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
+import { randomUUID } from 'node:crypto'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
@@ -820,6 +821,182 @@ async uploadScratchlistAttachment(
 
     async abortSession(sessionId: string): Promise<void> {
         await this.rpcGateway.abortSession(sessionId)
+    }
+
+    private assertConversationHistoryIdle(session: Session): void {
+        if (!session.active) {
+            throw new Error('Session must be active')
+        }
+        if (session.agentState?.controlledByUser === true) {
+            throw new Error('Conversation history actions require a remote session')
+        }
+        if (session.thinking) {
+            throw new Error('Session is busy')
+        }
+        const queued = this.store.messages.getImmediateQueuedLocalMessages(session.id)
+        if (queued.length > 0) {
+            throw new Error('Session has queued messages')
+        }
+    }
+
+    async forkConversation(
+        sessionId: string,
+        namespace: string,
+        messageLocalId?: string
+    ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
+        const access = this.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) {
+            return { type: 'error', message: access.reason === 'not-found' ? 'Session not found' : 'Access denied' }
+        }
+        const source = access.session
+        try {
+            this.assertConversationHistoryIdle(source)
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+
+        const history = source.metadata?.capabilities?.conversationHistory
+        if (messageLocalId) {
+            if (history?.forkAtMessage !== true) {
+                return { type: 'error', message: 'Historical fork is not supported for this session' }
+            }
+        } else if (history?.forkCurrent !== true) {
+            return { type: 'error', message: 'Fork current is not supported for this session' }
+        }
+
+        const machineId = source.metadata?.machineId
+        const directory = source.metadata?.path
+        if (!machineId || !directory) {
+            return { type: 'error', message: 'Session is missing machine or path metadata' }
+        }
+
+        let rpcResult: Awaited<ReturnType<RpcGateway['forkConversation']>>
+        try {
+            rpcResult = await this.rpcGateway.forkConversation(
+                sessionId,
+                messageLocalId ? { messageLocalId } : {}
+            )
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+
+        if (!rpcResult?.nativeSessionId) {
+            return { type: 'error', message: 'Native fork did not return a session id' }
+        }
+
+        const flavor = this.resolveFlavor(source)
+        const childId = randomUUID()
+        const childMetadata: Record<string, unknown> = {
+            path: directory,
+            host: source.metadata?.host ?? 'unknown',
+            machineId,
+            flavor,
+            forkedFrom: sessionId,
+            startedBy: 'runner',
+            capabilities: source.metadata?.capabilities
+        }
+        if (flavor === 'codex') {
+            childMetadata.codexSessionId = rpcResult.nativeSessionId
+        } else if (flavor === 'grok') {
+            childMetadata.grokSessionId = rpcResult.nativeSessionId
+        } else if (flavor === 'claude') {
+            // Child will bind the forked Claude id after --fork-session starts.
+            childMetadata.claudeSessionId = rpcResult.forkSession ? undefined : rpcResult.nativeSessionId
+        }
+
+        let childCreated = false
+        try {
+            this.sessionCache.getOrCreateSession(
+                `fork:${childId}`,
+                childMetadata,
+                null,
+                namespace,
+                source.model ?? undefined,
+                source.effort ?? undefined,
+                source.modelReasoningEffort ?? undefined,
+                childId
+            )
+            childCreated = true
+
+            const spawn = await this.rpcGateway.spawnSession(
+                machineId,
+                directory,
+                flavor,
+                source.model ?? undefined,
+                source.modelReasoningEffort ?? undefined,
+                undefined,
+                'simple',
+                undefined,
+                rpcResult.nativeSessionId,
+                source.effort ?? undefined,
+                source.permissionMode,
+                source.serviceTier ?? undefined,
+                childId,
+                source.collaborationMode,
+                rpcResult.forkSession === true
+            )
+            if (spawn.type !== 'success') {
+                throw new Error(spawn.message)
+            }
+            return { type: 'success', sessionId: childId }
+        } catch (error) {
+            if (childCreated) {
+                try {
+                    await this.deleteSession(childId)
+                } catch {
+                    // best-effort cleanup
+                }
+            }
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+    }
+
+    async rewindConversation(
+        sessionId: string,
+        namespace: string,
+        messageLocalId: string
+    ): Promise<{ type: 'success' } | { type: 'error'; message: string; hydrateFailed?: boolean }> {
+        const access = this.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) {
+            return { type: 'error', message: access.reason === 'not-found' ? 'Session not found' : 'Access denied' }
+        }
+        const session = access.session
+        try {
+            this.assertConversationHistoryIdle(session)
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+        if (session.metadata?.capabilities?.conversationHistory?.rewindToMessage !== true) {
+            return { type: 'error', message: 'Rewind is not supported for this session' }
+        }
+
+        let rpcResult: Awaited<ReturnType<RpcGateway['rewindConversation']>>
+        try {
+            rpcResult = await this.rpcGateway.rewindConversation(sessionId, { messageLocalId })
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+
+        if (rpcResult?.success !== true) {
+            return { type: 'error', message: 'Native rewind failed' }
+        }
+
+        try {
+            this.store.messages.truncateMessagesFromLocalId(
+                sessionId,
+                rpcResult.truncateFromLocalId ?? messageLocalId,
+                rpcResult.messages ?? []
+            )
+            this.eventPublisher.emit({ type: 'messages-invalidated', sessionId, namespace })
+            this.sessionCache.refreshSession(sessionId)
+            return { type: 'success' }
+        } catch (error) {
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : String(error),
+                hydrateFailed: true
+            }
+        }
     }
 
     async archiveSession(sessionId: string): Promise<void> {

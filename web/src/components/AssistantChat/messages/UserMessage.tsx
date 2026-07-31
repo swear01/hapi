@@ -46,6 +46,25 @@ export function HappyUserMessage() {
     const onRetry = canRetry ? () => ctx.onRetryMessage!(localId) : undefined
     const showStatus = shouldShowMessageStatus(status)
 
+    const history = ctx.metadata?.capabilities?.conversationHistory
+    const hasNativePoint = typeof localId === 'string'
+        && localId.length > 0
+        && ctx.metadata?.conversationHistoryPoints?.[localId] === true
+    const isLatestBoundary = ctx.isLatestCompletedBoundary?.(messageId) === true
+    const showHistoricalFork = Boolean(
+        history?.forkAtMessage
+        && hasNativePoint
+        && !isLatestBoundary
+        && !ctx.disabled
+        && ctx.onForkConversation
+    )
+    const showRewind = Boolean(
+        history?.rewindToMessage
+        && hasNativePoint
+        && !ctx.disabled
+        && ctx.onRewindConversation
+    )
+
     if (isCliOutput) {
         return (
             <MessagePrimitive.Root
@@ -83,7 +102,20 @@ export function HappyUserMessage() {
                     )}
                 </div>
             </div>
-            <MessageActions align="end" copyText={hasText ? text : undefined} messageElementId={elementId} />
+            <MessageActions
+                align="end"
+                copyText={hasText ? text : undefined}
+                messageElementId={elementId}
+                showFork={showHistoricalFork}
+                showRewind={showRewind}
+                historyActionPending={ctx.historyActionPending}
+                onFork={showHistoricalFork && localId
+                    ? () => ctx.onForkConversation!(localId)
+                    : undefined}
+                onRewind={showRewind && localId
+                    ? () => ctx.onRewindConversation!(localId)
+                    : undefined}
+            />
         </MessagePrimitive.Root>
     )
 }

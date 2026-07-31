@@ -1114,13 +1114,25 @@ export function buildCliArgs(
       args.push('--resume', options.resumeSessionId);
     }
   }
+  // Message-level Fork current for Claude: must follow --resume.
+  if (options.forkSession && agentCommand === 'claude') {
+    args.push('--fork-session');
+  }
   args.push('--hapi-starting-mode', 'remote', '--started-by', 'runner');
   // Codex import/resume (#1088) and Cursor ACP remote resume (#991) both reuse
   // the original HAPI row via --existing-session-id so the hub does not depend
   // on session-ready over a remote socket before merge.
-  if (agent === 'codex' || agent === 'cursor') {
+  // Claude message-level fork also reuses the pending child row.
+  if (agent === 'codex' || agent === 'cursor' || (agentCommand === 'claude' && options.forkSession)) {
     const existingSessionId = options.existingSessionId ?? options.sessionId;
     if (existingSessionId) {
+      args.push('--existing-session-id', existingSessionId);
+    }
+  }
+  // Grok fork children also bind the pending HAPI session id.
+  if (agent === 'grok') {
+    const existingSessionId = options.existingSessionId ?? options.sessionId;
+    if (existingSessionId && !args.includes('--existing-session-id')) {
       args.push('--existing-session-id', existingSessionId);
     }
   }

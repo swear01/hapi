@@ -20,6 +20,8 @@ import {
 import { GrokPermissionHandler } from './utils/permissionHandler'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { GROK_TITLE_INSTRUCTION } from './utils/systemPrompt'
+import { GrokConversationHistory } from './conversationHistory'
+import { isObject } from '@hapi/protocol'
 
 const PLAN_MODE_INSTRUCTION =
     'Work in plan-only mode. Analyze and propose a plan, but do not execute commands or modify files.'
@@ -46,6 +48,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendEffort: string | null = null
     private currentBackendPermissionMode: 'default' | 'auto' | null = null
     private instructionsSent = false
+    private readonly conversationHistory = new GrokConversationHistory(() => this.backend)
 
     constructor(
         private readonly session: GrokSession,
@@ -135,6 +138,40 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         }
 
         session.registerExistingNativeSession(acpSessionId)
+        this.conversationHistory.setSession(acpSessionId, session.path)
+        this.conversationHistory.setPublishCapabilities(async () => {
+            const conversationHistory = this.conversationHistory.getCapabilitiesForMetadata()?.conversationHistory
+            try {
+                session.client.updateMetadata((metadata) => ({
+                    ...metadata,
+                    path: metadata?.path ?? session.path,
+                    host: metadata?.host ?? 'unknown',
+                    capabilities: {
+                        ...metadata?.capabilities,
+                        ...(conversationHistory ? { conversationHistory } : {})
+                    },
+                    conversationHistoryPoints: {
+                        ...metadata?.conversationHistoryPoints,
+                        ...this.conversationHistory.getHistoryPoints()
+                    }
+                }))
+            } catch {
+                // best-effort; tests and transient hub disconnects must not crash the loop
+            }
+        })
+        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ForkConversation, async (payload: unknown) => {
+            const messageLocalId = isObject(payload) && typeof payload.messageLocalId === 'string'
+                ? payload.messageLocalId
+                : undefined
+            return await this.conversationHistory.fork(messageLocalId)
+        })
+        session.client.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, async (payload: unknown) => {
+            if (!isObject(payload) || typeof payload.messageLocalId !== 'string') {
+                throw new Error('messageLocalId is required')
+            }
+            return await this.conversationHistory.rewind(payload.messageLocalId)
+        })
+        void this.conversationHistory.probeCapabilities().catch(() => {})
         const modelMetadata = backend.getSessionModelsMetadata(acpSessionId)
         const effortMetadata = backend.getThoughtLevelConfigOption(acpSessionId)
         this.currentBackendModel = modelMetadata?.currentModelId ?? this.opts.model ?? null
@@ -248,18 +285,51 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                 this.instructionsSent = true
             }
             const promptContent: PromptContent[] = [{ type: 'text', text }]
+            const localId = batch.items
+                ?.map((item) => item.localId)
+                .find((id): id is string => typeof id === 'string' && id.length > 0)
+
+            // Official prompt index: count rewind points before the prompt; the new
+            // point lands at that index after a successful turn.
+            let nextPromptIndex: number | null = null
+            try {
+                const points = await backend.sendExtensionRequest<{ points?: unknown[] } | unknown[]>(
+                    '_x.ai/rewind/points',
+                    { sessionId: acpSessionId }
+                )
+                const list = Array.isArray(points)
+                    ? points
+                    : (isObject(points) && Array.isArray(points.points) ? points.points : null)
+                if (list) nextPromptIndex = list.length
+            } catch {
+                nextPromptIndex = null
+            }
 
             session.onThinkingChange(true)
+            this.conversationHistory.setBusy(true)
             try {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message)
                 })
+                if (localId && nextPromptIndex != null) {
+                    this.conversationHistory.rememberPromptIndex(localId, nextPromptIndex)
+                    session.client.updateMetadata((metadata) => ({
+                        ...metadata,
+                        path: metadata?.path ?? session.path,
+                        host: metadata?.host ?? 'unknown',
+                        conversationHistoryPoints: {
+                            ...metadata?.conversationHistoryPoints,
+                            [localId]: true as const
+                        }
+                    }))
+                }
             } catch (error) {
                 const message = formatGrokError(error)
                 logger.warn('[grok-remote] prompt failed', error)
                 session.sendSessionEvent({ type: 'message', message: `Grok prompt failed: ${message}` })
                 this.messageBuffer.addMessage(`Grok prompt failed: ${message}`, 'status')
             } finally {
+                this.conversationHistory.setBusy(false)
                 session.onThinkingChange(false)
                 await this.permissionHandler?.cancelAll('Prompt finished')
                 if (session.queue.size() === 0 && !this.shouldExit) {

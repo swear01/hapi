@@ -90,6 +90,7 @@ function createSession() {
             rpcHandlerManager: {
                 registerHandler(method: string, handler: () => unknown) { rpcHandlers.set(method, handler) }
             },
+            updateMetadata: vi.fn(),
             sendAgentMessage: vi.fn(),
             sendSessionEvent: vi.fn(),
             sendClaudeSessionMessage: vi.fn()

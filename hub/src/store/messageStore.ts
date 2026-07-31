@@ -26,6 +26,7 @@ import {
     mergeSessionMessages,
     copyMessageToSession as copyStoredMessageToSession,
     getAllMessages,
+    truncateMessagesFromLocalId,
     type CancelQueuedMessageResult,
     type LookupQueuedMessageResult,
     type LocalMessageState,
@@ -142,5 +143,18 @@ export class MessageStore {
 
     mergeSessionMessages(fromSessionId: string, toSessionId: string): { moved: number; oldMaxSeq: number; newMaxSeq: number } {
         return mergeSessionMessages(this.db, fromSessionId, toSessionId)
+    }
+
+    truncateMessagesFromLocalId(
+        sessionId: string,
+        localId: string,
+        replacement: Array<{
+            content: unknown
+            localId?: string | null
+            createdAt?: number
+            invokedAt?: number | null
+        }> = []
+    ): { deleted: number; inserted: number; epoch: number } {
+        return truncateMessagesFromLocalId(this.db, sessionId, localId, replacement)
     }
 }
