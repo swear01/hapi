@@ -137,7 +137,7 @@ export function cursorVariantDisambiguationSuffix(modelId: string): string {
 
 /**
  * Group ACP wire ids by raw base model. Labels are raw base ids; variant labels are raw suffixes.
- * Catalog order follows the input order; only `Default` is prepended.
+ * Catalog order follows the input order; only "Auto" is prepended.
  */
 export function buildCursorModelCatalog(
     availableModels: readonly CursorModelSummary[],
