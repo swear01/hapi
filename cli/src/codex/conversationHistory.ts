@@ -130,14 +130,16 @@ export class CodexConversationHistory {
             if (selectedIndex < 0) {
                 throw new Error('Selected turn not found')
             }
-            if (selectedIndex === 0) {
-                throw new Error('Forking before the first turn requires a fresh thread')
-            }
-            const lastTurnId = turns[selectedIndex - 1]!.id
+            // Prefer stable inclusive lastTurnId of the previous turn. The first
+            // turn has no predecessor, so fall back to experimental beforeTurnId
+            // (exclusive) for that single boundary.
+            const boundary = selectedIndex === 0
+                ? { beforeTurnId: selectedTurnId }
+                : { lastTurnId: turns[selectedIndex - 1]!.id }
             try {
                 const response = await client.forkThread({
                     threadId,
-                    lastTurnId
+                    ...boundary
                 })
                 const nativeSessionId = asString(asRecord(response.thread)?.id)
                 if (!nativeSessionId) throw new Error('thread/fork did not return thread.id')

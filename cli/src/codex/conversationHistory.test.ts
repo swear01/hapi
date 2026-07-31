@@ -47,12 +47,16 @@ describe('CodexConversationHistory', () => {
         expect(result.nativeSessionId).toBe('forked-hist')
     })
 
-    it('rejects historical fork before the first turn', async () => {
-        const fork = vi.fn(async () => ({ thread: { id: 'x' } }))
+    it('historical fork of the first turn uses beforeTurnId', async () => {
+        const fork = vi.fn(async (params: Record<string, unknown>) => {
+            expect(params.beforeTurnId).toBe('turn-a')
+            expect(params.lastTurnId).toBeUndefined()
+            return { thread: { id: 'forked-first' } }
+        })
         const history = new CodexConversationHistory(() => createClient({ fork }) as never)
         history.setThreadId('thread-1')
-        await expect(history.fork('local-a')).rejects.toThrow(/first turn/)
-        expect(fork).not.toHaveBeenCalled()
+        const result = await history.fork('local-a')
+        expect(result.nativeSessionId).toBe('forked-first')
     })
 
     it('computes rewind numTurns from selected turn', async () => {
