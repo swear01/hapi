@@ -22,6 +22,7 @@ import { CursorLegacyMigrator, type CursorLegacyMigratorOptions } from '../curso
 import { EventPublisher, type SyncEventListener } from './eventPublisher'
 import { MachineCache, type Machine } from './machineCache'
 import { MessageService } from './messageService'
+import { selectForkTranscriptPrefix } from './forkTranscript'
 import {
     RpcGateway,
     RpcTargetMissingError,
@@ -917,6 +918,21 @@ async uploadScratchlistAttachment(
                 childId
             )
             childCreated = true
+
+            // Native fork keeps agent context, but the new HAPI row starts empty.
+            // Hydrate the transcript prefix so web navigation is not a blank thread.
+            const sourceMessages = this.store.messages.getAllMessages(sessionId)
+            const prefix = selectForkTranscriptPrefix(sourceMessages, messageLocalId)
+            for (const message of prefix) {
+                this.store.messages.copyMessageToSession(childId, {
+                    content: message.content,
+                    createdAt: message.createdAt,
+                    localId: message.localId,
+                    invokedAt: message.invokedAt,
+                    scheduledAt: message.scheduledAt
+                })
+            }
+            this.sessionCache.refreshSession(childId)
 
             const spawn = await this.rpcGateway.spawnSession(
                 machineId,
