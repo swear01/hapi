@@ -1192,13 +1192,23 @@ async uploadScratchlistAttachment(
             return { type: 'success', sessionId: childId }
         } catch (error) {
             if (childCreated) {
-                try {
-                    await this.deleteSession(childId)
-                } catch {
-                    // best-effort cleanup
-                }
+                await this.cleanupFailedForkChild(childId)
             }
             return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+    }
+
+    /** Kill an active fork child (if any) then delete the HAPI row. */
+    private async cleanupFailedForkChild(childId: string): Promise<void> {
+        try {
+            const child = this.sessionCache.refreshSession(childId)
+            if (child?.active) {
+                await this.rpcGateway.killSession(childId).catch(() => {})
+                this.handleSessionEnd({ sid: childId, time: Date.now(), reason: 'error' })
+            }
+            await this.deleteSession(childId)
+        } catch {
+            // best-effort cleanup
         }
     }
 
