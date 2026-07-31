@@ -242,6 +242,12 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                 break
             }
 
+            // collectBatch already emitted messages-consumed; hub idle checks
+            // see an empty queue. Hold the history busy flag across the whole
+            // turn setup (model/permission sync, rewind-points, prompt).
+            this.conversationHistory.setBusy(true)
+            session.onThinkingChange(true)
+            try {
             const requestedModel = batch.mode.model === null
                 ? this.defaultBackendModel
                 : batch.mode.model
@@ -324,8 +330,6 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                 nextPromptIndex = null
             }
 
-            session.onThinkingChange(true)
-            this.conversationHistory.setBusy(true)
             try {
                 await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
                     this.handleAgentMessage(message)
@@ -351,6 +355,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                 logger.warn('[grok-remote] prompt failed', error)
                 session.sendSessionEvent({ type: 'message', message: `Grok prompt failed: ${message}` })
                 this.messageBuffer.addMessage(`Grok prompt failed: ${message}`, 'status')
+            }
             } finally {
                 this.conversationHistory.setBusy(false)
                 session.onThinkingChange(false)
