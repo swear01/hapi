@@ -1136,15 +1136,17 @@ async uploadScratchlistAttachment(
 
             // Native fork keeps agent context, but the new HAPI row starts empty.
             // Hydrate the transcript prefix so web navigation is not a blank thread.
-            for (const message of prefix) {
-                this.store.messages.copyMessageToSession(childId, {
+            this.store.messages.copyMessagesToSession(
+                childId,
+                prefix.map((message) => ({
                     content: message.content,
                     createdAt: message.createdAt,
                     localId: message.localId,
                     invokedAt: message.invokedAt,
                     scheduledAt: message.scheduledAt
-                })
-            }
+                }))
+            )
+            this.sessionCache.rebuildTodosFromTranscript(childId)
             this.sessionCache.refreshSession(childId)
 
             const spawn = await this.rpcGateway.spawnSession(
@@ -1270,6 +1272,7 @@ async uploadScratchlistAttachment(
                 rpcResult.messages ?? []
             )
             this.scrubHistoryLocators(sessionId, namespace)
+            this.sessionCache.rebuildTodosFromTranscript(sessionId)
             this.eventPublisher.emit({ type: 'messages-invalidated', sessionId, namespace })
             this.sessionCache.refreshSession(sessionId)
             return { type: 'success' }
@@ -1476,6 +1479,9 @@ async uploadScratchlistAttachment(
     }
 
     async switchSession(sessionId: string, to: 'remote' | 'local'): Promise<void> {
+        if (this.historyActionsInFlight.has(sessionId)) {
+            throw new Error('Conversation history action already in progress')
+        }
         await this.rpcGateway.switchSession(sessionId, to)
     }
 

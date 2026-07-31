@@ -157,6 +157,61 @@ export function copyMessageToSession(
     return toStoredMessage(row)
 }
 
+/**
+ * Batch-hydrate a fork child: one transaction, contiguous seq allocation,
+ * single epoch bump. Avoids O(n) max-seq lookups and epoch writes.
+ */
+export function copyMessagesToSession(
+    db: Database,
+    sessionId: string,
+    messages: CopyStoredMessageInput[]
+): number {
+    if (messages.length === 0) return 0
+
+    return db.transaction(() => {
+        let nextSeq = getMaxSeq(db, sessionId) + 1
+        const insert = db.prepare(`
+            INSERT INTO messages (
+                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at
+            ) VALUES (
+                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at
+            )
+        `)
+        const collisionCheck = db.prepare(
+            'SELECT 1 FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1'
+        )
+
+        for (const message of messages) {
+            const createdAt = Number.isFinite(message.createdAt) ? message.createdAt : Date.now()
+            let localId = message.localId
+            if (localId) {
+                const collision = collisionCheck.get(sessionId, localId) as { 1: number } | undefined
+                if (collision) {
+                    localId = `${localId}:merged:${randomUUID().slice(0, 8)}`
+                }
+            }
+            if (message.scheduledAt != null && !localId && message.invokedAt === null) {
+                localId = `merged-scheduled:${randomUUID()}`
+            }
+            const invokedAt = localId ? message.invokedAt : (message.invokedAt ?? createdAt)
+            insert.run({
+                id: randomUUID(),
+                session_id: sessionId,
+                content: JSON.stringify(message.content),
+                created_at: createdAt,
+                seq: nextSeq,
+                local_id: localId ?? null,
+                invoked_at: invokedAt ?? null,
+                scheduled_at: message.scheduledAt ?? null
+            })
+            nextSeq += 1
+        }
+
+        bumpMessageEpoch(db, sessionId)
+        return messages.length
+    })()
+}
+
 export function getMessages(
     db: Database,
     sessionId: string,

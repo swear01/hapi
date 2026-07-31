@@ -25,6 +25,7 @@ import {
     markMessagesInvoked,
     mergeSessionMessages,
     copyMessageToSession as copyStoredMessageToSession,
+    copyMessagesToSession as copyStoredMessagesToSession,
     getAllMessages,
     truncateMessagesFromLocalId,
     type CancelQueuedMessageResult,
@@ -50,6 +51,13 @@ export class MessageStore {
     ): StoredMessage {
         // 中文注释：重复会话合并时需要保留源消息的时间戳和排队信息，因此走专门的复制入口而不是普通 addMessage。
         return copyStoredMessageToSession(this.db, sessionId, message)
+    }
+
+    copyMessagesToSession(
+        sessionId: string,
+        messages: Array<Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'>>
+    ): number {
+        return copyStoredMessagesToSession(this.db, sessionId, messages)
     }
 
     getAllMessages(sessionId: string): StoredMessage[] {
