@@ -291,7 +291,7 @@ describe('SessionList collapse behavior', () => {
 
     function getProjectPanel(): Element {
         const header = screen.getByTitle('/work/hapi')
-        const panel = header.nextElementSibling
+        const panel = header.parentElement?.querySelector('.collapsible-panel')
         if (!panel) {
             throw new Error('Expected project collapse panel')
         }
@@ -360,6 +360,26 @@ describe('SessionList collapse behavior', () => {
         await waitFor(() => {
             expect(getProjectPanel().getAttribute('data-open')).toBe('true')
         })
+    })
+
+    it('opens the project group menu on right-click without collapsing the group', () => {
+        const sessions = [makeSession({
+            id: 'session-running',
+            active: true,
+            updatedAt: 100,
+            metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+        })]
+        render(renderSessionList(sessions))
+        const header = screen.getByTitle('/work/hapi')
+
+        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
+        fireEvent.mouseDown(header, { button: 2 })
+        fireEvent.mouseUp(header, { button: 2 })
+        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
+        fireEvent.contextMenu(header, { clientX: 10, clientY: 10 })
+
+        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
+        expect(screen.getByRole('menu', { name: 'Group actions' })).toBeInTheDocument()
     })
 
     it('keeps the previous selected path open when selection moves', async () => {

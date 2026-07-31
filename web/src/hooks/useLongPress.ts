@@ -86,7 +86,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         startTimer(e.clientX, e.clientY)
     }, [startTimer, isGhostMouseEvent])
 
-    const onMouseUp = useCallback<React.MouseEventHandler>(() => {
+    const onMouseUp = useCallback<React.MouseEventHandler>((e) => {
+        if (e.button !== 0) return
         if (isGhostMouseEvent()) return
         suppressNextClickRef.current = true
         handleEnd(!isLongPressRef.current)
