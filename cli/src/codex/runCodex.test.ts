@@ -128,6 +128,7 @@ vi.mock('./utils/codexCliOverrides', () => ({
 
 import { runCodex as runCodexImpl } from './runCodex'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import { listCodexModels } from '@/modules/common/codexModels'
 
 describe('runCodex', () => {
     beforeEach(() => {
@@ -149,6 +150,12 @@ describe('runCodex', () => {
         lifecycleMock.setExitCode.mockClear()
         lifecycleMock.setArchiveReason.mockClear()
         lifecycleMock.setSessionEndReason.mockClear()
+        vi.mocked(listCodexModels).mockResolvedValue([{
+            id: 'gpt-5.4',
+            displayName: 'gpt-5.4',
+            isDefault: true,
+            supportsPersonality: true
+        }])
     })
 
     it('uses the requested collaboration mode when resuming locally', async () => {
@@ -293,6 +300,53 @@ describe('runCodex', () => {
             resumeSessionId: 'codex-thread-2',
             replayTranscriptHistoryOnStart: true
         }))
+    })
+
+    it('keeps personality unset in unrelated config RPC responses', async () => {
+        await runCodexImpl({ workingDirectory: '/tmp/project' })
+
+        const registration = harness.session.rpcHandlerManager.registerHandler.mock.calls.find(
+            ([method]) => method === RPC_METHODS.SetSessionConfig
+        )
+        const handler = registration?.[1] as ((payload: unknown) => Promise<{ applied: Record<string, unknown> }>) | undefined
+        const response = await handler?.({ permissionMode: 'yolo' })
+
+        expect(response?.applied).not.toHaveProperty('personality')
+    })
+
+    it('rejects live unsupported personality changes', async () => {
+        vi.mocked(listCodexModels).mockResolvedValue([{
+            id: 'gpt-5.4',
+            displayName: 'gpt-5.4',
+            isDefault: true,
+            supportsPersonality: false
+        }])
+        await runCodexImpl({ workingDirectory: '/tmp/project' })
+
+        const registration = harness.session.rpcHandlerManager.registerHandler.mock.calls.find(
+            ([method]) => method === RPC_METHODS.SetSessionConfig
+        )
+        const handler = registration?.[1] as ((payload: unknown) => Promise<unknown>) | undefined
+
+        await expect(handler?.({ personality: 'friendly' })).rejects.toThrow('Selected model does not support personality')
+    })
+
+    it('clears personality when a live model change loses support', async () => {
+        vi.mocked(listCodexModels).mockResolvedValue([
+            { id: 'gpt-5.4', displayName: 'gpt-5.4', isDefault: true, supportsPersonality: true },
+            { id: 'gpt-5.3', displayName: 'gpt-5.3', isDefault: false, supportsPersonality: false }
+        ])
+        harness.sessionInfo = { serviceTier: null, personality: 'friendly' }
+        await runCodexImpl({ workingDirectory: '/tmp/project', model: 'gpt-5.4' })
+
+        const registration = harness.session.rpcHandlerManager.registerHandler.mock.calls.find(
+            ([method]) => method === RPC_METHODS.SetSessionConfig
+        )
+        const handler = registration?.[1] as ((payload: unknown) => Promise<{ applied: Record<string, unknown> }>) | undefined
+        const response = await handler?.({ model: 'gpt-5.3' })
+
+        expect(mockCodexSession.setPersonality).toHaveBeenLastCalledWith(null)
+        expect(response?.applied.personality).toBeNull()
     })
 
     it('accepts and normalizes model-reported reasoning efforts from session config', async () => {

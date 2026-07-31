@@ -12,7 +12,7 @@ import { registerLocalHandoffHandler } from '@/agent/localHandoff';
 import { createModeChangeHandler, createRunnerLifecycle, setControlledByUser } from '@/agent/runnerLifecycle';
 import { isPermissionModeAllowedForFlavor } from '@hapi/protocol';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
-import { CodexCollaborationModeSchema, PermissionModeSchema } from '@hapi/protocol/schemas';
+import { CodexCollaborationModeSchema, CodexPersonalitySchema, PermissionModeSchema } from '@hapi/protocol/schemas';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import type { ReasoningEffort } from './appServerTypes';
@@ -410,6 +410,9 @@ export async function runCodex(opts: {
         const shouldSyncModel = config.model !== undefined;
         if (shouldSyncModel) {
             currentModel = resolveModel(config.model);
+            if (currentPersonality !== null && currentPersonality !== undefined && !await personalitySupported(currentModel)) {
+                currentPersonality = null;
+            }
         }
 
         if (config.modelReasoningEffort !== undefined) {
@@ -424,8 +427,9 @@ export async function runCodex(opts: {
             currentServiceTier = resolveServiceTier(config.serviceTier);
         }
         if (config.personality !== undefined) {
-            if (config.personality !== null && !['friendly', 'pragmatic', 'none'].includes(String(config.personality))) throw new Error('Invalid Codex personality');
-            currentPersonality = config.personality as CodexPersonality | null;
+            const personality = CodexPersonalitySchema.nullable().parse(config.personality);
+            await assertPersonalitySupported(personality);
+            currentPersonality = personality;
         }
 
         applyCurrentConfigToSession({ syncModel: shouldSyncModel });
@@ -435,14 +439,16 @@ export async function runCodex(opts: {
             modelReasoningEffort: ReasoningEffort | null;
             collaborationMode: EnhancedMode['collaborationMode'];
             serviceTier: string | null;
-            personality: CodexPersonality | null;
+            personality?: CodexPersonality | null;
         } = {
             permissionMode: currentPermissionMode,
             modelReasoningEffort: currentModelReasoningEffort ?? null,
             collaborationMode: currentCollaborationMode,
-            serviceTier: currentServiceTier ?? null,
-            personality: currentPersonality ?? null
+            serviceTier: currentServiceTier ?? null
         };
+        if (currentPersonality !== undefined) {
+            applied.personality = currentPersonality;
+        }
         if (shouldSyncModel) {
             applied.model = currentModel ?? null;
         }
