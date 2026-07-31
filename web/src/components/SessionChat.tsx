@@ -102,11 +102,11 @@ export async function applyModelChangeWithReasoningRollback(args: {
     model: SessionModelSelection
     previousModelReasoningEffort: string | null
     shouldClearReasoningEffort: boolean
-    previousPersonality: Session['personality']
+    previousPersonality: import('@hapi/protocol').CodexPersonality | null
     shouldClearPersonality: boolean
     setModel: (model: SessionModelSelection) => Promise<void>
     setModelReasoningEffort: (effort: string | null) => Promise<void>
-    setPersonality: (personality: Session['personality']) => Promise<void>
+    setPersonality: (personality: import('@hapi/protocol').CodexPersonality | null) => Promise<void>
 }): Promise<void> {
     let clearedReasoningEffort = false
     let clearedPersonality = false
@@ -1045,7 +1045,7 @@ function SessionChatInner(props: SessionChatProps) {
     // Model mode change handler
     const handleModelChange = useCallback(async (model: SessionModelSelection) => {
         const previousModelReasoningEffort = props.session.modelReasoningEffort
-        const previousPersonality = props.session.personality
+        const previousPersonality = props.session.personality ?? null
         const shouldClearReasoningEffort = agentFlavor === 'codex'
             && Boolean(previousModelReasoningEffort)
             && supportsCodexReasoningEffort(
