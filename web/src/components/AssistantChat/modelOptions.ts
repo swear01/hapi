@@ -130,7 +130,7 @@ export function getModelOptionsForFlavor(
         if (customOptions && customOptions.length > 0) {
             return withCurrentModelOption(customOptions, currentModel)
         }
-        return withCurrentModelOption([{ value: 'auto', label: 'Auto' }], currentModel)
+        return withCurrentModelOption([{ value: null, label: 'Auto' }], currentModel)
     }
     if (flavor === 'grok') {
         return withCurrentModelOption([{ value: null, label: 'Default' }], currentModel)

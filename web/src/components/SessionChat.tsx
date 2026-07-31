@@ -652,10 +652,13 @@ function SessionChatInner(props: SessionChatProps) {
     const copilotModelOptions = useMemo(() => (
         agentFlavor === 'copilot'
             ? [
-                ...copilotModelsState.availableModels.map((model) => ({
-                    value: model.modelId,
-                    label: model.name ?? model.modelId
-                }))
+                { value: null, label: 'Auto' },
+                ...copilotModelsState.availableModels
+                    .filter((model) => model.modelId !== 'auto')
+                    .map((model) => ({
+                        value: model.modelId,
+                        label: model.name ?? model.modelId
+                    }))
             ]
             : undefined
     ), [agentFlavor, copilotModelsState.availableModels])
