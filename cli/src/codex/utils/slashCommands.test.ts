@@ -65,10 +65,10 @@ describe('resolveCodexSlashCommand', () => {
         });
     });
 
-    it('sets and clears personality without inventing hub state', () => {
+    it('sets personality without inventing hub state or a fake clear', () => {
         expect(resolveCodexSlashCommand('/personality', state)).toEqual({
             kind: 'handled',
-            message: 'Codex personality: default'
+            message: 'Codex personality: unset (Codex config / thread sticky)'
         });
         expect(resolveCodexSlashCommand('/personality', { ...state, personality: 'friendly' })).toEqual({
             kind: 'handled',
@@ -84,10 +84,14 @@ describe('resolveCodexSlashCommand', () => {
             message: 'Codex personality set to none',
             updates: { personality: 'none' }
         });
+        // Sticky: omit-after-override would leave the prior value active, so refuse clear aliases.
         expect(resolveCodexSlashCommand('/personality default', { ...state, personality: 'friendly' })).toEqual({
             kind: 'handled',
-            message: 'Codex personality cleared (using Codex config / thread default)',
-            updates: { personality: null }
+            message: 'Codex personality is sticky on the thread; set friendly, pragmatic, or none (cannot restore config.toml by clearing)'
+        });
+        expect(resolveCodexSlashCommand('/personality clear', { ...state, personality: 'pragmatic' })).toEqual({
+            kind: 'handled',
+            message: 'Codex personality is sticky on the thread; set friendly, pragmatic, or none (cannot restore config.toml by clearing)'
         });
         expect(resolveCodexSlashCommand('/personality spicy', state)).toEqual({
             kind: 'handled',

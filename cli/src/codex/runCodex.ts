@@ -149,7 +149,7 @@ export async function runCodex(opts: {
         collaborationMode?: EnhancedMode['collaborationMode'];
         serviceTier?: string | null;
         proactiveMultiAgent?: boolean;
-        personality?: CodexPersonality | null;
+        personality?: CodexPersonality;
     } | undefined): void => {
         if (!updates) return;
         if (updates.permissionMode !== undefined) {
@@ -171,7 +171,7 @@ export async function runCodex(opts: {
             currentProactiveMultiAgent = updates.proactiveMultiAgent;
         }
         if (updates.personality !== undefined) {
-            currentPersonality = updates.personality ?? undefined;
+            currentPersonality = updates.personality;
         }
         applyCurrentConfigToSession();
     };

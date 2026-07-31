@@ -36,8 +36,7 @@ export type CodexSlashResolution =
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
             proactiveMultiAgent?: boolean;
-            /** `null` clears the in-session override (inherit Codex default). */
-            personality?: CodexPersonality | null;
+            personality?: CodexPersonality;
         };
     }
     | {
@@ -51,7 +50,7 @@ export type CodexSlashResolution =
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
             proactiveMultiAgent?: boolean;
-            personality?: CodexPersonality | null;
+            personality?: CodexPersonality;
         };
     }
     | {
@@ -192,7 +191,7 @@ export function resolveCodexSlashCommand(
                 `- collaboration: \`${state.collaborationMode}\``,
                 `- model: \`${state.model ?? 'auto'}\``,
                 `- reasoning: \`${state.modelReasoningEffort ?? 'default'}\``,
-                `- personality: \`${state.personality ?? 'default'}\``
+                `- personality: \`${state.personality ?? 'unset'}\``
             ].join('\n')
         };
     }
@@ -201,14 +200,15 @@ export function resolveCodexSlashCommand(
         if (!rest) {
             return {
                 kind: 'handled',
-                message: `Codex personality: ${state.personality ?? 'default'}`
+                message: `Codex personality: ${state.personality ?? 'unset (Codex config / thread sticky)'}`
             };
         }
+        // turn/start.personality sticks for subsequent turns; omitting later does not
+        // restore config.toml. Only explicit friendly|pragmatic|none are valid.
         if (rest === 'default' || rest === 'auto' || rest === 'clear') {
             return {
                 kind: 'handled',
-                message: 'Codex personality cleared (using Codex config / thread default)',
-                updates: { personality: null }
+                message: 'Codex personality is sticky on the thread; set friendly, pragmatic, or none (cannot restore config.toml by clearing)'
             };
         }
         if (!(CODEX_PERSONALITIES as readonly string[]).includes(rest)) {
@@ -316,7 +316,7 @@ export function resolveCodexSlashCommand(
                 '- `/status` — show current Codex session config',
                 '- `/model [name|auto]` — show or set model',
                 '- `/reasoning [level|default]` — show or set reasoning effort',
-                '- `/personality [friendly|pragmatic|none|default]` — show or set response style',
+                '- `/personality [friendly|pragmatic|none]` — show or set response style (sticky on thread)',
                 '- `/fast [on|off|status]` — toggle Fast mode (GPT-5.5 / GPT-5.4, ChatGPT login)',
                 '- `/permissions [default|read-only|safe-yolo|yolo]` — show or set permission mode',
                 '',
