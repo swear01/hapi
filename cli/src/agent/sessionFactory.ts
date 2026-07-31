@@ -115,6 +115,18 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.piAvailableModels !== undefined) preserved.piAvailableModels = metadata.piAvailableModels
     // Preserve provider-qualified Pi model selection (disambiguates duplicate modelIds).
     if (metadata.piSelectedModel !== undefined) preserved.piSelectedModel = metadata.piSelectedModel
+    if (metadata.conversationHistoryPoints !== undefined) {
+        preserved.conversationHistoryPoints = metadata.conversationHistoryPoints
+    }
+    if (metadata.conversationHistoryIndexes !== undefined) {
+        preserved.conversationHistoryIndexes = metadata.conversationHistoryIndexes
+    }
+    if (metadata.capabilities?.conversationHistory !== undefined) {
+        preserved.capabilities = {
+            ...preserved.capabilities,
+            conversationHistory: metadata.capabilities.conversationHistory
+        }
+    }
 
     return preserved
 }

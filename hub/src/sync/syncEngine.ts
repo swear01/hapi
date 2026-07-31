@@ -153,6 +153,8 @@ export class SyncEngine {
     private readonly sessionReadyIds = new Set<string>()
     /** Serialize scratchlist uploads per session so disk-byte caps cannot race. */
     private readonly scratchlistUploadTails = new Map<string, Promise<unknown>>()
+    /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
+    private readonly historyActionsInFlight = new Set<string>()
 
     constructor(
         private readonly store: Store,
@@ -845,6 +847,22 @@ async uploadScratchlistAttachment(
         namespace: string,
         messageLocalId?: string
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
+        if (this.historyActionsInFlight.has(sessionId)) {
+            return { type: 'error', message: 'Conversation history action already in progress' }
+        }
+        this.historyActionsInFlight.add(sessionId)
+        try {
+            return await this.forkConversationUnlocked(sessionId, namespace, messageLocalId)
+        } finally {
+            this.historyActionsInFlight.delete(sessionId)
+        }
+    }
+
+    private async forkConversationUnlocked(
+        sessionId: string,
+        namespace: string,
+        messageLocalId?: string
+    ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         const access = this.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return { type: 'error', message: access.reason === 'not-found' ? 'Session not found' : 'Access denied' }
@@ -968,6 +986,22 @@ async uploadScratchlistAttachment(
     }
 
     async rewindConversation(
+        sessionId: string,
+        namespace: string,
+        messageLocalId: string
+    ): Promise<{ type: 'success' } | { type: 'error'; message: string; hydrateFailed?: boolean }> {
+        if (this.historyActionsInFlight.has(sessionId)) {
+            return { type: 'error', message: 'Conversation history action already in progress' }
+        }
+        this.historyActionsInFlight.add(sessionId)
+        try {
+            return await this.rewindConversationUnlocked(sessionId, namespace, messageLocalId)
+        } finally {
+            this.historyActionsInFlight.delete(sessionId)
+        }
+    }
+
+    private async rewindConversationUnlocked(
         sessionId: string,
         namespace: string,
         messageLocalId: string

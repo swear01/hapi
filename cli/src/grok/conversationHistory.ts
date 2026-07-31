@@ -68,6 +68,23 @@ export class GrokConversationHistory {
         return points
     }
 
+    getHistoryIndexes(): Record<string, number> {
+        const indexes: Record<string, number> = {}
+        for (const [localId, promptIndex] of this.promptIndexByLocalId.entries()) {
+            indexes[localId] = promptIndex
+        }
+        return indexes
+    }
+
+    restorePromptIndexes(indexes: Record<string, number> | null | undefined): void {
+        if (!indexes) return
+        for (const [localId, promptIndex] of Object.entries(indexes)) {
+            if (typeof localId !== 'string' || localId.length === 0) continue
+            if (!Number.isInteger(promptIndex) || promptIndex < 0) continue
+            this.promptIndexByLocalId.set(localId, promptIndex)
+        }
+    }
+
     async probeCapabilities(): Promise<void> {
         const backend = this.getBackend()
         const sessionId = this.sessionId

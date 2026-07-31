@@ -83,6 +83,9 @@ export const MetadataSchema = z.object({
     flavor: z.string().nullish(),
     capabilities: SessionCapabilitiesSchema.optional(),
     conversationHistoryPoints: z.record(z.string(), z.literal(true)).optional(),
+    // Native locators for historical fork/rewind (e.g. Grok prompt indexes).
+    // Kept separately from the boolean UI markers above.
+    conversationHistoryIndexes: z.record(z.string(), z.number().int().nonnegative()).optional(),
     worktree: WorktreeMetadataSchema.optional(),
     // Cached Pi model list — written by CLI, read by web (inactive session fallback).
     // Minimal shape: each entry must have modelId; other fields (provider, name, etc.) pass through.

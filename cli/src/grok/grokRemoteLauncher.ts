@@ -153,12 +153,21 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                     conversationHistoryPoints: {
                         ...metadata?.conversationHistoryPoints,
                         ...this.conversationHistory.getHistoryPoints()
+                    },
+                    conversationHistoryIndexes: {
+                        ...metadata?.conversationHistoryIndexes,
+                        ...this.conversationHistory.getHistoryIndexes()
                     }
                 }))
             } catch {
                 // best-effort; tests and transient hub disconnects must not crash the loop
             }
         })
+        this.conversationHistory.restorePromptIndexes(
+            typeof session.client.getMetadata === 'function'
+                ? session.client.getMetadata()?.conversationHistoryIndexes
+                : undefined
+        )
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ForkConversation, async (payload: unknown) => {
             const messageLocalId = isObject(payload) && typeof payload.messageLocalId === 'string'
                 ? payload.messageLocalId
@@ -320,6 +329,10 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                         conversationHistoryPoints: {
                             ...metadata?.conversationHistoryPoints,
                             [localId]: true as const
+                        },
+                        conversationHistoryIndexes: {
+                            ...metadata?.conversationHistoryIndexes,
+                            [localId]: nextPromptIndex
                         }
                     }))
                 }

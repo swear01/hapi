@@ -26,6 +26,19 @@ describe('GrokConversationHistory', () => {
         expect(send).toHaveBeenCalled()
     })
 
+    it('restores prompt indexes from durable metadata', async () => {
+        const send = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+            expect(params.targetPromptIndex).toBe(4)
+            return { newSessionId: 'grok-fork-restored' }
+        })
+        const history = new GrokConversationHistory(() => ({ sendExtensionRequest: send }) as never)
+        history.setSession('sess-1', '/tmp/proj')
+        history.restorePromptIndexes({ 'local-restored': 4 })
+        await history.fork('local-restored')
+        expect(history.getHistoryIndexes()).toEqual({ 'local-restored': 4 })
+        expect(history.getHistoryPoints()).toEqual({ 'local-restored': true })
+    })
+
     it('rewind always uses conversation_only and never all/files_only', async () => {
         const send = vi.fn(async (method: string, params: Record<string, unknown>) => {
             expect(method).toBe('_x.ai/rewind/execute')
