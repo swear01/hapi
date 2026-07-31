@@ -24,6 +24,8 @@ export async function claudeRemote(opts: {
     hookSettingsPath: string,
     signal?: AbortSignal,
     canCallTool: (toolName: string, input: unknown, mode: EnhancedMode, options: { signal: AbortSignal }) => Promise<PermissionResult>,
+    /** Session modes used to spawn Claude before the first fork child prompt. */
+    bootstrapMode?: EnhancedMode,
 
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
@@ -87,8 +89,10 @@ export async function claudeRemote(opts: {
     }
     const forkedFrom = forkSession ? startFrom : null;
 
-    // Mode starts provisional for fork bootstrap; updated when the first child prompt arrives.
-    let mode: EnhancedMode = { permissionMode: 'default' };
+    // Mode starts from the persisted session for fork bootstrap; updated when
+    // the first child prompt arrives. plan/auto must be present at process start.
+    const bootstrapMode: EnhancedMode = opts.bootstrapMode ?? { permissionMode: 'default' };
+    let mode: EnhancedMode = bootstrapMode;
     let initial: { message: string; mode: EnhancedMode } | null = null;
     let specialCommand: ReturnType<typeof parseSpecialCommand> = { type: null };
     // Claude reports the /compact outcome on a `system`/`status` message that
@@ -157,14 +161,20 @@ export async function claudeRemote(opts: {
         resume: startFrom ?? undefined,
         forkSession,
         mcpServers: opts.mcpServers,
-        permissionMode: 'default',
-        model: undefined,
-        effort: undefined,
-        fallbackModel: undefined,
-        customSystemPrompt: undefined,
-        appendSystemPrompt: systemPrompt,
-        allowedTools: opts.allowedTools,
-        disallowedTools: undefined,
+        permissionMode: bootstrapMode.permissionMode,
+        model: bootstrapMode.model,
+        effort: bootstrapMode.effort,
+        fallbackModel: bootstrapMode.fallbackModel,
+        customSystemPrompt: bootstrapMode.customSystemPrompt
+            ? bootstrapMode.customSystemPrompt + '\n\n' + systemPrompt
+            : undefined,
+        appendSystemPrompt: bootstrapMode.appendSystemPrompt
+            ? bootstrapMode.appendSystemPrompt + '\n\n' + systemPrompt
+            : systemPrompt,
+        allowedTools: bootstrapMode.allowedTools
+            ? bootstrapMode.allowedTools.concat(opts.allowedTools)
+            : opts.allowedTools,
+        disallowedTools: bootstrapMode.disallowedTools,
         canCallTool: (toolName: string, input: unknown, options: { signal: AbortSignal }) => opts.canCallTool(toolName, input, mode, options),
         abort: opts.signal,
         pathToClaudeCodeExecutable: getDefaultClaudeCodePath(),

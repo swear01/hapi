@@ -19,7 +19,7 @@ import { normalizeDecryptedMessage } from '@/chat/normalize'
 import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
-import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
+import { buildVisibleChatBlocks, isToolGroupBlock, visibleBlockRole, type ToolGroupBlock } from '@/chat/toolGroups'
 import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
 import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
@@ -36,7 +36,7 @@ import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
 import { ScratchlistMigrationBanner } from '@/components/AssistantChat/ScratchlistMigrationBanner'
-import { useHappyRuntime } from '@/lib/assistant-runtime'
+import { assignThreadMessageIds, useHappyRuntime } from '@/lib/assistant-runtime'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
 import { createScratchlistAttachmentAdapter } from '@/lib/scratchlistAttachmentAdapter'
 import {
@@ -454,30 +454,6 @@ function SessionChatInner(props: SessionChatProps) {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const [historyActionPending, setHistoryActionPending] = useState(false)
-
-    const latestCompletedBoundaryId = useMemo(() => {
-        if (props.viewMode !== 'tail') return null
-        for (let i = props.messages.length - 1; i >= 0; i -= 1) {
-            const message = props.messages[i]
-            if (!message) continue
-            const content = message.content as { role?: string } | undefined
-            const role = content && typeof content === 'object' && 'role' in content
-                ? content.role
-                : undefined
-            if (
-                role === 'agent'
-                || role === 'assistant'
-                || (role === 'user' && message.invokedAt != null)
-            ) {
-                return message.id
-            }
-        }
-        return null
-    }, [props.messages, props.viewMode])
-
-    const isLatestCompletedBoundary = useCallback((messageId: string) => {
-        return latestCompletedBoundaryId === messageId
-    }, [latestCompletedBoundaryId])
 
     const onForkConversation = useCallback(async (messageLocalId?: string) => {
         setHistoryActionPending(true)
@@ -1027,6 +1003,30 @@ function SessionChatInner(props: SessionChatProps) {
         }),
         [reconciled.blocks, props.hasMoreMessages]
     )
+
+    // Fork-current must compare against assistant-ui message ids (`kind:id`),
+    // not raw hub message ids — MessageActions receive the rendered card id,
+    // and adjacent assistant blocks join under the first block's id.
+    const latestCompletedBoundaryId = useMemo(() => {
+        if (props.viewMode !== 'tail') return null
+        let candidate: string | null = null
+        let previousRole: ReturnType<typeof visibleBlockRole> | null = null
+        for (const { block, threadMessageId } of assignThreadMessageIds(visibleBlocks)) {
+            const role = visibleBlockRole(block)
+            if (
+                (role === 'user' && block.invokedAt != null)
+                || (role === 'assistant' && previousRole !== 'assistant')
+            ) {
+                candidate = threadMessageId
+            }
+            previousRole = role
+        }
+        return candidate
+    }, [props.viewMode, visibleBlocks])
+
+    const isLatestCompletedBoundary = useCallback((messageId: string) => {
+        return latestCompletedBoundaryId === messageId
+    }, [latestCompletedBoundaryId])
 
     useEffect(() => {
         visibleGroupsRef.current = visibleBlocks.filter(isToolGroupBlock)

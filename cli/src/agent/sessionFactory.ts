@@ -121,6 +121,15 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.conversationHistoryIndexes !== undefined) {
         preserved.conversationHistoryIndexes = metadata.conversationHistoryIndexes
     }
+    if (metadata.conversationHistoryTurns !== undefined) {
+        preserved.conversationHistoryTurns = metadata.conversationHistoryTurns
+    }
+    if (metadata.conversationHistoryDiverged !== undefined) {
+        preserved.conversationHistoryDiverged = metadata.conversationHistoryDiverged
+    }
+    if (metadata.forkedFrom !== undefined) {
+        preserved.forkedFrom = metadata.forkedFrom
+    }
     if (metadata.capabilities?.conversationHistory !== undefined) {
         preserved.capabilities = {
             ...preserved.capabilities,
