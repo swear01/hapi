@@ -456,16 +456,7 @@ function SessionChatInner(props: SessionChatProps) {
     const [historyActionPending, setHistoryActionPending] = useState(false)
 
     const latestCompletedBoundaryId = useMemo(() => {
-        for (let i = props.messages.length - 1; i >= 0; i -= 1) {
-            const message = props.messages[i]
-            if (!message) continue
-            // Prefer latest assistant; else latest completed user message.
-            const content = message.content as { role?: string } | undefined
-            const role = content && typeof content === 'object' && 'role' in content
-                ? content.role
-                : undefined
-            if (role === 'agent' || role === 'assistant') return message.id
-        }
+        if (props.viewMode !== 'tail') return null
         for (let i = props.messages.length - 1; i >= 0; i -= 1) {
             const message = props.messages[i]
             if (!message) continue
@@ -473,10 +464,16 @@ function SessionChatInner(props: SessionChatProps) {
             const role = content && typeof content === 'object' && 'role' in content
                 ? content.role
                 : undefined
-            if (role === 'user' && message.invokedAt != null) return message.id
+            if (
+                role === 'agent'
+                || role === 'assistant'
+                || (role === 'user' && message.invokedAt != null)
+            ) {
+                return message.id
+            }
         }
         return null
-    }, [props.messages])
+    }, [props.messages, props.viewMode])
 
     const isLatestCompletedBoundary = useCallback((messageId: string) => {
         return latestCompletedBoundaryId === messageId

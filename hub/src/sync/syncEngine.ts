@@ -736,7 +736,7 @@ async uploadScratchlistAttachment(
         this.machineCache.expireInactive()
         // Piggybacked on the inactivity tick; not a logical part of expireInactive
         // but shares its 5s cadence (avoids a second timer).
-        this.messageService.releaseMatureScheduledMessages(Date.now())
+        this.messageService.releaseMatureScheduledMessages(Date.now(), this.historyActionsInFlight)
     }
 
     private reloadAll(): void {
@@ -787,6 +787,9 @@ async uploadScratchlistAttachment(
             scheduledAt?: number | null
         }
     ): Promise<void> {
+        if (this.historyActionsInFlight.has(sessionId)) {
+            throw new Error('Conversation history action already in progress')
+        }
         await this.messageService.sendMessage(sessionId, payload)
         this.sessionCache.markMessageQueued(sessionId)
         this.sessionCache.recordSessionActivity(sessionId, Date.now())
@@ -836,7 +839,7 @@ async uploadScratchlistAttachment(
         if (session.thinking) {
             throw new Error('Session is busy')
         }
-        const queued = this.store.messages.getImmediateQueuedLocalMessages(session.id)
+        const queued = this.store.messages.getUninvokedLocalMessages(session.id)
         if (queued.length > 0) {
             throw new Error('Session has queued messages')
         }
@@ -905,6 +908,15 @@ async uploadScratchlistAttachment(
 
         const flavor = this.resolveFlavor(source)
         const childId = randomUUID()
+        let prefix
+        try {
+            prefix = selectForkTranscriptPrefix(this.store.messages.getAllMessages(sessionId), messageLocalId)
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+        }
+        const copiedLocalIds = new Set(
+            prefix.flatMap((message) => (message.localId ? [message.localId] : []))
+        )
         const childMetadata: Record<string, unknown> = {
             path: directory,
             host: source.metadata?.host ?? 'unknown',
@@ -912,7 +924,15 @@ async uploadScratchlistAttachment(
             flavor,
             forkedFrom: sessionId,
             startedBy: 'runner',
-            capabilities: source.metadata?.capabilities
+            capabilities: source.metadata?.capabilities,
+            conversationHistoryPoints: Object.fromEntries(
+                Object.entries(source.metadata?.conversationHistoryPoints ?? {})
+                    .filter(([localId]) => copiedLocalIds.has(localId))
+            ),
+            conversationHistoryIndexes: Object.fromEntries(
+                Object.entries(source.metadata?.conversationHistoryIndexes ?? {})
+                    .filter(([localId]) => copiedLocalIds.has(localId))
+            )
         }
         if (flavor === 'codex') {
             childMetadata.codexSessionId = rpcResult.nativeSessionId
@@ -939,8 +959,6 @@ async uploadScratchlistAttachment(
 
             // Native fork keeps agent context, but the new HAPI row starts empty.
             // Hydrate the transcript prefix so web navigation is not a blank thread.
-            const sourceMessages = this.store.messages.getAllMessages(sessionId)
-            const prefix = selectForkTranscriptPrefix(sourceMessages, messageLocalId)
             for (const message of prefix) {
                 this.store.messages.copyMessageToSession(childId, {
                     content: message.content,
