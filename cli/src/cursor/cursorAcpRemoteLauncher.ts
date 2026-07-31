@@ -297,6 +297,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             session.sendSessionEvent({ type: 'ready' });
         };
 
+        try {
         while (!this.shouldExit) {
             const waitSignal = this.abortController.signal;
             const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
@@ -375,6 +376,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 if (session.queue.size() === 0 && !this.shouldExit) {
                     sendReady();
                 }
+            }
+        }
+        } finally {
+            if (this.softSteerWaiters.length > 0) {
+                await Promise.allSettled(this.softSteerWaiters);
+                this.softSteerWaiters = [];
             }
         }
     }
@@ -664,7 +671,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         await this.extensionAdapter?.cancelAll('User aborted');
         this.session.queue.reset();
         this.promptInFlight = false;
-        this.softSteerWaiters = [];
         this.session.onThinkingChange(false);
         this.abortController.abort();
         this.abortController = new AbortController();
