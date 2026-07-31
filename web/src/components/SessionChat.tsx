@@ -7,6 +7,7 @@ import type { ApiClient } from '@/api/client'
 import type {
     AttachmentMetadata,
     CodexCollaborationMode,
+    CodexModelSummary,
     DecryptedMessage,
     PermissionMode,
     Session,
@@ -82,6 +83,16 @@ import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voi
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
 
 type SessionModelSelection = { provider: string; modelId: string } | string | null
+
+export function shouldClearCodexPersonality(
+    models: readonly CodexModelSummary[],
+    model: SessionModelSelection,
+    personality: Session['personality']
+): boolean {
+    return personality !== null
+        && personality !== undefined
+        && resolveCodexModel(models, model)?.supportsPersonality === false
+}
 
 export function resolvePiContextWindow(
     models: PiModelSummary[] | undefined,
@@ -612,8 +623,9 @@ function SessionChatInner(props: SessionChatProps) {
             : undefined,
         [agentFlavor, codexModelsState.models, props.session.model]
     )
+    const selectedCodexModel = resolveCodexModel(codexModelsState.models, props.session.model)
     const codexPersonalitySupported = agentFlavor === 'codex'
-        && resolveCodexModel(codexModelsState.models, props.session.model)?.supportsPersonality === true
+        && selectedCodexModel?.supportsPersonality !== false
     const codexReasoningEffortOptions = useMemo(
         () => codexSupportedReasoningEfforts?.map((value) => ({ value })),
         [codexSupportedReasoningEfforts]
@@ -1054,8 +1066,7 @@ function SessionChatInner(props: SessionChatProps) {
                 previousModelReasoningEffort
             ) === false
         const shouldClearPersonality = agentFlavor === 'codex'
-            && previousPersonality !== null
-            && resolveCodexModel(codexModelsState.models, model)?.supportsPersonality !== true
+            && shouldClearCodexPersonality(codexModelsState.models, model, previousPersonality)
 
         try {
             await applyModelChangeWithReasoningRollback({

@@ -5,6 +5,7 @@ import {
     isScratchlistHotkeyBlockedTarget,
     isScratchlistToggleHotkey,
     resolvePiContextWindow,
+    shouldClearCodexPersonality,
     shouldAutoClearPendingSchedule,
     shouldRouteToScratchlist,
 } from './SessionChat'
@@ -70,6 +71,28 @@ describe('applyModelChangeWithReasoningRollback', () => {
         })).rejects.toBe(modelError)
 
         expect(setPersonality.mock.calls).toEqual([[null], ['friendly']])
+    })
+
+    it('keeps personality for a custom model absent from the catalog', async () => {
+        const setPersonality = vi.fn(async () => {})
+        const shouldClearPersonality = shouldClearCodexPersonality(
+            [{ id: 'gpt-5.4', displayName: 'GPT-5.4', isDefault: true, supportsPersonality: true }],
+            'custom-model',
+            'friendly'
+        )
+
+        await applyModelChangeWithReasoningRollback({
+            model: 'custom-model',
+            previousModelReasoningEffort: null,
+            shouldClearReasoningEffort: false,
+            previousPersonality: 'friendly',
+            shouldClearPersonality,
+            setModel: vi.fn(async () => {}),
+            setModelReasoningEffort: vi.fn(async () => {}),
+            setPersonality
+        })
+
+        expect(setPersonality).not.toHaveBeenCalledWith(null)
     })
 })
 
