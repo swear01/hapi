@@ -1,11 +1,13 @@
 import { CODEX_PERMISSION_MODES } from '@hapi/protocol/modes';
 import type { CodexPermissionMode } from '@hapi/protocol/types';
 import type { ReasoningEffort } from '../appServerTypes';
-import type { EnhancedMode } from '../loop';
+import type { CodexPersonality, EnhancedMode } from '../loop';
 import type { SlashCommand } from '@/modules/common/slashCommands';
 import { parseReasoningEffortValue } from './reasoningEffort';
 
 export const MAX_CODEX_GOAL_OBJECTIVE_CHARS = 4_000;
+
+const CODEX_PERSONALITIES = ['friendly', 'pragmatic', 'none'] as const satisfies readonly CodexPersonality[];
 
 const UNSUPPORTED_CODEX_BUILTIN_COMMANDS = new Set([
     'compat',
@@ -34,6 +36,8 @@ export type CodexSlashResolution =
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
             proactiveMultiAgent?: boolean;
+            /** `null` clears the in-session override (inherit Codex default). */
+            personality?: CodexPersonality | null;
         };
     }
     | {
@@ -47,6 +51,7 @@ export type CodexSlashResolution =
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
             proactiveMultiAgent?: boolean;
+            personality?: CodexPersonality | null;
         };
     }
     | {
@@ -66,6 +71,7 @@ export function resolveCodexSlashCommand(
         modelReasoningEffort?: ReasoningEffort;
         serviceTier?: string | null;
         proactiveMultiAgent?: boolean;
+        personality?: CodexPersonality;
     }
 ): CodexSlashResolution {
     const match = /^\s*\/([a-z0-9:_-]+)(?:\s+([\s\S]*))?$/i.exec(text);
@@ -185,8 +191,36 @@ export function resolveCodexSlashCommand(
                 `- permission: \`${state.permissionMode}\``,
                 `- collaboration: \`${state.collaborationMode}\``,
                 `- model: \`${state.model ?? 'auto'}\``,
-                `- reasoning: \`${state.modelReasoningEffort ?? 'default'}\``
+                `- reasoning: \`${state.modelReasoningEffort ?? 'default'}\``,
+                `- personality: \`${state.personality ?? 'default'}\``
             ].join('\n')
+        };
+    }
+
+    if (command === 'personality') {
+        if (!rest) {
+            return {
+                kind: 'handled',
+                message: `Codex personality: ${state.personality ?? 'default'}`
+            };
+        }
+        if (rest === 'default' || rest === 'auto' || rest === 'clear') {
+            return {
+                kind: 'handled',
+                message: 'Codex personality cleared (using Codex config / thread default)',
+                updates: { personality: null }
+            };
+        }
+        if (!(CODEX_PERSONALITIES as readonly string[]).includes(rest)) {
+            return {
+                kind: 'handled',
+                message: `Unknown Codex personality: ${rest}`
+            };
+        }
+        return {
+            kind: 'handled',
+            message: `Codex personality set to ${rest}`,
+            updates: { personality: rest as CodexPersonality }
         };
     }
 
@@ -282,6 +316,7 @@ export function resolveCodexSlashCommand(
                 '- `/status` — show current Codex session config',
                 '- `/model [name|auto]` — show or set model',
                 '- `/reasoning [level|default]` — show or set reasoning effort',
+                '- `/personality [friendly|pragmatic|none|default]` — show or set response style',
                 '- `/fast [on|off|status]` — toggle Fast mode (GPT-5.5 / GPT-5.4, ChatGPT login)',
                 '- `/permissions [default|read-only|safe-yolo|yolo]` — show or set permission mode',
                 '',

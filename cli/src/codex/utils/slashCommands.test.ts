@@ -65,6 +65,36 @@ describe('resolveCodexSlashCommand', () => {
         });
     });
 
+    it('sets and clears personality without inventing hub state', () => {
+        expect(resolveCodexSlashCommand('/personality', state)).toEqual({
+            kind: 'handled',
+            message: 'Codex personality: default'
+        });
+        expect(resolveCodexSlashCommand('/personality', { ...state, personality: 'friendly' })).toEqual({
+            kind: 'handled',
+            message: 'Codex personality: friendly'
+        });
+        expect(resolveCodexSlashCommand('/personality pragmatic', state)).toEqual({
+            kind: 'handled',
+            message: 'Codex personality set to pragmatic',
+            updates: { personality: 'pragmatic' }
+        });
+        expect(resolveCodexSlashCommand('/personality none', state)).toEqual({
+            kind: 'handled',
+            message: 'Codex personality set to none',
+            updates: { personality: 'none' }
+        });
+        expect(resolveCodexSlashCommand('/personality default', { ...state, personality: 'friendly' })).toEqual({
+            kind: 'handled',
+            message: 'Codex personality cleared (using Codex config / thread default)',
+            updates: { personality: null }
+        });
+        expect(resolveCodexSlashCommand('/personality spicy', state)).toEqual({
+            kind: 'handled',
+            message: 'Unknown Codex personality: spicy'
+        });
+    });
+
     it('enables Codex fast mode', () => {
         expect(resolveCodexSlashCommand('/fast', state)).toEqual({
             kind: 'handled',
