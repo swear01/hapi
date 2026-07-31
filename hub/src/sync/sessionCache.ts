@@ -172,7 +172,7 @@ export class SessionCache {
             serviceTier: stored.serviceTier,
             permissionMode: existing?.permissionMode ?? metadata?.preferredPermissionMode,
             collaborationMode: existing?.collaborationMode,
-            copilotAgentMode: existing?.copilotAgentMode
+            copilotAgentMode: existing?.copilotAgentMode ?? metadata?.preferredCopilotAgentMode
         }
 
         this.sessions.set(sessionId, session)
@@ -294,6 +294,7 @@ export class SessionCache {
         }
         if (payload.copilotAgentMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'copilotAgentMode', t)) {
             session.copilotAgentMode = payload.copilotAgentMode
+            this.persistPreferredCopilotAgentMode(session, payload.copilotAgentMode)
         }
 
         const now = Date.now()
@@ -588,6 +589,7 @@ export class SessionCache {
         }
         if (config.copilotAgentMode !== undefined) {
             session.copilotAgentMode = config.copilotAgentMode
+            this.persistPreferredCopilotAgentMode(session, config.copilotAgentMode)
             this.markRuntimeConfigUpdated(sessionId, 'copilotAgentMode', appliedAt)
         }
 
@@ -1148,6 +1150,10 @@ export class SessionCache {
             merged.preferredPermissionMode = oldObj.preferredPermissionMode
             changed = true
         }
+        if (typeof oldObj.preferredCopilotAgentMode === 'string' && typeof newObj.preferredCopilotAgentMode !== 'string') {
+            merged.preferredCopilotAgentMode = oldObj.preferredCopilotAgentMode
+            changed = true
+        }
 
         return changed ? merged : newMetadata
     }
@@ -1159,6 +1165,34 @@ export class SessionCache {
         }
 
         const nextMetadata = { ...currentMetadata, preferredPermissionMode: permissionMode }
+        const result = this.store.sessions.updateSessionMetadata(
+            session.id,
+            nextMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            return
+        }
+
+        const parsed = MetadataSchema.safeParse(result.value)
+        if (!parsed.success) {
+            return
+        }
+
+        session.metadata = parsed.data
+        session.metadataVersion = result.version
+    }
+
+    private persistPreferredCopilotAgentMode(session: Session, copilotAgentMode: CopilotAgentMode): void {
+        const currentMetadata = session.metadata
+        if (!currentMetadata || currentMetadata.preferredCopilotAgentMode === copilotAgentMode) {
+            return
+        }
+
+        const nextMetadata = { ...currentMetadata, preferredCopilotAgentMode: copilotAgentMode }
         const result = this.store.sessions.updateSessionMetadata(
             session.id,
             nextMetadata,

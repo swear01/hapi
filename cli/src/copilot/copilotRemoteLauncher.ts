@@ -381,33 +381,45 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
         if (!backend || !sessionId) {
             throw new Error('Copilot model switching is unavailable before the remote session is ready');
         }
-        if (!backend.setModel || this.setModelSupported === false) {
-            return this.currentBackendModel;
-        }
 
         logger.debug(`[copilot-remote] Switching model inline: ${this.currentBackendModel} -> ${model}`);
+        if (backend.setModel && this.setModelSupported !== false) {
+            try {
+                await backend.setModel(sessionId, model);
+                this.currentBackendModel = model;
+                this.setModelSupported = true;
+                return model;
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (/method not found/i.test(message)) {
+                    this.setModelSupported = false;
+                    logger.debug('[copilot-remote] session/set_model unavailable; trying model config option', error);
+                } else {
+                    logger.warn('[copilot-remote] Inline model switch failed', error);
+                    this.session.sendSessionEvent({
+                        type: 'message',
+                        message: `Failed to switch model to ${model}. Continuing with ${this.currentBackendModel}.`
+                    });
+                    return this.currentBackendModel;
+                }
+            }
+        }
+
+        const option = backend.getConfigOptionByCategory(sessionId, 'model');
+        if (!option) {
+            return this.currentBackendModel;
+        }
         try {
-            await backend.setModel(sessionId, model);
+            await backend.setConfigOption(sessionId, option.id, model);
             this.currentBackendModel = model;
-            this.setModelSupported = true;
             return model;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            const methodNotFound = /method not found/i.test(message);
-            if (methodNotFound && this.setModelSupported === undefined) {
-                this.setModelSupported = false;
-                logger.warn('[copilot-remote] Copilot CLI build does not support set_session_model; inline switching disabled for this session');
-                this.session.sendSessionEvent({
-                    type: 'message',
-                    message: 'This Copilot CLI build does not support inline model switching. Restart the session to apply a different model.'
-                });
-            } else {
-                logger.warn('[copilot-remote] Inline model switch failed', error);
-                this.session.sendSessionEvent({
-                    type: 'message',
-                    message: `Failed to switch model to ${model}. Continuing with ${this.currentBackendModel}.`
-                });
-            }
+            logger.warn('[copilot-remote] Inline model config option switch failed', error);
+            this.session.sendSessionEvent({
+                type: 'message',
+                message: `Failed to switch model to ${model}: ${message}. Continuing with ${this.currentBackendModel}.`
+            });
             return this.currentBackendModel;
         }
     }

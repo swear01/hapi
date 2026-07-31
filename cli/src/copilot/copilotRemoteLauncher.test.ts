@@ -6,6 +6,11 @@ type LauncherInternals = {
     backend: {
         setMode: (sessionId: string, mode: string) => Promise<void>;
         setModel?: (sessionId: string, model: string) => Promise<void>;
+        setConfigOption?: (sessionId: string, configId: string, value: string) => Promise<void>;
+        getConfigOptionByCategory?: (sessionId: string, category: string) => {
+            id: string;
+            options: Array<{ value: string }>;
+        } | undefined;
     } | null;
     activeSessionId: string | null;
     currentAgentMode: string;
@@ -77,5 +82,26 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
 
         expect(setModel).toHaveBeenCalledWith('copilot-session', 'auto');
         expect(internals.currentBackendModel).toBe('auto');
+    });
+
+    it('falls back to the model config option when setModel is unavailable', async () => {
+        const setModel = vi.fn().mockRejectedValue(new Error('Method not found'));
+        const setConfigOption = vi.fn().mockResolvedValue(undefined);
+        const { internals } = createLauncher(vi.fn().mockResolvedValue(undefined));
+        internals.backend = {
+            setMode: vi.fn().mockResolvedValue(undefined),
+            setModel,
+            setConfigOption,
+            getConfigOptionByCategory: vi.fn().mockReturnValue({
+                id: 'model',
+                options: [{ value: 'gpt-5.6' }]
+            })
+        };
+        internals.currentBackendModel = 'gpt-5.4';
+
+        await expect(internals.applyQueuedModel('gpt-5.6')).resolves.toBe('gpt-5.6');
+
+        expect(setConfigOption).toHaveBeenCalledWith('copilot-session', 'model', 'gpt-5.6');
+        expect(internals.currentBackendModel).toBe('gpt-5.6');
     });
 });

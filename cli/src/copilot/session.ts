@@ -81,6 +81,13 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
         await this.remoteAgentModeApplier(mode);
     };
 
+    protected override getKeepAliveRuntime() {
+        return {
+            ...(super.getKeepAliveRuntime() ?? {}),
+            copilotAgentMode: this.agentMode
+        };
+    }
+
     pushKeepAlive = (): void => {
         this.client.keepAlive(this.thinking, this.mode, {
             permissionMode: this.permissionMode,

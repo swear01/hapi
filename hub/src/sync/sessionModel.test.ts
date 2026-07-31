@@ -1451,6 +1451,44 @@ describe('session model', () => {
         }
     })
 
+    it('restores the Copilot agent mode from metadata after a hub restart', async () => {
+        const store = new Store(':memory:')
+        const firstEngine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+        const session = firstEngine.getOrCreateSession(
+            'session-copilot-agent-mode-restart',
+            {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'copilot',
+                copilotSessionId: 'copilot-thread-1'
+            },
+            null,
+            'default'
+        )
+        await firstEngine.applySessionConfig(session.id, { copilotAgentMode: 'autopilot' })
+        firstEngine.stop()
+
+        const restartedEngine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+        try {
+            expect(restartedEngine.getSession(session.id)?.copilotAgentMode).toBe('autopilot')
+            expect(store.sessions.getSession(session.id)?.metadata).toEqual(expect.objectContaining({
+                preferredCopilotAgentMode: 'autopilot'
+            }))
+        } finally {
+            restartedEngine.stop()
+        }
+    })
+
     it('passes the cached permissionMode when respawning a resumed session', async () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
