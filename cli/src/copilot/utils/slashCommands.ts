@@ -164,6 +164,14 @@ export function resolveCopilotSlashCommand(
                 updates: { agentMode: 'interactive' }
             };
         }
+        if (rest) {
+            return {
+                kind: 'replace',
+                text: rest,
+                message: 'Copilot autopilot mode enabled',
+                updates: { agentMode: 'autopilot' }
+            };
+        }
         return {
             kind: 'handled',
             message: 'Copilot autopilot mode enabled',

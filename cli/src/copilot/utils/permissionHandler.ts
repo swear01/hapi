@@ -17,6 +17,15 @@ interface PermissionResponseMessage {
     reason?: string;
 }
 
+const READ_ONLY_TOOL_NAMES = new Set([
+    'read',
+    'read file',
+    'grep',
+    'glob',
+    'search',
+    'list files'
+]);
+
 function deriveToolInput(request: PermissionRequest): unknown {
     if (request.rawInput !== undefined) {
         return request.rawInput;
@@ -49,12 +58,12 @@ export function mapCopilotPermissionDecision(
     }
 
     if (decision === 'approved_for_session') {
-        const optionId = pickOptionId(request, ['allow_always', 'allow_once']);
+        const optionId = pickOptionId(request, ['allow_always', 'allow_once'], false);
         return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' };
     }
 
     if (decision === 'approved') {
-        const optionId = pickOptionId(request, ['allow_once', 'allow_always']);
+        const optionId = pickOptionId(request, ['allow_once', 'allow_always'], false);
         return optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' };
     }
 
@@ -83,7 +92,9 @@ export class CopilotPermissionHandler extends BasePermissionHandler<PermissionRe
         const toolInput = deriveToolInput(request);
         const mode = this.getPermissionMode() ?? 'default';
 
-        const autoDecision = this.resolveAutoApprovalDecision(mode, toolName, request.toolCallId);
+        const autoDecision = mode === 'read-only'
+            ? (READ_ONLY_TOOL_NAMES.has(toolName.trim().toLowerCase()) ? 'approved' : null)
+            : this.resolveAutoApprovalDecision(mode, toolName, request.toolCallId);
         if (autoDecision) {
             void this.autoApprove(request, toolName, toolInput, autoDecision);
             return;

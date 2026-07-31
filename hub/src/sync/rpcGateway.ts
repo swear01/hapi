@@ -359,11 +359,21 @@ export class RpcGateway {
     }
 
     async listCopilotModelsForCwd(machineId: string, cwd: string): Promise<RpcListCopilotModelsResponse> {
-        return await this.machineRpc(machineId, RPC_METHODS.ListCopilotModelsForCwd, { cwd }) as RpcListCopilotModelsResponse
+        return await this.machineRpc(
+            machineId,
+            RPC_METHODS.ListCopilotModelsForCwd,
+            { cwd },
+            MODEL_LIST_RPC_TIMEOUT_MS
+        ) as RpcListCopilotModelsResponse
     }
 
     async listCopilotModelsForSession(sessionId: string): Promise<RpcListCopilotModelsResponse> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.ListCopilotModels, {}) as RpcListCopilotModelsResponse
+        return await this.sessionRpc(
+            sessionId,
+            RPC_METHODS.ListCopilotModels,
+            {},
+            MODEL_LIST_RPC_TIMEOUT_MS
+        ) as RpcListCopilotModelsResponse
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

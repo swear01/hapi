@@ -36,6 +36,15 @@ describe('resolveCopilotSlashCommand', () => {
         }
     });
 
+    it('preserves a task supplied with /autopilot', () => {
+        expect(resolveCopilotSlashCommand('/autopilot implement the fix', state)).toEqual({
+            kind: 'replace',
+            text: 'implement the fix',
+            message: 'Copilot autopilot mode enabled',
+            updates: { agentMode: 'autopilot' }
+        });
+    });
+
     it('sets model from /model', () => {
         expect(resolveCopilotSlashCommand('/model gpt-5.4', state)).toEqual({
             kind: 'handled',

@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
     checkPathsExists: vi.fn(),
     codexModelsLoading: false,
     directoryExists: undefined as boolean | undefined,
-    copilotModels: [] as Array<{ modelId: string; name?: string }>
+    copilotModels: [] as Array<{ modelId: string; name?: string }>,
+    copilotModelsLoading: false
 }))
 
 vi.mock('@/lib/use-translation', () => ({
@@ -107,7 +108,7 @@ vi.mock('@/hooks/queries/useCopilotModelsForCwd', () => ({
     useCopilotModelsForCwd: () => ({
         availableModels: mocks.copilotModels,
         currentModelId: null,
-        isLoading: false,
+        isLoading: mocks.copilotModelsLoading,
         error: null
     })
 }))
@@ -176,6 +177,7 @@ describe('NewSession launch preferences', () => {
         mocks.codexModelsLoading = false
         mocks.directoryExists = true
         mocks.copilotModels = []
+        mocks.copilotModelsLoading = false
         savePreferredAgent('codex')
     })
 
@@ -226,6 +228,30 @@ describe('NewSession launch preferences', () => {
         await waitFor(() => {
             expect(screen.getByTestId('model-options')).toHaveTextContent('Auto,GPT-5.6')
         })
+    })
+
+    it('disables creation while a remembered Copilot model is being validated', async () => {
+        mocks.copilotModelsLoading = true
+        savePreferredAgent('copilot')
+        savePreferredLaunchSettings('machine-1', 'copilot', {
+            model: 'gpt-5.6',
+            cursorSelectedBase: 'auto',
+            effort: 'auto',
+            modelReasoningEffort: 'default'
+        })
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
     })
 
     it.each([

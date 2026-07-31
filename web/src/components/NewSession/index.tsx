@@ -1089,6 +1089,12 @@ export function NewSession(props: {
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && opencodeModelsState.isLoading)
             ))
+        || (agent === 'copilot'
+            && model !== 'auto'
+            && (
+                deferredDirectoryExists === undefined
+                || (deferredDirectoryExists === true && copilotModelsState.isLoading)
+            ))
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
         && codexModelsState.isLoading
