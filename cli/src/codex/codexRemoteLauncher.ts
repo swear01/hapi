@@ -3199,6 +3199,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         }
         this.conversationHistory.setPublishCapabilities(publishConversationHistoryCapabilities)
+        this.conversationHistory.restoreTurns(
+            typeof session.client.getMetadata === 'function'
+                ? session.client.getMetadata()?.conversationHistoryTurns
+                : undefined
+        )
         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ForkConversation, async (payload: unknown) => {
             const messageLocalId = payload && typeof payload === 'object' && typeof (payload as { messageLocalId?: unknown }).messageLocalId === 'string'
                 ? (payload as { messageLocalId: string }).messageLocalId
@@ -3804,6 +3809,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                                 conversationHistoryPoints: {
                                     ...metadata?.conversationHistoryPoints,
                                     [clientUserMessageId]: true as const
+                                },
+                                conversationHistoryTurns: {
+                                    ...metadata?.conversationHistoryTurns,
+                                    [clientUserMessageId]: turnId
                                 }
                             }))
                         }

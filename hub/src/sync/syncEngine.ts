@@ -839,6 +839,9 @@ async uploadScratchlistAttachment(
         if (session.thinking) {
             throw new Error('Session is busy')
         }
+        if (session.metadata?.conversationHistoryDiverged === true) {
+            throw new Error('Conversation history is diverged; refuse further fork/rewind')
+        }
         const queued = this.store.messages.getUninvokedLocalMessages(session.id)
         if (queued.length > 0) {
             throw new Error('Session has queued messages')
@@ -852,6 +855,136 @@ async uploadScratchlistAttachment(
         )
         if (!boundary) {
             throw new Error('History boundary message not found or not yet invoked')
+        }
+    }
+
+    /**
+     * Claude `--fork-session` materializes only after the child process starts.
+     * Poll until the child metadata has a native id distinct from the source.
+     */
+    private async waitForClaudeForkBound(
+        childId: string,
+        sourceNativeSessionId: string,
+        timeoutMs: number = 60_000
+    ): Promise<boolean> {
+        const startedAt = Date.now()
+        while (Date.now() - startedAt < timeoutMs) {
+            this.sessionCache.refreshSession(childId)
+            const child = this.sessionCache.getSession(childId)
+            const boundId = child?.metadata?.claudeSessionId
+            if (
+                typeof boundId === 'string'
+                && boundId.length > 0
+                && boundId !== sourceNativeSessionId
+            ) {
+                return true
+            }
+            // Give the runner a few seconds to come up before treating inactivity as failure.
+            if (child && !child.active && Date.now() - startedAt > 5_000) {
+                return false
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+        return false
+    }
+
+    /** Drop history locators that no longer have a corresponding message row. */
+    private scrubHistoryLocators(sessionId: string, namespace: string): void {
+        const remainingLocalIds = new Set(
+            this.store.messages.getAllMessages(sessionId)
+                .flatMap((message) => (message.localId ? [message.localId] : []))
+        )
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const session = this.sessionCache.getSessionByNamespace(sessionId, namespace)
+                ?? this.sessionCache.refreshSession(sessionId)
+            if (!session?.metadata) return
+
+            const nextMetadata: Record<string, unknown> = { ...session.metadata }
+            let changed = false
+
+            const points = session.metadata.conversationHistoryPoints
+            if (points) {
+                const nextPoints = Object.fromEntries(
+                    Object.entries(points).filter(([localId]) => remainingLocalIds.has(localId))
+                )
+                if (Object.keys(nextPoints).length !== Object.keys(points).length) {
+                    changed = true
+                    if (Object.keys(nextPoints).length > 0) {
+                        nextMetadata.conversationHistoryPoints = nextPoints
+                    } else {
+                        delete nextMetadata.conversationHistoryPoints
+                    }
+                }
+            }
+
+            const indexes = session.metadata.conversationHistoryIndexes
+            if (indexes) {
+                const nextIndexes = Object.fromEntries(
+                    Object.entries(indexes).filter(([localId]) => remainingLocalIds.has(localId))
+                )
+                if (Object.keys(nextIndexes).length !== Object.keys(indexes).length) {
+                    changed = true
+                    if (Object.keys(nextIndexes).length > 0) {
+                        nextMetadata.conversationHistoryIndexes = nextIndexes
+                    } else {
+                        delete nextMetadata.conversationHistoryIndexes
+                    }
+                }
+            }
+
+            const turns = session.metadata.conversationHistoryTurns
+            if (turns) {
+                const nextTurns = Object.fromEntries(
+                    Object.entries(turns).filter(([localId]) => remainingLocalIds.has(localId))
+                )
+                if (Object.keys(nextTurns).length !== Object.keys(turns).length) {
+                    changed = true
+                    if (Object.keys(nextTurns).length > 0) {
+                        nextMetadata.conversationHistoryTurns = nextTurns
+                    } else {
+                        delete nextMetadata.conversationHistoryTurns
+                    }
+                }
+            }
+
+            if (!changed) return
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                nextMetadata,
+                session.metadataVersion,
+                namespace,
+                { touchUpdatedAt: false }
+            )
+            if (result.result === 'success') {
+                this.sessionCache.refreshSession(sessionId)
+                return
+            }
+            if (result.result !== 'version-mismatch') return
+            this.sessionCache.refreshSession(sessionId)
+        }
+    }
+
+    private markConversationHistoryDiverged(sessionId: string, namespace: string): void {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const session = this.sessionCache.getSessionByNamespace(sessionId, namespace)
+                ?? this.sessionCache.refreshSession(sessionId)
+            if (!session?.metadata) return
+            if (session.metadata.conversationHistoryDiverged === true) return
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                { ...session.metadata, conversationHistoryDiverged: true },
+                session.metadataVersion,
+                namespace,
+                { touchUpdatedAt: false }
+            )
+            if (result.result === 'success') {
+                this.sessionCache.refreshSession(sessionId)
+                return
+            }
+            if (result.result !== 'version-mismatch') return
+            this.sessionCache.refreshSession(sessionId)
         }
     }
 
@@ -947,6 +1080,10 @@ async uploadScratchlistAttachment(
             conversationHistoryIndexes: Object.fromEntries(
                 Object.entries(source.metadata?.conversationHistoryIndexes ?? {})
                     .filter(([localId]) => copiedLocalIds.has(localId))
+            ),
+            conversationHistoryTurns: Object.fromEntries(
+                Object.entries(source.metadata?.conversationHistoryTurns ?? {})
+                    .filter(([localId]) => copiedLocalIds.has(localId))
             )
         }
         if (flavor === 'codex') {
@@ -1005,6 +1142,18 @@ async uploadScratchlistAttachment(
             if (spawn.type !== 'success') {
                 throw new Error(spawn.message)
             }
+
+            // Claude fork is spawn+flag, not an RPC-time snapshot. Keep the
+            // source history lock (caller holds historyActionsInFlight) until
+            // the child binds a distinct native id — otherwise the source can
+            // advance before --fork-session materializes.
+            if (flavor === 'claude' && rpcResult.forkSession === true) {
+                const bound = await this.waitForClaudeForkBound(childId, rpcResult.nativeSessionId)
+                if (!bound) {
+                    throw new Error('Claude fork did not materialize before timeout')
+                }
+            }
+
             return { type: 'success', sessionId: childId }
         } catch (error) {
             if (childCreated) {
@@ -1075,10 +1224,13 @@ async uploadScratchlistAttachment(
                 rpcResult.truncateFromLocalId ?? messageLocalId,
                 rpcResult.messages ?? []
             )
+            this.scrubHistoryLocators(sessionId, namespace)
             this.eventPublisher.emit({ type: 'messages-invalidated', sessionId, namespace })
             this.sessionCache.refreshSession(sessionId)
             return { type: 'success' }
         } catch (error) {
+            // Native history already changed; refuse further history actions until repaired.
+            this.markConversationHistoryDiverged(sessionId, namespace)
             return {
                 type: 'error',
                 message: error instanceof Error ? error.message : String(error),

@@ -55,6 +55,17 @@ export class CodexConversationHistory {
         this.threadId = threadId
     }
 
+    restoreTurns(turns: Record<string, string> | null | undefined): void {
+        if (!turns) return
+        for (const [localId, turnId] of Object.entries(turns)) {
+            if (localId && turnId) this.turnByLocalId.set(localId, turnId)
+        }
+    }
+
+    getTurns(): Record<string, string> {
+        return Object.fromEntries(this.turnByLocalId.entries())
+    }
+
     rememberLocalIdTurn(localId: string | undefined, turnId: string | null | undefined): void {
         if (!localId || !turnId) return
         this.turnByLocalId.set(localId, turnId)

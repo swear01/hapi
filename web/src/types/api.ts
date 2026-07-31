@@ -91,6 +91,9 @@ export type SessionMetadataSummary = {
         }
     }
     conversationHistoryPoints?: Record<string, true>
+    conversationHistoryIndexes?: Record<string, number>
+    conversationHistoryTurns?: Record<string, string>
+    conversationHistoryDiverged?: boolean
     worktree?: WorktreeMetadata
 }
 

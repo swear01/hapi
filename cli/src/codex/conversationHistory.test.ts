@@ -86,4 +86,21 @@ describe('CodexConversationHistory', () => {
         await expect(history.fork('missing-local')).rejects.toThrow(/No native history point/)
         expect(fork).not.toHaveBeenCalled()
     })
+
+    it('restores durable localId→turnId locators across relaunches', async () => {
+        const fork = vi.fn(async (params: Record<string, unknown>) => {
+            expect(params.beforeTurnId).toBe('turn-b')
+            return { thread: { id: 'forked-restored' } }
+        })
+        const history = new CodexConversationHistory(() => createClient({
+            fork,
+            // Simulate a relaunch where thread/read no longer exposes clientIds.
+            read: async () => ({ thread: { id: 'thread-1', turns: [{ id: 'turn-b', items: [] }] } })
+        }) as never)
+        history.setThreadId('thread-1')
+        history.restoreTurns({ 'local-b': 'turn-b' })
+        const result = await history.fork('local-b')
+        expect(result.nativeSessionId).toBe('forked-restored')
+        expect(history.getTurns()).toEqual({ 'local-b': 'turn-b' })
+    })
 })

@@ -86,6 +86,10 @@ export const MetadataSchema = z.object({
     // Native locators for historical fork/rewind (e.g. Grok prompt indexes).
     // Kept separately from the boolean UI markers above.
     conversationHistoryIndexes: z.record(z.string(), z.number().int().nonnegative()).optional(),
+    // Codex localId → turnId mapping (durable across runner relaunches).
+    conversationHistoryTurns: z.record(z.string(), z.string().min(1)).optional(),
+    // Set when native rewind succeeded but HAPI truncate/hydrate failed.
+    conversationHistoryDiverged: z.boolean().optional(),
     worktree: WorktreeMetadataSchema.optional(),
     // Cached Pi model list — written by CLI, read by web (inactive session fallback).
     // Minimal shape: each entry must have modelId; other fields (provider, name, etc.) pass through.
