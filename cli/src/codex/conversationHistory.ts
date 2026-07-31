@@ -121,11 +121,23 @@ export class CodexConversationHistory {
             if (this.states.forkAtMessage === 'unsupported') {
                 throw new Error('Historical fork is not supported')
             }
-            const turnId = await this.resolveTurnId(messageLocalId)
+            // HAPI historical fork excludes the selected boundary turn. Prefer the
+            // stable inclusive `lastTurnId` of the previous turn over experimental
+            // `beforeTurnId`, so native context matches the hydrated transcript.
+            const turns = await this.listTurns()
+            const selectedTurnId = await this.resolveTurnId(messageLocalId, turns)
+            const selectedIndex = turns.findIndex((turn) => turn.id === selectedTurnId)
+            if (selectedIndex < 0) {
+                throw new Error('Selected turn not found')
+            }
+            if (selectedIndex === 0) {
+                throw new Error('Forking before the first turn requires a fresh thread')
+            }
+            const lastTurnId = turns[selectedIndex - 1]!.id
             try {
                 const response = await client.forkThread({
                     threadId,
-                    beforeTurnId: turnId
+                    lastTurnId
                 })
                 const nativeSessionId = asString(asRecord(response.thread)?.id)
                 if (!nativeSessionId) throw new Error('thread/fork did not return thread.id')

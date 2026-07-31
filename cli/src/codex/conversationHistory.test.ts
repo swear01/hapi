@@ -35,15 +35,24 @@ describe('CodexConversationHistory', () => {
         expect(fork).toHaveBeenCalledTimes(1)
     })
 
-    it('historical fork passes beforeTurnId for the selected localId', async () => {
+    it('historical fork passes lastTurnId of the previous turn', async () => {
         const fork = vi.fn(async (params: Record<string, unknown>) => {
-            expect(params.beforeTurnId).toBe('turn-b')
+            expect(params.lastTurnId).toBe('turn-a')
+            expect(params.beforeTurnId).toBeUndefined()
             return { thread: { id: 'forked-hist' } }
         })
         const history = new CodexConversationHistory(() => createClient({ fork }) as never)
         history.setThreadId('thread-1')
         const result = await history.fork('local-b')
         expect(result.nativeSessionId).toBe('forked-hist')
+    })
+
+    it('rejects historical fork before the first turn', async () => {
+        const fork = vi.fn(async () => ({ thread: { id: 'x' } }))
+        const history = new CodexConversationHistory(() => createClient({ fork }) as never)
+        history.setThreadId('thread-1')
+        await expect(history.fork('local-a')).rejects.toThrow(/first turn/)
+        expect(fork).not.toHaveBeenCalled()
     })
 
     it('computes rewind numTurns from selected turn', async () => {
@@ -89,18 +98,27 @@ describe('CodexConversationHistory', () => {
 
     it('restores durable localId→turnId locators across relaunches', async () => {
         const fork = vi.fn(async (params: Record<string, unknown>) => {
-            expect(params.beforeTurnId).toBe('turn-b')
+            expect(params.lastTurnId).toBe('turn-a')
+            expect(params.beforeTurnId).toBeUndefined()
             return { thread: { id: 'forked-restored' } }
         })
         const history = new CodexConversationHistory(() => createClient({
             fork,
             // Simulate a relaunch where thread/read no longer exposes clientIds.
-            read: async () => ({ thread: { id: 'thread-1', turns: [{ id: 'turn-b', items: [] }] } })
+            read: async () => ({
+                thread: {
+                    id: 'thread-1',
+                    turns: [
+                        { id: 'turn-a', items: [] },
+                        { id: 'turn-b', items: [] }
+                    ]
+                }
+            })
         }) as never)
         history.setThreadId('thread-1')
         history.restoreTurns({ 'local-b': 'turn-b' })
         const result = await history.fork('local-b')
         expect(result.nativeSessionId).toBe('forked-restored')
-        expect(history.getTurns()).toEqual({ 'local-b': 'turn-b' })
+        expect(history.getTurns()['local-b']).toBe('turn-b')
     })
 })
