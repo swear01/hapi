@@ -259,6 +259,12 @@ export function HappyComposer(props: {
         sendError = null,
         onClearSendError
     } = props
+    const personalityLabels: Record<CodexPersonality | 'default', string> = {
+        default: t('misc.codexPersonalityDefault'),
+        friendly: t('misc.codexPersonalityFriendly'),
+        pragmatic: t('misc.codexPersonalityPragmatic'),
+        none: t('misc.codexPersonalityNone')
+    }
 
     // Use ?? so missing values fall back to default (destructuring defaults only handle undefined)
     const permissionMode = rawPermissionMode ?? 'default'
@@ -945,10 +951,10 @@ export function HappyComposer(props: {
 
                         {onPersonalityChange ? (
                             <div className="py-2">
-                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">Personality</div>
+                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">{t('misc.codexPersonality')}</div>
                                 {CODEX_PERSONALITY_OPTIONS.map((option) => (
-                                    <button key={option.label} type="button" disabled={controlsDisabled} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--app-secondary-bg)]" onClick={() => onPersonalityChange(option.value)} onMouseDown={(e) => e.preventDefault()}>
-                                        <span className={personality === option.value ? 'text-[var(--app-link)]' : ''}>{personality === option.value ? '● ' : '○ '}{option.label}</span>
+                                    <button key={option.value ?? 'default'} type="button" disabled={controlsDisabled} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--app-secondary-bg)]" onClick={() => onPersonalityChange(option.value)} onMouseDown={(e) => e.preventDefault()}>
+                                        <span className={personality === option.value ? 'text-[var(--app-link)]' : ''}>{personality === option.value ? '● ' : '○ '}{personalityLabels[option.value ?? 'default']}</span>
                                     </button>
                                 ))}
                             </div>

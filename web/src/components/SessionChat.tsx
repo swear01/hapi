@@ -102,21 +102,34 @@ export async function applyModelChangeWithReasoningRollback(args: {
     model: SessionModelSelection
     previousModelReasoningEffort: string | null
     shouldClearReasoningEffort: boolean
+    previousPersonality: Session['personality']
+    shouldClearPersonality: boolean
     setModel: (model: SessionModelSelection) => Promise<void>
     setModelReasoningEffort: (effort: string | null) => Promise<void>
+    setPersonality: (personality: Session['personality']) => Promise<void>
 }): Promise<void> {
     let clearedReasoningEffort = false
+    let clearedPersonality = false
 
     try {
         if (args.shouldClearReasoningEffort) {
             await args.setModelReasoningEffort(null)
             clearedReasoningEffort = true
         }
+        if (args.shouldClearPersonality) {
+            await args.setPersonality(null)
+            clearedPersonality = true
+        }
         await args.setModel(args.model)
     } catch (error) {
         if (clearedReasoningEffort && args.previousModelReasoningEffort) {
             await args.setModelReasoningEffort(args.previousModelReasoningEffort).catch((restoreError) => {
                 console.error('Failed to restore model reasoning effort:', restoreError)
+            })
+        }
+        if (clearedPersonality && args.previousPersonality) {
+            await args.setPersonality(args.previousPersonality).catch((restoreError) => {
+                console.error('Failed to restore personality:', restoreError)
             })
         }
         throw error
@@ -1032,6 +1045,7 @@ function SessionChatInner(props: SessionChatProps) {
     // Model mode change handler
     const handleModelChange = useCallback(async (model: SessionModelSelection) => {
         const previousModelReasoningEffort = props.session.modelReasoningEffort
+        const previousPersonality = props.session.personality
         const shouldClearReasoningEffort = agentFlavor === 'codex'
             && Boolean(previousModelReasoningEffort)
             && supportsCodexReasoningEffort(
@@ -1039,14 +1053,20 @@ function SessionChatInner(props: SessionChatProps) {
                 model,
                 previousModelReasoningEffort
             ) === false
+        const shouldClearPersonality = agentFlavor === 'codex'
+            && previousPersonality !== null
+            && resolveCodexModel(codexModelsState.models, model)?.supportsPersonality !== true
 
         try {
             await applyModelChangeWithReasoningRollback({
                 model,
                 previousModelReasoningEffort,
                 shouldClearReasoningEffort,
+                previousPersonality,
+                shouldClearPersonality,
                 setModel,
-                setModelReasoningEffort
+                setModelReasoningEffort,
+                setPersonality
             })
             haptic.notification('success')
             props.onRefresh()
@@ -1058,8 +1078,10 @@ function SessionChatInner(props: SessionChatProps) {
         agentFlavor,
         codexModelsState.models,
         props.session.modelReasoningEffort,
+        props.session.personality,
         setModelReasoningEffort,
         setModel,
+        setPersonality,
         props.onRefresh,
         haptic
     ])

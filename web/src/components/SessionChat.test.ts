@@ -21,8 +21,11 @@ describe('applyModelChangeWithReasoningRollback', () => {
             model: 'gpt-next',
             previousModelReasoningEffort: 'extreme',
             shouldClearReasoningEffort: true,
+            previousPersonality: null,
+            shouldClearPersonality: false,
             setModel,
-            setModelReasoningEffort
+            setModelReasoningEffort,
+            setPersonality: vi.fn(async () => {})
         })).rejects.toBe(modelError)
 
         expect(setModelReasoningEffort.mock.calls).toEqual([[null], ['extreme']])
@@ -37,13 +40,36 @@ describe('applyModelChangeWithReasoningRollback', () => {
             model: 'gpt-next',
             previousModelReasoningEffort: 'extreme',
             shouldClearReasoningEffort: true,
+            previousPersonality: null,
+            shouldClearPersonality: false,
             setModel,
-            setModelReasoningEffort
+            setModelReasoningEffort,
+            setPersonality: vi.fn(async () => {})
         })
 
         expect(setModelReasoningEffort).toHaveBeenCalledOnce()
         expect(setModelReasoningEffort).toHaveBeenCalledWith(null)
         expect(setModel).toHaveBeenCalledWith('gpt-next')
+    })
+
+    it('clears unsupported personality and restores it when the model change fails', async () => {
+        const modelError = new Error('model switch failed')
+        const setModel = vi.fn(async () => { throw modelError })
+        const setModelReasoningEffort = vi.fn(async () => {})
+        const setPersonality = vi.fn(async () => {})
+
+        await expect(applyModelChangeWithReasoningRollback({
+            model: 'unsupported-model',
+            previousModelReasoningEffort: null,
+            shouldClearReasoningEffort: false,
+            previousPersonality: 'friendly',
+            shouldClearPersonality: true,
+            setModel,
+            setModelReasoningEffort,
+            setPersonality
+        })).rejects.toBe(modelError)
+
+        expect(setPersonality.mock.calls).toEqual([[null], ['friendly']])
     })
 })
 
