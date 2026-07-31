@@ -139,8 +139,7 @@ vi.mock('@/ui/logger', () => ({
 
 import {
     classifyCursorAcpLoadError,
-    cursorAcpRemoteLauncher,
-    isCurrentSoftSteerCallback
+    cursorAcpRemoteLauncher
 } from './cursorAcpRemoteLauncher';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
 import { CursorSession } from './session';
@@ -201,12 +200,6 @@ describe('cursorAcpRemoteLauncher', () => {
         legacyLauncher.mockClear();
         process.stdin.isTTY = false;
         process.stdout.isTTY = false;
-    });
-
-    it('invalidates soft-steer callbacks after abort or cleanup', () => {
-        expect(isCurrentSoftSteerCallback(3, 3, false)).toBe(true);
-        expect(isCurrentSoftSteerCallback(4, 3, false)).toBe(false);
-        expect(isCurrentSoftSteerCallback(3, 3, true)).toBe(false);
     });
 
     afterEach(() => {

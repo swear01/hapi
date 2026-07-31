@@ -11,7 +11,7 @@ export interface QueueItem<T> {
 export type QueueReservation<T> = {
     item: QueueItem<T>;
     index: number;
-    cancelled: boolean;
+    state: 'reserved' | 'dispatching' | 'cancelled';
 };
 
 /**
@@ -277,7 +277,8 @@ export class MessageQueue2<T> {
         }
         const reservation = this.reservations.get(localId);
         if (!reservation) return false;
-        reservation.cancelled = true;
+        if (reservation.state === 'dispatching') return false;
+        reservation.state = 'cancelled';
         return true;
     }
 
@@ -300,7 +301,7 @@ export class MessageQueue2<T> {
         if (idx === -1) return null;
         const [item] = this.queue.splice(idx, 1);
         if (!item) return null;
-        const reservation: QueueReservation<T> = { item, index: idx, cancelled: false };
+        const reservation: QueueReservation<T> = { item, index: idx, state: 'reserved' };
         if (item.localId) {
             this.reservations.set(item.localId, reservation);
         }
@@ -312,7 +313,7 @@ export class MessageQueue2<T> {
      * original index (clamped if the queue shrank).
      */
     restoreReservation(reservation: QueueReservation<T>): boolean {
-        if (reservation.cancelled) {
+        if (reservation.state === 'cancelled') {
             return false;
         }
         if (this.closed) {
@@ -335,7 +336,7 @@ export class MessageQueue2<T> {
     }
 
     commitReservation(reservation: QueueReservation<T>): boolean {
-        if (reservation.cancelled) {
+        if (reservation.state === 'cancelled') {
             return false;
         }
         if (reservation.item.localId) {
@@ -344,6 +345,17 @@ export class MessageQueue2<T> {
             }
             this.reservations.delete(reservation.item.localId);
         }
+        return true;
+    }
+
+    beginReservationDispatch(reservation: QueueReservation<T>): boolean {
+        if (reservation.state !== 'reserved') {
+            return false;
+        }
+        if (reservation.item.localId && this.reservations.get(reservation.item.localId) !== reservation) {
+            return false;
+        }
+        reservation.state = 'dispatching';
         return true;
     }
 
@@ -358,7 +370,7 @@ export class MessageQueue2<T> {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
         for (const reservation of this.reservations.values()) {
-            reservation.cancelled = true;
+            reservation.state = 'cancelled';
         }
         this.reservations.clear();
         this.closed = false;
@@ -374,7 +386,7 @@ export class MessageQueue2<T> {
         logger.debug(`[MessageQueue2] close() called`);
         this.closed = true;
         for (const reservation of this.reservations.values()) {
-            reservation.cancelled = true;
+            reservation.state = 'cancelled';
         }
         this.reservations.clear();
 

@@ -1965,6 +1965,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     hash: taken.item.modeHash
                 };
                 const steerEpoch = this.steerEpoch;
+                if (!session.queue.beginReservationDispatch(taken)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
                 const steered = await trySteerActiveTurn(batch);
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
                     return { steered: false, error: 'Steer cancelled' };
