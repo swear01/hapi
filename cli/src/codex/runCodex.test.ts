@@ -290,6 +290,33 @@ describe('runCodex', () => {
         expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: null }))
     })
 
+    it('allows personality for a model absent from the catalog', async () => {
+        await runCodexImpl({
+            workingDirectory: '/tmp/project',
+            model: 'custom-model',
+            personality: 'friendly'
+        } as Parameters<typeof runCodex>[0])
+
+        expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: 'friendly' }))
+    })
+
+    it('cleans up the session when startup personality validation fails', async () => {
+        vi.mocked(listCodexModels).mockResolvedValue([{
+            id: 'gpt-5.4',
+            displayName: 'gpt-5.4',
+            isDefault: true,
+            supportsPersonality: false
+        }])
+
+        await runCodexImpl({
+            workingDirectory: '/tmp/project',
+            personality: 'friendly'
+        } as Parameters<typeof runCodex>[0])
+
+        expect(lifecycleMock.markCrash).toHaveBeenCalled()
+        expect(lifecycleMock.cleanupAndExit).toHaveBeenCalledOnce()
+    })
+
     it('replays transcript history when attaching a new Hapi session to an existing Codex thread', async () => {
         await runCodexImpl({
             workingDirectory: '/tmp/project',

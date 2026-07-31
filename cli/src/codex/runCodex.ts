@@ -112,7 +112,7 @@ export async function runCodex(opts: {
     const personalitySupported = async (model: string | null | undefined): Promise<boolean> => {
         try {
             modelCatalog ??= listCodexModels();
-            return resolveCodexModel(await modelCatalog, model)?.supportsPersonality === true;
+            return resolveCodexModel(await modelCatalog, model)?.supportsPersonality !== false;
         } catch (error) {
             logger.debug('[codex] Unable to resolve personality support from model catalog', error);
             // Fail open when catalog discovery is unavailable so sessions still start.
@@ -124,8 +124,6 @@ export async function runCodex(opts: {
             throw new Error('Selected model does not support personality');
         }
     };
-    await assertPersonalitySupported(currentPersonality);
-
     const lifecycle = createRunnerLifecycle({
         session,
         logTag: 'codex',
@@ -270,7 +268,17 @@ export async function runCodex(opts: {
                     return;
                 }
                 if (slash.kind !== 'passthrough') {
-                    await applySlashUpdates(slash.updates);
+                    try {
+                        await applySlashUpdates(slash.updates);
+                    } catch (error) {
+                        session.sendAgentMessage({
+                            type: 'message',
+                            message: error instanceof Error ? error.message : 'Failed to update Codex personality',
+                            id: randomUUID()
+                        });
+                        if (localId) session.emitMessagesConsumed([localId]);
+                        return;
+                    }
                     if (slash.message) {
                         session.sendAgentMessage({
                             type: 'message',
@@ -460,6 +468,7 @@ export async function runCodex(opts: {
     let crashed = false;
 
     try {
+        await assertPersonalitySupported(currentPersonality);
         await loop({
             path: workingDirectory,
             startingMode,
