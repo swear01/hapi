@@ -845,6 +845,16 @@ async uploadScratchlistAttachment(
         }
     }
 
+    /** Stale localIds must fail before native fork/rewind mutates agent history. */
+    private assertInvokedHistoryBoundary(sessionId: string, messageLocalId: string): void {
+        const boundary = this.store.messages.getAllMessages(sessionId).find(
+            (message) => message.localId === messageLocalId && message.invokedAt != null
+        )
+        if (!boundary) {
+            throw new Error('History boundary message not found or not yet invoked')
+        }
+    }
+
     async forkConversation(
         sessionId: string,
         namespace: string,
@@ -881,6 +891,11 @@ async uploadScratchlistAttachment(
         if (messageLocalId) {
             if (history?.forkAtMessage !== true) {
                 return { type: 'error', message: 'Historical fork is not supported for this session' }
+            }
+            try {
+                this.assertInvokedHistoryBoundary(sessionId, messageLocalId)
+            } catch (error) {
+                return { type: 'error', message: error instanceof Error ? error.message : String(error) }
             }
         } else if (history?.forkCurrent !== true) {
             return { type: 'error', message: 'Fork current is not supported for this session' }
@@ -1036,6 +1051,11 @@ async uploadScratchlistAttachment(
         }
         if (session.metadata?.capabilities?.conversationHistory?.rewindToMessage !== true) {
             return { type: 'error', message: 'Rewind is not supported for this session' }
+        }
+        try {
+            this.assertInvokedHistoryBoundary(sessionId, messageLocalId)
+        } catch (error) {
+            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
         }
 
         let rpcResult: Awaited<ReturnType<RpcGateway['rewindConversation']>>

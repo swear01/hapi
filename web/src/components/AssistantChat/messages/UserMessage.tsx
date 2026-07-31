@@ -51,6 +51,12 @@ export function HappyUserMessage() {
         && localId.length > 0
         && ctx.metadata?.conversationHistoryPoints?.[localId] === true
     const isLatestBoundary = ctx.isLatestCompletedBoundary?.(messageId) === true
+    const showCurrentFork = Boolean(
+        history?.forkCurrent
+        && isLatestBoundary
+        && !ctx.disabled
+        && ctx.onForkConversation
+    )
     const showHistoricalFork = Boolean(
         history?.forkAtMessage
         && hasNativePoint
@@ -58,6 +64,7 @@ export function HappyUserMessage() {
         && !ctx.disabled
         && ctx.onForkConversation
     )
+    const showFork = showCurrentFork || showHistoricalFork
     const showRewind = Boolean(
         history?.rewindToMessage
         && hasNativePoint
@@ -106,12 +113,14 @@ export function HappyUserMessage() {
                 align="end"
                 copyText={hasText ? text : undefined}
                 messageElementId={elementId}
-                showFork={showHistoricalFork}
+                showFork={showFork}
                 showRewind={showRewind}
                 historyActionPending={ctx.historyActionPending}
-                onFork={showHistoricalFork && localId
-                    ? () => ctx.onForkConversation!(localId)
-                    : undefined}
+                onFork={showCurrentFork
+                    ? () => ctx.onForkConversation!()
+                    : showHistoricalFork && localId
+                        ? () => ctx.onForkConversation!(localId)
+                        : undefined}
                 onRewind={showRewind && localId
                     ? () => ctx.onRewindConversation!(localId)
                     : undefined}

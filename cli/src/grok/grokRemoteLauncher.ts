@@ -142,23 +142,27 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         this.conversationHistory.setPublishCapabilities(async () => {
             const conversationHistory = this.conversationHistory.getCapabilitiesForMetadata()?.conversationHistory
             try {
-                session.client.updateMetadata((metadata) => ({
-                    ...metadata,
-                    path: metadata?.path ?? session.path,
-                    host: metadata?.host ?? 'unknown',
-                    capabilities: {
-                        ...metadata?.capabilities,
-                        ...(conversationHistory ? { conversationHistory } : {})
-                    },
-                    conversationHistoryPoints: {
-                        ...metadata?.conversationHistoryPoints,
-                        ...this.conversationHistory.getHistoryPoints()
-                    },
-                    conversationHistoryIndexes: {
-                        ...metadata?.conversationHistoryIndexes,
-                        ...this.conversationHistory.getHistoryIndexes()
+                session.client.updateMetadata((metadata) => {
+                    const capabilities = { ...metadata?.capabilities }
+                    delete capabilities.conversationHistory
+                    if (conversationHistory) {
+                        capabilities.conversationHistory = conversationHistory
                     }
-                }))
+                    return {
+                        ...metadata,
+                        path: metadata?.path ?? session.path,
+                        host: metadata?.host ?? 'unknown',
+                        capabilities,
+                        conversationHistoryPoints: {
+                            ...metadata?.conversationHistoryPoints,
+                            ...this.conversationHistory.getHistoryPoints()
+                        },
+                        conversationHistoryIndexes: {
+                            ...metadata?.conversationHistoryIndexes,
+                            ...this.conversationHistory.getHistoryIndexes()
+                        }
+                    }
+                })
             } catch {
                 // best-effort; tests and transient hub disconnects must not crash the loop
             }
