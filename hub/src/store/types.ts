@@ -15,7 +15,8 @@ export type StoredSession = {
     modelReasoningEffort: string | null
     effort: string | null
     serviceTier: string | null
-    personality: CodexPersonality | null
+    /** Undefined inherits Codex; null is an explicit Default reset. */
+    personality: CodexPersonality | null | undefined
     todos: unknown | null
     todosUpdatedAt: number | null
     teamState: unknown | null

@@ -159,7 +159,7 @@ export class RpcGateway {
         serviceTier?: string,
         existingSessionId?: string,
         collaborationMode?: CodexCollaborationMode,
-        personality?: CodexPersonality
+        personality?: CodexPersonality | null
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         try {
             const result = await this.machineRpc(

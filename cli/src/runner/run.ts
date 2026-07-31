@@ -1136,8 +1136,8 @@ export function buildCliArgs(
   if (options.serviceTier && agent === 'codex') {
     args.push('--service-tier', options.serviceTier);
   }
-  if (options.personality && agent === 'codex') {
-    args.push('--personality', options.personality);
+  if (options.personality !== undefined && agent === 'codex') {
+    args.push('--personality', options.personality ?? 'default');
   }
   if (options.collaborationMode && options.collaborationMode !== 'default' && agent === 'codex') {
     args.push('--collaboration-mode', options.collaborationMode);

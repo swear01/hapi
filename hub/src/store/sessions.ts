@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite'
+import { CodexPersonalitySchema } from '@hapi/protocol/schemas'
 import type { CodexPersonality } from '@hapi/protocol/types'
 import { randomUUID } from 'node:crypto'
 
@@ -146,7 +147,7 @@ type DbSessionRow = {
     model_reasoning_effort: string | null
     effort: string | null
     service_tier: string | null
-    personality: CodexPersonality | null
+    personality: string | null
     todos: string | null
     todos_updated_at: number | null
     team_state: string | null
@@ -172,7 +173,11 @@ function toStoredSession(row: DbSessionRow): StoredSession {
         modelReasoningEffort: row.model_reasoning_effort,
         effort: row.effort,
         serviceTier: row.service_tier,
-        personality: row.personality,
+        personality: row.personality === null
+            ? undefined
+            : row.personality === 'default'
+                ? null
+                : CodexPersonalitySchema.parse(row.personality),
         todos: safeJsonParse(row.todos),
         todosUpdatedAt: row.todos_updated_at,
         teamState: safeJsonParse(row.team_state),
@@ -512,7 +517,7 @@ export function setSessionServiceTier(
 export function setSessionPersonality(
     db: Database,
     id: string,
-    personality: string | null,
+    personality: CodexPersonality | null,
     namespace: string,
     options?: { touchUpdatedAt?: boolean }
 ): boolean {
@@ -531,7 +536,7 @@ export function setSessionPersonality(
         `).run({
             id,
             namespace,
-            personality,
+            personality: personality ?? 'default',
             updated_at: now,
             touch_updated_at: touchUpdatedAt ? 1 : 0
         })

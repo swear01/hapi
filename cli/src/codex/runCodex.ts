@@ -18,6 +18,8 @@ import { getInvokedCwd } from '@/utils/invokedCwd';
 import type { ReasoningEffort } from './appServerTypes';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { listSlashCommands } from '@/modules/common/slashCommands';
+import { listCodexModels, resolveCodexModel } from '@/modules/common/codexModels';
+import type { CodexModelSummary } from '@hapi/protocol/apiTypes';
 import { resolveCodexSlashCommand } from './utils/slashCommands';
 import type { CodexPersonality } from '@hapi/protocol/modes';
 import { parseReasoningEffortValue } from './utils/reasoningEffort';
@@ -105,7 +107,18 @@ export async function runCodex(opts: {
     let currentServiceTier: string | null | undefined = opts.serviceTier ?? sessionInfo.serviceTier ?? undefined;
     let currentPersonality: CodexPersonality | null | undefined = opts.personality !== undefined
         ? opts.personality
-        : sessionInfo.personality ?? undefined;
+        : sessionInfo.personality;
+    let modelCatalog: Promise<CodexModelSummary[]> | undefined;
+    const personalitySupported = async (model: string | null | undefined): Promise<boolean> => {
+        modelCatalog ??= listCodexModels();
+        return resolveCodexModel(await modelCatalog, model)?.supportsPersonality === true;
+    };
+    const assertPersonalitySupported = async (personality: CodexPersonality | null | undefined): Promise<void> => {
+        if (personality !== null && personality !== undefined && !await personalitySupported(currentModel)) {
+            throw new Error('Selected model does not support personality');
+        }
+    };
+    await assertPersonalitySupported(currentPersonality);
 
     const lifecycle = createRunnerLifecycle({
         session,
@@ -146,7 +159,7 @@ export async function runCodex(opts: {
         );
     };
 
-    const applySlashUpdates = (updates: {
+    const applySlashUpdates = async (updates: {
         permissionMode?: PermissionMode;
         model?: string | null;
         modelReasoningEffort?: ReasoningEffort | null;
@@ -154,13 +167,16 @@ export async function runCodex(opts: {
         serviceTier?: string | null;
         personality?: CodexPersonality | null;
         proactiveMultiAgent?: boolean;
-    } | undefined): void => {
+    } | undefined): Promise<void> => {
         if (!updates) return;
         if (updates.permissionMode !== undefined) {
             currentPermissionMode = updates.permissionMode;
         }
         if (updates.model !== undefined) {
             currentModel = updates.model ?? undefined;
+            if (currentPersonality !== null && currentPersonality !== undefined && !await personalitySupported(currentModel)) {
+                currentPersonality = null;
+            }
         }
         if (updates.modelReasoningEffort !== undefined) {
             currentModelReasoningEffort = updates.modelReasoningEffort;
@@ -171,7 +187,10 @@ export async function runCodex(opts: {
         if (updates.serviceTier !== undefined) {
             currentServiceTier = updates.serviceTier;
         }
-        if (updates.personality !== undefined) currentPersonality = updates.personality;
+        if (updates.personality !== undefined) {
+            await assertPersonalitySupported(updates.personality);
+            currentPersonality = updates.personality;
+        }
         if (updates.proactiveMultiAgent !== undefined) {
             currentProactiveMultiAgent = updates.proactiveMultiAgent;
         }
@@ -245,7 +264,7 @@ export async function runCodex(opts: {
                     return;
                 }
                 if (slash.kind !== 'passthrough') {
-                    applySlashUpdates(slash.updates);
+                    await applySlashUpdates(slash.updates);
                     if (slash.message) {
                         session.sendAgentMessage({
                             type: 'message',

@@ -265,6 +265,7 @@ describe('session model', () => {
             null,
             'default'
         )
+        store.sessions.setSessionPersonality(newSession.id, null, 'default')
 
         await cache.mergeSessions(oldSession.id, newSession.id, 'default')
 
@@ -572,8 +573,8 @@ describe('session model', () => {
             personality: 'invalid' as never
         })
 
-        expect(cache.getSession(session.id)?.personality).toBeNull()
-        expect(store.sessions.getSession(session.id)?.personality).toBeNull()
+        expect(cache.getSession(session.id)?.personality).toBeUndefined()
+        expect(store.sessions.getSession(session.id)?.personality).toBeUndefined()
     })
 
     it('touches session updatedAt when new message activity is recorded', () => {

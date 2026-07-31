@@ -8,6 +8,17 @@ export interface ListCodexModelsRequest {
 
 export type ListCodexModelsResponse = CodexModelsResponse;
 
+export function resolveCodexModel(
+    models: readonly CodexModelSummary[],
+    model: string | null | undefined
+): CodexModelSummary | null {
+    const modelId = model?.trim()
+    if (!modelId || modelId === 'auto') {
+        return models.find((candidate) => candidate.isDefault) ?? models[0] ?? null
+    }
+    return models.find((candidate) => candidate.id === modelId) ?? null
+}
+
 function asNonEmptyString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }

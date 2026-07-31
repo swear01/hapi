@@ -44,7 +44,7 @@ export const codexCommand: CommandDefinition = {
                 model?: string
                 modelReasoningEffort?: ReasoningEffort
                 serviceTier?: string
-                personality?: CodexPersonality
+                personality?: CodexPersonality | null
                 collaborationMode?: 'default' | 'plan'
             } = {}
             const unknownArgs: string[] = []
@@ -101,10 +101,10 @@ export const codexCommand: CommandDefinition = {
                     options.serviceTier = parseServiceTier(tier)
                 } else if (arg === '--personality') {
                     const personality = commandArgs[++i]
-                    if (!personality || !['friendly', 'pragmatic', 'none'].includes(personality)) {
+                    if (!personality || !['friendly', 'pragmatic', 'none', 'default'].includes(personality)) {
                         throw new Error(`Invalid --personality value: ${personality ?? '(missing)'}`)
                     }
-                    options.personality = personality as CodexPersonality
+                    options.personality = personality === 'default' ? null : personality as CodexPersonality
                 } else if (arg === '--collaboration-mode') {
                     const mode = commandArgs[++i]
                     if (!mode) {

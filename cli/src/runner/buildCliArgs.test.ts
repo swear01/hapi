@@ -118,6 +118,15 @@ describe('buildCliArgs', () => {
         expect(args).toContain('pragmatic')
     })
 
+    it('passes explicit default personality through for resumed codex sessions', () => {
+        const args = buildCliArgs('codex', {
+            directory: '/tmp',
+            personality: null,
+        })
+        expect(args).toContain('--personality')
+        expect(args).toContain('default')
+    })
+
     it('passes existing Hapi session id separately from Codex resume thread', () => {
         const args = buildCliArgs('codex', {
             directory: '/tmp',

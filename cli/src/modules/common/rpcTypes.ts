@@ -14,7 +14,7 @@ export interface SpawnSessionOptions {
     yolo?: boolean
     permissionMode?: string
     serviceTier?: string
-    personality?: CodexPersonality
+    personality?: CodexPersonality | null
     collaborationMode?: 'default' | 'plan'
     token?: string
     sessionType?: 'simple' | 'worktree'

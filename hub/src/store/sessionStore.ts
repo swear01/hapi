@@ -89,7 +89,7 @@ export class SessionStore {
         return setSessionServiceTier(this.db, id, serviceTier, namespace, options)
     }
 
-    setSessionPersonality(id: string, personality: string | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {
+    setSessionPersonality(id: string, personality: import('@hapi/protocol/types').CodexPersonality | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {
         return setSessionPersonality(this.db, id, personality, namespace, options)
     }
 
