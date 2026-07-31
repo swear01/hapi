@@ -110,8 +110,14 @@ export async function runCodex(opts: {
         : sessionInfo.personality;
     let modelCatalog: Promise<CodexModelSummary[]> | undefined;
     const personalitySupported = async (model: string | null | undefined): Promise<boolean> => {
-        modelCatalog ??= listCodexModels();
-        return resolveCodexModel(await modelCatalog, model)?.supportsPersonality === true;
+        try {
+            modelCatalog ??= listCodexModels();
+            return resolveCodexModel(await modelCatalog, model)?.supportsPersonality === true;
+        } catch (error) {
+            logger.debug('[codex] Unable to resolve personality support from model catalog', error);
+            // Fail open when catalog discovery is unavailable so sessions still start.
+            return true;
+        }
     };
     const assertPersonalitySupported = async (personality: CodexPersonality | null | undefined): Promise<void> => {
         if (personality !== null && personality !== undefined && !await personalitySupported(currentModel)) {

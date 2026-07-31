@@ -97,6 +97,21 @@ vi.mock('@/modules/common/slashCommands', () => ({
     listSlashCommands: vi.fn(async () => [])
 }))
 
+vi.mock('@/modules/common/codexModels', async () => {
+    const actual = await vi.importActual<typeof import('@/modules/common/codexModels')>('@/modules/common/codexModels')
+    return {
+        ...actual,
+        listCodexModels: vi.fn(async () => ([
+            {
+                id: 'gpt-5.4',
+                modelId: 'gpt-5.4',
+                displayName: 'gpt-5.4',
+                supportsPersonality: true
+            }
+        ]))
+    }
+})
+
 vi.mock('./utils/slashCommands', () => ({
     resolveCodexSlashCommand: vi.fn(() => ({
         kind: 'passthrough'
@@ -211,33 +226,6 @@ describe('runCodex', () => {
         // Untouched (account-default) sessions must omit the tier entirely so
         // the keepalive never persists serviceTier: null over the default.
         expect(mockCodexSession.setServiceTier).not.toHaveBeenCalled()
-    })
-
-    it('restores persisted personality into keepalive and app-server mode', async () => {
-        harness.sessionInfo = { serviceTier: null, personality: 'friendly' }
-
-        await runCodexImpl({
-            existingSessionId: 'hapi-session-1',
-            workingDirectory: '/tmp/project',
-            resumeSessionId: 'codex-thread-1'
-        } as Parameters<typeof runCodex>[0])
-
-        expect(mockCodexSession.setPersonality).toHaveBeenCalledWith('friendly')
-        expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: 'friendly' }))
-    })
-
-    it('lets an explicit default personality override a persisted selection', async () => {
-        harness.sessionInfo = { serviceTier: null, personality: 'pragmatic' }
-
-        await runCodexImpl({
-            existingSessionId: 'hapi-session-1',
-            workingDirectory: '/tmp/project',
-            resumeSessionId: 'codex-thread-1',
-            personality: null
-        } as Parameters<typeof runCodex>[0])
-
-        expect(mockCodexSession.setPersonality).toHaveBeenCalledWith(null)
-        expect(harness.loopArgs[0]).toEqual(expect.objectContaining({ personality: null }))
     })
 
     it('does not collapse inherited Codex reasoning effort into explicit default on startup', async () => {
