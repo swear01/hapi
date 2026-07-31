@@ -888,6 +888,31 @@ async uploadScratchlistAttachment(
         return false
     }
 
+    /**
+     * Grok RPC already created `expectedNativeSessionId`. Wait until the child
+     * binds that exact id — a different id means load failed and fell back.
+     */
+    private async waitForGrokForkBound(
+        childId: string,
+        expectedNativeSessionId: string,
+        timeoutMs: number = 60_000
+    ): Promise<boolean> {
+        const startedAt = Date.now()
+        while (Date.now() - startedAt < timeoutMs) {
+            this.sessionCache.refreshSession(childId)
+            const child = this.sessionCache.getSession(childId)
+            const boundId = child?.metadata?.grokSessionId
+            if (typeof boundId === 'string' && boundId.length > 0) {
+                return boundId === expectedNativeSessionId
+            }
+            if (child && !child.active && Date.now() - startedAt > 5_000) {
+                return false
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+        return false
+    }
+
     /** Drop history locators that no longer have a corresponding message row. */
     private scrubHistoryLocators(sessionId: string, namespace: string): void {
         const remainingLocalIds = new Set(
@@ -1151,6 +1176,16 @@ async uploadScratchlistAttachment(
                 const bound = await this.waitForClaudeForkBound(childId, rpcResult.nativeSessionId)
                 if (!bound) {
                     throw new Error('Claude fork did not materialize before timeout')
+                }
+            }
+
+            // Grok forks at RPC time, but spawn may still fall back to a blank
+            // session if load fails. Do not report success until the child is
+            // bound to the exact forked native id.
+            if (flavor === 'grok') {
+                const bound = await this.waitForGrokForkBound(childId, rpcResult.nativeSessionId)
+                if (!bound) {
+                    throw new Error('Grok fork could not load the forked native session')
                 }
             }
 

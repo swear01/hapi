@@ -105,6 +105,9 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         await backend.initialize()
 
         const acpMcpServers = toAcpMcpServers(mcpServers)
+        // Fork children must load the exact native id hub forked. Falling back to
+        // newSession() would leave hydrated HAPI history without matching model context.
+        const strictForkResume = session.client.getMetadata()?.forkedFrom != null
         let acpSessionId: string
         try {
             if (session.sessionId) {
@@ -115,6 +118,9 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
                         mcpServers: acpMcpServers
                     })
                 } catch (error) {
+                    if (strictForkResume) {
+                        throw error
+                    }
                     logger.warn('[grok-remote] resume failed, starting new session', error)
                     session.sendSessionEvent({
                         type: 'message',
