@@ -7,6 +7,7 @@ import { query } from './query'
 import type { SDKSystemMessage } from './types'
 import { logger } from '@/ui/logger'
 import type { SkillSummary } from '@/modules/common/skills'
+import { join, resolve } from 'node:path'
 
 export interface SDKMetadata {
     tools?: string[]
@@ -44,6 +45,24 @@ export function filterCatalogAffectingClaudeArgs(args: readonly string[] | undef
         }
     }
     return filtered
+}
+
+export function getClaudePluginSkillRoots(
+    args: readonly string[] | undefined,
+    cwd: string
+): string[] {
+    if (!args) return []
+    const roots: string[] = []
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i]
+        const pluginDir = arg === '--plugin-dir' && args[i + 1] && !args[i + 1].startsWith('-')
+            ? args[++i]
+            : arg.startsWith('--plugin-dir=')
+                ? arg.slice('--plugin-dir='.length)
+                : undefined
+        if (pluginDir) roots.push(join(resolve(cwd, pluginDir), 'skills'))
+    }
+    return roots
 }
 
 export function classifyClaudeSlashCatalog(

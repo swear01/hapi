@@ -4,7 +4,7 @@ import { AgentState, SessionEffort, SessionModel } from '@/api/types';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
-import { classifyClaudeSlashCatalog, extractSDKMetadata } from '@/claude/sdk/metadataExtractor';
+import { classifyClaudeSlashCatalog, extractSDKMetadata, getClaudePluginSkillRoots } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
@@ -81,15 +81,20 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
 
     const catalogPromise = Promise.all([
         extractSDKMetadata({ cwd: workingDirectory, claudeArgs: options.claudeArgs }),
-        listSkills(workingDirectory, { flavor: 'claude' })
+        listSkills(workingDirectory, {
+            flavor: 'claude',
+            additionalRoots: getClaudePluginSkillRoots(options.claudeArgs, workingDirectory)
+        })
     ]).then(([sdkMetadata, discoveredSkills]) => ({
         sdkMetadata,
         catalog: classifyClaudeSlashCatalog(sdkMetadata.slashCommands, discoveredSkills)
     }));
-    session.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
-        success: true,
-        skills: (await catalogPromise).catalog.skills
-    }));
+    session.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => {
+        const result = await catalogPromise;
+        return result.sdkMetadata.slashCommands === undefined
+            ? { success: false, error: 'Claude skill catalog unavailable' }
+            : { success: true, skills: result.catalog.skills };
+    });
 
     // Extract SDK metadata in background and update session when ready
     void catalogPromise.then(({ sdkMetadata, catalog }) => {

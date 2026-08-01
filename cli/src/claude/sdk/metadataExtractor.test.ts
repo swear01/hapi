@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { classifyClaudeSlashCatalog, filterCatalogAffectingClaudeArgs } from './metadataExtractor'
+import {
+    classifyClaudeSlashCatalog,
+    filterCatalogAffectingClaudeArgs,
+    getClaudePluginSkillRoots
+} from './metadataExtractor'
 
 describe('Claude skill catalog', () => {
     const discoveredSkills = [
@@ -34,6 +38,16 @@ describe('Claude skill catalog', () => {
             '--settings=/tmp/settings.json',
             '--add-dir', '/tmp/one', '/tmp/two',
             '--disable-slash-commands'
+        ])
+    })
+
+    it('resolves launch plugin skill roots relative to the session cwd', () => {
+        expect(getClaudePluginSkillRoots([
+            '--plugin-dir', './plugins/one',
+            '--plugin-dir=/tmp/plugin two'
+        ], '/work/repo')).toEqual([
+            '/work/repo/plugins/one/skills',
+            '/tmp/plugin two/skills'
         ])
     })
 })
