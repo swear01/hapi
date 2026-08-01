@@ -130,19 +130,3 @@ export async function extractSDKMetadata(options: {
         return {}
     }
 }
-
-/**
- * Extract SDK metadata asynchronously without blocking
- * Fires the extraction and updates metadata when complete
- */
-export function extractSDKMetadataAsync(onComplete: (metadata: SDKMetadata) => void, cwd?: string): void {
-    extractSDKMetadata({ cwd })
-        .then(metadata => {
-            if (metadata.tools || metadata.slashCommands) {
-                onComplete(metadata)
-            }
-        })
-        .catch(error => {
-            logger.debug('[metadataExtractor] Async extraction failed:', error)
-        })
-}
