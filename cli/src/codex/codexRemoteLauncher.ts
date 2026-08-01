@@ -17,10 +17,11 @@ import { AppServerEventConverter } from './utils/appServerEventConverter';
 import { detectImageMimeType, registerGeneratedImage } from '@/modules/common/generatedImages';
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerConfig';
-import type { ThreadGoal, ThreadGoalStatus } from './appServerTypes';
+import type { SkillMetadata, ThreadGoal, ThreadGoalStatus } from './appServerTypes';
 import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { extractErrorInfo } from '@/utils/errorUtils';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import {
     RemoteLauncherBase,
     type RemoteLauncherDisplayContext,
@@ -3165,6 +3166,27 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 experimentalApi: true
             }
         });
+
+        let nativeSkills: SkillMetadata[] = [];
+        try {
+            const response = await appServerClient.listSkills({
+                cwds: [session.path],
+                forceReload: false
+            });
+            const inventory = response.data?.find(entry => entry.cwd === session.path)
+                ?? response.data?.[0];
+            nativeSkills = (inventory?.skills ?? []).filter(skill => skill.enabled);
+            session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
+                success: true,
+                skills: nativeSkills.map(skill => ({
+                    name: skill.name,
+                    description: skill.description
+                }))
+            }));
+        } catch (error) {
+            logger.debug(`[Codex] skills/list failed: ${errorMessage(error)}; keeping filesystem fallback`);
+        }
+
         let supportsTurnCollaborationMode = true;
         let supportsGoals = true;
         try {
@@ -3695,6 +3717,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     cwd: session.path,
                     mode,
                     cliOverrides: session.codexCliOverrides,
+                    skills: nativeSkills,
                     overrides: suppressCollaborationMode
                         ? { suppressCollaborationMode: true }
                         : undefined
