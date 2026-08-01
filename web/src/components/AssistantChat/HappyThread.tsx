@@ -671,10 +671,11 @@ export function HappyThread(props: {
             // Keep the keyboard/pointer intent armed while the user moves
             // through ordinary history. Consume it only when the viewport
             // actually reaches the preload area.
+            const hadExplicitUpwardIntent = hasExplicitUpwardIntent(intent)
             const explicitUpwardIntent = needsCoverage && consumeExplicitUpwardIntent(intent)
 
             if (isInitialScrollSettling()) {
-                if (shouldCancelInitialScrollSettling(intent, hasExplicitUpwardIntent(intent))) {
+                if (shouldCancelInitialScrollSettling(intent, hadExplicitUpwardIntent)) {
                     initialScrollDeadlineRef.current = 0
                     clearInitialScrollTimers()
                     setAutoScrollMode(false)
