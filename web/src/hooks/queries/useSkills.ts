@@ -55,6 +55,10 @@ export function useSkills(
     }, [query.data])
 
     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {
+        const refreshed = queryText === '$' ? await query.refetch() : null
+        const currentSkills = refreshed?.data?.success
+            ? (refreshed.data.skills ?? [])
+            : skills
         const recent = getRecentSkills()
         const getRecency = (name: string) => recent[name] ?? 0
         const searchTerm = queryText.startsWith('$')
@@ -62,7 +66,7 @@ export function useSkills(
             : queryText.toLowerCase()
 
         if (!searchTerm) {
-            return [...skills]
+            return [...currentSkills]
                 .sort((a, b) => getRecency(b.name) - getRecency(a.name) || a.name.localeCompare(b.name))
                 .map((skill) => ({
                     key: `$${skill.name}`,
@@ -74,7 +78,7 @@ export function useSkills(
         }
 
         const maxDistance = Math.max(2, Math.floor(searchTerm.length / 2))
-        return skills
+        return currentSkills
             .map(skill => {
                 const name = skill.name.toLowerCase()
                 let score: number
@@ -96,7 +100,7 @@ export function useSkills(
                 description: skill.description,
                 source: 'builtin'
             }))
-    }, [skills])
+    }, [query.refetch, skills])
 
     return {
         skills,
