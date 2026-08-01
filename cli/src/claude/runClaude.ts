@@ -268,7 +268,11 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         sessionInstance.setEffort(currentEffort);
         logger.debug(`[loop] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${currentModel ?? 'auto'}, effort=${currentEffort ?? 'auto'}`);
     };
-    const handleUserMessage: Parameters<typeof session.onUserMessage>[0] = (message, localId) => {
+    type UserMessageHandler = Parameters<typeof session.onUserMessage>[0];
+    type UserMessageArgs = Parameters<UserMessageHandler>;
+    const deferredMessages: UserMessageArgs[] = [];
+    let messagePipelineReady = false;
+    const handleUserMessage: UserMessageHandler = (message, localId) => {
         const sessionPermissionMode = currentSessionRef.current?.getPermissionMode();
         if (sessionPermissionMode && isPermissionModeAllowedForFlavor(sessionPermissionMode, 'claude')) {
             currentPermissionMode = sessionPermissionMode as PermissionMode;
@@ -435,11 +439,26 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         messageQueue.push(formattedText, enhancedMode, localId);
         logger.debugLargeJson('User message pushed to queue:', message)
     };
+    session.onUserMessage((...args) => {
+        if (!messagePipelineReady) {
+            deferredMessages.push(args);
+            return;
+        }
+        handleUserMessage(...args);
+    });
     void Promise.allSettled([sessionReady, getCatalog()]).then(() => {
-        session.onUserMessage(handleUserMessage);
+        messagePipelineReady = true;
+        for (const args of deferredMessages.splice(0)) {
+            handleUserMessage(...args);
+        }
     });
 
     session.onCancelQueuedMessage((localId) => {
+        const deferredIndex = deferredMessages.findIndex(([, id]) => id === localId);
+        if (deferredIndex >= 0) {
+            deferredMessages.splice(deferredIndex, 1);
+            return true;
+        }
         const removed = messageQueue.cancelByLocalId(localId);
         logger.debug(`[claude] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
         return removed;
