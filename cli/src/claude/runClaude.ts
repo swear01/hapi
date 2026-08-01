@@ -77,6 +77,10 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     logger.debug(`Session created: ${sessionInfo.id}`);
 
     const currentSessionRef: { current: Session | null } = { current: null };
+    let resolveSessionReady!: (session: Session) => void;
+    const sessionReady = new Promise<Session>((resolve) => {
+        resolveSessionReady = resolve;
+    });
     let nativeSkills: SkillSummary[] | null = null;
 
     const loadCatalog = async () => {
@@ -264,7 +268,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         sessionInstance.setEffort(currentEffort);
         logger.debug(`[loop] Synced session config for keepalive: permissionMode=${currentPermissionMode}, model=${currentModel ?? 'auto'}, effort=${currentEffort ?? 'auto'}`);
     };
-    session.onUserMessage((message, localId) => {
+    const handleUserMessage: Parameters<typeof session.onUserMessage>[0] = (message, localId) => {
         const sessionPermissionMode = currentSessionRef.current?.getPermissionMode();
         if (sessionPermissionMode && isPermissionModeAllowedForFlavor(sessionPermissionMode, 'claude')) {
             currentPermissionMode = sessionPermissionMode as PermissionMode;
@@ -430,6 +434,9 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         };
         messageQueue.push(formattedText, enhancedMode, localId);
         logger.debugLargeJson('User message pushed to queue:', message)
+    };
+    void Promise.allSettled([sessionReady, getCatalog()]).then(() => {
+        session.onUserMessage(handleUserMessage);
     });
 
     session.onCancelQueuedMessage((localId) => {
@@ -507,6 +514,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             onModeChange: createModeChangeHandler(session),
             onSessionReady: (sessionInstance) => {
                 currentSessionRef.current = sessionInstance;
+                resolveSessionReady(sessionInstance);
                 if (nativeSkills) {
                     sessionInstance.setNativeSkillNames(nativeSkills.map((skill) => skill.name));
                 }
