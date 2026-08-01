@@ -281,7 +281,11 @@ describe('claudeRemoteLauncher resume anchor', () => {
 
         try {
             session.setNativeSkillNames(['hapi'])
-            queue.push('@/tmp/input.txt\n\n$hapi inspect', { permissionMode: 'default' }, 'local-1')
+            const prompt = session.expandSkillReference(
+                '$hapi inspect',
+                '@C:\\Users\\Jane Doe\\input.txt'
+            )
+            queue.push(prompt, { permissionMode: 'default' }, 'local-1')
             harness.switchAfterCall = 1
             harness.triggerSwitch = () => {
                 client.rpcHandlers.get(RPC_METHODS.Switch)?.()
@@ -289,7 +293,9 @@ describe('claudeRemoteLauncher resume anchor', () => {
 
             await claudeRemoteLauncher(session as any)
 
-            expect(harness.initialMessages).toEqual(['/hapi inspect\n\n@/tmp/input.txt'])
+            expect(harness.initialMessages).toEqual([
+                '/hapi inspect\n\n@C:\\Users\\Jane Doe\\input.txt'
+            ])
         } finally {
             session.stopKeepAlive()
         }

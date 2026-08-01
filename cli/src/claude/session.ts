@@ -102,16 +102,11 @@ export class Session extends AgentSessionBase<EnhancedMode> {
         this.nativeSkillNames = new Set(names);
     };
 
-    expandSkillReference = (message: string): string => {
-        const separator = message.indexOf('\n\n');
-        const attachmentText = separator > 0 ? message.slice(0, separator) : '';
-        const hasAttachments = attachmentText.length > 0
-            && attachmentText.split(/\s+/).every((part) => part.startsWith('@'));
-        const prompt = hasAttachments ? message.slice(separator + 2) : message;
-        const match = /^\s*\$([^\s]+)(?=\s|$)/.exec(prompt);
+    expandSkillReference = (message: string, trailingContext = ''): string => {
+        const match = /^\s*\$([^\s]+)(?=\s|$)/.exec(message);
         if (!match || !this.nativeSkillNames.has(match[1])) return message;
-        const expanded = `/${match[1]}${prompt.slice(match[0].length)}`;
-        return hasAttachments ? `${expanded}\n\n${attachmentText}` : expanded;
+        const expanded = `/${match[1]}${message.slice(match[0].length)}`;
+        return trailingContext ? `${expanded}\n\n${trailingContext}` : expanded;
     };
 
     recordLocalLaunchFailure = (message: string, exitReason: LocalLaunchExitReason): void => {

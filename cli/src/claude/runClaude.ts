@@ -18,7 +18,7 @@ import { createModeChangeHandler, createRunnerLifecycle, setControlledByUser } f
 import { isPermissionModeAllowedForFlavor } from '@hapi/protocol';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { PermissionModeSchema } from '@hapi/protocol/schemas';
-import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
+import { formatAttachmentsForClaude, formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { normalizeClaudeSessionModel } from './model';
 import { normalizeClaudeSessionEffort } from './effort';
 import { normalizeHookPermissionMode } from './utils/hookPermissionMode';
@@ -304,8 +304,14 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         // Check for special commands before processing
         const specialCommand = parseSpecialCommand(message.content.text);
 
-        // Format message text with attachments for Claude
-        const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
+        // Native slash skills must stay at the start of the prompt. Regular
+        // messages keep the existing attachment-first format.
+        const attachmentText = formatAttachmentsForClaude(message.content.attachments);
+        const expandedText = currentSessionRef.current?.expandSkillReference(message.content.text, attachmentText)
+            ?? message.content.text;
+        const formattedText = expandedText !== message.content.text
+            ? expandedText
+            : formatMessageWithAttachments(message.content.text, message.content.attachments);
 
         if (specialCommand.type === 'compact') {
             logger.debug('[start] Detected /compact command');
