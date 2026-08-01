@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
     classifyClaudeSlashCatalog,
-    filterCatalogAffectingClaudeArgs,
-    getClaudePluginSkillRoots
+    filterCatalogAffectingClaudeArgs
 } from './metadataExtractor'
 
 describe('Claude skill catalog', () => {
@@ -14,12 +13,14 @@ describe('Claude skill catalog', () => {
 
     it('separates native skills from slash commands and keeps plugin namespaces', () => {
         expect(classifyClaudeSlashCatalog(
-            ['help', 'hapi', 'ponytail:ponytail', 'review'],
-            discoveredSkills
+            ['help', 'hapi', 'url-plugin:url-skill', 'ponytail:ponytail', 'review'],
+            discoveredSkills,
+            ['hapi', 'url-plugin:url-skill', 'ponytail:ponytail']
         )).toEqual({
             commands: ['help', 'review'],
             skills: [
                 { name: 'hapi', description: 'Manage HAPI' },
+                { name: 'url-plugin:url-skill', description: undefined },
                 { name: 'ponytail:ponytail', description: 'Keep code simple' }
             ]
         })
@@ -41,13 +42,4 @@ describe('Claude skill catalog', () => {
         ])
     })
 
-    it('resolves launch plugin skill roots relative to the session cwd', () => {
-        expect(getClaudePluginSkillRoots([
-            '--plugin-dir', './plugins/one',
-            '--plugin-dir=/tmp/plugin two'
-        ], '/work/repo')).toEqual([
-            '/work/repo/plugins/one/skills',
-            '/tmp/plugin two/skills'
-        ])
-    })
 })

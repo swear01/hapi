@@ -18,10 +18,6 @@ export interface ListSkillsRequest {
     flavor?: string;
 }
 
-export interface SkillDiscoveryOptions extends ListSkillsRequest {
-    additionalRoots?: string[];
-}
-
 export interface ListSkillsResponse {
     success: boolean;
     skills?: SkillSummary[];
@@ -283,23 +279,21 @@ async function listPluginCacheSkillsRoots(flavor?: string): Promise<string[]> {
         .map((installPath) => join(installPath, 'skills'));
 }
 
-async function discoverSkills(workingDirectory?: string, options: SkillDiscoveryOptions = {}): Promise<DiscoveredSkill[]> {
+async function discoverSkills(workingDirectory?: string, options: { flavor?: string } = {}): Promise<DiscoveredSkill[]> {
     const flavor = normalizeFlavor(options.flavor);
     const projectRoots = await listProjectSkillsRoots(workingDirectory, flavor);
     const userRoots = getUserSkillsRoots(flavor);
     const pluginRoots = await listPluginCacheSkillsRoots(flavor);
     const adminRoot = getAdminSkillsRoot();
     const includeAdminRoots = flavor === 'codex';
-    const [additionalSkillDirs, projectSkillDirs, userSkillDirs, pluginSkillDirs, adminSkillDirs] = await Promise.all([
-        Promise.all((options.additionalRoots ?? []).map(async (root) => await listTopLevelSkillDirs(root))).then((dirs) => dirs.flat()),
+    const [projectSkillDirs, userSkillDirs, pluginSkillDirs, adminSkillDirs] = await Promise.all([
         Promise.all(projectRoots.map(async (root) => await listTopLevelSkillDirs(root, { includeCodexSystem: shouldIncludeCodexSystem(root, flavor) }))).then((dirs) => dirs.flat()),
         Promise.all(userRoots.map(async (root) => await listTopLevelSkillDirs(root, { includeCodexSystem: shouldIncludeCodexSystem(root, flavor) }))).then((dirs) => dirs.flat()),
         Promise.all(pluginRoots.map(async (root) => await listTopLevelSkillDirs(root, { includeCodexSystem: false }))).then((dirs) => dirs.flat()),
         includeAdminRoots ? listTopLevelSkillDirs(adminRoot, { includeCodexSystem: true }) : [],
     ]);
 
-    const [additionalSkills, projectSkills, userSkills, pluginSkills, adminSkills] = await Promise.all([
-        readSkillsFromDirs(additionalSkillDirs),
+    const [projectSkills, userSkills, pluginSkills, adminSkills] = await Promise.all([
         readSkillsFromDirs(projectSkillDirs),
         readSkillsFromDirs(userSkillDirs),
         readSkillsFromDirs(pluginSkillDirs),
@@ -308,7 +302,6 @@ async function discoverSkills(workingDirectory?: string, options: SkillDiscovery
 
     const dedupedSkills = new Map<string, DiscoveredSkill>();
     for (const skill of [
-        ...additionalSkills,
         ...projectSkills,
         ...userSkills,
         ...pluginSkills,
@@ -322,7 +315,7 @@ async function discoverSkills(workingDirectory?: string, options: SkillDiscovery
     return [...dedupedSkills.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function listSkills(workingDirectory?: string, options: SkillDiscoveryOptions = {}): Promise<SkillSummary[]> {
+export async function listSkills(workingDirectory?: string, options: { flavor?: string } = {}): Promise<SkillSummary[]> {
     const skills = await discoverSkills(workingDirectory, options);
     return skills.map(({ name, description }) => ({ name, description }));
 }
@@ -346,7 +339,7 @@ function validateSkillName(name: string): string {
 export async function resolveSkill(
     name: string,
     workingDirectory?: string,
-    options: SkillDiscoveryOptions = {}
+    options: { flavor?: string } = {}
 ): Promise<ResolvedSkill | null> {
     const skillName = validateSkillName(name);
     const skills = await discoverSkills(workingDirectory, options);

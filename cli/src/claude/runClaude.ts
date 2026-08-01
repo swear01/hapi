@@ -4,7 +4,7 @@ import { AgentState, SessionEffort, SessionModel } from '@/api/types';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
-import { classifyClaudeSlashCatalog, extractSDKMetadata, getClaudePluginSkillRoots } from '@/claude/sdk/metadataExtractor';
+import { classifyClaudeSlashCatalog, extractSDKMetadata } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
@@ -79,44 +79,61 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     const currentSessionRef: { current: Session | null } = { current: null };
     let nativeSkills: SkillSummary[] | null = null;
 
-    const catalogPromise = Promise.all([
-        extractSDKMetadata({ cwd: workingDirectory, claudeArgs: options.claudeArgs }),
-        listSkills(workingDirectory, {
-            flavor: 'claude',
-            additionalRoots: getClaudePluginSkillRoots(options.claudeArgs, workingDirectory)
-        })
-    ]).then(([sdkMetadata, discoveredSkills]) => ({
-        sdkMetadata,
-        catalog: classifyClaudeSlashCatalog(sdkMetadata.slashCommands, discoveredSkills)
-    }));
+    const loadCatalog = async () => {
+        const [sdkMetadata, discoveredSkills] = await Promise.all([
+            extractSDKMetadata({ cwd: workingDirectory, claudeArgs: options.claudeArgs }),
+            listSkills(workingDirectory, { flavor: 'claude' })
+        ]);
+        return {
+            sdkMetadata,
+            catalog: classifyClaudeSlashCatalog(
+                sdkMetadata.slashCommands,
+                discoveredSkills,
+                sdkMetadata.skills
+            )
+        };
+    };
+    let catalogPromise: ReturnType<typeof loadCatalog> | null = null;
+    const getCatalog = (): ReturnType<typeof loadCatalog> => {
+        if (!catalogPromise) {
+            catalogPromise = loadCatalog().then((result) => {
+                const { sdkMetadata, catalog } = result;
+                logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
+                if (sdkMetadata.slashCommands === undefined) {
+                    catalogPromise = null;
+                    if (sdkMetadata.tools !== undefined) {
+                        session.updateMetadata((currentMetadata) => ({
+                            ...currentMetadata,
+                            tools: sdkMetadata.tools
+                        }));
+                    }
+                    return result;
+                }
+                nativeSkills = catalog.skills;
+                currentSessionRef.current?.setNativeSkillNames(catalog.skills.map((skill) => skill.name));
+                session.updateMetadata((currentMetadata) => ({
+                    ...currentMetadata,
+                    tools: sdkMetadata.tools,
+                    slashCommands: catalog.commands
+                }));
+                logger.debug('[start] Session metadata updated with SDK capabilities');
+                return result;
+            }).catch((error) => {
+                catalogPromise = null;
+                throw error;
+            });
+        }
+        return catalogPromise;
+    };
     session.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => {
-        const result = await catalogPromise;
+        const result = await getCatalog();
         return result.sdkMetadata.slashCommands === undefined
             ? { success: false, error: 'Claude skill catalog unavailable' }
             : { success: true, skills: result.catalog.skills };
     });
 
     // Extract SDK metadata in background and update session when ready
-    void catalogPromise.then(({ sdkMetadata, catalog }) => {
-        logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
-        if (sdkMetadata.slashCommands === undefined) {
-            if (sdkMetadata.tools !== undefined) {
-                session.updateMetadata((currentMetadata) => ({
-                    ...currentMetadata,
-                    tools: sdkMetadata.tools
-                }));
-            }
-            return;
-        }
-        nativeSkills = catalog.skills;
-        currentSessionRef.current?.setNativeSkillNames(catalog.skills.map((skill) => skill.name));
-        session.updateMetadata((currentMetadata) => ({
-            ...currentMetadata,
-            tools: sdkMetadata.tools,
-            slashCommands: catalog.commands
-        }));
-        logger.debug('[start] Session metadata updated with SDK capabilities');
-    }).catch((error) => {
+    void getCatalog().catch((error) => {
         logger.debug('[start] Failed to update session metadata:', error);
     });
 

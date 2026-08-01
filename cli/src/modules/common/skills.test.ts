@@ -58,15 +58,6 @@ describe('listSkills', () => {
         await expect(listSkills()).resolves.toEqual([])
     })
 
-    it('includes skills from explicit plugin roots', async () => {
-        const pluginSkills = join(sandboxDir, 'plugin', 'skills')
-        await writeSkill(join(pluginSkills, 'plugin-skill'), 'plugin-skill', 'Launch plugin skill')
-
-        await expect(listSkills(undefined, { additionalRoots: [pluginSkills] })).resolves.toEqual([
-            { name: 'plugin-skill', description: 'Launch plugin skill' }
-        ])
-    })
-
     it('lists user skills from ~/.agents only', async () => {
         await writeSkill(join(homeDir, '.agents', 'skills', 'amis'), 'amis', 'AMIS guide')
 

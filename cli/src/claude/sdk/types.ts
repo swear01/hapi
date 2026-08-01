@@ -59,6 +59,7 @@ export interface SDKSystemMessage extends SDKMessage {
     model?: string
     cwd?: string
     tools?: string[]
+    skills?: string[]
     slash_commands?: string[]
     /**
      * Present on `subtype: 'status'` messages that report a /compact outcome.

@@ -7,10 +7,10 @@ import { query } from './query'
 import type { SDKSystemMessage } from './types'
 import { logger } from '@/ui/logger'
 import type { SkillSummary } from '@/modules/common/skills'
-import { join, resolve } from 'node:path'
 
 export interface SDKMetadata {
     tools?: string[]
+    skills?: string[]
     slashCommands?: string[]
 }
 
@@ -47,29 +47,13 @@ export function filterCatalogAffectingClaudeArgs(args: readonly string[] | undef
     return filtered
 }
 
-export function getClaudePluginSkillRoots(
-    args: readonly string[] | undefined,
-    cwd: string
-): string[] {
-    if (!args) return []
-    const roots: string[] = []
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i]
-        const pluginDir = arg === '--plugin-dir' && args[i + 1] && !args[i + 1].startsWith('-')
-            ? args[++i]
-            : arg.startsWith('--plugin-dir=')
-                ? arg.slice('--plugin-dir='.length)
-                : undefined
-        if (pluginDir) roots.push(join(resolve(cwd, pluginDir), 'skills'))
-    }
-    return roots
-}
-
 export function classifyClaudeSlashCatalog(
     names: readonly string[] | undefined,
-    discoveredSkills: readonly SkillSummary[]
+    discoveredSkills: readonly SkillSummary[],
+    loadedSkillNames?: readonly string[]
 ): { commands: string[]; skills: SkillSummary[] } {
     const skillsByName = new Map(discoveredSkills.map((skill) => [skill.name, skill]))
+    const loadedSkills = loadedSkillNames ? new Set(loadedSkillNames) : null
     const commands: string[] = []
     const skills: SkillSummary[] = []
 
@@ -77,9 +61,9 @@ export function classifyClaudeSlashCatalog(
         const name = rawName.trim()
         if (!name) continue
         const localName = name.slice(name.lastIndexOf(':') + 1)
-        const skill = skillsByName.get(name) ?? skillsByName.get(localName)
-        if (skill) {
-            skills.push({ ...skill, name })
+        const discoveredSkill = skillsByName.get(name) ?? skillsByName.get(localName)
+        if (loadedSkills?.has(name) || (!loadedSkills && discoveredSkill)) {
+            skills.push({ name, description: discoveredSkill?.description })
         } else {
             commands.push(name)
         }
@@ -120,6 +104,7 @@ export async function extractSDKMetadata(options: {
                 
                 const metadata: SDKMetadata = {
                     tools: systemMessage.tools,
+                    skills: systemMessage.skills,
                     slashCommands: systemMessage.slash_commands
                 }
                 
