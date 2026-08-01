@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classifyClaudeSlashCatalog } from './metadataExtractor'
+import { classifyClaudeSlashCatalog, filterCatalogAffectingClaudeArgs } from './metadataExtractor'
 
 describe('Claude skill catalog', () => {
     const discoveredSkills = [
@@ -19,5 +19,21 @@ describe('Claude skill catalog', () => {
                 { name: 'ponytail:ponytail', description: 'Keep code simple' }
             ]
         })
+    })
+
+    it('keeps only launch arguments that affect the command catalog', () => {
+        expect(filterCatalogAffectingClaudeArgs([
+            '--resume', 'session-id',
+            '--plugin-dir', '/tmp/my plugin',
+            '--settings=/tmp/settings.json',
+            '--add-dir', '/tmp/one', '/tmp/two',
+            '--disable-slash-commands',
+            '--model', 'sonnet'
+        ])).toEqual([
+            '--plugin-dir', '/tmp/my plugin',
+            '--settings=/tmp/settings.json',
+            '--add-dir', '/tmp/one', '/tmp/two',
+            '--disable-slash-commands'
+        ])
     })
 })

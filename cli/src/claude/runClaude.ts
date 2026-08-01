@@ -80,7 +80,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     let nativeSkills: SkillSummary[] | null = null;
 
     const catalogPromise = Promise.all([
-        extractSDKMetadata(workingDirectory),
+        extractSDKMetadata({ cwd: workingDirectory, claudeArgs: options.claudeArgs }),
         listSkills(workingDirectory, { flavor: 'claude' })
     ]).then(([sdkMetadata, discoveredSkills]) => ({
         sdkMetadata,
@@ -94,6 +94,15 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     // Extract SDK metadata in background and update session when ready
     void catalogPromise.then(({ sdkMetadata, catalog }) => {
         logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
+        if (sdkMetadata.slashCommands === undefined) {
+            if (sdkMetadata.tools !== undefined) {
+                session.updateMetadata((currentMetadata) => ({
+                    ...currentMetadata,
+                    tools: sdkMetadata.tools
+                }));
+            }
+            return;
+        }
         nativeSkills = catalog.skills;
         currentSessionRef.current?.setNativeSkillNames(catalog.skills.map((skill) => skill.name));
         session.updateMetadata((currentMetadata) => ({

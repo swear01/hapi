@@ -13,6 +13,39 @@ export interface SDKMetadata {
     slashCommands?: string[]
 }
 
+const CATALOG_FLAGS = new Set([
+    '--bare',
+    '--disable-slash-commands',
+    '--safe-mode'
+])
+const CATALOG_VALUE_FLAGS = new Set([
+    '--add-dir',
+    '--plugin-dir',
+    '--plugin-url',
+    '--settings',
+    '--setting-sources'
+])
+
+export function filterCatalogAffectingClaudeArgs(args: readonly string[] | undefined): string[] {
+    if (!args) return []
+    const filtered: string[] = []
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i]
+        const equalsIndex = arg.indexOf('=')
+        if (CATALOG_FLAGS.has(arg) || (equalsIndex > 0 && CATALOG_VALUE_FLAGS.has(arg.slice(0, equalsIndex)))) {
+            filtered.push(arg)
+            continue
+        }
+        if (!CATALOG_VALUE_FLAGS.has(arg)) continue
+        filtered.push(arg)
+        while (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+            filtered.push(args[++i])
+            if (arg !== '--add-dir') break
+        }
+    }
+    return filtered
+}
+
 export function classifyClaudeSlashCatalog(
     names: readonly string[] | undefined,
     discoveredSkills: readonly SkillSummary[]
@@ -40,7 +73,10 @@ export function classifyClaudeSlashCatalog(
  * Extract SDK metadata by running a minimal query and capturing the init message
  * @returns SDK metadata containing tools and slash commands
  */
-export async function extractSDKMetadata(cwd?: string): Promise<SDKMetadata> {
+export async function extractSDKMetadata(options: {
+    cwd?: string
+    claudeArgs?: readonly string[]
+} = {}): Promise<SDKMetadata> {
     const abortController = new AbortController()
     
     try {
@@ -50,7 +86,8 @@ export async function extractSDKMetadata(cwd?: string): Promise<SDKMetadata> {
         const sdkQuery = query({
             prompt: 'hello',
             options: {
-                cwd,
+                cwd: options.cwd,
+                additionalArgs: filterCatalogAffectingClaudeArgs(options.claudeArgs),
                 allowedTools: ['Bash(echo)'],
                 maxTurns: 1,
                 abort: abortController.signal
@@ -95,7 +132,7 @@ export async function extractSDKMetadata(cwd?: string): Promise<SDKMetadata> {
  * Fires the extraction and updates metadata when complete
  */
 export function extractSDKMetadataAsync(onComplete: (metadata: SDKMetadata) => void, cwd?: string): void {
-    extractSDKMetadata(cwd)
+    extractSDKMetadata({ cwd })
         .then(metadata => {
             if (metadata.tools || metadata.slashCommands) {
                 onComplete(metadata)
