@@ -81,6 +81,7 @@ export async function extractSDKMetadata(options: {
     claudeArgs?: readonly string[]
 } = {}): Promise<SDKMetadata> {
     const abortController = new AbortController()
+    const timeout = setTimeout(() => abortController.abort(), 10_000)
     
     try {
         logger.debug('[metadataExtractor] Starting SDK metadata extraction')
@@ -128,5 +129,7 @@ export async function extractSDKMetadata(options: {
         }
         logger.debug('[metadataExtractor] Error extracting SDK metadata:', error)
         return {}
+    } finally {
+        clearTimeout(timeout)
     }
 }
