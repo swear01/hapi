@@ -274,4 +274,24 @@ describe('claudeRemoteLauncher resume anchor', () => {
             session.stopKeepAlive()
         }
     })
+
+    it('keeps an advertised $skill first when attachments are present', async () => {
+        const client = createClientStub()
+        const { session, queue } = createSession(client, undefined)
+
+        try {
+            session.setNativeSkillNames(['hapi'])
+            queue.push('@/tmp/input.txt\n\n$hapi inspect', { permissionMode: 'default' }, 'local-1')
+            harness.switchAfterCall = 1
+            harness.triggerSwitch = () => {
+                client.rpcHandlers.get(RPC_METHODS.Switch)?.()
+            }
+
+            await claudeRemoteLauncher(session as any)
+
+            expect(harness.initialMessages).toEqual(['/hapi inspect\n\n@/tmp/input.txt'])
+        } finally {
+            session.stopKeepAlive()
+        }
+    })
 })

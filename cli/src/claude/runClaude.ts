@@ -4,7 +4,7 @@ import { AgentState, SessionEffort, SessionModel } from '@/api/types';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
-import { classifyClaudeSlashCatalog, extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
+import { classifyClaudeSlashCatalog, extractSDKMetadata } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
@@ -79,31 +79,32 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     const currentSessionRef: { current: Session | null } = { current: null };
     let nativeSkills: SkillSummary[] | null = null;
 
+    const catalogPromise = Promise.all([
+        extractSDKMetadata(workingDirectory),
+        listSkills(workingDirectory, { flavor: 'claude' })
+    ]).then(([sdkMetadata, discoveredSkills]) => ({
+        sdkMetadata,
+        catalog: classifyClaudeSlashCatalog(sdkMetadata.slashCommands, discoveredSkills)
+    }));
+    session.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
+        success: true,
+        skills: (await catalogPromise).catalog.skills
+    }));
+
     // Extract SDK metadata in background and update session when ready
-    extractSDKMetadataAsync(async (sdkMetadata) => {
+    void catalogPromise.then(({ sdkMetadata, catalog }) => {
         logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
-        try {
-            const catalog = classifyClaudeSlashCatalog(
-                sdkMetadata.slashCommands,
-                await listSkills(workingDirectory, { flavor: 'claude' })
-            );
-            nativeSkills = catalog.skills;
-            currentSessionRef.current?.setNativeSkillNames(catalog.skills.map((skill) => skill.name));
-            session.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
-                success: true,
-                skills: catalog.skills
-            }));
-            // Update session metadata with tools and slash commands
-            session.updateMetadata((currentMetadata) => ({
-                ...currentMetadata,
-                tools: sdkMetadata.tools,
-                slashCommands: catalog.commands
-            }));
-            logger.debug('[start] Session metadata updated with SDK capabilities');
-        } catch (error) {
-            logger.debug('[start] Failed to update session metadata:', error);
-        }
-    }, workingDirectory);
+        nativeSkills = catalog.skills;
+        currentSessionRef.current?.setNativeSkillNames(catalog.skills.map((skill) => skill.name));
+        session.updateMetadata((currentMetadata) => ({
+            ...currentMetadata,
+            tools: sdkMetadata.tools,
+            slashCommands: catalog.commands
+        }));
+        logger.debug('[start] Session metadata updated with SDK capabilities');
+    }).catch((error) => {
+        logger.debug('[start] Failed to update session metadata:', error);
+    });
 
     // Start HAPI MCP server
     const happyServer = await startHappyServer(session);
