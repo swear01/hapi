@@ -1245,6 +1245,21 @@ describe('codexRemoteLauncher', () => {
         ]);
     });
 
+    it('keeps the filesystem skill handler when native discovery reports errors', async () => {
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [],
+                errors: ['failed to read skills']
+            }]
+        };
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(rpcHandlers.has('listSkills')).toBe(false);
+    });
+
     it('reloads the native skill catalog after skills/changed', async () => {
         const { session, rpcHandlers } = createSessionStub();
 

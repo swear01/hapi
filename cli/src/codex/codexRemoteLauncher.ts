@@ -3096,7 +3096,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             });
             const inventory = response.data?.find(entry => entry.cwd === session.path)
                 ?? response.data?.[0];
-            nativeSkills = (inventory?.skills ?? []).filter(skill => skill.enabled);
+            if (!inventory || (inventory.skills.length === 0 && (inventory.errors?.length ?? 0) > 0)) {
+                throw new Error('skills/list returned no usable inventory');
+            }
+            nativeSkills = inventory.skills.filter(skill => skill.enabled);
             if (!nativeSkillsAvailable) {
                 nativeSkillsAvailable = true;
                 session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
