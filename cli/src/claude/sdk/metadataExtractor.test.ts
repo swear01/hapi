@@ -1,0 +1,23 @@
+import { describe, expect, it } from 'vitest'
+import { classifyClaudeSlashCatalog } from './metadataExtractor'
+
+describe('Claude skill catalog', () => {
+    const discoveredSkills = [
+        { name: 'hapi', description: 'Manage HAPI' },
+        { name: 'ponytail', description: 'Keep code simple' },
+        { name: 'scanner-only', description: 'Not loaded by Claude' }
+    ]
+
+    it('separates native skills from slash commands and keeps plugin namespaces', () => {
+        expect(classifyClaudeSlashCatalog(
+            ['help', 'hapi', 'ponytail:ponytail', 'review'],
+            discoveredSkills
+        )).toEqual({
+            commands: ['help', 'review'],
+            skills: [
+                { name: 'hapi', description: 'Manage HAPI' },
+                { name: 'ponytail:ponytail', description: 'Keep code simple' }
+            ]
+        })
+    })
+})

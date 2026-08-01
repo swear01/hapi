@@ -4,7 +4,7 @@ import { AgentState, SessionEffort, SessionModel } from '@/api/types';
 import { EnhancedMode, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
-import { extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
+import { classifyClaudeSlashCatalog, extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
 import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
@@ -23,6 +23,7 @@ import { normalizeClaudeSessionModel } from './model';
 import { normalizeClaudeSessionEffort } from './effort';
 import { normalizeHookPermissionMode } from './utils/hookPermissionMode';
 import { getInvokedCwd } from '@/utils/invokedCwd';
+import { listSkills, type SkillSummary } from '@/modules/common/skills';
 
 export interface StartOptions {
     model?: string
@@ -75,28 +76,38 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     const { api, session, sessionInfo } = bootstrap;
     logger.debug(`Session created: ${sessionInfo.id}`);
 
+    const currentSessionRef: { current: Session | null } = { current: null };
+    let nativeSkills: SkillSummary[] | null = null;
+
     // Extract SDK metadata in background and update session when ready
     extractSDKMetadataAsync(async (sdkMetadata) => {
         logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
         try {
+            const catalog = classifyClaudeSlashCatalog(
+                sdkMetadata.slashCommands,
+                await listSkills(workingDirectory, { flavor: 'claude' })
+            );
+            nativeSkills = catalog.skills;
+            currentSessionRef.current?.setNativeSkillNames(catalog.skills.map((skill) => skill.name));
+            session.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
+                success: true,
+                skills: catalog.skills
+            }));
             // Update session metadata with tools and slash commands
             session.updateMetadata((currentMetadata) => ({
                 ...currentMetadata,
                 tools: sdkMetadata.tools,
-                slashCommands: sdkMetadata.slashCommands
+                slashCommands: catalog.commands
             }));
             logger.debug('[start] Session metadata updated with SDK capabilities');
         } catch (error) {
             logger.debug('[start] Failed to update session metadata:', error);
         }
-    });
+    }, workingDirectory);
 
     // Start HAPI MCP server
     const happyServer = await startHappyServer(session);
     logger.debug(`[START] HAPI MCP server started at ${happyServer.url}`);
-
-    // Variable to track current session instance (updated via onSessionReady callback)
-    const currentSessionRef: { current: Session | null } = { current: null };
 
     const formatFailureReason = (message: string): string => {
         const maxLength = 200;
@@ -458,6 +469,9 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             onModeChange: createModeChangeHandler(session),
             onSessionReady: (sessionInstance) => {
                 currentSessionRef.current = sessionInstance;
+                if (nativeSkills) {
+                    sessionInstance.setNativeSkillNames(nativeSkills.map((skill) => skill.name));
+                }
                 syncSessionModes();
             },
             mcpServers: {

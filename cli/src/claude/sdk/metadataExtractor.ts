@@ -6,17 +6,41 @@
 import { query } from './query'
 import type { SDKSystemMessage } from './types'
 import { logger } from '@/ui/logger'
+import type { SkillSummary } from '@/modules/common/skills'
 
 export interface SDKMetadata {
     tools?: string[]
     slashCommands?: string[]
 }
 
+export function classifyClaudeSlashCatalog(
+    names: readonly string[] | undefined,
+    discoveredSkills: readonly SkillSummary[]
+): { commands: string[]; skills: SkillSummary[] } {
+    const skillsByName = new Map(discoveredSkills.map((skill) => [skill.name, skill]))
+    const commands: string[] = []
+    const skills: SkillSummary[] = []
+
+    for (const rawName of names ?? []) {
+        const name = rawName.trim()
+        if (!name) continue
+        const localName = name.slice(name.lastIndexOf(':') + 1)
+        const skill = skillsByName.get(name) ?? skillsByName.get(localName)
+        if (skill) {
+            skills.push({ ...skill, name })
+        } else {
+            commands.push(name)
+        }
+    }
+
+    return { commands, skills }
+}
+
 /**
  * Extract SDK metadata by running a minimal query and capturing the init message
  * @returns SDK metadata containing tools and slash commands
  */
-export async function extractSDKMetadata(): Promise<SDKMetadata> {
+export async function extractSDKMetadata(cwd?: string): Promise<SDKMetadata> {
     const abortController = new AbortController()
     
     try {
@@ -26,6 +50,7 @@ export async function extractSDKMetadata(): Promise<SDKMetadata> {
         const sdkQuery = query({
             prompt: 'hello',
             options: {
+                cwd,
                 allowedTools: ['Bash(echo)'],
                 maxTurns: 1,
                 abort: abortController.signal
@@ -69,8 +94,8 @@ export async function extractSDKMetadata(): Promise<SDKMetadata> {
  * Extract SDK metadata asynchronously without blocking
  * Fires the extraction and updates metadata when complete
  */
-export function extractSDKMetadataAsync(onComplete: (metadata: SDKMetadata) => void): void {
-    extractSDKMetadata()
+export function extractSDKMetadataAsync(onComplete: (metadata: SDKMetadata) => void, cwd?: string): void {
+    extractSDKMetadata(cwd)
         .then(metadata => {
             if (metadata.tools || metadata.slashCommands) {
                 onComplete(metadata)
