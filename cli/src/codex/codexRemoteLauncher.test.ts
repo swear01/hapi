@@ -1245,6 +1245,38 @@ describe('codexRemoteLauncher', () => {
         ]);
     });
 
+    it('reloads the native skill catalog after skills/changed', async () => {
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'new-skill',
+                    description: 'New skill',
+                    path: '/tmp/new-skill/SKILL.md',
+                    scope: 'repo',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
+
+        harness.dispatchNotification?.('skills/changed', {});
+        await vi.waitFor(() => {
+            expect(harness.listSkillsCalls.at(-1)).toEqual({
+                cwds: ['/tmp/hapi-update'],
+                forceReload: true
+            });
+        });
+
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'new-skill', description: 'New skill' }]
+        });
+    });
+
     it('routes app-server MCP elicitation through the existing user-input transport', async () => {
         const { session, codexMessages, rpcHandlers, setPermissionMode } = createSessionStub();
 

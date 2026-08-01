@@ -3087,7 +3087,35 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         });
 
+        let nativeSkills: SkillMetadata[] = [];
+        let nativeSkillsAvailable = false;
+        const refreshNativeSkills = async (forceReload: boolean): Promise<void> => {
+            const response = await appServerClient.listSkills({
+                cwds: [session.path],
+                forceReload
+            });
+            const inventory = response.data?.find(entry => entry.cwd === session.path)
+                ?? response.data?.[0];
+            nativeSkills = (inventory?.skills ?? []).filter(skill => skill.enabled);
+            if (!nativeSkillsAvailable) {
+                nativeSkillsAvailable = true;
+                session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
+                    success: true,
+                    skills: nativeSkills.map(skill => ({
+                        name: skill.name,
+                        description: skill.description
+                    }))
+                }));
+            }
+        };
+
         appServerClient.setNotificationHandler((method, params) => {
+            if (method === 'skills/changed') {
+                void refreshNativeSkills(true).catch((error) => {
+                    logger.debug(`[Codex] failed to refresh skills: ${errorMessage(error)}`);
+                });
+                return;
+            }
             const events = appServerEventConverter.handleNotification(method, params);
             for (const event of events) {
                 const eventRecord = asRecord(event) ?? { type: undefined };
@@ -3167,22 +3195,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         });
 
-        let nativeSkills: SkillMetadata[] = [];
         try {
-            const response = await appServerClient.listSkills({
-                cwds: [session.path],
-                forceReload: false
-            });
-            const inventory = response.data?.find(entry => entry.cwd === session.path)
-                ?? response.data?.[0];
-            nativeSkills = (inventory?.skills ?? []).filter(skill => skill.enabled);
-            session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
-                success: true,
-                skills: nativeSkills.map(skill => ({
-                    name: skill.name,
-                    description: skill.description
-                }))
-            }));
+            await refreshNativeSkills(false);
         } catch (error) {
             logger.debug(`[Codex] skills/list failed: ${errorMessage(error)}; keeping filesystem fallback`);
         }
