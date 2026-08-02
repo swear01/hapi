@@ -1148,6 +1148,7 @@ async uploadScratchlistAttachment(
         }
 
         let childCreated = false
+        let spawnAttempted = false
         try {
             this.sessionCache.getOrCreateSession(
                 `fork:${childId}`,
@@ -1176,6 +1177,7 @@ async uploadScratchlistAttachment(
             this.sessionCache.rebuildTodosFromTranscript(childId)
             this.sessionCache.refreshSession(childId)
 
+            spawnAttempted = true
             const spawn = await this.rpcGateway.spawnSession(
                 machineId,
                 directory,
@@ -1222,7 +1224,7 @@ async uploadScratchlistAttachment(
         } catch (error) {
             if (childCreated) {
                 try {
-                    await this.cleanupFailedForkChild(childId)
+                    await this.cleanupFailedForkChild(childId, machineId, spawnAttempted)
                 } catch (cleanupError) {
                     const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
                     return { type: 'error', message: `Fork failed; child cleanup was not confirmed: ${message}` }
@@ -1233,10 +1235,19 @@ async uploadScratchlistAttachment(
     }
 
     /** Kill an active fork child (if any) then delete the HAPI row. */
-    private async cleanupFailedForkChild(childId: string): Promise<void> {
+    private async cleanupFailedForkChild(
+        childId: string,
+        machineId: string,
+        spawnAttempted: boolean
+    ): Promise<void> {
+        if (spawnAttempted) {
+            const status = await this.rpcGateway.stopRunnerSession(machineId, childId)
+            if (status === 'still_alive') {
+                throw new Error('Fork child termination was not confirmed')
+            }
+        }
         const child = this.sessionCache.refreshSession(childId)
         if (child?.active) {
-            await this.rpcGateway.killSession(childId)
             this.handleSessionEnd({ sid: childId, time: Date.now(), reason: 'error' })
         }
         await this.deleteSession(childId)
@@ -1286,7 +1297,15 @@ async uploadScratchlistAttachment(
         try {
             rpcResult = await this.rpcGateway.rewindConversation(sessionId, { messageLocalId })
         } catch (error) {
-            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+            if (!(error instanceof RpcTargetMissingError)) {
+                this.markConversationHistoryDiverged(sessionId, namespace)
+                return {
+                    type: 'error',
+                    hydrateFailed: true,
+                    message: 'Rewind outcome is unknown; session history requires reconciliation'
+                }
+            }
+            return { type: 'error', message: error.message }
         }
 
         if (rpcResult?.success !== true) {
