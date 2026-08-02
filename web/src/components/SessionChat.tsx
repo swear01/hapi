@@ -1531,7 +1531,11 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? handleCopilotAgentModeChange
                                 : undefined
                         }
-                        onPermissionModeChange={handlePermissionModeChange}
+                        onPermissionModeChange={
+                            agentFlavor === 'copilot' && controlledByUser
+                                ? undefined
+                                : handlePermissionModeChange
+                        }
                         selectedModelBase={
                             agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
                                 ? cursorSelectedBaseValue
