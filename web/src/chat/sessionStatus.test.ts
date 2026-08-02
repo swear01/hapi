@@ -74,37 +74,48 @@ describe('buildSessionStatusData', () => {
         const blocks: ChatBlock[] = [
             toolBlock({ name: 'CodexAgent', tool: { id: 'agent-1', state: 'running', input: { summary: 'Inspect API', activity: 'Reading files' } } }),
             toolBlock({ name: 'Agent', tool: { id: 'agent-2', state: 'error', input: { description: 'Review changes' } } }),
-            toolBlock({ name: 'Task', tool: { id: 'agent-3', state: 'completed', input: { description: 'Done' } } })
+            toolBlock({
+                name: 'Task',
+                tool: { id: 'agent-3', state: 'completed', input: { description: 'Done' } },
+                children: [
+                    toolBlock({ name: 'Agent', tool: { id: 'agent-4', input: { description: 'Nested work' } } })
+                ]
+            })
         ]
 
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toEqual([
             expect.objectContaining({ id: 'agent-1', title: 'Inspect API', detail: 'Reading files', state: 'running' }),
-            expect.objectContaining({ id: 'agent-2', title: 'Review changes', state: 'error' })
+            expect.objectContaining({ id: 'agent-2', title: 'Review changes', state: 'error' }),
+            expect.objectContaining({ id: 'agent-4', title: 'Nested work', state: 'running' })
         ])
     })
 
     it('tracks Claude background terminals until their task notification arrives', () => {
-        const blocks: ChatBlock[] = [
-            toolBlock({
-                name: 'Bash',
-                tool: {
-                    id: 'bash-1',
-                    state: 'completed',
-                    input: { command: 'bun run dev', cwd: '/repo/web' },
-                    result: 'Command running in background with ID: bg-1',
-                    startedAt: 123
-                }
-            }),
-            toolBlock({
-                name: 'Bash',
-                tool: {
-                    id: 'bash-2',
-                    state: 'completed',
-                    input: { command: 'bun test --watch' },
-                    result: [{ type: 'text', text: 'Command running in background with ID: bg-2' }]
-                }
-            })
-        ]
+        const blocks: ChatBlock[] = [toolBlock({
+            name: 'Agent',
+            tool: { state: 'completed' },
+            children: [
+                toolBlock({
+                    name: 'Bash',
+                    tool: {
+                        id: 'bash-1',
+                        state: 'completed',
+                        input: { command: 'bun run dev', cwd: '/repo/web' },
+                        result: 'Command running in background with ID: bg-1',
+                        startedAt: 123
+                    }
+                }),
+                toolBlock({
+                    name: 'Bash',
+                    tool: {
+                        id: 'bash-2',
+                        state: 'completed',
+                        input: { command: 'bun test --watch' },
+                        result: [{ type: 'text', text: 'Command running in background with ID: bg-2' }]
+                    }
+                })
+            ]
+        })]
 
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [taskNotification('bg-1')] })?.terminals).toEqual([
             { id: 'bg-2', command: 'bun test --watch', cwd: null, startedAt: 100 }

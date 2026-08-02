@@ -58,6 +58,15 @@ function terminalFromBlock(block: ToolCallBlock): SessionStatusTerminal | null {
     }
 }
 
+function collectToolBlocks(blocks: readonly ChatBlock[]): ToolCallBlock[] {
+    const tools: ToolCallBlock[] = []
+    for (const block of blocks) {
+        if (block.kind !== 'tool-call') continue
+        tools.push(block, ...collectToolBlocks(block.children))
+    }
+    return tools
+}
+
 function completedBackgroundTaskIds(messages: readonly NormalizedMessage[]): Set<string> {
     const ids = new Set<string>()
 
@@ -76,11 +85,10 @@ function completedBackgroundTaskIds(messages: readonly NormalizedMessage[]): Set
 }
 
 function buildBackgroundTerminals(
-    blocks: readonly ChatBlock[],
+    tools: readonly ToolCallBlock[],
     messages: readonly NormalizedMessage[]
 ): SessionStatusTerminal[] {
-    const terminals = blocks
-        .filter((block): block is ToolCallBlock => block.kind === 'tool-call')
+    const terminals = tools
         .map(terminalFromBlock)
         .filter((terminal): terminal is SessionStatusTerminal => terminal !== null)
     const completedIds = completedBackgroundTaskIds(messages)
@@ -126,7 +134,8 @@ export function buildSessionStatusData(args: {
     messages: readonly NormalizedMessage[]
     backgroundTaskCount?: number
 }): SessionStatusData | null {
-    const detectedTerminals = buildBackgroundTerminals(args.blocks, args.messages)
+    const tools = collectToolBlocks(args.blocks)
+    const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
     const terminals = args.backgroundTaskCount === undefined
         ? detectedTerminals
         : args.backgroundTaskCount > 0
@@ -135,8 +144,7 @@ export function buildSessionStatusData(args: {
     const data: SessionStatusData = {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
-        subagents: args.blocks
-            .filter((block): block is ToolCallBlock => block.kind === 'tool-call')
+        subagents: tools
             .map(subagentFromBlock)
             .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
         terminals
