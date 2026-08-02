@@ -90,7 +90,7 @@ export class CodexConversationHistory {
             try {
                 // Dry capability: fork with ephemeral if supported; otherwise assume fork works
                 // once thread/fork is callable. We don't actually leave a fork — probe via
-                // reading params acceptance by attempting fork current and immediately... 
+                // reading params acceptance by attempting fork current and immediately...
                 // Too expensive. Mark supported when experimental API is connected; demote on error.
                 this.states = markSupported(this.states, 'forkCurrent')
                 this.states = markSupported(this.states, 'forkAtMessage')
