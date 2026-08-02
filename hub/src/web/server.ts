@@ -28,6 +28,7 @@ import { createCursorImportRoutes } from './routes/cursorImport'
 import { createPushRoutes } from './routes/push'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
+import { createClaudeModelsRoutes } from './routes/claudeModels'
 import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
@@ -222,6 +223,7 @@ function createWebApp(options: {
     embeddedAssetMap: Map<string, EmbeddedWebAsset> | null
     relayMode?: boolean
     officialWebUrl?: string
+    dataDir: string
 }): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -264,6 +266,7 @@ function createWebApp(options: {
     app.route('/api', createClaudeDesktopRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
     app.route('/api', createCursorImportRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
     app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
+    app.route('/api', createClaudeModelsRoutes(options.dataDir))
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes())
 
@@ -401,6 +404,7 @@ export async function startWebServer(options: {
     corsOrigins?: string[]
     relayMode?: boolean
     officialWebUrl?: string
+    dataDir: string
 }): Promise<BunServer<WebSocketData>> {
     const isCompiled = isBunCompiled()
     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null
@@ -413,6 +417,7 @@ export async function startWebServer(options: {
         vapidPublicKey: options.vapidPublicKey,
         corsOrigins: options.corsOrigins,
         embeddedAssetMap,
+        dataDir: options.dataDir,
         relayMode: options.relayMode,
         officialWebUrl: options.officialWebUrl
     })
