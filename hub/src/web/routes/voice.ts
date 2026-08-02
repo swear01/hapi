@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { z } from 'zod'
 import type { WebAppEnv } from '../middleware/auth'
 import {
@@ -49,6 +50,8 @@ const transcriptionLanguageSchema = z.string()
     .optional()
 
 const MAX_TRANSCRIPTION_BYTES = 25 * 1024 * 1024
+const MAX_TRANSCRIPTION_BODY_BYTES = MAX_TRANSCRIPTION_BYTES + 1024 * 1024
+const TRANSCRIPTION_TIMEOUT_MS = 120_000
 
 function trimTrailingSlash(value: string): string {
     return value.replace(/\/+$/, '')
@@ -119,7 +122,12 @@ async function transcribeStandard(
     }
 
     try {
-        const response = await fetch(url, { method: 'POST', headers, body })
+        const response = await fetch(url, {
+            method: 'POST',
+            headers,
+            body,
+            signal: AbortSignal.timeout(TRANSCRIPTION_TIMEOUT_MS)
+        })
         if (!response.ok) {
             console.warn('[Voice][Transcription] Upstream request failed', { provider, status: response.status })
             return Response.json({ error: `${provider} transcription failed (HTTP ${response.status})` }, { status: 502 })
@@ -367,7 +375,10 @@ export function createVoiceRoutes(): Hono<WebAppEnv> {
         return c.json({ providers: listConfiguredTranscriptionProviders(process.env) })
     })
 
-    app.post('/voice/transcription', async (c) => {
+    app.post('/voice/transcription', bodyLimit({
+        maxSize: MAX_TRANSCRIPTION_BODY_BYTES,
+        onError: (c) => c.json({ error: 'Audio file too large' }, 413)
+    }), async (c) => {
         const form = await c.req.formData().catch(() => null)
         if (!form) return c.json({ error: 'Invalid form data' }, 400)
 

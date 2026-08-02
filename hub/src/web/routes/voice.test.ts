@@ -163,6 +163,22 @@ describe('voice transcription routes', () => {
         expect(res.status).toBe(400)
         expect(await res.json()).toEqual({ error: 'Unsupported audio file type' })
     })
+
+    test('rejects oversized request bodies before multipart parsing', async () => {
+        const app = createApp()
+        const res = await app.request('/api/voice/transcription', {
+            method: 'POST',
+            headers: {
+                ...(await authHeaders()),
+                'content-length': String(27 * 1024 * 1024),
+                'content-type': 'multipart/form-data; boundary=test'
+            },
+            body: '--test--'
+        })
+
+        expect(res.status).toBe(413)
+        expect(await res.json()).toEqual({ error: 'Audio file too large' })
+    })
 })
 
 describe('POST /api/voice/token', () => {
