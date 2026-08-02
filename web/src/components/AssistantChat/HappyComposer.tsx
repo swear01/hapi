@@ -4,7 +4,7 @@ import {
     getPermissionModeOptionsForFlavor,
     type CopilotAgentMode
 } from '@hapi/protocol'
-import { ComposerPrimitive, useAssistantApi, useAssistantState } from '@assistant-ui/react'
+import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import {
     type ChangeEvent as ReactChangeEvent,
     type ClipboardEvent as ReactClipboardEvent,
@@ -17,6 +17,12 @@ import {
     useRef,
     useState
 } from 'react'
+import { isRichComposerMentionsEnabled } from '@/lib/composerSegments'
+import type { SessionMentionResolveResult } from '@/components/AssistantChat/RichComposerInput'
+import {
+    RichComposerInput,
+    type RichComposerInputHandle,
+} from '@/components/AssistantChat/RichComposerInput'
 import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary, ThreadGoal } from '@/types/api'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
@@ -156,6 +162,8 @@ export function HappyComposer(props: {
     contextSize?: number
     contextCacheRead?: number
     contextWindow?: number | null
+    /** Model for the context-window heuristic; see StatusBar.contextModel. */
+    contextModel?: string | null
     controlledByUser?: boolean
     agentFlavor?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string }>
@@ -209,6 +217,8 @@ export function HappyComposer(props: {
     // inline error affordance until the user dismisses or starts editing.
     sendError?: ComposerSendError | null
     onClearSendError?: () => void
+    /** Chip hover / aria-label resolver (SessionChat → useSessions). */
+    resolveSessionMentionTooltip?: (id: string, title: string) => SessionMentionResolveResult
 }) {
     const { t } = useTranslation()
     const {
@@ -229,6 +239,7 @@ export function HappyComposer(props: {
         contextSize,
         contextCacheRead,
         contextWindow,
+        contextModel,
         controlledByUser = false,
         agentFlavor,
         availableModelOptions,
@@ -261,7 +272,8 @@ export function HappyComposer(props: {
         onSchedule: onScheduleProp,
         onClearSchedule: onClearScheduleProp,
         sendError = null,
-        onClearSendError
+        onClearSendError,
+        resolveSessionMentionTooltip,
     } = props
 
     // Use ?? so missing values fall back to default (destructuring defaults only handle undefined)
@@ -274,12 +286,12 @@ export function HappyComposer(props: {
     const serviceTier = rawServiceTier ?? null
     const displayedServiceTier = getDisplayedCodexServiceTier(serviceTier)
 
-    const api = useAssistantApi()
+    const api = useAui()
     const { composerEnterBehavior } = useComposerEnterBehavior()
-    const composerText = useAssistantState(({ composer }) => composer.text)
-    const attachments = useAssistantState(({ composer }) => composer.attachments)
-    const threadIsRunning = useAssistantState(({ thread }) => thread.isRunning)
-    const threadIsDisabled = useAssistantState(({ thread }) => thread.isDisabled)
+    const composerText = useAuiState((s) => s.composer.text)
+    const attachments = useAuiState((s) => s.composer.attachments)
+    const threadIsRunning = useAuiState((s) => s.thread.isRunning)
+    const threadIsDisabled = useAuiState((s) => s.thread.isDisabled)
 
     const controlsDisabled = disabled || (!active && !allowSendWhenInactive) || threadIsDisabled
     const trimmed = composerText.trim()
@@ -314,6 +326,10 @@ export function HappyComposer(props: {
     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
 
     const textareaRef = useRef<HTMLTextAreaElement>(null)
+    const richInputRef = useRef<RichComposerInputHandle>(null)
+    // Kill-switch only (?richMentions=0 / localStorage=0 / VITE=false). Mount-time
+    // read — hard reload required, so no per-keystroke localStorage/URL parse.
+    const [richMentionsEnabled] = useState(() => isRichComposerMentionsEnabled())
     const prevControlledByUser = useRef(controlledByUser)
 
     const attachmentDrafts = attachments.flatMap((attachment) => {
@@ -370,6 +386,10 @@ export function HappyComposer(props: {
     }, [sendError, api, composerText, onScheduleProp])
 
     useEffect(() => {
+        if (richMentionsEnabled) {
+            // Rich input owns mirror text + selection via onMirrorChange.
+            return
+        }
         setInputState((prev) => {
             if (prev.text === composerText) return prev
             // When syncing from composerText, update selection to end of text
@@ -377,7 +397,7 @@ export function HappyComposer(props: {
             const newPos = composerText.length
             return { text: composerText, selection: { start: newPos, end: newPos } }
         })
-    }, [composerText])
+    }, [composerText, richMentionsEnabled])
 
     // Track one-time "continue" hint after switching from local to remote.
     useEffect(() => {
@@ -413,10 +433,32 @@ export function HappyComposer(props: {
 
     const handleSuggestionSelect = useCallback((index: number) => {
         const suggestion = suggestions[index]
-        if (!suggestion || !textareaRef.current) return
+        if (!suggestion) return
         if (suggestion.text.startsWith('$')) {
             markSkillUsed(suggestion.text.slice(1))
         }
+
+        if (richMentionsEnabled && richInputRef.current) {
+            // insert*/apply* emit mirror state via onMirrorChange (keep inputState in mirror space).
+            if (suggestion.sessionMention) {
+                richInputRef.current.insertSessionMention(
+                    suggestion.sessionMention,
+                    autocompletePrefixes
+                )
+            } else {
+                richInputRef.current.applyPlainSuggestion(
+                    suggestion.text,
+                    autocompletePrefixes
+                )
+            }
+            setTimeout(() => {
+                richInputRef.current?.focus()
+            }, 0)
+            haptic('light')
+            return
+        }
+
+        if (!textareaRef.current) return
 
         const result = applySuggestion(
             inputState.text,
@@ -444,7 +486,7 @@ export function HappyComposer(props: {
         }, 0)
 
         haptic('light')
-    }, [api, suggestions, inputState, autocompletePrefixes, haptic])
+    }, [api, suggestions, inputState, autocompletePrefixes, haptic, richMentionsEnabled])
 
     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
@@ -557,7 +599,15 @@ export function HappyComposer(props: {
         [permissionModeOptions]
     )
 
-    const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    /** Flush rich chips → `[title](/sessions/<id>)` into composer.text, then send. */
+    const flushAndSend = useCallback(() => {
+        if (richMentionsEnabled && richInputRef.current) {
+            richInputRef.current.flushSerializedText()
+        }
+        api.composer().send()
+    }, [api, richMentionsEnabled])
+
+    const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
         const key = e.key
 
         // Avoid intercepting IME composition keystrokes (Enter, arrows, etc.)
@@ -565,9 +615,9 @@ export function HappyComposer(props: {
             return
         }
 
-        // Shift+Enter inserts a newline (standard behavior)
+        // Shift+Enter inserts a newline (textarea default; rich path inserts <br>).
         if (key === 'Enter' && e.shiftKey) {
-            return // let default textarea behavior handle newline
+            return
         }
 
         // Enter with suggestions visible: select the suggestion
@@ -583,14 +633,14 @@ export function HappyComposer(props: {
             if (composerEnterBehavior === 'newline') {
                 if ((e.ctrlKey || e.metaKey) && !e.altKey && canSend) {
                     e.preventDefault()
-                    api.composer().send()
+                    flushAndSend()
                     setShowContinueHint(false)
                 }
                 return
             }
             e.preventDefault()
             if (!e.ctrlKey && !e.altKey && !e.metaKey && canSend) {
-                api.composer().send()
+                flushAndSend()
                 setShowContinueHint(false)
             }
             return
@@ -649,7 +699,9 @@ export function HappyComposer(props: {
         canSend,
         api,
         haptic,
-        composerEnterBehavior
+        composerEnterBehavior,
+        richMentionsEnabled,
+        flushAndSend,
     ])
 
     useEffect(() => {
@@ -692,7 +744,7 @@ export function HappyComposer(props: {
         }))
     }, [])
 
-    const handlePaste = useCallback(async (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const handlePaste = useCallback(async (e: ReactClipboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
         const files = Array.from(e.clipboardData?.files || [])
         const imageFiles = files.filter(file => file.type.startsWith('image/'))
 
@@ -824,7 +876,7 @@ export function HappyComposer(props: {
     const voiceEnabled = Boolean(onVoiceToggle)
 
     const handleSend = useCallback(() => {
-        api.composer().send()
+        flushAndSend()
         // SessionChat owns clearing the schedule — it clears only after awaiting
         // the send hook's accepted result, which covers both pre-mutation guards
         // and async inactive-session resume failure. Clearing here unconditionally
@@ -835,7 +887,7 @@ export function HappyComposer(props: {
         // the route-level state (`onSuccess`/`onError` in router.tsx) replaces
         // or clears it based on the actual mutation result, so the user keeps
         // the error context while the new attempt is in flight.
-    }, [api])
+    }, [flushAndSend])
 
     // Pi: selected model info for UI labels and thinking level filtering
     const piModelLabel = agentFlavor === 'pi'
@@ -1346,6 +1398,7 @@ export function HappyComposer(props: {
                             contextSize={contextSize}
                             contextCacheRead={contextCacheRead}
                             contextWindow={contextWindow}
+                            contextModel={contextModel}
                             model={model}
                             modelReasoningEffort={modelReasoningEffort}
                             serviceTier={serviceTier}
@@ -1391,20 +1444,39 @@ export function HappyComposer(props: {
                         ) : null}
 
                         <div className="flex items-center px-4 py-3">
-                            <ComposerPrimitive.Input
-                                ref={textareaRef}
-                                autoFocus={!controlsDisabled && !isTouch}
-                                placeholder={showContinueHint ? t('misc.typeMessage') : t('misc.typeAMessage')}
-                                disabled={controlsDisabled}
-                                maxRows={5}
-                                submitOnEnter={false}
-                                cancelOnEscape={false}
-                                onChange={handleChange}
-                                onSelect={handleSelect}
-                                onKeyDown={handleKeyDown}
-                                onPaste={handlePaste}
-                                className="flex-1 resize-none bg-transparent text-base leading-snug text-[var(--app-fg)] placeholder-[var(--app-hint)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-                            />
+                            {richMentionsEnabled ? (
+                                <RichComposerInput
+                                    ref={richInputRef}
+                                    value={composerText}
+                                    autoFocus={!controlsDisabled && !isTouch}
+                                    placeholder={showContinueHint ? t('misc.typeMessage') : t('misc.typeAMessage')}
+                                    disabled={controlsDisabled}
+                                    onValueChange={(text) => api.composer().setText(text)}
+                                    onMirrorChange={(state) => setInputState(state)}
+                                    onKeyDown={handleKeyDown}
+                                    onPaste={handlePaste}
+                                    resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                                    onEdit={() => {
+                                        if (sendError && onClearSendError) onClearSendError()
+                                    }}
+                                    className="max-h-[7.5rem] min-h-[1.5rem] flex-1 overflow-y-auto whitespace-pre-wrap break-words bg-transparent text-base leading-snug text-[var(--app-fg)] focus:outline-none"
+                                />
+                            ) : (
+                                <ComposerPrimitive.Input
+                                    ref={textareaRef}
+                                    autoFocus={!controlsDisabled && !isTouch}
+                                    placeholder={showContinueHint ? t('misc.typeMessage') : t('misc.typeAMessage')}
+                                    disabled={controlsDisabled}
+                                    maxRows={5}
+                                    submitOnEnter={false}
+                                    cancelOnEscape={false}
+                                    onChange={handleChange}
+                                    onSelect={handleSelect}
+                                    onKeyDown={handleKeyDown}
+                                    onPaste={handlePaste}
+                                    className="flex-1 resize-none bg-transparent text-base leading-snug text-[var(--app-fg)] placeholder-[var(--app-hint)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                                />
+                            )}
                         </div>
 
                         <ComposerButtons

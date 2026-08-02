@@ -24,6 +24,7 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'model', description: 'Show or set Codex model, e.g. /model gpt-5.5', source: 'builtin' },
         { name: 'reasoning', description: 'Show or set reasoning effort', source: 'builtin' },
         { name: 'effort', description: 'Alias for /reasoning', source: 'builtin' },
+        { name: 'personality', description: 'Show or set response style: friendly, pragmatic, or none', source: 'builtin' },
         { name: 'permissions', description: 'Show or set permission mode', source: 'builtin' },
         { name: 'permission', description: 'Alias for /permissions', source: 'builtin' },
     ],
@@ -73,6 +74,8 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'permission', description: 'Alias for /permissions', source: 'builtin' },
         { name: 'usage', description: 'Show session usage metrics', source: 'builtin' },
     ],
+    kimi: [],
+    pi: [],
 } as const satisfies Record<string, readonly SlashCommand[]>
 
 export function getBuiltinSlashCommands(agent: string): SlashCommand[] {

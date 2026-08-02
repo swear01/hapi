@@ -29,7 +29,7 @@ export { ScratchlistStore } from './scratchlistStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 
-const SCHEMA_VERSION: number = 15
+const SCHEMA_VERSION: number = 16
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -107,6 +107,36 @@ export class Store {
         this.scratchlist = new ScratchlistStore(this.db)
     }
 
+    /**
+     * Atomically records a CLI prompt-consumption acknowledgement and returns
+     * the persisted session activity timestamp. A duplicate or sibling-stamped
+     * acknowledgement leaves the session untouched while returning its existing
+     * timestamp for replay-safe in-memory cache synchronization.
+     */
+    recordMessagesConsumed(
+        sessionId: string,
+        localIds: string[],
+        invokedAt: number,
+        namespace: string
+    ): number {
+        return this.db.transaction(() => {
+            const changes = this.messages.markMessagesInvoked(sessionId, localIds, invokedAt)
+            if (changes > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, invokedAt, namespace)
+            }
+
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after messages-consumed transition')
+            }
+            if (changes > 0 && session.updatedAt < invokedAt) {
+                throw new Error('session activity was not persisted after messages-consumed transition')
+            }
+
+            return session.updatedAt
+        })()
+    }
+
     close(): void {
         if (this.closed) return
         this.db.close()
@@ -142,6 +172,7 @@ export class Store {
             12: () => this.migrateFromV12ToV13(),
             13: () => this.migrateFromV13ToV14(),
             14: () => this.migrateFromV14ToV15(),
+            15: () => this.migrateFromV15ToV16(),
         })
 
         if (currentVersion === 0) {
@@ -564,6 +595,15 @@ export class Store {
             this.db.exec(`ALTER TABLE session_scratchlist ADD COLUMN attachments TEXT DEFAULT NULL`)
         }
     }
+
+    /**
+     * V16 has no DDL change: messages.content may now hold zstd-compressed
+     * BLOBs alongside legacy plaintext JSON TEXT (see contentCodec.ts). The
+     * version bump exists so an older hub build refuses to open the DB with a
+     * schema-mismatch error instead of silently rendering every compressed
+     * message as null.
+     */
+    private migrateFromV15ToV16(): void {}
 
     private getSessionColumnNames(): Set<string> {
         const rows = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
