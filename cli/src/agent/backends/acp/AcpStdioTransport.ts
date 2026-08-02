@@ -430,7 +430,8 @@ export class AcpStdioTransport {
 
     private flushActionableStderrTail(): void {
         const pending = this.stderrParseBuffer.trim();
-        if (matchesAcpRetryBackoff(pending) || matchesAcpHttp2Cancel(pending)) {
+        const quotaOrRateLimit = /status 429|ratelimitexceeded|rate limit|quota|resource exhausted|resourceexhausted/i.test(pending);
+        if (quotaOrRateLimit || matchesAcpRetryBackoff(pending) || matchesAcpHttp2Cancel(pending)) {
             this.stderrParseBuffer = '';
             this.parseStderrError(pending);
         }
