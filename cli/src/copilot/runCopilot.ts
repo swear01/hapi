@@ -170,7 +170,7 @@ export async function runCopilot(opts: {
                             message: 'Copilot model, permission mode, and agent mode can only be changed for remote sessions.',
                             id: randomUUID()
                         });
-                        sessionWrapperRef.current.onThinkingChange(false);
+                        sessionWrapperRef.current.pushKeepAlive();
                         return;
                     }
                     if (slash.updates) {
@@ -199,7 +199,7 @@ export async function runCopilot(opts: {
                                 id: randomUUID()
                             });
                         }
-                        sessionWrapperRef.current?.onThinkingChange(false);
+                        sessionWrapperRef.current?.pushKeepAlive();
                         return;
                     }
                     if (slash.message) {
@@ -226,7 +226,7 @@ export async function runCopilot(opts: {
                         message: error instanceof Error ? error.message : 'Failed to apply Copilot slash command',
                         id: randomUUID()
                     });
-                    sessionWrapperRef.current?.onThinkingChange(false);
+                    sessionWrapperRef.current?.pushKeepAlive();
                     return;
                 }
                 pushPlain();
