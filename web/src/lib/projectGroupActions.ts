@@ -46,13 +46,13 @@ export function isOldInactiveSession(
     session: SessionSummary,
     now: number = Date.now()
 ): boolean {
-    const hasFutureScheduledMessage = session.futureScheduledMessageCount > 0
-        || session.nextScheduledAt !== null
+    const hasPendingScheduledMessage = (session.uninvokedScheduledMessageCount
+        ?? session.futureScheduledMessageCount) > 0
     const lastUserDataUpdateAt = Math.max(
         session.updatedAt,
         session.scratchlistUpdatedAt ?? 0
     )
     return !session.active
-        && !hasFutureScheduledMessage
+        && !hasPendingScheduledMessage
         && lastUserDataUpdateAt <= now - OLD_SESSION_AGE_MS
 }

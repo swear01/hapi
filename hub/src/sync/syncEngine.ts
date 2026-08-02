@@ -271,6 +271,10 @@ export class SyncEngine {
         return this.store.messages.countFutureScheduledBySessionIds(sessionIds, now)
     }
 
+    getUninvokedScheduledMessageCounts(sessionIds: string[]): Map<string, number> {
+        return this.store.messages.countUninvokedScheduledBySessionIds(sessionIds)
+    }
+
     getNextScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
         return this.store.messages.minFutureScheduledAtBySessionIds(sessionIds, now)
     }

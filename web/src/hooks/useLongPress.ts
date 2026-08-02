@@ -135,7 +135,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
     }, [disabled, clearTimer, onLongPress])
 
     const onKeyDown = useCallback<React.KeyboardEventHandler>((e) => {
-        if (disabled) return
+        if (disabled || e.currentTarget instanceof HTMLButtonElement) return
         if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
             onShortClick?.()
