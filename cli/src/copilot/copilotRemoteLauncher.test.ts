@@ -20,11 +20,16 @@ type LauncherInternals = {
     applyQueuedModel: (model: string) => Promise<string | null>;
 };
 
-function createLauncher(setMode: (sessionId: string, mode: string) => Promise<void>) {
+function createLauncher(
+    setMode: (sessionId: string, mode: string) => Promise<void>,
+    onModelRollback?: (model: string | null) => void
+) {
     const session = {
-        sendSessionEvent: vi.fn()
+        sendSessionEvent: vi.fn(),
+        setModel: vi.fn(),
+        pushKeepAlive: vi.fn()
     } as unknown as CopilotSession;
-    const launcher = new CopilotRemoteLauncher(session, {});
+    const launcher = new CopilotRemoteLauncher(session, { onModelRollback });
     const internals = launcher as unknown as LauncherInternals;
     internals.backend = { setMode };
     internals.activeSessionId = 'copilot-session';
@@ -82,6 +87,25 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
 
         expect(setModel).toHaveBeenCalledWith('copilot-session', 'auto');
         expect(internals.currentBackendModel).toBe('auto');
+    });
+
+    it('rolls back the published model when switching fails', async () => {
+        const onModelRollback = vi.fn();
+        const { internals, session } = createLauncher(
+            vi.fn().mockResolvedValue(undefined),
+            onModelRollback
+        );
+        internals.backend = {
+            setMode: vi.fn().mockResolvedValue(undefined),
+            setModel: vi.fn().mockRejectedValue(new Error('transport unavailable'))
+        };
+        internals.currentBackendModel = 'gpt-5.4';
+
+        await expect(internals.applyQueuedModel('gpt-5.6')).resolves.toBe('gpt-5.4');
+
+        expect(session.setModel).toHaveBeenCalledWith('gpt-5.4');
+        expect(session.pushKeepAlive).toHaveBeenCalledOnce();
+        expect(onModelRollback).toHaveBeenCalledWith('gpt-5.4');
     });
 
     it('falls back to the model config option when setModel is unavailable', async () => {

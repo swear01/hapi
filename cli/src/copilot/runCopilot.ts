@@ -174,9 +174,13 @@ export async function runCopilot(opts: {
                         return;
                     }
                     if (slash.updates) {
+                        const requestedAgentMode = slash.updates.agentMode;
+                        if (localId && requestedAgentMode !== undefined && requestedAgentMode !== currentAgentMode) {
+                            preparingLocalIds.delete(localId);
+                        }
                         currentAgentMode = await applyCopilotSlashAgentMode(
                             currentAgentMode,
-                            slash.updates.agentMode,
+                            requestedAgentMode,
                             sessionWrapperRef.current
                         );
                         if (slash.updates.permissionMode !== undefined) {
@@ -329,6 +333,10 @@ export async function runCopilot(opts: {
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();
+            },
+            onModelRollback: (model) => {
+                sessionModel = model;
+                resolvedModel = resolveCopilotQueueModel(model);
             }
         });
     } catch (error) {

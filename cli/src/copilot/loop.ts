@@ -21,6 +21,7 @@ interface CopilotLoopOptions {
     copilotAgentMode?: CopilotAgentMode;
     resumeSessionId?: string;
     onSessionReady?: (session: CopilotSession) => void;
+    onModelRollback?: (model: string | null) => void;
 }
 
 export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
@@ -57,7 +58,8 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
             model: getCurrentModel()
         }),
         runRemote: (instance) => copilotRemoteLauncher(instance, {
-            model: getCurrentModel()
+            model: getCurrentModel(),
+            onModelRollback: opts.onModelRollback
         }),
         onSessionReady: opts.onSessionReady
     });

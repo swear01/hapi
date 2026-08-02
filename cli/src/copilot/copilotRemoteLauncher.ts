@@ -18,6 +18,7 @@ import { buildCopilotModelsResponseFromBackend } from '@/modules/common/copilotM
 export class CopilotRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CopilotSession;
     private readonly model?: string;
+    private readonly onModelRollback?: (model: string | null) => void;
     private backend: ReturnType<typeof createCopilotBackend> | null = null;
     private permissionHandler: CopilotPermissionHandler | null = null;
     private happyServer: { stop: () => void } | null = null;
@@ -32,10 +33,14 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
     private activeSessionId: string | null = null;
     private readonly lastDisplayedToolCall = new Map<string, string>();
 
-    constructor(session: CopilotSession, opts: { model?: string }) {
+    constructor(session: CopilotSession, opts: {
+        model?: string;
+        onModelRollback?: (model: string | null) => void;
+    }) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
         this.model = opts.model;
+        this.onModelRollback = opts.onModelRollback;
     }
 
     public async launch(): Promise<RemoteLauncherExitReason> {
@@ -400,14 +405,14 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
                         type: 'message',
                         message: `Failed to switch model to ${model}. Continuing with ${this.currentBackendModel}.`
                     });
-                    return this.currentBackendModel;
+                    return this.rollbackModel();
                 }
             }
         }
 
         const option = backend.getConfigOptionByCategory(sessionId, 'model');
         if (!option) {
-            return this.currentBackendModel;
+            return this.rollbackModel();
         }
         try {
             await backend.setConfigOption(sessionId, option.id, model);
@@ -420,8 +425,16 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
                 type: 'message',
                 message: `Failed to switch model to ${model}: ${message}. Continuing with ${this.currentBackendModel}.`
             });
-            return this.currentBackendModel;
+            return this.rollbackModel();
         }
+    }
+
+    private rollbackModel(): string | null {
+        const model = this.currentBackendModel === 'auto' ? null : this.currentBackendModel;
+        this.session.setModel(model);
+        this.session.pushKeepAlive();
+        this.onModelRollback?.(model);
+        return this.currentBackendModel;
     }
 
     private async handleAbort(): Promise<void> {
@@ -462,7 +475,7 @@ function toAcpMcpServers(config: Record<string, { command: string; args: string[
 
 export async function copilotRemoteLauncher(
     session: CopilotSession,
-    opts: { model?: string }
+    opts: { model?: string; onModelRollback?: (model: string | null) => void }
 ): Promise<'switch' | 'exit'> {
     const launcher = new CopilotRemoteLauncher(session, opts);
     return launcher.launch();
