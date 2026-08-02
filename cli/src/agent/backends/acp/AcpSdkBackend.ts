@@ -74,6 +74,7 @@ export class AcpSdkBackend implements AgentBackend {
     private initializeResult: AcpInitializeResult | null = null;
     private setModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
+    private promptRequestInFlight = false;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -503,10 +504,16 @@ export class AcpSdkBackend implements AgentBackend {
         try {
             // No timeout for prompt requests - they can run for extended periods
             // during complex tasks, tool-heavy operations, or slow model responses
-            const response = await this.transport.sendRequest('session/prompt', {
-                sessionId,
-                prompt: content
-            }, { timeoutMs: Infinity });
+            this.promptRequestInFlight = true;
+            let response: unknown;
+            try {
+                response = await this.transport.sendRequest('session/prompt', {
+                    sessionId,
+                    prompt: content
+                }, { timeoutMs: Infinity });
+            } finally {
+                this.promptRequestInFlight = false;
+            }
 
             stopReason = isObject(response) ? asString(response.stopReason) : null;
             promptUsage = this.extractPromptUsage(response);
@@ -672,6 +679,10 @@ export class AcpSdkBackend implements AgentBackend {
      */
     get processingMessage(): boolean {
         return this.isProcessingMessage;
+    }
+
+    isPromptRequestInFlight(): boolean {
+        return this.promptRequestInFlight;
     }
 
     getLastSessionUpdateAt(): number {

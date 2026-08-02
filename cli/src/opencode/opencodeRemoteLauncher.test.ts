@@ -104,6 +104,9 @@ vi.mock('./utils/opencodeBackend', () => ({
             }
             harness.events.push('prompt:end');
         }),
+        isPromptRequestInFlight: vi.fn(() =>
+            harness.events.lastIndexOf('prompt:start') > harness.events.lastIndexOf('prompt:end')
+        ),
         cancelPrompt: vi.fn(async (sessionId: string) => {
             await harness.cancelPrompt(sessionId);
             if (harness.cancelPromptImpl) {
