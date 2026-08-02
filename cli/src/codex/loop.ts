@@ -7,13 +7,12 @@ import { codexRemoteLauncher } from './codexRemoteLauncher';
 import { ApiClient, ApiSessionClient } from '@/lib';
 import type { CodexCliOverrides } from './utils/codexCliOverrides';
 import type { ReasoningEffort } from './appServerTypes';
-import type { CodexCollaborationMode, CodexPermissionMode } from '@hapi/protocol/types';
+import type { CodexCollaborationMode, CodexPermissionMode, CodexPersonality as ProtocolCodexPersonality } from '@hapi/protocol/types';
 
 export type PermissionMode = CodexPermissionMode;
+export type CodexPersonality = ProtocolCodexPersonality;
 
 /** Codex response style. Omit from mode to inherit config.toml / thread default. */
-export type CodexPersonality = 'friendly' | 'pragmatic' | 'none';
-
 export interface EnhancedMode {
     permissionMode: PermissionMode;
     model?: string;
@@ -26,7 +25,7 @@ export interface EnhancedMode {
      */
     serviceTier?: string | null;
     /** When set, forwarded to app-server thread/turn params. */
-    personality?: CodexPersonality;
+    personality?: CodexPersonality | null;
 }
 
 interface LoopOptions {
@@ -43,6 +42,7 @@ interface LoopOptions {
     model?: string;
     modelReasoningEffort?: ReasoningEffort;
     collaborationMode?: CodexCollaborationMode;
+    personality?: CodexPersonality | null;
     resumeSessionId?: string;
     sourceSessionId?: string;
     replayTranscriptHistoryOnStart?: boolean;
@@ -70,6 +70,7 @@ export async function loop(opts: LoopOptions): Promise<void> {
         model: opts.model,
         modelReasoningEffort: opts.modelReasoningEffort,
         collaborationMode: opts.collaborationMode ?? 'default',
+        personality: opts.personality,
         sourceSessionId: opts.sourceSessionId,
         replayTranscriptHistoryOnStart: opts.replayTranscriptHistoryOnStart ?? false
     });

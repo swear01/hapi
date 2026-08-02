@@ -106,7 +106,6 @@ export async function extractSDKMetadata(options: {
         const sdkQuery = query({
             prompt: 'hello',
             options: {
-                cwd: options.cwd,
                 additionalArgs: filterCatalogAffectingClaudeArgs(options.claudeArgs),
                 allowedTools: ['Bash(echo)'],
                 maxTurns: 1,

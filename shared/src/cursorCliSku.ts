@@ -61,6 +61,19 @@ export function cursorCliSkuBaseId(slug: string): string {
     return base;
 }
 
+export function isCursorCliSkuVariantId(modelId: string): boolean {
+    const trimmed = modelId.trim();
+    return Boolean(trimmed)
+        && !isCursorAcpWireModelId(trimmed)
+        && cursorCliSkuBaseId(trimmed) !== trimmed;
+}
+
+export function isCursorAcpCatalogModelId(modelId: string): boolean {
+    const trimmed = modelId.trim();
+    if (!trimmed || trimmed === 'auto' || trimmed === 'default') return false;
+    return isCursorAcpWireModelId(trimmed) || !isCursorCliSkuVariantId(trimmed);
+}
+
 export function parseCursorWireParams(modelId: string): Record<string, string> {
     const variant = modelId.includes('[') ? modelId.slice(modelId.indexOf('[') + 1).replace(/\]$/, '') : '';
     if (!variant) {

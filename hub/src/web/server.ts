@@ -19,9 +19,12 @@ import { createMessagesRoutes } from './routes/messages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
+import { createUpgradeRoutes, createUpgradeCliRoutes } from './routes/upgrade'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
+import { createClaudeDesktopRoutes } from './routes/claudeDesktop'
+import { createCursorImportRoutes } from './routes/cursorImport'
 import { createPushRoutes } from './routes/push'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
@@ -192,19 +195,19 @@ function findWebappDistDir(): { distDir: string; indexHtmlPath: string } {
     return { distDir, indexHtmlPath: join(distDir, 'index.html') }
 }
 
+export function getWebAssetCacheHeaders(path: string): Record<string, string> {
+    return path.startsWith('/assets/')
+        ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+        : {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'CDN-Cache-Control': 'no-store',
+            'Cloudflare-CDN-Cache-Control': 'no-store'
+        }
+}
+
 function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
-    const headers: Record<string, string> = {
-        'Content-Type': asset.mimeType
-    }
-
-    if (asset.path === '/sw.js') {
-        headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
-        headers['CDN-Cache-Control'] = 'no-store'
-        headers['Cloudflare-CDN-Cache-Control'] = 'no-store'
-    }
-
     return new Response(Bun.file(asset.sourcePath), {
-        headers
+        headers: { 'Content-Type': asset.mimeType, ...getWebAssetCacheHeaders(asset.path) }
     })
 }
 
@@ -232,13 +235,14 @@ function createWebApp(options: {
     const corsOriginOption = corsOrigins.includes('*') ? '*' : corsOrigins
     const corsMiddleware = cors({
         origin: corsOriginOption,
-        allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
         allowHeaders: ['authorization', 'content-type']
     })
     app.use('/api/*', corsMiddleware)
     app.use('/cli/*', corsMiddleware)
 
     app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/cli', createUpgradeCliRoutes())
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
@@ -250,12 +254,15 @@ function createWebApp(options: {
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))
+    app.route('/api', createUpgradeRoutes())
     app.route('/api', createGitRoutes(options.getSyncEngine))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
     app.route('/api', createCodexDesktopRoutes({
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))
+    app.route('/api', createClaudeDesktopRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
+    app.route('/api', createCursorImportRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
     app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes())
@@ -340,7 +347,12 @@ from GitHub Pages instead of through the relay tunnel.
         return app
     }
 
-    app.use('/assets/*', serveStatic({ root: distDir }))
+    app.use('/assets/*', serveStatic({
+        root: distDir,
+        onFound: (_path, c) => {
+            for (const [name, value] of Object.entries(getWebAssetCacheHeaders(c.req.path))) c.header(name, value)
+        }
+    }))
 
     app.use('*', async (c, next) => {
         if (c.req.path.startsWith('/api')) {
@@ -348,7 +360,14 @@ from GitHub Pages instead of through the relay tunnel.
             return
         }
 
-        return await serveStatic({ root: distDir })(c, next)
+        return await serveStatic({
+            root: distDir,
+            onFound: (_path, staticContext) => {
+                for (const [name, value] of Object.entries(getWebAssetCacheHeaders(staticContext.req.path))) {
+                    staticContext.header(name, value)
+                }
+            }
+        })(c, next)
     })
 
     app.get('*', async (c, next) => {
@@ -357,7 +376,15 @@ from GitHub Pages instead of through the relay tunnel.
             return
         }
 
-        return await serveStatic({ root: distDir, path: 'index.html' })(c, next)
+        return await serveStatic({
+            root: distDir,
+            path: 'index.html',
+            onFound: (_path, staticContext) => {
+                for (const [name, value] of Object.entries(getWebAssetCacheHeaders('/index.html'))) {
+                    staticContext.header(name, value)
+                }
+            }
+        })(c, next)
     })
 
     return app

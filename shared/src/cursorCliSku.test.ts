@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     cursorCliSkuBaseId,
     findBestCliSkuForAcpWire,
+    isCursorAcpCatalogModelId,
     isCursorAcpWireModelId,
     matchCliSkuToAcpWireId,
     parseCursorAvailableModelsFromRejection,
@@ -200,5 +201,14 @@ describe('isCursorAcpWireModelId', () => {
     it('detects wire ids', () => {
         expect(isCursorAcpWireModelId('gpt-5.5[fast=false]')).toBe(true);
         expect(isCursorAcpWireModelId('gpt-5.5-high-fast')).toBe(false);
+    });
+});
+
+describe('isCursorAcpCatalogModelId', () => {
+    it('accepts ACP ids and rejects CLI variants/defaults', () => {
+        expect(isCursorAcpCatalogModelId('composer-2.5[fast=false]')).toBe(true);
+        expect(isCursorAcpCatalogModelId('composer-2.5')).toBe(true);
+        expect(isCursorAcpCatalogModelId('gpt-5.5-high-fast')).toBe(false);
+        expect(isCursorAcpCatalogModelId('default')).toBe(false);
     });
 });

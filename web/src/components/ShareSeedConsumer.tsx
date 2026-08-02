@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useAssistantApi, useAssistantState } from '@assistant-ui/react'
+import { useAui, useAuiState } from '@assistant-ui/react'
 import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
 import { getDraft } from '@/lib/composer-drafts'
@@ -31,8 +31,8 @@ import { getDraft } from '@/lib/composer-drafts'
  *    refresh of /sessions/:id doesn't re-attach the same payload.
  */
 export function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
-    const assistantApi = useAssistantApi()
-    const composerText = useAssistantState(({ composer }) => composer.text)
+    const assistantApi = useAui()
+    const composerText = useAuiState(({ composer }) => composer.text)
     const composerTextRef = useRef(composerText)
     const consumedRef = useRef(false)
 

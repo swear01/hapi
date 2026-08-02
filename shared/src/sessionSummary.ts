@@ -1,4 +1,4 @@
-import type { Metadata, Session, WorktreeMetadata } from './schemas'
+import type { AgentState, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
 import { isKnownFlavor } from './flavors'
 import type { AgentFlavor } from './modes'
 
@@ -39,7 +39,9 @@ export type SessionSummaryMetadata = {
     flavor?: string | null
     worktree?: WorktreeMetadata
     agentSessionId?: string
+    claudeSessionId?: string
     lifecycleState?: string
+    hapiMcpUrl?: string
 }
 
 export type SessionSummary = {
@@ -65,47 +67,61 @@ export type SessionSummary = {
     effort: string | null
 }
 
+export function computePendingRequestKinds(agentState: AgentState | null | undefined): PendingRequestKind[] {
+    const requests = agentState?.requests
+    if (!requests) return []
+    const kinds = new Set(Object.values(requests).map((request) => classifyKind(request.tool)))
+    return kinds.has('permission') && kinds.has('input') ? ['permission', 'input'] : Array.from(kinds)
+}
+
+export function computePendingRequests(
+    agentState: AgentState | null | undefined,
+    fallbackSince: number,
+    cap: number = PENDING_REQUEST_SUMMARY_CAP
+): PendingRequest[] {
+    const items = Object.entries(agentState?.requests ?? {}).map(([id, request]) => ({
+        id,
+        kind: classifyKind(request.tool),
+        tool: request.tool,
+        since: typeof request.createdAt === 'number' ? request.createdAt : fallbackSince
+    }))
+    items.sort((a, b) => a.since - b.since || a.id.localeCompare(b.id))
+    return cap >= items.length ? items : items.slice(0, cap)
+}
+
+export function computePendingRequestsCount(agentState: AgentState | null | undefined): number {
+    return Object.keys(agentState?.requests ?? {}).length
+}
+
+export function computeTodoProgress(todos: TodoItem[] | undefined): SessionSummary['todoProgress'] {
+    if (!todos?.length) return null
+    return { completed: todos.filter((todo) => todo.status === 'completed').length, total: todos.length }
+}
+
 export function getPendingRequests(
     session: Session,
     cap: number = PENDING_REQUEST_SUMMARY_CAP
 ): PendingRequest[] {
-    const requests = session.agentState?.requests
-    if (!requests) {
-        return []
-    }
-
-    const items: PendingRequest[] = []
-    for (const [id, request] of Object.entries(requests)) {
-        items.push({
-            id,
-            kind: classifyKind(request.tool),
-            tool: request.tool,
-            since: typeof request.createdAt === 'number' ? request.createdAt : session.updatedAt
-        })
-    }
-
-    items.sort((a, b) => {
-        if (a.since !== b.since) return a.since - b.since
-        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-    })
-
-    return cap >= items.length ? items : items.slice(0, cap)
+    return computePendingRequests(session.agentState, session.updatedAt, cap)
 }
 
 export function getPendingRequestKinds(session: Session): PendingRequestKind[] {
-    const requests = session.agentState?.requests
-    if (!requests) {
-        return []
-    }
+    return computePendingRequestKinds(session.agentState)
+}
 
-    const kinds = new Set<PendingRequestKind>()
-    for (const request of Object.values(requests)) {
-        kinds.add(classifyKind(request.tool))
-    }
-
-    return kinds.has('permission') && kinds.has('input')
-        ? ['permission', 'input']
-        : Array.from(kinds)
+export function toSessionSummaryMetadata(metadata: Metadata | null | undefined): SessionSummaryMetadata | null {
+    return metadata ? {
+        name: metadata.name,
+        path: metadata.path,
+        machineId: metadata.machineId ?? undefined,
+        summary: metadata.summary ? { text: metadata.summary.text } : undefined,
+        flavor: metadata.flavor ?? null,
+        worktree: metadata.worktree,
+        agentSessionId: getSummaryAgentSessionId(metadata),
+        claudeSessionId: metadata.claudeSessionId ?? undefined,
+        lifecycleState: metadata.lifecycleState,
+        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined
+    } : null
 }
 
 const AGENT_SESSION_ID_FIELD_BY_FLAVOR = {
@@ -141,33 +157,15 @@ function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
 }
 
 export function toSessionSummary(session: Session): SessionSummary {
-    const pendingRequestsCount = session.agentState?.requests ? Object.keys(session.agentState.requests).length : 0
-
-    const metadata: SessionSummaryMetadata | null = session.metadata ? {
-        name: session.metadata.name,
-        path: session.metadata.path,
-        machineId: session.metadata.machineId ?? undefined,
-        summary: session.metadata.summary ? { text: session.metadata.summary.text } : undefined,
-        flavor: session.metadata.flavor ?? null,
-        worktree: session.metadata.worktree,
-        agentSessionId: getSummaryAgentSessionId(session.metadata),
-        lifecycleState: session.metadata.lifecycleState
-    } : null
-
-    const todoProgress = session.todos?.length ? {
-        completed: session.todos.filter(t => t.status === 'completed').length,
-        total: session.todos.length
-    } : null
-
     return {
         id: session.id,
         active: session.active,
         thinking: session.thinking,
         activeAt: session.activeAt,
         updatedAt: session.updatedAt,
-        metadata,
-        todoProgress,
-        pendingRequestsCount,
+        metadata: toSessionSummaryMetadata(session.metadata),
+        todoProgress: computeTodoProgress(session.todos),
+        pendingRequestsCount: computePendingRequestsCount(session.agentState),
         pendingRequestKinds: getPendingRequestKinds(session),
         pendingRequests: getPendingRequests(session),
         backgroundTaskCount: session.backgroundTaskCount ?? 0,

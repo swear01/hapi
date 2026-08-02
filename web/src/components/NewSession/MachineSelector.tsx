@@ -1,4 +1,9 @@
 import type { Machine } from '@/types/api'
+import {
+    machineTrailsUpgradeOffer,
+    type FleetUpgradePolicy,
+    type HubUpgradeOffer,
+} from '@hapi/protocol/upgradeChannel'
 import { useTranslation } from '@/lib/use-translation'
 import { SelectControl } from '@/components/ui/select-control'
 
@@ -6,6 +11,21 @@ function getMachineTitle(machine: Machine): string {
     if (machine.metadata?.displayName) return machine.metadata.displayName
     if (machine.metadata?.host) return machine.metadata.host
     return machine.id.slice(0, 8)
+}
+
+export function machineNeedsUpdateLabel(
+    machine: Machine,
+    offer: HubUpgradeOffer | null | undefined,
+    policy: FleetUpgradePolicy,
+): boolean {
+    return policy !== 'silent'
+        && Boolean(offer)
+        && machine.active
+        && machineTrailsUpgradeOffer(
+            offer!,
+            machine.metadata?.happyCliVersion,
+            machine.metadata?.capabilities,
+        )
 }
 
 export function MachineSelector(props: {

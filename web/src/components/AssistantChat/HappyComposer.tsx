@@ -123,6 +123,18 @@ export function useRichComposerBridge(
 
 const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
 
+export function resolveVisibleModelEffortSelectedValue(args: {
+    options: ReadonlyArray<{ value: string }> | null | undefined
+    selectedModelVariant?: string | null
+    cursorDrillDownDefaultVariant?: string | null
+    model?: string | null
+}): string | null | undefined {
+    const selectedVisibleVariant = args.options?.some(
+        (option) => option.value === args.selectedModelVariant
+    ) ? args.selectedModelVariant : null
+    return selectedVisibleVariant ?? args.cursorDrillDownDefaultVariant ?? args.model
+}
+
 export function ModelEffortSettingsSection(props: {
     agentFlavor?: string | null
     options: Array<{ value: string; label: string }>
