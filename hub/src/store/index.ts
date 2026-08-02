@@ -235,6 +235,7 @@ export class Store {
                 model_reasoning_effort TEXT,
                 effort TEXT,
                 service_tier TEXT,
+                personality TEXT,
                 todos TEXT,
                 todos_updated_at INTEGER,
                 team_state TEXT,
@@ -580,18 +581,13 @@ export class Store {
         this.migrateFromV12ToV13()
     }
 
-    /**
-     * tiann/hapi#921 (scratchlist v2.2): attachment metadata JSON column.
-     * Bytes live on hub filesystem under HAPI_HOME/scratchlist-attachments/.
-     * Upstream ladder: V11→V12 = session_scratchlist (#896); V12–V14 =
-     * message_epochs reconciliation; this step is V14→V15 for attachments.
-     *
-     * Rollback: `ALTER TABLE session_scratchlist DROP COLUMN attachments` is
-     * unsupported on older SQLite; rebuild DB or leave column unused.
-     */
     private migrateFromV14ToV15(): void {
-        const columns = this.db.prepare('PRAGMA table_info(session_scratchlist)').all() as Array<{ name: string }>
-        if (!columns.some((col) => col.name === 'attachments')) {
+        const columns = this.getSessionColumnNames()
+        if (columns.size > 0 && !columns.has('personality')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
+        }
+        const scratchlistColumns = this.db.prepare('PRAGMA table_info(session_scratchlist)').all() as Array<{ name: string }>
+        if (!scratchlistColumns.some((col) => col.name === 'attachments')) {
             this.db.exec(`ALTER TABLE session_scratchlist ADD COLUMN attachments TEXT DEFAULT NULL`)
         }
     }

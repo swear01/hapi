@@ -4,8 +4,8 @@ import { initializeToken } from '@/ui/tokenInit'
 import { maybeAutoStartServer } from '@/utils/autoStartServer'
 import type { CommandDefinition } from './types'
 import { CODEX_PERMISSION_MODES } from '@hapi/protocol/modes'
-import type { CodexPermissionMode } from '@hapi/protocol/types'
-import { CodexCollaborationModeSchema } from '@hapi/protocol/schemas'
+import type { CodexPermissionMode, CodexPersonality } from '@hapi/protocol/types'
+import { CodexCollaborationModeSchema } from '@hapi/protocol/schemas' 
 import type { ReasoningEffort } from '@/codex/appServerTypes'
 import { assertCodexLocalSupported } from '@/codex/utils/codexVersion'
 import { parseReasoningEffortValue } from '@/codex/utils/reasoningEffort'
@@ -45,6 +45,7 @@ export const codexCommand: CommandDefinition = {
                 modelReasoningEffort?: ReasoningEffort
                 serviceTier?: string
                 collaborationMode?: 'default' | 'plan'
+                personality?: CodexPersonality
             } = {}
             const unknownArgs: string[] = []
             let hasExplicitPermissionMode = false
@@ -104,6 +105,12 @@ export const codexCommand: CommandDefinition = {
                         throw new Error('Missing --collaboration-mode value')
                     }
                     options.collaborationMode = parseCollaborationMode(mode)
+                } else if (arg === '--personality') {
+                    const personality = commandArgs[++i]
+                    if (!personality || !['friendly', 'pragmatic', 'none'].includes(personality)) {
+                        throw new Error(`Invalid --personality value: ${personality ?? '(missing)'}`)
+                    }
+                    options.personality = personality as CodexPersonality
                 } else {
                     unknownArgs.push(arg)
                 }

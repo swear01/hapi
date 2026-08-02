@@ -1,8 +1,9 @@
 import { z } from 'zod'
-import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
+import { CODEX_COLLABORATION_MODES, CODEX_PERSONALITIES, PERMISSION_MODES } from './modes'
 
 export const PermissionModeSchema = z.enum(PERMISSION_MODES)
 export const CodexCollaborationModeSchema = z.enum(CODEX_COLLABORATION_MODES)
+export const CodexPersonalitySchema = z.enum(CODEX_PERSONALITIES)
 export const SessionEndReasonSchema = z.enum(['completed', 'terminated', 'error', 'handoff'])
 export type SessionEndReason = z.infer<typeof SessionEndReasonSchema>
 
@@ -34,6 +35,10 @@ export const MetadataSchema = z.object({
     summary: MetadataSummarySchema.optional(),
     machineId: z.string().optional(),
     claudeSessionId: z.string().optional(),
+    // Source session ID when this session was created by forking a live one
+    // (`claude --resume <id> --fork-session`). Lets the web list mark the new
+    // session as a branch of `<id>` instead of an unrelated duplicate.
+    forkedFrom: z.string().optional(),
     codexSessionId: z.string().optional(),
     // 原始 Codex thread id。导入 Codex 历史后，HAPI 会 fork 出自己的续写 thread；
     // codexSessionId 保存 fork 后的 thread，codexSourceSessionId 保留来源 thread 便于同步/展示。
@@ -215,7 +220,9 @@ export const DecryptedMessageSchema = z.object({
     content: z.unknown(),
     createdAt: z.number(),
     invokedAt: z.number().nullable().optional(),
-    scheduledAt: z.number().nullable().optional()
+    scheduledAt: z.number().nullable().optional(),
+    // Live signal via messages-consumed (steered:true); not persisted by the hub.
+    steered: z.boolean().optional()
 })
 
 export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
@@ -243,22 +250,54 @@ export const SessionSchema = z.object({
     effort: z.string().nullable().optional().default(null),
     serviceTier: z.string().nullable().optional().default(null),
     permissionMode: PermissionModeSchema.optional(),
-    collaborationMode: CodexCollaborationModeSchema.optional()
+    collaborationMode: CodexCollaborationModeSchema.optional(),
+    personality: CodexPersonalitySchema.nullable().optional()
 })
 
 export type Session = z.infer<typeof SessionSchema>
+
+// Versioned wrappers mirror the socket.io `update-session` broadcast shape so
+// metadata/agentState always travel as an atomic (version, value) pair — the
+// version is the only safe way for downstream caches to reject stale patches.
+const VersionedMetadataPatchSchema = z.object({
+    version: z.number(),
+    value: MetadataSchema.nullable()
+})
+
+const VersionedAgentStatePatchSchema = z.object({
+    version: z.number(),
+    value: AgentStateSchema.nullable()
+})
 
 export const SessionPatchSchema = z.object({
     active: z.boolean().optional(),
     thinking: z.boolean().optional(),
     activeAt: z.number().optional(),
     updatedAt: z.number().optional(),
+    // Structured-patch fields for the second half of #884. Letting the four
+    // hub-side emit-sites in cli/sessionHandlers.ts (todos, teamState,
+    // metadata, agentState writes) carry their delta means the web client's
+    // SSE handler can patch the cache in place instead of falling through to
+    // the invalidation fallback that triggers per-session REST refetches.
+    // Versioned wrappers for metadata/agentState mirror the socket.io
+    // `update-session` broadcast shape — the version field is the only safe
+    // way for downstream caches to reject stale patches.
+    metadata: VersionedMetadataPatchSchema.optional(),
+    agentState: VersionedAgentStatePatchSchema.optional(),
+    todos: TodosSchema.optional(),
+    // `null` is the clear signal (TeamDelete events drive
+    // applyTeamStateDelta to return null, which `setSessionTeamState`
+    // persists as a cleared row). The patch must distinguish "field
+    // absent" (don't touch teamState) from "field is null" (clear it);
+    // consumers use hasOwnProperty for the discriminator.
+    teamState: TeamStateSchema.nullable().optional(),
     model: z.string().nullable().optional(),
     modelReasoningEffort: z.string().nullable().optional(),
     effort: z.string().nullable().optional(),
     serviceTier: z.string().nullable().optional(),
     permissionMode: PermissionModeSchema.optional(),
     collaborationMode: CodexCollaborationModeSchema.optional(),
+    personality: CodexPersonalitySchema.nullable().optional(),
     backgroundTaskCount: z.number().optional(),
     // tiann/hapi#893 (scratchlist v2). Bumped whenever any entry on the
     // session_scratchlist table mutates. Web client uses the change as a
@@ -303,10 +342,20 @@ export const MachineMetadataSchema = z.object({
     platform: z.string(),
     happyCliVersion: z.string(),
     displayName: z.string().optional(),
+    /** process.arch when the runner last registered (x64, arm64, …). */
+    arch: z.string().optional(),
     homeDir: z.string().optional(),
     happyHomeDir: z.string().optional(),
     happyLibDir: z.string().optional(),
-    workspaceRoots: z.array(z.string()).optional()
+    workspaceRoots: z.array(z.string()).optional(),
+    /** Machine-scoped RPC capability ids this runner registers (see runnerCapabilities). */
+    capabilities: z.array(z.string()).optional(),
+    /** True when this runner process started with HAPI_DISABLE_VERSION_HANDOFF=1. */
+    versionHandoffDisabled: z.boolean().optional(),
+    /** CLI binary/package mtime when this runner process started. */
+    startedCliMtimeMs: z.number().optional(),
+    /** Current on-disk CLI binary/package mtime (may differ after upgrade). */
+    installedCliMtimeMs: z.number().optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
@@ -427,7 +476,9 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
     SessionChangedSchema.extend({
         type: z.literal('messages-consumed'),
         localIds: z.array(z.string()),
-        invokedAt: z.number()
+        invokedAt: z.number(),
+        // True when messages were steered into an active turn (not a normal queue drain).
+        steered: z.boolean().optional()
     }),
     SessionChangedSchema.extend({
         type: z.literal('message-cancelled'),
@@ -457,3 +508,11 @@ export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
 ])
 
 export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>
+
+export const SteerQueuedMessageResponseSchema = z.discriminatedUnion('status', [
+    z.object({ status: z.literal('steered'), localId: z.string() }),
+    z.object({ status: z.literal('invoked'), message: DecryptedMessageSchema }),
+    z.object({ status: z.literal('failed'), error: z.string(), localId: z.string().nullable() }),
+])
+
+export type SteerQueuedMessageResponse = z.infer<typeof SteerQueuedMessageResponseSchema>

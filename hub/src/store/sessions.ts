@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite'
+import type { CodexPersonality } from '@hapi/protocol/types'
 import { randomUUID } from 'node:crypto'
 
 import type { StoredSession, VersionedUpdateResult } from './types'
@@ -146,6 +147,7 @@ type DbSessionRow = {
     model_reasoning_effort: string | null
     effort: string | null
     service_tier: string | null
+    personality: CodexPersonality | null
     todos: string | null
     todos_updated_at: number | null
     team_state: string | null
@@ -171,6 +173,7 @@ function toStoredSession(row: DbSessionRow): StoredSession {
         modelReasoningEffort: row.model_reasoning_effort,
         effort: row.effort,
         serviceTier: row.service_tier,
+        personality: row.personality,
         todos: safeJsonParse(row.todos),
         todosUpdatedAt: row.todos_updated_at,
         teamState: safeJsonParse(row.team_state),
@@ -507,6 +510,39 @@ export function setSessionServiceTier(
     }
 }
 
+export function setSessionPersonality(
+    db: Database,
+    id: string,
+    personality: string | null,
+    namespace: string,
+    options?: { touchUpdatedAt?: boolean }
+): boolean {
+    const now = Date.now()
+    const touchUpdatedAt = options?.touchUpdatedAt === true
+
+    try {
+        const result = db.prepare(`
+            UPDATE sessions
+            SET personality = @personality,
+                updated_at = CASE WHEN @touch_updated_at = 1 THEN @updated_at ELSE updated_at END,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
+              AND personality IS NOT @personality
+        `).run({
+            id,
+            namespace,
+            personality,
+            updated_at: now,
+            touch_updated_at: touchUpdatedAt ? 1 : 0
+        })
+
+        return result.changes === 1
+    } catch {
+        return false
+    }
+}
+
 export function setSessionEffort(
     db: Database,
     id: string,
@@ -586,6 +622,38 @@ export function touchSessionUpdatedAt(
             WHERE id = @id
               AND namespace = @namespace
               AND updated_at < @updated_at
+        `).run({
+            id,
+            namespace,
+            updated_at: updatedAt
+        })
+
+        return result.changes === 1
+    } catch {
+        return false
+    }
+}
+
+// 中文注释：transcript 导入新建会话时，会话出生时间是 Date.now()（今天），而真实最后活动在历史里。
+// touchSessionUpdatedAt 是“只前进不后退”的活跃刷新，保护在线会话不被陈旧事件拉回过去，因此无法把
+// 导入会话的 updated_at 调回历史。这里提供一个仅供导入路径使用的无条件 setter，把刚建好的导入会话
+// 的 updated_at 设成真实最后活动时间，避免历史会话在列表里被排成“今天刚活跃”。
+export function setImportedSessionActivity(
+    db: Database,
+    id: string,
+    updatedAt: number,
+    namespace: string
+): boolean {
+    if (!Number.isFinite(updatedAt)) {
+        return false
+    }
+    try {
+        const result = db.prepare(`
+            UPDATE sessions
+            SET updated_at = @updated_at,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
         `).run({
             id,
             namespace,

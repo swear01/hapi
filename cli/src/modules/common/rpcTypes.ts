@@ -1,4 +1,4 @@
-import type { AgentFlavor } from '@hapi/protocol'
+import type { AgentFlavor, CodexPersonality } from '@hapi/protocol'
 
 export interface SpawnSessionOptions {
     machineId?: string
@@ -15,6 +15,7 @@ export interface SpawnSessionOptions {
     permissionMode?: string
     serviceTier?: string
     collaborationMode?: 'default' | 'plan'
+    personality?: CodexPersonality
     token?: string
     sessionType?: 'simple' | 'worktree'
     worktreeName?: string

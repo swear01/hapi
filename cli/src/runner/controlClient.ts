@@ -307,6 +307,13 @@ export async function stopRunner() {
     } else {
       logger.debug('Runner already dead or could not be killed');
     }
+    if (isProcessAlive(state.pid)) {
+      await waitForProcessDeath(state.pid, 2000);
+    }
+    const currentState = await readRunnerState();
+    if (currentState?.pid === state.pid) {
+      await clearRunnerState();
+    }
   } catch (error) {
     logger.debug('Error stopping runner', error);
   }
