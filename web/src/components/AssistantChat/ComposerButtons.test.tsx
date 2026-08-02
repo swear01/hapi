@@ -1,8 +1,8 @@
 import type { ReactElement } from 'react'
-import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
-import { UnifiedButton } from './ComposerButtons'
+import { ComposerExpandButton, UnifiedButton } from './ComposerButtons'
 
 function renderInProviders(ui: ReactElement) {
     return render(<I18nProvider>{ui}</I18nProvider>)
@@ -80,5 +80,29 @@ describe('UnifiedButton — routesToScratchlist visual state', () => {
         )
         const btn = getButton('Send')
         expect(btn.className).not.toContain('bg-amber-500')
+    })
+})
+
+describe('ComposerExpandButton', () => {
+    afterEach(() => {
+        cleanup()
+    })
+
+    it('announces and triggers expansion', () => {
+        const onToggle = vi.fn()
+        renderInProviders(<ComposerExpandButton expanded={false} onToggle={onToggle} />)
+
+        const button = getButton('Expand message editor')
+        expect(button.getAttribute('aria-pressed')).toBe('false')
+        fireEvent.click(button)
+        expect(onToggle).toHaveBeenCalledOnce()
+    })
+
+    it('announces the collapse action while expanded', () => {
+        renderInProviders(<ComposerExpandButton expanded onToggle={() => {}} />)
+
+        const button = getButton('Collapse message editor')
+        expect(button.getAttribute('aria-pressed')).toBe('true')
+        expect(button.className).toContain('text-[var(--app-link)]')
     })
 })
