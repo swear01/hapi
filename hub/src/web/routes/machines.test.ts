@@ -136,6 +136,38 @@ describe('machines routes', () => {
         })
     })
 
+    it('forwards startingMode "pty" to SyncEngine.spawnSession in the startingMode slot', async () => {
+        const machine = createMachine()
+        let captured: unknown[] | null = null
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            spawnSession: async (...args: unknown[]) => {
+                captured = args
+                return { type: 'success', sessionId: 's-1' }
+            }
+        } as unknown as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/machines/machine-1/spawn', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ directory: '/tmp/x', startingMode: 'pty' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(captured).not.toBeNull()
+        // startingMode follows existingSessionId in the positional API.
+        expect(captured![13]).toBe('pty')
+        expect(captured![12]).toBeUndefined()
+    })
+
     it('returns 400 when /opencode-models is called without cwd', async () => {
         const machine = createMachine()
         const engine = {

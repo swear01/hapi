@@ -89,11 +89,12 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.yolo,
             parsed.data.sessionType,
             parsed.data.worktreeName,
-            undefined,
+            undefined, // resumeSessionId
             parsed.data.effort,
             parsed.data.permissionMode,
             parsed.data.serviceTier,
             undefined,
+            parsed.data.startingMode,
             parsed.data.collaborationMode
         )
         return c.json(result)
@@ -153,6 +154,29 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ exists })
         } catch (error) {
             return c.json({ error: error instanceof Error ? error.message : 'Failed to check paths' }, 500)
+        }
+    })
+
+    app.get('/machines/:id/agy-models', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) {
+            return machine
+        }
+
+        try {
+            const result = await engine.listAgyModelsForMachine(machineId)
+            return c.json(result)
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list Agy models'
+            }, 500)
         }
     })
 

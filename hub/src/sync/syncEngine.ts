@@ -24,6 +24,7 @@ import type { Server } from 'socket.io'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
+import { clearAgentTerminalBuffer } from '../socket/agentTerminalBuffer'
 import type { SSEManager } from '../sse/sseManager'
 import { CursorLegacyMigrator, type CursorLegacyMigratorOptions } from '../cursor/cursorLegacyMigrator'
 
@@ -39,6 +40,7 @@ import {
     type RpcGeneratedImageResponse,
     type RpcListDirectoryResponse,
     type RpcStatFilesResponse,
+    type RpcListAgyModelsResponse,
     type RpcListCodexModelsResponse,
     type RpcArchiveCodexSessionResponse,
     type RpcListCursorModelsResponse,
@@ -67,6 +69,7 @@ export type {
     RpcGeneratedImageResponse,
     RpcListDirectoryResponse,
     RpcStatFilesResponse,
+    RpcListAgyModelsResponse,
     RpcListCodexModelsResponse,
     RpcListCursorModelsResponse,
     RpcListOpencodeModelsResponse,
@@ -182,7 +185,7 @@ export class SyncEngine {
 
     constructor(
         private readonly store: Store,
-        io: Server,
+        private readonly io: Server,
         rpcRegistry: RpcRegistry,
         sseManager: SSEManager,
         options?: SyncEngineOptions,
@@ -479,6 +482,17 @@ export class SyncEngine {
         if (ownsPiAttempt || isPiAttemptChild) {
             void this.clearPiAttemptForEndedSession(payload.sid, restorePiArchive)
         }
+
+        // Notify agent-terminal subscribers so the web UI shows a clear
+        // termination message instead of staying connected with stale output.
+        if (typeof this.io.of === 'function') {
+            this.io.of('/terminal').to(`agent-session:${payload.sid}`).emit('agent-terminal:output', {
+                sessionId: payload.sid,
+                terminalId: 'agent',
+                data: '\r\n[Session terminated]\r\n'
+            })
+        }
+        clearAgentTerminalBuffer(payload.sid)
     }
 
     handleBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
@@ -1301,7 +1315,9 @@ async uploadScratchlistAttachment(
         permissionMode?: PermissionMode,
         serviceTier?: string,
         existingSessionId?: string,
-        collaborationMode?: CodexCollaborationMode
+        startingMode?: 'remote' | 'pty',
+        collaborationMode?: CodexCollaborationMode,
+        personality?: Session['personality']
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -1317,7 +1333,9 @@ async uploadScratchlistAttachment(
             permissionMode,
             serviceTier,
             existingSessionId,
-            collaborationMode
+            startingMode,
+            collaborationMode,
+            personality ?? undefined
         )
     }
 
@@ -1339,6 +1357,7 @@ async uploadScratchlistAttachment(
         if (flavor === 'gemini') return metadata.geminiSessionId ?? null
         if (flavor === 'opencode') return metadata.opencodeSessionId ?? null
         if (flavor === 'grok') return metadata.grokSessionId ?? null
+        if (flavor === 'agy') return metadata.agySessionId ?? null
         if (flavor === 'cursor') return metadata.cursorSessionId ?? null
         if (flavor === 'kimi') return metadata.kimiSessionId ?? null
         if (flavor === 'pi') return metadata.piSessionId ?? null
@@ -1807,6 +1826,10 @@ async uploadScratchlistAttachment(
             : opts?.permissionMode
                 ?? session.permissionMode
                 ?? metadataPermissionMode
+        const resumedStartingMode =
+            (session.agentState as { startingMode?: 'local' | 'remote' | 'pty' } | null)?.startingMode === 'pty'
+                ? 'pty'
+                : undefined
         let piResumeSucceeded = false
         try {
             const spawnResult = await this.rpcGateway.spawnSession(
@@ -1823,7 +1846,9 @@ async uploadScratchlistAttachment(
                 preferredPermissionMode,
                 session.serviceTier ?? undefined,
                 access.sessionId,
-                session.collaborationMode ?? undefined
+                resumedStartingMode,
+                session.collaborationMode ?? undefined,
+                session.personality ?? undefined
             )
 
             if (spawnResult.type !== 'success') {
@@ -1878,7 +1903,8 @@ async uploadScratchlistAttachment(
                 return { type: 'error', message: 'Session failed to become active', code: 'resume_failed' }
             }
 
-            const needsReadyBeforeSuccess = requiresPiNativeReady
+            const needsReadyBeforeSuccess = resumedStartingMode === 'pty'
+                || requiresPiNativeReady
                 || (
                     spawnResult.sessionId !== access.sessionId
                     && flavor === 'cursor'
@@ -1902,6 +1928,10 @@ async uploadScratchlistAttachment(
                         ? readyResult === 'ended'
                             ? 'Pi session ended before native resume completed'
                             : 'Pi session failed to become native-ready'
+                        : resumedStartingMode === 'pty'
+                            ? readyResult === 'ended'
+                                ? 'Session ended before the agent PTY became ready'
+                                : 'Session failed to become ready'
                         : readyResult === 'ended'
                             ? 'Session ended before Cursor ACP load completed'
                             : 'Session failed to become ready'
@@ -2256,6 +2286,7 @@ async uploadScratchlistAttachment(
             && (prev?.cursorSessionId ?? null) === (next.cursorSessionId ?? null)
             && (prev?.piSessionId ?? null) === (next.piSessionId ?? null)
             && (prev?.kimiSessionId ?? null) === (next.kimiSessionId ?? null)
+            && (prev?.agySessionId ?? null) === (next.agySessionId ?? null)
     }
 
     private canRunCursorDedup(session: Session): boolean {
@@ -2554,6 +2585,10 @@ async uploadScratchlistAttachment(
         error?: string
     }> {
         return await this.rpcGateway.listSkills(sessionId, flavor)
+    }
+
+    async listAgyModelsForMachine(machineId: string): Promise<RpcListAgyModelsResponse> {
+        return await this.rpcGateway.listAgyModelsForMachine(machineId)
     }
 
     async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {
