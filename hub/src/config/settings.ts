@@ -23,6 +23,8 @@ export interface Settings {
     corsOrigins?: string[]
     // Operator fleet-upgrade policy (no alert / alert / auto-upgrade)
     fleetUpgradePolicy?: FleetUpgradePolicy
+    /** Custom model names offered in the Claude model picker (e.g. DeepSeek via ANTHROPIC_BASE_URL). */
+    customClaudeModels?: string[]
 }
 
 export function getSettingsFile(dataDir: string): string {

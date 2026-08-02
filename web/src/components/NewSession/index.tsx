@@ -35,6 +35,7 @@ import {
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
 import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
+import { MODEL_OPTIONS } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { CollaborationModeSelector } from './CollaborationModeSelector'
@@ -246,6 +247,37 @@ export function NewSession(props: {
         machineId,
         enabled: agent === 'codex' && Boolean(machineId)
     })
+    const [claudeCustomModels, setClaudeCustomModels] = useState<string[]>([])
+    useEffect(() => {
+        let cancelled = false
+        if (!props.api) {
+            return
+        }
+        try {
+            props.api.getClaudeCustomModels().then((result) => {
+                if (!cancelled) {
+                    setClaudeCustomModels(Array.isArray(result.models) ? result.models : [])
+                }
+            }).catch(() => {
+                // Custom models are optional — fall back to the built-in presets.
+            })
+        } catch {
+            // Partial api clients (tests, older hub versions) without the
+            // method must not break the New Session form.
+        }
+        return () => {
+            cancelled = true
+        }
+    }, [props.api])
+    const claudeModelOptions = useMemo(() => {
+        const options = [...MODEL_OPTIONS.claude]
+        for (const modelName of claudeCustomModels) {
+            if (!options.some((option) => option.value === modelName)) {
+                options.push({ value: modelName, label: modelName })
+            }
+        }
+        return options
+    }, [claudeCustomModels])
     const runnerSpawnError = useMemo(
         () => formatRunnerSpawnError(selectedMachine),
         [selectedMachine]
@@ -1321,7 +1353,9 @@ export function NewSession(props: {
                         agent={agent}
                         model={model}
                         options={
-                            agent === 'codex'
+                            agent === 'claude'
+                                ? claudeModelOptions
+                                : agent === 'codex'
                                 ? codexModelOptions
                                 : agent === 'grok'
                                     ? grokModelOptions
