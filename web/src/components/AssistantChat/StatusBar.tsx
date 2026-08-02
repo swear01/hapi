@@ -9,7 +9,6 @@ import * as Popover from '@radix-ui/react-popover'
 import { useMemo } from 'react'
 import type { AgentState, CodexCollaborationMode, PermissionMode } from '@/types/api'
 import type { ConversationStatus } from '@/realtime/types'
-import type { ThreadGoal } from '@/types/api'
 import { getContextBudgetTokens } from '@/chat/modelConfig'
 import {
     formatCodexReasoningLabel,
@@ -208,7 +207,6 @@ export function StatusBar(props: {
     serviceTier?: string | null
     permissionMode?: PermissionMode
     collaborationMode?: CodexCollaborationMode
-    threadGoal?: ThreadGoal | null
     agentFlavor?: string | null
     voiceStatus?: ConversationStatus
 }) {
@@ -270,11 +268,6 @@ export function StatusBar(props: {
         ? formatCompactCodexReasoningLabel(props.modelReasoningEffort)
         : null
     const codexFastMode = shouldShowCodexFastBadge(props.agentFlavor, props.serviceTier)
-    const goalLabel = props.agentFlavor === 'codex' && props.threadGoal
-        ? props.threadGoal.status === 'active'
-            ? 'goal'
-            : `goal ${props.threadGoal.status === 'budgetLimited' ? 'limited' : props.threadGoal.status}`
-        : null
 
     return (
         <div className="flex min-w-0 items-baseline justify-between gap-2 px-2 pb-1">
@@ -359,11 +352,6 @@ export function StatusBar(props: {
                 {codexFastMode ? (
                     <span className="whitespace-nowrap text-xs text-[#34C759]">
                         fast
-                    </span>
-                ) : null}
-                {goalLabel ? (
-                    <span className="whitespace-nowrap text-xs text-[var(--app-link)]">
-                        {goalLabel}
                     </span>
                 ) : null}
                 {collaborationModeLabel ? (

@@ -1,0 +1,148 @@
+import { isObject } from '@hapi/protocol'
+import type { ThreadGoal, TodoItem } from '@/types/api'
+import type { ChatBlock, NormalizedMessage, ToolCallBlock } from '@/chat/types'
+import { isSubagentToolName } from '@/chat/subagentTool'
+import { getCodexAgentActivity, getCodexAgentSummary } from '@/components/ToolCard/codexAgents'
+import { getInputStringAny, truncate } from '@/lib/toolInputUtils'
+
+export type SessionStatusSubagent = {
+    id: string
+    title: string
+    detail: string | null
+    state: 'running' | 'waiting' | 'error'
+    startedAt: number
+}
+
+export type SessionStatusTerminal = {
+    id: string
+    command: string
+    cwd: string | null
+    startedAt: number
+}
+
+export type SessionStatusData = {
+    goal: ThreadGoal | null
+    tasks: TodoItem[]
+    subagents: SessionStatusSubagent[]
+    terminals: SessionStatusTerminal[]
+}
+
+const BACKGROUND_START_RE = /Command running in background with ID:\s*([^\s<]+)/
+const TASK_ID_RE = /<task-id>\s*([^<]+?)\s*<\/task-id>/
+
+function textFromUnknown(value: unknown): string {
+    if (typeof value === 'string') return value
+    if (Array.isArray(value)) return value.map(textFromUnknown).join('\n')
+    if (!isObject(value)) return ''
+    return Object.values(value).map(textFromUnknown).join('\n')
+}
+
+function commandFromInput(input: unknown): string | null {
+    const command = getInputStringAny(input, ['command', 'cmd'])
+    if (command) return command
+    if (!isObject(input) || !Array.isArray(input.command)) return null
+    const parts = input.command.filter((part): part is string => typeof part === 'string')
+    return parts.length > 0 ? parts.join(' ') : null
+}
+
+function terminalFromBlock(block: ToolCallBlock): SessionStatusTerminal | null {
+    const resultText = textFromUnknown(block.tool.result)
+    const taskId = resultText.match(BACKGROUND_START_RE)?.[1]
+    if (!taskId) return null
+
+    return {
+        id: taskId,
+        command: commandFromInput(block.tool.input) ?? block.tool.description ?? block.tool.name,
+        cwd: getInputStringAny(block.tool.input, ['cwd', 'workdir', 'path']),
+        startedAt: block.tool.startedAt ?? block.createdAt
+    }
+}
+
+function completedBackgroundTaskIds(messages: readonly NormalizedMessage[]): Set<string> {
+    const ids = new Set<string>()
+
+    for (const message of messages) {
+        if (message.role !== 'agent') continue
+        for (const content of message.content) {
+            if (content.type !== 'sidechain') continue
+            const prompt = content.prompt.trimStart()
+            if (!prompt.startsWith('<task-notification>')) continue
+            const taskId = prompt.match(TASK_ID_RE)?.[1]?.trim()
+            if (taskId) ids.add(taskId)
+        }
+    }
+
+    return ids
+}
+
+function buildBackgroundTerminals(
+    blocks: readonly ChatBlock[],
+    messages: readonly NormalizedMessage[]
+): SessionStatusTerminal[] {
+    const terminals = blocks
+        .filter((block): block is ToolCallBlock => block.kind === 'tool-call')
+        .map(terminalFromBlock)
+        .filter((terminal): terminal is SessionStatusTerminal => terminal !== null)
+    const completedIds = completedBackgroundTaskIds(messages)
+    return terminals.filter((terminal) => !completedIds.has(terminal.id))
+}
+
+function subagentTitle(block: ToolCallBlock): string {
+    if (block.tool.name === 'CodexAgent') {
+        return getCodexAgentSummary(block.tool.input) ?? 'Agent'
+    }
+    const explicit = getInputStringAny(block.tool.input, ['description', 'summary', 'title'])
+    if (explicit) return truncate(explicit.replace(/\s+/g, ' ').trim(), 100)
+    const prompt = getInputStringAny(block.tool.input, ['prompt', 'message'])
+    if (prompt) return truncate(prompt.replace(/\s+/g, ' ').trim(), 100)
+    return getInputStringAny(block.tool.input, ['subagent_type', 'agent_type']) ?? 'Agent'
+}
+
+function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
+    if (block.tool.name !== 'CodexAgent' && !isSubagentToolName(block.tool.name)) return null
+    if (block.tool.state === 'completed') return null
+
+    const latestChild = block.children.at(-1)
+    const activity = block.tool.name === 'CodexAgent'
+        ? getCodexAgentActivity(block.tool.input)
+        : latestChild?.kind === 'tool-call'
+            ? latestChild.tool.nativeTitle ?? latestChild.tool.name
+            : null
+    const waiting = activity?.toLowerCase().startsWith('waiting') ?? false
+
+    return {
+        id: block.tool.id,
+        title: subagentTitle(block),
+        detail: activity,
+        state: block.tool.state === 'error' ? 'error' : waiting ? 'waiting' : 'running',
+        startedAt: block.tool.startedAt ?? block.createdAt
+    }
+}
+
+export function buildSessionStatusData(args: {
+    goal: ThreadGoal | null | undefined
+    tasks: readonly TodoItem[] | null | undefined
+    blocks: readonly ChatBlock[]
+    messages: readonly NormalizedMessage[]
+    backgroundTaskCount?: number
+}): SessionStatusData | null {
+    const detectedTerminals = buildBackgroundTerminals(args.blocks, args.messages)
+    const terminals = args.backgroundTaskCount === undefined
+        ? detectedTerminals
+        : args.backgroundTaskCount > 0
+            ? detectedTerminals.slice(-args.backgroundTaskCount)
+            : []
+    const data: SessionStatusData = {
+        goal: args.goal ?? null,
+        tasks: args.tasks ? [...args.tasks] : [],
+        subagents: args.blocks
+            .filter((block): block is ToolCallBlock => block.kind === 'tool-call')
+            .map(subagentFromBlock)
+            .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
+        terminals
+    }
+
+    return data.goal || data.tasks.length > 0 || data.subagents.length > 0 || data.terminals.length > 0
+        ? data
+        : null
+}
