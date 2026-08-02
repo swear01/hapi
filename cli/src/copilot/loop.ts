@@ -47,10 +47,7 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
         session.onSessionFound(opts.resumeSessionId);
     }
 
-    const getCurrentModel = (): string | undefined => {
-        const sessionModel = session.getModel();
-        return sessionModel != null ? sessionModel : opts.model;
-    };
+    const getCurrentModel = (): string | undefined => session.getModel() ?? undefined;
 
     await runLocalRemoteSession({
         session,

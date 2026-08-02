@@ -156,6 +156,19 @@ export async function runCopilot(opts: {
                 });
 
                 if (slash.kind !== 'passthrough') {
+                    if (sessionWrapperRef.current?.mode === 'local'
+                        && (slash.updates?.permissionMode !== undefined || slash.updates?.model !== undefined)) {
+                        if (localId) {
+                            session.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+                        }
+                        session.sendAgentMessage({
+                            type: 'message',
+                            message: 'Copilot model and permission mode can only be changed for remote sessions.',
+                            id: randomUUID()
+                        });
+                        sessionWrapperRef.current.onThinkingChange(false);
+                        return;
+                    }
                     if (slash.updates) {
                         currentAgentMode = await applyCopilotSlashAgentMode(
                             currentAgentMode,
@@ -256,6 +269,9 @@ export async function runCopilot(opts: {
         }
 
         if (config.model !== undefined) {
+            if (sessionWrapperRef.current?.mode === 'local') {
+                throw new Error('Copilot model can only be changed for remote sessions');
+            }
             sessionModel = resolveModel(config.model);
             resolvedModel = resolveCopilotQueueModel(sessionModel);
             applied.model = sessionModel;
