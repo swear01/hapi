@@ -1,9 +1,9 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { isTelegramApp } from '@/hooks/useTelegram'
-import { useSessionActions } from '@/hooks/mutations/useSessionActions'
+import { sessionModelMutationKey, useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
@@ -97,6 +97,15 @@ function headerToggleClass(active: boolean): string {
     }`
 }
 
+function TerminalIcon(props: { className?: string }) {
+    return (
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+        </svg>
+    )
+}
+
 function MoreVerticalIcon(props: { className?: string }) {
     return (
         <svg
@@ -114,6 +123,16 @@ function MoreVerticalIcon(props: { className?: string }) {
     )
 }
 
+function ModelChangingStatus() {
+    const { t } = useTranslation()
+    return (
+        <span data-testid="session-header-model-changing" className="inline-flex items-center gap-1" title={t('session.modelChange.pendingTooltip')}>
+            <span aria-hidden="true" className="h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-current border-r-transparent" />
+            <span>{t('session.modelChange.pending')}</span>
+        </span>
+    )
+}
+
 export function SessionHeader(props: {
     session: Session
     serviceTier?: string | null
@@ -122,6 +141,8 @@ export function SessionHeader(props: {
     filesActive?: boolean
     onToggleOutline?: () => void
     outlineActive?: boolean
+    onToggleTerminal?: () => void
+    terminalActive?: boolean
     api: ApiClient | null
     canReopen?: boolean
     reopenDisabledReason?: string
@@ -136,6 +157,10 @@ export function SessionHeader(props: {
     const worktreeBranch = session.metadata?.worktree?.branch?.trim() || null
     const { preferences: headerMetadata } = useSessionHeaderMetadata()
     const modelLabel = getSessionModelLabel(session)
+    const isModelChanging = useIsMutating({
+        mutationKey: sessionModelMutationKey(session.id),
+        exact: true,
+    }) > 0
     const agentFlavor = session.metadata?.flavor ?? null
     const agentLabel = agentFlavor?.trim() || null
     const reasoningEffort = getReasoningEffortForFlavor(
@@ -317,7 +342,7 @@ export function SessionHeader(props: {
                                         {agentLabel}
                                     </span>
                                 ) : null}
-                                {mobileSecondary === 'model' && modelLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}</span> : null}
+                                {mobileSecondary === 'model' && modelLabel ? <span className="inline-flex truncate items-center gap-1.5">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}{isModelChanging ? <ModelChangingStatus /> : null}</span> : null}
                                 {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
                                 {mobileSecondary === 'machine' && machineLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span> : null}
                                 {mobileSecondary === 'lastActive' && ageLabel ? <span className="truncate" title={ageAbsolute ?? undefined}>{ageLabel}</span> : null}
@@ -345,8 +370,9 @@ export function SessionHeader(props: {
                                 </span>
                             ) : null}
                             {headerMetadata.model && modelLabel ? (
-                                <span>
-                                    {headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span>{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}</span>
+                                    {isModelChanging ? <ModelChangingStatus /> : null}
                                 </span>
                             ) : null}
                             {headerMetadata.reasoning && reasoningLabel ? (
@@ -390,6 +416,19 @@ export function SessionHeader(props: {
                             aria-pressed={props.outlineActive ?? false}
                         >
                             <OutlineIcon />
+                        </button>
+                    ) : null}
+
+                    {props.onToggleTerminal ? (
+                        <button
+                            type="button"
+                            onClick={props.onToggleTerminal}
+                            className={headerToggleClass(props.terminalActive ?? false)}
+                            title="Terminal"
+                            aria-label="Terminal"
+                            aria-pressed={props.terminalActive ?? false}
+                        >
+                            <TerminalIcon />
                         </button>
                     ) : null}
 

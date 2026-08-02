@@ -1,4 +1,4 @@
-import { getClaudeModelLabel, getFlavorLabel, isKnownFlavor } from '@hapi/protocol'
+import { getAgyModelLabel, getClaudeModelLabel, getFlavorLabel, isKnownFlavor } from '@hapi/protocol'
 
 type SessionModelSource = {
     model?: string | null
@@ -43,7 +43,7 @@ export function getSessionModelLabel(
             : explicitModel
         return {
             key: 'session.item.model',
-            value: displayName?.trim() || getClaudeModelLabel(explicitModel) || fallbackLabel
+            value: displayName?.trim() || getAgyModelLabel(explicitModel) || getClaudeModelLabel(explicitModel) || fallbackLabel
         }
     }
 

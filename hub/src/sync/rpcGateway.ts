@@ -6,6 +6,7 @@ import {
     ListCodexSessionsRpcResponseSchema
 } from '@hapi/protocol/apiTypes'
 import type {
+    AgyModelsResponse,
     CodexModelSummary,
     CodexModelsResponse,
     CommandResponse,
@@ -77,6 +78,7 @@ export type RpcListOpencodeModelsResponse = OpencodeModelsResponse
 export type RpcListGrokModelsResponse = GrokModelsResponse
 export type RpcListGrokReasoningEffortOptionsResponse = GrokReasoningEffortResponse
 export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
+export type RpcListAgyModelsResponse = AgyModelsResponse
 
 export class RpcGateway {
     constructor(
@@ -164,7 +166,9 @@ export class RpcGateway {
         effort?: string,
         permissionMode?: PermissionMode,
         serviceTier?: string,
+        // Hub session id to reuse for this spawn.
         existingSessionId?: string,
+        startingMode?: 'remote' | 'pty',
         collaborationMode?: CodexCollaborationMode,
         personality?: CodexPersonality
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
@@ -188,6 +192,7 @@ export class RpcGateway {
                     existingSessionId,
                     sessionId: existingSessionId,
                     collaborationMode,
+                    startingMode,
                     personality
                 }
 
@@ -390,6 +395,10 @@ export class RpcGateway {
 
     async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {
         return await this.sessionRpc(sessionId, RPC_METHODS.ListOpencodeReasoningEffortOptions, {}) as RpcListOpencodeReasoningEffortOptionsResponse
+    }
+
+    async listAgyModelsForMachine(machineId: string): Promise<RpcListAgyModelsResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ListAgyModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListAgyModelsResponse
     }
 
     private async sessionRpc(
