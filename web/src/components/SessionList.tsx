@@ -408,6 +408,19 @@ function ProjectGroupHeader(props: {
         <>
             <div
                 {...longPressHandlers}
+                tabIndex={0}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onKeyDown={(event) => {
+                    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                        event.preventDefault()
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        setMenuAnchorPoint({ x: rect.left + rect.width / 2, y: rect.bottom })
+                        setMenuOpen(true)
+                        return
+                    }
+                    longPressHandlers.onKeyDown(event)
+                }}
                 className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
                 style={{ WebkitTouchCallout: 'none' }}
                 title={group.directory}
