@@ -75,6 +75,9 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
     };
 
     applyRemoteAgentMode = async (mode: CopilotAgentMode): Promise<void> => {
+        if (this.thinking) {
+            throw new Error('Wait for the current Copilot turn to finish before changing agent mode');
+        }
         if (!this.remoteAgentModeApplier) {
             throw new Error('Copilot agent mode switching is unavailable for this session');
         }
