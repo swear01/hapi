@@ -346,6 +346,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 // and report a false failure after the inject already started.
                 // Keep the launcher busy until that background prompt settles so we
                 // do not emit ready / start the next backend.prompt() while it runs.
+                if (!session.queue.beginReservationDispatch(taken)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
                 let steer: { dispatched: Promise<void>; completed: Promise<void> };
                 try {
                     steer = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
