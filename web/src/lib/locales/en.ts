@@ -938,6 +938,7 @@ export default {
   'session.status.tasks': 'Tasks',
   'session.status.subagents': 'Subagents',
   'session.status.terminals': 'Background terminals',
+  'session.status.terminalsUnavailable': '{count} running · command details unavailable',
   'session.status.goal.active': 'Active',
   'session.status.goal.paused': 'Paused',
   'session.status.goal.budgetLimited': 'Limited',

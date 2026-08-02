@@ -11,6 +11,7 @@ export type SessionStatusSubagent = {
     detail: string | null
     state: 'running' | 'waiting' | 'error'
     startedAt: number
+    endedAt: number | null
 }
 
 export type SessionStatusTerminal = {
@@ -25,6 +26,7 @@ export type SessionStatusData = {
     tasks: TodoItem[]
     subagents: SessionStatusSubagent[]
     terminals: SessionStatusTerminal[]
+    undiscoveredTerminalCount: number
 }
 
 const BACKGROUND_START_RE = /Command running in background with ID:\s*([^\s<]+)/
@@ -123,7 +125,10 @@ function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
         title: subagentTitle(block),
         detail: activity,
         state: block.tool.state === 'error' ? 'error' : waiting ? 'waiting' : 'running',
-        startedAt: block.tool.startedAt ?? block.createdAt
+        startedAt: block.tool.startedAt ?? block.createdAt,
+        endedAt: block.tool.state === 'error'
+            ? block.tool.completedAt ?? block.tool.startedAt ?? block.createdAt
+            : null
     }
 }
 
@@ -141,16 +146,24 @@ export function buildSessionStatusData(args: {
         : args.backgroundTaskCount > 0
             ? detectedTerminals.slice(-args.backgroundTaskCount)
             : []
+    const undiscoveredTerminalCount = args.backgroundTaskCount === undefined
+        ? 0
+        : Math.max(0, args.backgroundTaskCount - terminals.length)
     const data: SessionStatusData = {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
         subagents: tools
             .map(subagentFromBlock)
             .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
-        terminals
+        terminals,
+        undiscoveredTerminalCount
     }
 
-    return data.goal || data.tasks.length > 0 || data.subagents.length > 0 || data.terminals.length > 0
+    return data.goal
+        || data.tasks.length > 0
+        || data.subagents.length > 0
+        || data.terminals.length > 0
+        || data.undiscoveredTerminalCount > 0
         ? data
         : null
 }

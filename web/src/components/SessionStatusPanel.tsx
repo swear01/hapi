@@ -29,13 +29,15 @@ function elapsedSince(startedAt: number, now: number): string | null {
 export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
     const { t } = useTranslation()
     const completedTasks = data.tasks.filter((task) => task.status === 'completed').length
+    const hasLiveElapsed = data.terminals.length > 0
+        || data.subagents.some((subagent) => subagent.endedAt === null)
     const [now, setNow] = useState(() => Date.now())
 
     useEffect(() => {
-        if (data.subagents.length === 0 && data.terminals.length === 0) return
+        if (!hasLiveElapsed) return
         const timer = window.setInterval(() => setNow(Date.now()), 1000)
         return () => window.clearInterval(timer)
-    }, [data.subagents.length, data.terminals.length])
+    }, [hasLiveElapsed])
 
     return (
         <details className="group mx-3 mt-3 rounded-md border border-[var(--app-border)] bg-[var(--app-subtle-bg)]">
@@ -57,7 +59,7 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                 {data.tasks.length > 0 ? (
                     <Section title={`${t('session.status.tasks')} · ${completedTasks}/${data.tasks.length}`}>
                         <ChecklistList items={data.tasks.map((task) => ({
-                            id: task.id,
+                            id: task.id || undefined,
                             text: task.content,
                             status: task.status
                         }))} />
@@ -68,7 +70,7 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                     <Section title={t('session.status.subagents')}>
                         <div className="flex flex-col gap-1.5">
                             {data.subagents.map((subagent) => {
-                                const elapsed = elapsedSince(subagent.startedAt, now)
+                                const elapsed = elapsedSince(subagent.startedAt, subagent.endedAt ?? now)
                                 return (
                                     <div key={subagent.id} className="min-w-0 text-sm">
                                         <div className="flex min-w-0 items-baseline gap-1.5">
@@ -89,7 +91,7 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                     </Section>
                 ) : null}
 
-                {data.terminals.length > 0 ? (
+                {data.terminals.length > 0 || data.undiscoveredTerminalCount > 0 ? (
                     <Section title={t('session.status.terminals')}>
                         <div className="flex flex-col gap-1.5">
                             {data.terminals.map((terminal) => {
@@ -107,6 +109,11 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                                     </div>
                                 )
                             })}
+                            {data.undiscoveredTerminalCount > 0 ? (
+                                <div className="text-xs text-[var(--app-hint)]">
+                                    {t('session.status.terminalsUnavailable', { count: data.undiscoveredTerminalCount })}
+                                </div>
+                            ) : null}
                         </div>
                     </Section>
                 ) : null}

@@ -942,6 +942,7 @@ export default {
   'session.status.tasks': '任务',
   'session.status.subagents': '子代理',
   'session.status.terminals': '后台终端',
+  'session.status.terminalsUnavailable': '{count} 个终端运行中 · 命令详情不可用',
   'session.status.goal.active': '进行中',
   'session.status.goal.paused': '已暂停',
   'session.status.goal.budgetLimited': '已受限',

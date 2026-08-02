@@ -84,8 +84,8 @@ describe('buildSessionStatusData', () => {
         ]
 
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toEqual([
-            expect.objectContaining({ id: 'agent-1', title: 'Inspect API', detail: 'Reading files', state: 'running' }),
-            expect.objectContaining({ id: 'agent-2', title: 'Review changes', state: 'error' }),
+            expect.objectContaining({ id: 'agent-1', title: 'Inspect API', detail: 'Reading files', state: 'running', endedAt: null }),
+            expect.objectContaining({ id: 'agent-2', title: 'Review changes', state: 'error', endedAt: 100 }),
             expect.objectContaining({ id: 'agent-4', title: 'Nested work', state: 'running' })
         ])
     })
@@ -127,5 +127,12 @@ describe('buildSessionStatusData', () => {
             messages: [],
             backgroundTaskCount: 0
         })).toBeNull()
+        expect(buildSessionStatusData({
+            goal: null,
+            tasks: [],
+            blocks: [],
+            messages: [],
+            backgroundTaskCount: 2
+        })).toMatchObject({ terminals: [], undiscoveredTerminalCount: 2 })
     })
 })
