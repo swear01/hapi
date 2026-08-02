@@ -46,7 +46,13 @@ import type {
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor } from '@hapi/protocol'
-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
+import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+import type { FleetUpgradePolicy, HubUpgradeOffer } from '@hapi/protocol/upgradeChannel'
+
+export type UpgradeInfoResponse = {
+    offer: HubUpgradeOffer
+    policy: FleetUpgradePolicy
+}
 
 type ApiClientOptions = {
     baseUrl?: string
@@ -460,6 +466,13 @@ export class ApiClient {
         return response as CancelMessageResponse
     }
 
+    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
+        return await this.request<SteerQueuedMessageResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
+            { method: 'POST', body: '{}' }
+        )
+    }
+
     async abortSession(sessionId: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
             method: 'POST',
@@ -550,6 +563,13 @@ export class ApiClient {
         })
     }
 
+    async setPersonality(sessionId: string, personality: import('@hapi/protocol').CodexPersonality | null): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/personality`, {
+            method: 'POST',
+            body: JSON.stringify({ personality })
+        })
+    }
+
     async setModel(sessionId: string, model: { provider: string; modelId: string } | string | null): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
             method: 'POST',
@@ -624,6 +644,31 @@ export class ApiClient {
 
     async getSqliteStorageUsage(): Promise<SqliteStorageUsageResponse> {
         return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
+    }
+
+    async restartMachineRunner(machineId: string): Promise<{ message: string }> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/restart-runner`, {
+            method: 'POST',
+            body: '{}'
+        })
+    }
+
+    async upgradeMachineRunner(machineId: string): Promise<{ message: string; response?: unknown }> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/upgrade-runner`, {
+            method: 'POST',
+            body: '{}'
+        })
+    }
+
+    async getUpgradeInfo(): Promise<UpgradeInfoResponse> {
+        return await this.request<UpgradeInfoResponse>('/api/upgrade/offer')
+    }
+
+    async setFleetUpgradePolicy(policy: FleetUpgradePolicy): Promise<{ policy: FleetUpgradePolicy }> {
+        return await this.request('/api/upgrade/policy', {
+            method: 'PUT',
+            body: JSON.stringify({ policy })
+        })
     }
 
     async listMachineDirectory(

@@ -16,10 +16,10 @@ const { setText, addAttachment, getShareTransfer, deleteShareTransfer } = vi.hoi
 }))
 
 vi.mock('@assistant-ui/react', () => ({
-    useAssistantApi: () => ({
+    useAui: () => ({
         composer: () => ({ setText, addAttachment }),
     }),
-    useAssistantState: (selector: (state: { composer: { text: string } }) => unknown) =>
+    useAuiState: (selector: (state: { composer: { text: string } }) => unknown) =>
         selector({ composer: { text: '' } }),
 }))
 

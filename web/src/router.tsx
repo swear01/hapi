@@ -52,6 +52,7 @@ import TerminalPage from '@/routes/sessions/terminal'
 import SettingsLayout from '@/routes/settings/layout'
 import SettingsHubPage from '@/routes/settings'
 import SettingsGeneralPage from '@/routes/settings/general'
+import SettingsRunnerManagementPage from '@/routes/settings/runner-management'
 import SettingsDisplayPage from '@/routes/settings/display'
 import SettingsChatPage from '@/routes/settings/chat'
 import SettingsVoicePage from '@/routes/settings/voice'
@@ -773,7 +774,7 @@ function NewSessionPage() {
 
     const handleSuccess = useCallback((sessionId: string) => {
         if (shareTransferId) {
-            setSharePendingTransfer(shareTransferId)
+            setSharePendingTransfer(shareTransferId, sessionId)
         }
         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
         // Replace current page with /sessions to clear spawn flow from history
@@ -1046,6 +1047,12 @@ const settingsGeneralRoute = createRoute({
     component: SettingsGeneralPage,
 })
 
+const settingsRunnerManagementRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'general/runners',
+    component: SettingsRunnerManagementPage,
+})
+
 const settingsDisplayRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'display',
@@ -1128,6 +1135,7 @@ export const routeTree = rootRoute.addChildren([
     settingsRoute.addChildren([
         settingsIndexRoute,
         settingsGeneralRoute,
+        settingsRunnerManagementRoute,
         settingsDisplayRoute,
         settingsChatRoute,
         settingsVoiceRoute,

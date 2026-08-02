@@ -7,9 +7,18 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
-import { isKnownFlavor, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
+import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
+import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
+import {
+    DEFAULT_FLEET_UPGRADE_POLICY,
+    machineTrailsUpgradeOffer,
+    type FleetUpgradePolicy,
+    type HubUpgradeOffer,
+    type RunnerSelfUpgradeResponse,
+} from '@hapi/protocol/upgradeChannel'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
+import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
 import type { Store, CancelQueuedMessageResult } from '../store'
@@ -93,6 +102,12 @@ export type CursorChatStoreStatusResult =
     | { type: 'success'; status: CursorChatStoreStatus }
     | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'resume_unavailable' | 'no_machine_online' | 'probe_failed' }
 
+export type SyncEngineOptions = {
+    getUpgradeOffer?: () => HubUpgradeOffer
+    prepareArtifactOffer?: (offer: HubUpgradeOffer, platform: string, arch: string) => Promise<HubUpgradeOffer>
+    getFleetUpgradePolicy?: () => FleetUpgradePolicy
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
@@ -159,16 +174,25 @@ export class SyncEngine {
     private readonly piUnexpectedTempOriginalIds = new Map<string, string>()
     /** Serialize scratchlist uploads per session so disk-byte caps cannot race. */
     private readonly scratchlistUploadTails = new Map<string, Promise<unknown>>()
+    private readonly fleetUpgradeAttemptAt = new Map<string, number>()
+    private static readonly FLEET_UPGRADE_COOLDOWN_MS = 15 * 60_000
+    private readonly getUpgradeOffer: (() => HubUpgradeOffer) | null
+    private readonly prepareArtifactOffer: SyncEngineOptions['prepareArtifactOffer']
+    private readonly getFleetUpgradePolicy: () => FleetUpgradePolicy
 
     constructor(
         private readonly store: Store,
         io: Server,
         rpcRegistry: RpcRegistry,
-        sseManager: SSEManager
+        sseManager: SSEManager,
+        options?: SyncEngineOptions,
     ) {
+        this.getUpgradeOffer = options?.getUpgradeOffer ?? null
+        this.prepareArtifactOffer = options?.prepareArtifactOffer
+        this.getFleetUpgradePolicy = options?.getFleetUpgradePolicy ?? (() => DEFAULT_FLEET_UPGRADE_POLICY)
         this.eventPublisher = new EventPublisher(sseManager, (event) => this.resolveNamespace(event))
         this.sessionCache = new SessionCache(store, this.eventPublisher)
-        this.machineCache = new MachineCache(store, this.eventPublisher)
+        this.machineCache = new MachineCache(store, this.eventPublisher, rpcRegistry)
         this.messageService = new MessageService(
             store,
             io,
@@ -743,6 +767,118 @@ async uploadScratchlistAttachment(
 
     handleMachineAlive(payload: { machineId: string; time: number; health?: unknown }): void {
         this.machineCache.handleMachineAlive(payload)
+        void this.maybeFleetUpgradeMachine(payload.machineId)
+    }
+
+    private async maybeFleetUpgradeMachine(machineId: string): Promise<void> {
+        if (!this.getUpgradeOffer || this.getFleetUpgradePolicy() !== 'auto') return
+        const offer = this.getUpgradeOffer()
+        const machine = this.machineCache.getMachine(machineId)
+        if (
+            offer.channel === 'off'
+            || !machine?.active
+            || !machine.metadata
+            || machine.metadata.versionHandoffDisabled === true
+            || !machineTrailsUpgradeOffer(offer, machine.metadata.happyCliVersion, machine.metadata.capabilities)
+        ) return
+        const last = this.fleetUpgradeAttemptAt.get(machineId) ?? 0
+        if (Date.now() - last < SyncEngine.FLEET_UPGRADE_COOLDOWN_MS) return
+        this.fleetUpgradeAttemptAt.set(machineId, Date.now())
+        await this.upgradeMachineRunner(machineId, machine.namespace).catch(() => undefined)
+    }
+
+    async restartMachineRunner(machineId: string, namespace: string): Promise<
+        | { type: 'success'; message: string }
+        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'restart_failed' }
+    > {
+        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
+            ?? this.machineCache.refreshMachine(machineId)
+        if (!machine || machine.namespace !== namespace) {
+            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
+        }
+        if (!machine.active) return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
+        try {
+            await this.rpcGateway.stopRunner(machineId)
+            return { type: 'success', message: 'Runner restart requested' }
+        } catch (error) {
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Failed to restart runner',
+                code: 'restart_failed',
+            }
+        }
+    }
+
+    async upgradeMachineRunner(machineId: string, namespace: string): Promise<
+        | { type: 'success'; message: string; response: RunnerSelfUpgradeResponse }
+        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'upgrade_unavailable' | 'upgrade_failed' }
+    > {
+        if (!this.getUpgradeOffer) {
+            return { type: 'error', message: 'Upgrade offer not configured', code: 'upgrade_unavailable' }
+        }
+        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
+            ?? this.machineCache.refreshMachine(machineId)
+        if (!machine || machine.namespace !== namespace) {
+            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
+        }
+        if (!machine.active) return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
+        let offer = this.getUpgradeOffer()
+        if (offer.channel === 'off') {
+            return { type: 'error', message: 'Fleet upgrade disabled (HAPI_UPGRADE_CHANNEL=off)', code: 'upgrade_unavailable' }
+        }
+        if (machine.metadata?.versionHandoffDisabled === true) {
+            return {
+                type: 'error',
+                message: 'Runner opted out of version handoff (soup/rebuild-only or HAPI_DISABLE_VERSION_HANDOFF=1); rematerialize soup or clear the opt-out',
+                code: 'upgrade_unavailable'
+            }
+        }
+        if (!(machine.metadata?.capabilities ?? []).includes(MACHINE_CAPABILITIES.RunnerSelfUpgrade)) {
+            return {
+                type: 'error',
+                message: 'Runner does not support self-upgrade; upgrade the CLI manually and restart the runner',
+                code: 'upgrade_unavailable'
+            }
+        }
+        if (offer.channel === 'hub-artifact') {
+            const platform = machine.metadata?.platform
+            const arch = machine.metadata?.arch
+            if (!this.prepareArtifactOffer) {
+                return { type: 'error', message: 'Artifact builder not configured', code: 'upgrade_unavailable' }
+            }
+            if (!platform || !arch) {
+                return {
+                    type: 'error',
+                    message: 'Machine platform/arch unavailable for hub-artifact upgrade',
+                    code: 'upgrade_unavailable'
+                }
+            }
+            try {
+                offer = await this.prepareArtifactOffer(offer, platform, arch)
+            } catch (error) {
+                return {
+                    type: 'error',
+                    message: error instanceof Error ? error.message : 'Failed to prepare CLI artifact',
+                    code: 'upgrade_unavailable',
+                }
+            }
+            if (!offer.artifact?.sha256) {
+                return { type: 'error', message: 'Artifact missing sha256', code: 'upgrade_unavailable' }
+            }
+        }
+        try {
+            const response = await this.rpcGateway.runnerSelfUpgrade(machineId, offer) as RunnerSelfUpgradeResponse
+            if (response.status === 'failed' || response.status === 'unsupported') {
+                return { type: 'error', message: response.message || `Upgrade ${response.status}`, code: 'upgrade_failed' }
+            }
+            return { type: 'success', message: response.message || 'Upgrade started', response }
+        } catch (error) {
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Fleet upgrade RPC failed',
+                code: 'upgrade_failed',
+            }
+        }
     }
 
     private expireInactive(): void {
@@ -820,6 +956,50 @@ async uploadScratchlistAttachment(
         messageId: string
     ): Promise<CancelQueuedMessageResult> {
         return this.messageService.cancelQueuedMessage(sessionId, messageId)
+    }
+
+    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
+        const session = this.getSession(sessionId)
+        if (!session) return { status: 'failed', error: 'Session not found', localId: null }
+        if (!isSteeringSupportedForSession(session.metadata)) {
+            return { status: 'failed', error: 'Steering is not supported for this agent', localId: null }
+        }
+        if (session.agentState?.controlledByUser === true) {
+            return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
+        }
+        const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
+        if (lookup.status === 'absent') return { status: 'failed', error: 'Message not found', localId: null }
+        if (lookup.status === 'invoked') {
+            const message = lookup.message
+            return {
+                status: 'invoked',
+                message: {
+                    id: message.id,
+                    seq: message.seq,
+                    localId: message.localId,
+                    content: message.content,
+                    createdAt: message.createdAt,
+                    invokedAt: message.invokedAt,
+                    scheduledAt: message.scheduledAt
+                }
+            }
+        }
+        if (!lookup.localId) return { status: 'failed', error: 'Message has no localId', localId: null }
+        if (lookup.scheduledAt != null && lookup.scheduledAt > Date.now()) {
+            return { status: 'failed', error: 'Scheduled messages cannot be steered', localId: lookup.localId }
+        }
+        try {
+            const result = await this.rpcGateway.steerQueuedMessage(sessionId, lookup.localId)
+            return result.steered
+                ? { status: 'steered', localId: lookup.localId }
+                : { status: 'failed', error: result.error ?? 'Steer failed', localId: lookup.localId }
+        } catch (error) {
+            return {
+                status: 'failed',
+                error: error instanceof Error ? error.message : 'Steer failed',
+                localId: lookup.localId
+            }
+        }
     }
 
     sweepImmediateQueuedOnSessionEnd(sessionId: string, invokedAt: number): void {
@@ -1061,6 +1241,7 @@ async uploadScratchlistAttachment(
             effort?: string | null
             serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
+            personality?: Session['personality']
         }
     ): Promise<void> {
         const session = this.sessionCache.getSession(sessionId)
@@ -1085,6 +1266,7 @@ async uploadScratchlistAttachment(
                 effort?: Session['effort']
                 serviceTier?: Session['serviceTier']
                 collaborationMode?: Session['collaborationMode']
+                personality?: Session['personality']
             }
         }
         if (typeof obj.error === 'string' && obj.error.trim().length > 0) {

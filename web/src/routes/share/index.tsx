@@ -307,6 +307,8 @@ export default function SharePage() {
                                 setCustomStart(start)
                                 setCustomEnd(end)
                             }}
+                            expanded
+                            onExpandedChange={() => {}}
                         />
                         {pickerSessions === null ? (
                             <LoadingState label={t('share.loading')} className="text-sm py-4" />
