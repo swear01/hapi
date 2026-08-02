@@ -143,19 +143,16 @@ test('reversing toward newer history cancels a prepend at the row cap', async ({
 
     const newerAnchor = await page.evaluate(() => {
         const viewport = document.querySelector('.app-scroll-y') as HTMLElement
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - 1000)
+        const target = Array.from(
+            viewport.querySelectorAll<HTMLElement>('.happy-thread-messages > [id]')
+        ).find((candidate) => Number(candidate.id.match(/m-(\d+)/)?.[1]) > 1000)
+        if (!target) throw new Error('Expected newer-history target')
+        target.scrollIntoView({ block: 'start' })
         viewport.dispatchEvent(new Event('scroll'))
         const viewportRect = viewport.getBoundingClientRect()
-        const message = Array.from(
-            viewport.querySelectorAll<HTMLElement>('.happy-thread-messages > [id]')
-        ).find((candidate) => {
-            const rect = candidate.getBoundingClientRect()
-            return rect.bottom > viewportRect.top && rect.top < viewportRect.bottom
-        })
-        if (!message) throw new Error('Expected a visible newer-history anchor')
         return {
-            id: message.id,
-            topOffset: message.getBoundingClientRect().top - viewportRect.top
+            id: target.id,
+            topOffset: target.getBoundingClientRect().top - viewportRect.top
         }
     })
     const anchorSequence = Number(newerAnchor.id.match(/m-(\d+)/)?.[1])
@@ -565,10 +562,10 @@ test('touch pull shows staged feedback and loads older on release', async ({ pag
     )).toBe(1)
 
     await dispatchTouch('touchend', 164)
+    await expect(page.getByText('Loading…', { exact: true })).toBeVisible()
     await expect.poll(async () => await page.evaluate(() =>
         window.__probe.requests.filter((request) => request.direction === 'before').length
     )).toBe(2)
-    await expect(page.getByText('Loading…', { exact: true })).toBeVisible()
 })
 
 // Regression: scroll/resize signals emitted while a failed page is in backoff

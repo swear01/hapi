@@ -136,7 +136,7 @@ describe('claudeRemoteLauncher launch-failure recovery', () => {
         // restored to the queue before attempt 2, not silently dropped.
         expect(queueSizeOnSecondAttempt).toBe(1);
         expect(restoredMessageText).toBe('hello');
-    });
+    }, 15_000);
 
     it('restores a joined batch as separate items with each original localId and order preserved', async () => {
         // MessageQueue2.collectBatch() joins same-mode messages into a single

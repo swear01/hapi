@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+caller_dir="$PWD"
 repo="${HAPI_REPO:-$PWD}"
 base_dir="$script_dir"
 patch_dir="$base_dir/patches"
@@ -19,6 +20,10 @@ while [ "$#" -gt 0 ]; do
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+case "$repo" in /*) ;; *) repo="$caller_dir/$repo" ;; esac
+case "$patch_dir" in /*) ;; *) patch_dir="$caller_dir/$patch_dir" ;; esac
+case "$manifest" in /*) ;; *) manifest="$caller_dir/$manifest" ;; esac
 
 if [ "$push" -eq 1 ] && [ "${HAPI_SYNC_CONFIRM:-}" != "RESET_ORIGIN_MAIN_WITH_FORCE_WITH_LEASE" ]; then
     echo "--push requires HAPI_SYNC_CONFIRM=RESET_ORIGIN_MAIN_WITH_FORCE_WITH_LEASE" >&2

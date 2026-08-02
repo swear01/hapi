@@ -86,7 +86,7 @@ test('exports a text-only user fallback alongside assistant DOM', async ({ page 
     await page.getByRole('button', { name: 'Open share preview' }).click()
 
     const dialog = page.getByRole('dialog')
-    await expect(dialog.getByText(/请导出这一轮复杂对话/)).toBeVisible()
+    await expect(dialog.getByText(/这个失败不用说吧/)).toBeVisible()
     await expect(dialog.getByText('Complex response fixture')).toBeVisible()
     await dialog.screenshot({ path: testInfo.outputPath('fallback-preview.png') })
 

@@ -38,7 +38,7 @@ type PendingScrollRestore = {
 }
 
 type HistoryLoadSource = 'coverage' | 'user' | 'consumer'
-type PullToLoadState = 'idle' | 'pulling' | 'ready'
+type PullToLoadState = 'idle' | 'pulling' | 'ready' | 'loading'
 
 type HistoryLoaderState = {
     runId: number
@@ -832,9 +832,11 @@ export function HappyThread(props: {
                 && pullToLoadStateRef.current === 'ready'
                 && viewport.scrollTop <= 0
             pullStartY = null
-            updatePullToLoadState('idle')
             if (shouldLoad) {
-                void requestOlderRef.current('user')
+                updatePullToLoadState('loading')
+                void requestOlderRef.current('user').finally(() => updatePullToLoadState('idle'))
+            } else {
+                updatePullToLoadState('idle')
             }
         }
 
@@ -1454,11 +1456,11 @@ export function HappyThread(props: {
                         aria-live="polite"
                         className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
                     >
-                        {props.isLoadingMoreMessages ? (
+                        {props.isLoadingMoreMessages || pullToLoadState === 'loading' ? (
                             <Spinner size="sm" label={null} className="text-current" />
                         ) : null}
                         <span>
-                            {props.isLoadingMoreMessages
+                            {props.isLoadingMoreMessages || pullToLoadState === 'loading'
                                 ? t('misc.loading')
                                 : pullToLoadState === 'ready'
                                     ? t('misc.releaseToLoadOlder')

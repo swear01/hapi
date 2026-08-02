@@ -36,7 +36,7 @@ export type CodexSlashResolution =
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
             proactiveMultiAgent?: boolean;
-            personality?: CodexPersonality;
+            personality?: CodexPersonality | null;
         };
     }
     | {
@@ -50,7 +50,7 @@ export type CodexSlashResolution =
             modelReasoningEffort?: ReasoningEffort | null;
             serviceTier?: string | null;
             proactiveMultiAgent?: boolean;
-            personality?: CodexPersonality;
+            personality?: CodexPersonality | null;
         };
     }
     | {
@@ -70,7 +70,7 @@ export function resolveCodexSlashCommand(
         modelReasoningEffort?: ReasoningEffort;
         serviceTier?: string | null;
         proactiveMultiAgent?: boolean;
-        personality?: CodexPersonality;
+        personality?: CodexPersonality | null;
     }
 ): CodexSlashResolution {
     const match = /^\s*\/([a-z0-9:_-]+)(?:\s+([\s\S]*))?$/i.exec(text);
