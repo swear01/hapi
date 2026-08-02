@@ -356,8 +356,8 @@ describe('AcpStdioTransport closed stdin writes', () => {
         for (const handler of stderrHandlers) {
             handler('provider unavailable, retry');
             handler('ing in 30 seconds\n');
-            handler('Error: T: [canceled] http/');
-            handler('2 stream closed with error code CANCEL (0x8)');
+            handler('Error: T: [canceled] ht');
+            handler('tp/2 stream closed with error code CANCEL (0x8)');
         }
 
         expect(seen).toEqual([

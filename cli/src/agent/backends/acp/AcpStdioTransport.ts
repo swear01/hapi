@@ -63,6 +63,7 @@ export class AcpStdioTransport {
     private buffer = '';
     private recentStderr = '';
     private stderrParseBuffer = '';
+    private stderrPartialErrorReported = false;
     private emittedModelRejection = false;
     private nextId = 1;
     private protocolError: Error | null = null;
@@ -425,14 +426,16 @@ export class AcpStdioTransport {
             const text = line.trim();
             if (text) {
                 this.parseStderrError(text);
+                this.stderrPartialErrorReported = false;
             }
         }
     }
 
     private flushActionableStderrTail(): void {
         const pending = this.stderrParseBuffer.trim();
-        if (pending && this.parseStderrError(pending)) {
+        if (pending && this.parseStderrError(pending) === 'reported-complete') {
             this.stderrParseBuffer = '';
+            this.stderrPartialErrorReported = false;
         }
     }
 
@@ -442,11 +445,12 @@ export class AcpStdioTransport {
         if (text) {
             this.parseStderrError(text);
         }
+        this.stderrPartialErrorReported = false;
     }
 
-    private parseStderrError(text: string): boolean {
+    private parseStderrError(text: string): 'none' | 'reported-partial' | 'reported-complete' {
         if (!this.stderrErrorHandler) {
-            return false;
+            return 'none';
         }
 
         const lowerText = text.toLowerCase();
@@ -459,7 +463,7 @@ export class AcpStdioTransport {
         const modelRejection = text.match(/Cannot use this model:\s*\S[\s\S]*/i);
         if (modelRejection) {
             if (this.emittedModelRejection) {
-                return true;
+                return 'reported-complete';
             }
             const message = modelRejection[0].trim();
             this.emittedModelRejection = true;
@@ -468,7 +472,7 @@ export class AcpStdioTransport {
                 message,
                 raw: message
             });
-            return true;
+            return 'reported-complete';
         }
 
         // Rate limit errors (429)
@@ -478,7 +482,7 @@ export class AcpStdioTransport {
                 message: 'Rate limit exceeded. Please wait before sending more requests.',
                 raw: text
             });
-            return true;
+            return 'reported-complete';
         }
 
         // Model not found errors (404)
@@ -488,7 +492,7 @@ export class AcpStdioTransport {
                 message: `Model not found. Available models: ${GEMINI_MODEL_PRESETS.join(', ')}`,
                 raw: text
             });
-            return true;
+            return 'reported-complete';
         }
 
         // Authentication errors (401/403)
@@ -500,7 +504,7 @@ export class AcpStdioTransport {
                 message: 'Authentication failed. Please check your credentials or run "gemini auth login".',
                 raw: text
             });
-            return true;
+            return 'reported-complete';
         }
 
         // Quota exceeded
@@ -510,7 +514,7 @@ export class AcpStdioTransport {
                 message: 'API quota exceeded. Please check your billing or wait for quota reset.',
                 raw: text
             });
-            return true;
+            return 'reported-complete';
         }
 
         if (matchesAcpRetryBackoff(text)) {
@@ -519,7 +523,7 @@ export class AcpStdioTransport {
                 message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
                 raw: text
             });
-            return true;
+            return 'reported-complete';
         }
 
         if (matchesAcpHttp2Cancel(text)) {
@@ -528,23 +532,26 @@ export class AcpStdioTransport {
                 message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
                 raw: text
             });
-            return true;
+            return 'reported-complete';
         }
 
-        // Keep a split HTTP/2 cancellation signature buffered until its next chunk.
-        if (/canceled.*http\/?$/i.test(text)) {
-            return false;
+        // Keep cancellation errors buffered until a later chunk can classify them.
+        if (lowerText.includes('canceled')) {
+            return 'none';
         }
 
         // Only report as unknown if it looks like an actual error
         if (lowerText.includes('error') || lowerText.includes('failed') || lowerText.includes('exception')) {
-            this.stderrErrorHandler({
-                type: 'unknown',
-                message: text,
-                raw: text
-            });
-            return true;
+            if (!this.stderrPartialErrorReported) {
+                this.stderrPartialErrorReported = true;
+                this.stderrErrorHandler({
+                    type: 'unknown',
+                    message: text,
+                    raw: text
+                });
+            }
+            return 'reported-partial';
         }
-        return false;
+        return 'none';
     }
 }
