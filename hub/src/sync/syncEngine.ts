@@ -623,7 +623,9 @@ export class SyncEngine {
                     deleteScratchlistAttachmentFiles(getHapiHomeDir(), orphaned)
                 )
             }
-            this.sessionCache.emitScratchlistChanged(sessionId, Date.now())
+            const changedAt = Date.now()
+            this.sessionCache.recordSessionActivity(sessionId, changedAt)
+            this.sessionCache.emitScratchlistChanged(sessionId, changedAt)
         }
         return removed
     }

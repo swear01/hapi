@@ -692,6 +692,11 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
         }
 
+        if (c.req.query('requireArchived') === '1'
+            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
+            return c.json({ error: 'Session is no longer archived' }, 409)
+        }
+
         if (c.req.query('cleanOld') === '1') {
             const pending = engine.getUninvokedScheduledMessageCounts([sessionResult.sessionId]).get(sessionResult.sessionId) ?? 0
             const scratchAt = engine.getScratchlistUpdatedAtBySessionIds([sessionResult.sessionId]).get(sessionResult.sessionId) ?? 0

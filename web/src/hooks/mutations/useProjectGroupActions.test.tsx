@@ -82,8 +82,8 @@ describe('useProjectGroupActions - deleteAll', () => {
         })
 
         expect(deleteSession).toHaveBeenCalledTimes(2)
-        expect(deleteSession).toHaveBeenNthCalledWith(1, 'a')
-        expect(deleteSession).toHaveBeenNthCalledWith(2, 'b')
+        expect(deleteSession).toHaveBeenNthCalledWith(1, 'a', { requireArchived: true })
+        expect(deleteSession).toHaveBeenNthCalledWith(2, 'b', { requireArchived: true })
     })
 
     it('aborts the run when a delete rejects mid-loop', async () => {

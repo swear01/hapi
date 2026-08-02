@@ -44,7 +44,7 @@ export function useProjectGroupActions(
                 throw new Error('Session unavailable')
             }
             for (const session of sessions) {
-                await api.deleteSession(session.id)
+                await api.deleteSession(session.id, { requireArchived: true })
             }
         },
         onSuccess: async () => {
