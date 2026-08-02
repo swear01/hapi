@@ -1,4 +1,4 @@
-import { useAssistantApi } from '@assistant-ui/react'
+import { useAui } from '@assistant-ui/react'
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import type { ApiClient } from '@/api/client'
 import { getMessageWindowState, subscribeMessageWindow } from '@/lib/message-window-store'
@@ -209,7 +209,7 @@ export function QueuedMessagesBar({
     onEdit?: (params: { text: string; pendingSchedule: PendingSchedule | null }) => void
 }) {
     const queued = useQueuedMessages(sessionId)
-    const assistantApi = useAssistantApi()
+    const assistantApi = useAui()
     const cancelMutation = useCancelQueuedMessage(api)
     const steerMutation = useSteerQueuedMessage(api)
     const { t } = useTranslation()
