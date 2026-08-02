@@ -89,7 +89,7 @@ describe('getModelOptionsForFlavor', () => {
     it('returns only default/current for cursor before models are discovered (no claude fallback)', () => {
         const options = getModelOptionsForFlavor('cursor', 'composer-2.5')
         expect(options).toEqual([
-            { value: null, label: 'Default' },
+            { value: null, label: 'Auto' },
             { value: 'composer-2.5', label: 'composer-2.5' }
         ])
     })
@@ -108,12 +108,12 @@ describe('getModelOptionsForFlavor', () => {
     it('does not inject raw wire id when dual picker base is already listed', () => {
         const wire = 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]'
         const options = getModelOptionsForFlavor('cursor', wire, [
-            { value: null, label: 'Default' },
+            { value: null, label: 'Auto' },
             { value: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
             { value: 'composer-2.5', label: 'Composer 2.5' },
         ])
         expect(options).toEqual([
-            { value: null, label: 'Default' },
+            { value: null, label: 'Auto' },
             { value: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
             { value: 'composer-2.5', label: 'Composer 2.5' },
         ])
@@ -122,11 +122,11 @@ describe('getModelOptionsForFlavor', () => {
     it('injects unknown wire id only when catalog lacks base and wire', () => {
         const wire = 'claude-opus-4-9[effort=high,fast=false]'
         const options = getModelOptionsForFlavor('cursor', wire, [
-            { value: null, label: 'Default' },
+            { value: null, label: 'Auto' },
             { value: 'composer-2.5', label: 'Composer 2.5' },
         ])
         expect(options).toEqual([
-            { value: null, label: 'Default' },
+            { value: null, label: 'Auto' },
             { value: wire, label: wire },
             { value: 'composer-2.5', label: 'Composer 2.5' },
         ])
@@ -152,6 +152,16 @@ describe('getModelOptionsForFlavor', () => {
         expect(options).toEqual([
             { value: null, label: 'Default' },
             { value: 'claude-sonnet-4-5', label: 'claude-sonnet-4-5' }
+        ])
+    })
+
+    it('returns only default/current for grok without falling back to Claude models', () => {
+        expect(getModelOptionsForFlavor('grok')).toEqual([
+            { value: null, label: 'Default' }
+        ])
+        expect(getModelOptionsForFlavor('grok', 'grok-4.5')).toEqual([
+            { value: null, label: 'Default' },
+            { value: 'grok-4.5', label: 'grok-4.5' }
         ])
     })
 })
@@ -217,6 +227,10 @@ describe('getNextModelForFlavor', () => {
         // a Pi session via set-session-config.
         const next = getNextModelForFlavor('pi', 'claude-sonnet-4-5')
         expect(next).toBe('claude-sonnet-4-5')
+    })
+
+    it('keeps the current grok model on cycle (no Claude fallback)', () => {
+        expect(getNextModelForFlavor('grok', 'grok-4.5')).toBe('grok-4.5')
     })
 
     it('returns null for pi without a current model (no Claude fallback)', () => {

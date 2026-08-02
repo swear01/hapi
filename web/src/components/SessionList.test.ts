@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest'
+import { toSessionSummary, type Session } from '@hapi/protocol'
 import type { SessionSummary } from '@/types/api'
 import {
     deduplicateSessionsByAgentId,
     expandSelectedSessionCollapseOverrides,
     filterActiveSessionsOnly,
+    getSessionTimeRange,
     getNextSessionVisibleCount,
+    getPreviousSessionVisibleCount,
+    getPullToRefreshState,
     getSessionDedupKey,
+    getWorktreeSessionLabel,
     getVisibleSessionPreview,
     isSidebarEmptySessionStub,
     normalizeSearch,
     prepareSidebarSessions,
     sessionMatchesQuery,
+    sessionMatchesTimeRange,
     shouldShowSessionInSidebar
 } from './SessionList'
 
@@ -33,6 +39,51 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         ...overrides
     }
 }
+
+describe('getWorktreeSessionLabel', () => {
+    it('returns the worktree name for sessions grouped under a shared repository', () => {
+        const session = makeSession({
+            id: 'worktree-session',
+            metadata: {
+                path: '/work/hapi-worktrees/fix-resume',
+                worktree: {
+                    basePath: '/work/hapi',
+                    branch: 'fix/resume',
+                    name: 'fix-resume',
+                    worktreePath: '/work/hapi-worktrees/fix-resume'
+                }
+            }
+        })
+
+        expect(getWorktreeSessionLabel(session)).toBe('fix-resume')
+    })
+
+    it('does not add a subtitle to ordinary sessions', () => {
+        const session = makeSession({
+            id: 'ordinary-session',
+            metadata: { path: '/work/hapi' }
+        })
+
+        expect(getWorktreeSessionLabel(session)).toBeNull()
+    })
+
+    it('falls back to the worktree directory name when metadata name is blank', () => {
+        const session = makeSession({
+            id: 'windows-worktree-session',
+            metadata: {
+                path: 'C:\\work\\hapi-worktrees\\fix-resume',
+                worktree: {
+                    basePath: 'C:\\work\\hapi',
+                    branch: 'fix/resume',
+                    name: '   ',
+                    worktreePath: 'C:\\work\\hapi-worktrees\\fix-resume\\'
+                }
+            }
+        })
+
+        expect(getWorktreeSessionLabel(session)).toBe('fix-resume')
+    })
+})
 
 describe('deduplicateSessionsByAgentId', () => {
     it('deduplicates sessions with the same agentSessionId', () => {
@@ -183,6 +234,39 @@ describe('prepareSidebarSessions', () => {
         expect(result.map(session => session.id)).toEqual(['real'])
     })
 
+    it('keeps an archived Pi session with a native session id and no title', () => {
+        const piSession: Session = {
+            id: 'archived-pi',
+            namespace: 'default',
+            seq: 1,
+            createdAt: 50,
+            active: false,
+            activeAt: 0,
+            updatedAt: 100,
+            metadata: {
+                path: '/work/hapi',
+                host: 'local',
+                flavor: 'pi',
+                piSessionId: 'pi-session-1',
+                lifecycleState: 'archived'
+            },
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            model: null,
+            modelReasoningEffort: null,
+            effort: null,
+            serviceTier: null
+        }
+
+        const summary = toSessionSummary(piSession)
+
+        expect(summary.metadata?.agentSessionId).toBe('pi-session-1')
+        expect(prepareSidebarSessions([summary]).map(session => session.id)).toEqual(['archived-pi'])
+    })
+
     it('keeps the selected inactive stub visible', () => {
         const sessions = [
             makeSession({ id: 'stub', metadata: { path: '/work/hapi' } }),
@@ -241,6 +325,41 @@ describe('session list search helpers', () => {
         expect(sessionMatchesQuery(session, normalizeSearch('bot review'), 'desktop')).toBe(true)
         expect(sessionMatchesQuery(session, normalizeSearch('desktop'), 'desktop')).toBe(true)
         expect(sessionMatchesQuery(session, normalizeSearch('missing'), 'desktop')).toBe(false)
+    })
+
+    it('matches the displayed worktree label and worktree path', () => {
+        const session = makeSession({
+            id: 'worktree-session',
+            metadata: {
+                path: '/work/hapi',
+                worktree: {
+                    basePath: '/work/hapi',
+                    branch: 'fix/sidebar-search',
+                    name: 'sidebar-search',
+                    worktreePath: '/work/hapi-worktrees/fix-sidebar-search'
+                }
+            }
+        })
+
+        expect(sessionMatchesQuery(session, normalizeSearch('sidebar-search'), 'desktop')).toBe(true)
+        expect(sessionMatchesQuery(session, normalizeSearch('hapi-worktrees'), 'desktop')).toBe(true)
+    })
+})
+
+describe('session list time filter helpers', () => {
+    it('treats the selected end date as inclusive in local time', () => {
+        const range = getSessionTimeRange('2026-07-01', '2026-07-18')
+        expect(range).toEqual({
+            start: new Date(2026, 6, 1).getTime(),
+            end: new Date(2026, 6, 19).getTime()
+        })
+        expect(sessionMatchesTimeRange(makeSession({ id: 'inside', updatedAt: new Date(2026, 6, 18, 23, 59).getTime() }), range)).toBe(true)
+        expect(sessionMatchesTimeRange(makeSession({ id: 'outside', updatedAt: new Date(2026, 6, 19).getTime() }), range)).toBe(false)
+    })
+
+    it('does not filter until both dates are selected', () => {
+        expect(getSessionTimeRange('', '')).toBeNull()
+        expect(getSessionTimeRange('2026-07-01', '')).toBeNull()
     })
 })
 
@@ -345,32 +464,53 @@ describe('getNextSessionVisibleCount', () => {
     })
 })
 
+describe('getPreviousSessionVisibleCount', () => {
+    it('collapses one batch of step size per call', () => {
+        expect(getPreviousSessionVisibleCount(20, 8)).toBe(12)
+        expect(getPreviousSessionVisibleCount(12, 8)).toBe(8)
+    })
+
+    it('never goes below the preview limit', () => {
+        expect(getPreviousSessionVisibleCount(10, 8)).toBe(8)
+        expect(getPreviousSessionVisibleCount(8, 8)).toBe(8)
+    })
+
+    it('uses a minimum batch size of one', () => {
+        expect(getPreviousSessionVisibleCount(5, 0)).toBe(4)
+    })
+})
+
 describe('expandSelectedSessionCollapseOverrides', () => {
-    it('expands collapsed project and machine, but preserves session preview folding', () => {
+    it('expands the collapsed project group, but preserves session preview folding', () => {
         const overrides = new Map<string, boolean>([
             ['machine-1::/work/hapi', true],
-            ['sessions::machine-1::/work/hapi', true],
-            ['machine::machine-1', true]
+            ['sessions::machine-1::/work/hapi', true]
         ])
 
         const result = expandSelectedSessionCollapseOverrides(overrides, {
-            key: 'machine-1::/work/hapi',
-            machineId: 'machine-1'
+            key: 'machine-1::/work/hapi'
         })
 
-        expect(result.has('machine-1::/work/hapi')).toBe(false)
+        expect(result.get('machine-1::/work/hapi')).toBe(false)
         expect(result.get('sessions::machine-1::/work/hapi')).toBe(true)
-        expect(result.has('machine::machine-1')).toBe(false)
     })
 
     it('leaves missing session preview override unset', () => {
         const overrides = new Map<string, boolean>()
 
         const result = expandSelectedSessionCollapseOverrides(overrides, {
-            key: 'machine-1::/work/hapi',
-            machineId: 'machine-1'
+            key: 'machine-1::/work/hapi'
         })
 
         expect(result.has('sessions::machine-1::/work/hapi')).toBe(false)
+    })
+})
+
+describe('getPullToRefreshState', () => {
+    it('requires a deliberate pull past the trigger distance', () => {
+        expect(getPullToRefreshState(15)).toBe('idle')
+        expect(getPullToRefreshState(16)).toBe('pulling')
+        expect(getPullToRefreshState(63)).toBe('pulling')
+        expect(getPullToRefreshState(64)).toBe('ready')
     })
 })

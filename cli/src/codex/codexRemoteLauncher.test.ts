@@ -13,8 +13,24 @@ const harness = vi.hoisted(() => ({
     listCollaborationModeCalls: 0,
     collaborationModeResponse: { data: [{ mode: 'default' }, { mode: 'plan' }] } as unknown,
     failListCollaborationModes: false,
+    listSkillsCalls: [] as unknown[],
+    skillsListResponse: {
+        data: [{
+            cwd: '/tmp/hapi-update',
+            skills: [{
+                name: 'hapi',
+                description: 'Manage HAPI',
+                path: '/home/user/.agents/skills/hapi/SKILL.md',
+                scope: 'user',
+                enabled: true
+            }],
+            errors: []
+        }]
+    } as unknown,
     startThreadIds: [] as string[],
+    startThreadParams: [] as Array<Record<string, unknown>>,
     resumeThreadIds: [] as string[],
+    resumeThreadParams: [] as Array<Record<string, unknown>>,
     startTurnThreadIds: [] as string[],
     startTurnParams: [] as Array<Record<string, unknown>>,
     startTurnErrors: [] as Error[],
@@ -39,6 +55,7 @@ const harness = vi.hoisted(() => ({
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
     failNextCompact: false,
+    deferCompactCompletion: false,
     deferThreadStatusNotifications: false,
     emitStaleTaskCompleteAfterRetry: false,
     emitStaleTaskFailedAfterRetry: false,
@@ -65,6 +82,7 @@ const harness = vi.hoisted(() => ({
     emitSecondParentSpawnStartWithoutEnd: false,
     emitParentSendInputFailure: false,
     emitParentResumeSuccess: false,
+    emitParentV2AgentTools: false,
     emitRunningChildTurnBeforeSuppressedParent: false,
     emitCompletedChildTurnBeforeSuppressedParent: false,
     emitTurnAbortedOnInterrupt: false,
@@ -100,6 +118,11 @@ vi.mock('./codexAppServerClient', () => {
             return harness.collaborationModeResponse;
         }
 
+        async listSkills(params: unknown): Promise<unknown> {
+            harness.listSkillsCalls.push(params);
+            return harness.skillsListResponse;
+        }
+
         async setExperimentalFeatureEnablement(params: unknown): Promise<unknown> {
             harness.setFeatureEnablementCalls.push(params);
             if (harness.failSetFeatureEnablement) {
@@ -113,15 +136,17 @@ vi.mock('./codexAppServerClient', () => {
             harness.requestHandlers.set(method, handler);
         }
 
-        async startThread(): Promise<{ thread: { id: string }; model: string }> {
+        async startThread(params?: Record<string, unknown>): Promise<{ thread: { id: string }; model: string }> {
             const id = `thread-${harness.startThreadIds.length + 1}`;
             harness.startThreadIds.push(id);
+            harness.startThreadParams.push(params ?? {});
             return { thread: { id }, model: 'gpt-5.4' };
         }
 
-        async resumeThread(params?: { threadId?: string }): Promise<{ thread: { id: string }; model: string }> {
-            const id = params?.threadId ?? 'thread-resumed';
+        async resumeThread(params?: Record<string, unknown>): Promise<{ thread: { id: string }; model: string }> {
+            const id = typeof params?.threadId === 'string' ? params.threadId : 'thread-resumed';
             harness.resumeThreadIds.push(id);
+            harness.resumeThreadParams.push(params ?? {});
             if (harness.failResumeThreadIds.includes(id)) {
                 throw new Error('resume failed');
             }
@@ -134,6 +159,9 @@ vi.mock('./codexAppServerClient', () => {
             if (harness.failNextCompact) {
                 harness.failNextCompact = false;
                 throw new Error('compact failed');
+            }
+            if (harness.deferCompactCompletion) {
+                return {};
             }
             const compacted = { threadId, turnId: `compact-${harness.compactThreadIds.length}` };
             harness.notifications.push({ method: 'thread/compacted', params: compacted });
@@ -420,6 +448,48 @@ vi.mock('./codexAppServerClient', () => {
                     const parentCompact = { thread: { id: threadId } };
                     harness.notifications.push({ method: 'thread/compacted', params: parentCompact });
                     this.notificationHandler?.('thread/compacted', parentCompact);
+                }
+
+                if (harness.emitParentV2AgentTools) {
+                    const v2Calls = [{
+                        callId: 'v2-spawn',
+                        name: 'spawn_agent',
+                        input: { task_name: 'review', message: 'Review this' },
+                        output: { task_name: '/root/review', nickname: 'Reviewer' }
+                    }, {
+                        callId: 'v2-wait',
+                        name: 'wait_agent',
+                        input: { timeout_ms: 10_000 },
+                        output: { message: 'Wait timed out.', timed_out: true }
+                    }];
+
+                    for (const call of v2Calls) {
+                        const started = {
+                            threadId,
+                            turnId,
+                            item: {
+                                type: 'function_call',
+                                namespace: 'collaboration',
+                                name: call.name,
+                                arguments: JSON.stringify(call.input),
+                                call_id: call.callId
+                            }
+                        };
+                        harness.notifications.push({ method: 'rawResponseItem/completed', params: started });
+                        this.notificationHandler?.('rawResponseItem/completed', started);
+
+                        const completed = {
+                            threadId,
+                            turnId,
+                            item: {
+                                type: 'function_call_output',
+                                call_id: call.callId,
+                                output: JSON.stringify(call.output)
+                            }
+                        };
+                        harness.notifications.push({ method: 'rawResponseItem/completed', params: completed });
+                        this.notificationHandler?.('rawResponseItem/completed', completed);
+                    }
                 }
 
                 if (harness.emitParentSpawnFailureWithoutAgentId || harness.emitParentSpawnStartWithoutEnd) {
@@ -988,10 +1058,16 @@ function createMode(): EnhancedMode {
     };
 }
 
-function createSessionStub(messages = ['hello from launcher test'], mode = createMode()) {
+function createSessionStub(
+    messages = ['hello from launcher test'],
+    mode = createMode(),
+    isolateMessages = false
+) {
     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
     messages.forEach((message, index) => {
-        if (index === 0 && messages.length > 1) {
+        if (isolateMessages) {
+            queue.pushIsolated(message, mode);
+        } else if (index === 0 && messages.length > 1) {
             queue.pushIsolateAndClear(message, mode);
         } else {
             queue.push(message, mode);
@@ -1120,8 +1196,24 @@ describe('codexRemoteLauncher', () => {
         harness.listCollaborationModeCalls = 0;
         harness.collaborationModeResponse = { data: [{ mode: 'default' }, { mode: 'plan' }] };
         harness.failListCollaborationModes = false;
+        harness.listSkillsCalls = [];
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'hapi',
+                    description: 'Manage HAPI',
+                    path: '/home/user/.agents/skills/hapi/SKILL.md',
+                    scope: 'user',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
         harness.startThreadIds = [];
+        harness.startThreadParams = [];
         harness.resumeThreadIds = [];
+        harness.resumeThreadParams = [];
         harness.startTurnThreadIds = [];
         harness.startTurnParams = [];
         harness.startTurnErrors = [];
@@ -1146,6 +1238,7 @@ describe('codexRemoteLauncher', () => {
         harness.remainingThreadSystemErrors = 0;
         harness.nextThreadSystemErrorMessage = null;
         harness.failNextCompact = false;
+        harness.deferCompactCompletion = false;
         harness.deferThreadStatusNotifications = false;
         harness.emitStaleTaskCompleteAfterRetry = false;
         harness.emitStaleTaskFailedAfterRetry = false;
@@ -1172,6 +1265,7 @@ describe('codexRemoteLauncher', () => {
         harness.emitSecondParentSpawnStartWithoutEnd = false;
         harness.emitParentSendInputFailure = false;
         harness.emitParentResumeSuccess = false;
+        harness.emitParentV2AgentTools = false;
         harness.emitRunningChildTurnBeforeSuppressedParent = false;
         harness.emitCompletedChildTurnBeforeSuppressedParent = false;
         harness.emitTurnAbortedOnInterrupt = false;
@@ -1192,6 +1286,8 @@ describe('codexRemoteLauncher', () => {
         expect(exitReason).toBe('exit');
         expect(foundSessionIds).toContain('thread-1');
         expect(getModel()).toBe('gpt-5.4');
+        expect(harness.startThreadParams).toHaveLength(1);
+        expect(harness.startThreadParams[0]?.threadSource).toBe('user');
         expect(harness.initializeCalls).toEqual([{
             clientInfo: {
                 name: 'hapi-codex-client',
@@ -1211,6 +1307,73 @@ describe('codexRemoteLauncher', () => {
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(thinkingChanges).toContain(true);
         expect(session.thinking).toBe(false);
+    });
+
+    it('uses the native skill catalog for completion and structured turn input', async () => {
+        const { session, rpcHandlers } = createSessionStub(['$hapi inspect']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.listSkillsCalls).toEqual([{
+            cwds: ['/tmp/hapi-update'],
+            forceReload: false
+        }]);
+        expect(Array.from(rpcHandlers.keys())).toContain('listSkills');
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'hapi', description: 'Manage HAPI' }]
+        });
+        expect(harness.startTurnParams[0]?.input).toEqual([
+            { type: 'skill', name: 'hapi', path: '/home/user/.agents/skills/hapi/SKILL.md' },
+            { type: 'text', text: ' inspect' }
+        ]);
+    });
+
+    it('keeps the filesystem skill handler when native discovery reports errors', async () => {
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [],
+                errors: ['failed to read skills']
+            }]
+        };
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(rpcHandlers.has('listSkills')).toBe(false);
+    });
+
+    it('reloads the native skill catalog after skills/changed', async () => {
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'new-skill',
+                    description: 'New skill',
+                    path: '/tmp/new-skill/SKILL.md',
+                    scope: 'repo',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
+
+        harness.dispatchNotification?.('skills/changed', {});
+        await vi.waitFor(() => {
+            expect(harness.listSkillsCalls.at(-1)).toEqual({
+                cwds: ['/tmp/hapi-update'],
+                forceReload: true
+            });
+        });
+
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'new-skill', description: 'New skill' }]
+        });
     });
 
     it('routes app-server MCP elicitation through the existing user-input transport', async () => {
@@ -1417,6 +1580,8 @@ describe('codexRemoteLauncher', () => {
 
         expect(exitReason).toBe('exit');
         expect(foundSessionIds).toEqual(['thread-1']);
+        expect(harness.startThreadParams).toHaveLength(1);
+        expect(harness.startThreadParams[0]?.threadSource).toBe('user');
         expect(harness.startTurnParams).toHaveLength(0);
         expect(harness.goalSetCalls).toEqual([{
             threadId: 'thread-1',
@@ -2110,12 +2275,14 @@ describe('codexRemoteLauncher', () => {
 
         expect(exitReason).toBe('exit');
         expect(harness.resumeThreadIds).toEqual(['thread-old']);
+        expect(harness.resumeThreadParams).toHaveLength(1);
+        expect(harness.resumeThreadParams[0]?.threadSource).toBeUndefined();
         expect(harness.startThreadIds).toEqual([]);
         expect(harness.startTurnThreadIds).toEqual([]);
         expect(session.sessionId).toBe('thread-old');
         expect(sessionEvents).toContainEqual({
             type: 'message',
-            message: 'Task failed: Codex conversation thread-old could not be resumed; no new conversation was created'
+            message: 'Task failed: Codex conversation thread-old could not be resumed; no new conversation was created. Reason: resume failed'
         });
         expect(session.thinking).toBe(false);
     });
@@ -2608,6 +2775,44 @@ describe('codexRemoteLauncher', () => {
         }));
     });
 
+    it('forwards shared MultiAgent V2 tools as direct tool cards', async () => {
+        harness.emitParentV2AgentTools = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call',
+            name: 'spawn_agent',
+            callId: 'v2-spawn',
+            input: { task_name: 'review', message: 'Review this' }
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call-result',
+            callId: 'v2-spawn',
+            output: '{"task_name":"/root/review","nickname":"Reviewer"}'
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call',
+            name: 'wait_agent',
+            callId: 'v2-wait',
+            input: { timeout_ms: 10_000 }
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call-result',
+            callId: 'v2-wait',
+            output: '{"message":"Wait timed out.","timed_out":true}'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-start',
+            cardId: 'v2-spawn'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:v2-spawn'
+        }));
+    });
+
     it('marks pending spawn_agent cards failed with the Codex router argument error from stderr', async () => {
         harness.emitParentSpawnStartWithoutEnd = true;
         harness.emitParentSpawnRouterStderrError = true;
@@ -2832,6 +3037,45 @@ describe('codexRemoteLauncher', () => {
             type: 'message',
             message: 'Compaction started'
         });
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Compaction completed'
+        });
+    });
+
+    it('does not start the next turn until manual compaction finishes', async () => {
+        harness.deferCompactCompletion = true;
+        const { session, sessionEvents } = createSessionStub([
+            'first message',
+            '/compact',
+            'after compact'
+        ], createMode(), true);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(harness.compactThreadIds).toEqual(['thread-1']);
+        });
+
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(sessionEvents).not.toContainEqual({
+            type: 'message',
+            message: 'Compaction completed'
+        });
+
+        harness.dispatchNotification?.('item/completed', {
+            threadId: 'thread-1',
+            turnId: 'compact-1',
+            item: { id: 'compact-item-1', type: 'contextCompaction' }
+        });
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turn: { id: 'compact-1', status: 'completed' }
+        });
+
+        const exitReason = await running;
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message', 'after compact']);
         expect(sessionEvents).toContainEqual({
             type: 'message',
             message: 'Compaction completed'

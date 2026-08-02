@@ -1,4 +1,4 @@
-import { access, readdir, readFile } from 'fs/promises';
+import { access, open, readdir, readFile, stat } from 'fs/promises';
 import { basename, dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { parse as parseYaml } from 'yaml';
@@ -7,6 +7,12 @@ export interface SkillSummary {
     name: string;
     description?: string;
 }
+
+export interface ResolvedSkill extends SkillSummary {
+    body: string;
+}
+
+export const MAX_SKILL_FILE_BYTES = 128 * 1024;
 
 export interface ListSkillsRequest {
     flavor?: string;
@@ -28,6 +34,10 @@ type InstalledPluginsFile = {
     plugins?: Record<string, InstalledPlugin[]>;
 };
 
+type DiscoveredSkill = ResolvedSkill & {
+    fileSize: number;
+};
+
 function getHomeDirectory(): string {
     return process.env.HOME ?? process.env.USERPROFILE ?? homedir();
 }
@@ -43,6 +53,8 @@ function getAgentConfigDir(flavor?: string): string {
             return process.env.CLAUDE_CONFIG_DIR || join(getHomeDirectory(), '.claude');
         case 'codex':
             return process.env.CODEX_HOME || join(getHomeDirectory(), '.codex');
+        case 'grok':
+            return process.env.GROK_HOME || join(getHomeDirectory(), '.grok');
         default:
             return join(getHomeDirectory(), `.${normalizedFlavor}`);
     }
@@ -56,6 +68,9 @@ function getUserSkillsRoots(flavor?: string): string[] {
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
         case 'codex':
+            roots.push(join(getAgentConfigDir(flavor), 'skills'));
+            break;
+        case 'grok':
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
     }
@@ -75,6 +90,9 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
         case 'codex':
             roots.push(join(directory, '.codex', 'skills'));
             break;
+        case 'grok':
+            roots.push(join(directory, '.grok', 'skills'));
+            break;
     }
     return roots;
 }
@@ -86,6 +104,10 @@ async function pathExists(path: string): Promise<boolean> {
     } catch {
         return false;
     }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+    return await stat(path).then((info) => info.isDirectory()).catch(() => false);
 }
 
 async function listProjectSkillsRoots(workingDirectory?: string, flavor?: string): Promise<string[]> {
@@ -145,27 +167,29 @@ function extractSkillSummary(skillDir: string, fileContent: string): SkillSummar
 
 async function listTopLevelSkillDirs(skillsRoot: string, options: { includeCodexSystem?: boolean } = {}): Promise<string[]> {
     try {
-        const entries = await readdir(skillsRoot, { withFileTypes: true });
+        const entries = await readdir(skillsRoot);
         const result: string[] = [];
 
         for (const entry of entries) {
-            if (!entry.isDirectory()) {
+            const entryPath = join(skillsRoot, entry);
+            if (!await isDirectory(entryPath)) {
                 continue;
             }
 
-            if (entry.name.startsWith('.')) {
-                if (options.includeCodexSystem && entry.name === '.system') {
-                    const systemEntries = await readdir(join(skillsRoot, entry.name), { withFileTypes: true }).catch(() => []);
+            if (entry.startsWith('.')) {
+                if (options.includeCodexSystem && entry === '.system') {
+                    const systemEntries = await readdir(entryPath).catch(() => []);
                     for (const systemEntry of systemEntries) {
-                        if (systemEntry.isDirectory() && !systemEntry.name.startsWith('.')) {
-                            result.push(join(skillsRoot, entry.name, systemEntry.name));
+                        const systemEntryPath = join(entryPath, systemEntry);
+                        if (!systemEntry.startsWith('.') && await isDirectory(systemEntryPath)) {
+                            result.push(systemEntryPath);
                         }
                     }
                 }
                 continue;
             }
 
-            result.push(join(skillsRoot, entry.name));
+            result.push(entryPath);
         }
 
         return result;
@@ -174,18 +198,51 @@ async function listTopLevelSkillDirs(skillsRoot: string, options: { includeCodex
     }
 }
 
-async function readSkillsFromDirs(skillDirs: string[]): Promise<SkillSummary[]> {
-    const skills = await Promise.all(skillDirs.map(async (dir): Promise<SkillSummary | null> => {
-        const filePath = join(dir, 'SKILL.md');
+async function readSkillFile(filePath: string): Promise<{ content: string; fileSize: number } | null> {
+    try {
+        const file = await open(filePath, 'r');
         try {
-            const fileContent = await readFile(filePath, 'utf-8');
-            return extractSkillSummary(dir, fileContent);
-        } catch {
+            const info = await file.stat();
+            if (!info.isFile()) {
+                return null;
+            }
+
+            const bytesToRead = Math.min(info.size, MAX_SKILL_FILE_BYTES + 1);
+            const buffer = Buffer.alloc(bytesToRead);
+            const { bytesRead } = await file.read(buffer, 0, bytesToRead, 0);
+            return {
+                content: buffer.subarray(0, bytesRead).toString('utf-8'),
+                fileSize: info.size
+            };
+        } finally {
+            await file.close();
+        }
+    } catch {
+        return null;
+    }
+}
+
+async function readSkillsFromDirs(skillDirs: string[]): Promise<DiscoveredSkill[]> {
+    const skills = await Promise.all(skillDirs.map(async (dir): Promise<DiscoveredSkill | null> => {
+        const filePath = join(dir, 'SKILL.md');
+        const skillFile = await readSkillFile(filePath);
+        if (!skillFile) {
             return null;
         }
+
+        const summary = extractSkillSummary(dir, skillFile.content);
+        if (!summary) {
+            return null;
+        }
+
+        return {
+            ...summary,
+            body: parseFrontmatter(skillFile.content).body,
+            fileSize: skillFile.fileSize
+        };
     }));
 
-    return skills.filter((skill): skill is SkillSummary => skill !== null);
+    return skills.filter((skill): skill is DiscoveredSkill => skill !== null);
 }
 
 function shouldIncludeCodexSystem(root: string, flavor: string): boolean {
@@ -222,7 +279,7 @@ async function listPluginCacheSkillsRoots(flavor?: string): Promise<string[]> {
         .map((installPath) => join(installPath, 'skills'));
 }
 
-export async function listSkills(workingDirectory?: string, options: { flavor?: string } = {}): Promise<SkillSummary[]> {
+async function discoverSkills(workingDirectory?: string, options: { flavor?: string } = {}): Promise<DiscoveredSkill[]> {
     const flavor = normalizeFlavor(options.flavor);
     const projectRoots = await listProjectSkillsRoots(workingDirectory, flavor);
     const userRoots = getUserSkillsRoots(flavor);
@@ -243,7 +300,7 @@ export async function listSkills(workingDirectory?: string, options: { flavor?: 
         readSkillsFromDirs(adminSkillDirs),
     ]);
 
-    const dedupedSkills = new Map<string, SkillSummary>();
+    const dedupedSkills = new Map<string, DiscoveredSkill>();
     for (const skill of [
         ...projectSkills,
         ...userSkills,
@@ -256,4 +313,46 @@ export async function listSkills(workingDirectory?: string, options: { flavor?: 
     }
 
     return [...dedupedSkills.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function listSkills(workingDirectory?: string, options: { flavor?: string } = {}): Promise<SkillSummary[]> {
+    const skills = await discoverSkills(workingDirectory, options);
+    return skills.map(({ name, description }) => ({ name, description }));
+}
+
+function validateSkillName(name: string): string {
+    const trimmed = name.trim();
+    if (
+        !trimmed
+        || trimmed.length > 128
+        || trimmed === '.'
+        || trimmed === '..'
+        || trimmed.includes('/')
+        || trimmed.includes('\\')
+        || trimmed.includes('\0')
+    ) {
+        throw new Error('Invalid skill name');
+    }
+    return trimmed;
+}
+
+export async function resolveSkill(
+    name: string,
+    workingDirectory?: string,
+    options: { flavor?: string } = {}
+): Promise<ResolvedSkill | null> {
+    const skillName = validateSkillName(name);
+    const skills = await discoverSkills(workingDirectory, options);
+    const skill = skills.find((candidate) => candidate.name === skillName);
+    if (!skill) {
+        return null;
+    }
+    if (skill.fileSize > MAX_SKILL_FILE_BYTES) {
+        throw new Error(`Skill is too large to load (maximum ${MAX_SKILL_FILE_BYTES} bytes)`);
+    }
+    return {
+        name: skill.name,
+        description: skill.description,
+        body: skill.body
+    };
 }

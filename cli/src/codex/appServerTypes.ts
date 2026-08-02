@@ -62,6 +62,29 @@ export interface ModelListResponse {
     [key: string]: unknown;
 }
 
+export interface SkillsListParams {
+    cwds: string[];
+    forceReload?: boolean;
+}
+
+export interface SkillMetadata {
+    name: string;
+    description: string;
+    path: string;
+    scope: string;
+    enabled: boolean;
+    [key: string]: unknown;
+}
+
+export interface SkillsListResponse {
+    data?: Array<{
+        cwd: string;
+        skills: SkillMetadata[];
+        errors?: unknown[];
+    }>;
+    [key: string]: unknown;
+}
+
 export interface CollaborationModeListItem {
     name?: string;
     mode?: 'plan' | 'default' | string | null;
@@ -93,6 +116,8 @@ export interface ThreadStartParams {
     baseInstructions?: string;
     developerInstructions?: string;
     personality?: string;
+    /** Client-supplied analytics classification persisted with the thread. */
+    threadSource?: string;
     ephemeral?: boolean;
     experimentalRawEvents?: boolean;
 }
@@ -125,8 +150,21 @@ export interface ThreadResumeParams {
 export interface ThreadResumeResponse {
     thread: {
         id: string;
+        turns?: Array<{ items?: ResponseItem[] }>;
     };
     model: string;
+    [key: string]: unknown;
+}
+
+export interface ThreadForkParams extends Omit<ThreadResumeParams, 'history' | 'path'> {
+}
+
+export interface ThreadForkResponse {
+    thread: {
+        id: string;
+        turns?: Array<{ items?: ResponseItem[] }>;
+    };
+    model?: string;
     [key: string]: unknown;
 }
 
@@ -149,6 +187,11 @@ export type UserInput =
     }
     | {
         type: 'skill';
+        name: string;
+        path: string;
+    }
+    | {
+        type: 'mention';
         name: string;
         path: string;
     };

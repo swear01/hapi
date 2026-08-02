@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useNavigate } from '@tanstack/react-router'
-import { AssistantRuntimeProvider, useAssistantApi, useAssistantState } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
 import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
 import type { ApiClient } from '@/api/client'
 import type {
@@ -19,22 +20,38 @@ import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
 import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
-import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
+import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
+import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import {
     getCodexModelReasoningEfforts,
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
-import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
+import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
-import { useScratchlist } from '@/lib/use-scratchlist'
+import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
+import { useSessions } from '@/hooks/queries/useSessions'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { formatSessionMentionTooltip } from '@/lib/sessionReference'
+import { classifySessionAttention, getSessionAttentionLabelKey } from '@/lib/sessionAttention'
+import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
+import { formatRelativeTime } from '@/lib/relativeTime'
+import { ScratchlistMigrationBanner } from '@/components/AssistantChat/ScratchlistMigrationBanner'
 import { useHappyRuntime } from '@/lib/assistant-runtime'
+import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
+import { createScratchlistAttachmentAdapter } from '@/lib/scratchlistAttachmentAdapter'
+import {
+    rehydrateScratchlistAttachmentsToComposer,
+    stageScratchlistAttachmentsForComposeSend
+} from '@/lib/scratchlistAttachmentFlow'
+import type { ScratchlistEntry } from '@/lib/scratchlist'
+import { isHubScratchlistAttachmentPath } from '@hapi/protocol'
 import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
 import { getDraft } from '@/lib/composer-drafts'
@@ -62,6 +79,8 @@ import {
 } from '@/lib/sessionChatCursorModel'
 import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
+import { useGrokModels } from '@/hooks/queries/useGrokModels'
+import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
 import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeReasoningEffortOptions'
 import { useVoiceOptional } from '@/lib/voice-context'
@@ -69,6 +88,21 @@ import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voi
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
 
 type SessionModelSelection = { provider: string; modelId: string } | string | null
+
+export function resolvePiContextWindow(
+    models: PiModelSummary[] | undefined,
+    selectedModel: { provider: string; modelId: string } | null | undefined,
+    legacyModelId: string
+): number | undefined {
+    const model = selectedModel
+        ? models?.find((candidate) => (
+            candidate.provider === selectedModel.provider
+            && candidate.modelId === selectedModel.modelId
+        ))
+        : models?.find((candidate) => candidate.modelId === legacyModelId)
+
+    return model?.contextWindow
+}
 
 export async function applyModelChangeWithReasoningRollback(args: {
     model: SessionModelSelection
@@ -164,15 +198,8 @@ export function isScratchlistHotkeyBlockedTarget(target: EventTarget | null): bo
 
 /**
  * Decide whether a submit should be routed to the per-session scratchlist
- * or to the regular chat send. Scratchlist entries are pure text - they
- * don't carry attachments or schedules - so any submit that includes
- * either of those MUST fall through to the normal chat path even if the
- * scratchlist toggle is on. Otherwise the wrapper would silently drop
- * attachments / scheduled-send metadata while telling the composer the
- * submission succeeded (which then clears the composer state, losing
- * the user's data).
- *
- * Per upstream review on PR #798 (github-actions[bot] [Major]).
+ * or to the regular chat send. Scratchlist entries support text and hub-
+ * stored attachments; scheduled sends still fall through to chat.
  *
  * Pure / exported so it can be unit tested without mounting SessionChat.
  */
@@ -182,9 +209,11 @@ export function shouldRouteToScratchlist(
     scheduledAt: number | null | undefined,
 ): boolean {
     if (!scratchlistMode) return false
-    if (attachments && attachments.length > 0) return false
     if (scheduledAt != null) return false
-    return true
+    // Only park when every attachment is already hub-resident. Composer
+    // uploads made before scratchlist mode was enabled still have normal
+    // CLI paths; the hub rejects those as scratchlist metadata.
+    return (attachments ?? []).every((att) => isHubScratchlistAttachmentPath(att.path))
 }
 
 function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
@@ -214,8 +243,8 @@ function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
  *    refresh of /sessions/:id doesn't re-attach the same payload.
  */
 function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
-    const assistantApi = useAssistantApi()
-    const composerText = useAssistantState(({ composer }) => composer.text)
+    const assistantApi = useAui()
+    const composerText = useAuiState((s) => s.composer.text)
     const composerTextRef = useRef(composerText)
     const initRef = useRef(false)
     const transferIdRef = useRef<string | null>(null)
@@ -295,37 +324,51 @@ function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean })
  * composer-toolbar counter and the drawer share one source of truth.
  */
 export function ScratchlistDrawerHost(props: {
-    entries: ReturnType<typeof useScratchlist>['entries']
-    onMove: ReturnType<typeof useScratchlist>['move']
-    onDelete: ReturnType<typeof useScratchlist>['remove']
+    sessionId: string
+    api: ApiClient
+    entries: ReturnType<typeof useHubScratchlist>['entries']
+    onMove: ReturnType<typeof useHubScratchlist>['move']
+    onDelete: ReturnType<typeof useHubScratchlist>['remove']
     onSend: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => Promise<boolean>
-    /**
-     * Called when the operator promotes an entry to the composer.
-     *
-     * Promoting means "I want to send this for real now" - so the host
-     * MUST exit scratchlist mode, otherwise the next composer submit
-     * routes back to scratchlist (per the v1.1 modal-mode contract) and
-     * the user re-adds the same text instead of sending it to chat.
-     * Per upstream review on PR #798 (HAPI Bot, v6 follow-up).
-     */
     onExitScratchlistMode: () => void
 }) {
-    const assistantApi = useAssistantApi()
-    const handlePromoteToComposer = useCallback((text: string) => {
-        assistantApi.composer().setText(text)
-        props.onExitScratchlistMode()
-    }, [assistantApi, props.onExitScratchlistMode])
-    const handlePromoteToQueue = useCallback(async (text: string) => {
-        // Promote-to-queue bypasses the scratchlist-mode wrapper by
-        // calling props.onSend directly (the chat send), so the queue
-        // entry lands in the conversation regardless of scratchlist
-        // mode. Mode itself stays on - the operator may still be
-        // capturing related notes.
-        return await props.onSend(text)
-    }, [props.onSend])
+    const assistantApi = useAui()
+    const handlePromoteToComposer = useCallback(async (entry: ScratchlistEntry) => {
+        assistantApi.composer().setText(entry.text)
+        // Exit scratchlist mode before rehydrating attachments so addAttachment
+        // uses the normal chat upload adapter (not the scratchlist hub adapter).
+        flushSync(() => {
+            props.onExitScratchlistMode()
+        })
+        if (entry.attachments && entry.attachments.length > 0) {
+            await rehydrateScratchlistAttachmentsToComposer(
+                props.api,
+                props.sessionId,
+                entry.attachments,
+                assistantApi.composer()
+            )
+        }
+    }, [assistantApi, props.api, props.onExitScratchlistMode, props.sessionId])
+    const handlePromoteToQueue = useCallback(async (entry: ScratchlistEntry) => {
+        let attachments: AttachmentMetadata[] | undefined
+        if (entry.attachments && entry.attachments.length > 0) {
+            attachments = await stageScratchlistAttachmentsForComposeSend(
+                props.api,
+                props.sessionId,
+                entry.attachments
+            )
+        }
+        const accepted = await props.onSend(entry.text, attachments)
+        if (accepted) {
+            props.onExitScratchlistMode()
+        }
+        return accepted
+    }, [props.api, props.onSend, props.onExitScratchlistMode, props.sessionId])
     return (
         <ScratchlistDrawer
             entries={props.entries}
+            sessionId={props.sessionId}
+            api={props.api}
             onMove={props.onMove}
             onDelete={props.onDelete}
             onPromoteToComposer={handlePromoteToComposer}
@@ -335,27 +378,9 @@ export function ScratchlistDrawerHost(props: {
 }
 
 export function buildGoalStateMessages(
-    messages: DecryptedMessage[],
-    pendingMessages: DecryptedMessage[] = []
+    messages: DecryptedMessage[]
 ): DecryptedMessage[] {
-    const eligibleMessages = messages.filter((message) => !isUninvokedScheduledMessage(message))
-    const eligiblePendingMessages = pendingMessages.filter((message) => !isUninvokedScheduledMessage(message))
-    return eligiblePendingMessages.length > 0
-        ? mergeMessages(eligibleMessages, eligiblePendingMessages)
-        : eligibleMessages
-}
-
-function getOutlineTitle(session: Session): string {
-    if (session.metadata?.name) {
-        return session.metadata.name
-    }
-    if (session.metadata?.summary?.text) {
-        return session.metadata.summary.text
-    }
-    if (session.metadata?.path) {
-        return session.metadata.path
-    }
-    return session.id.slice(0, 8)
+    return messages.filter((message) => !isUninvokedScheduledMessage(message))
 }
 
 function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
@@ -378,25 +403,27 @@ function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
 type SessionChatProps = {
     api: ApiClient
     session: Session
+    cursorChatOnDisk?: boolean
+    reopenDisabledReason?: string
     messages: DecryptedMessage[]
-    pendingMessages?: DecryptedMessage[]
     messagesWarning: string | null
     hasMoreMessages: boolean
-    isLoadingMessages: boolean
+    isSyncingTail: boolean
     isLoadingMoreMessages: boolean
     isSending: boolean
-    pendingCount: number
+    viewMode: 'tail' | 'history'
     messagesVersion: number
+    historyVersion: number
     onBack: () => void
     onRefresh: () => void
-    onLoadMore: () => Promise<unknown>
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    onCancelLoadMore: () => void
     // Resolves true when the send was accepted by the underlying mutation, false when
     // pre-mutation guards (no-api / no-session / pending) rejected the call OR async
     // inactive-session resume failed. Composer state that should only be cleared on
     // actual send (pendingSchedule) must await this — see handleSend below.
     onSend: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => Promise<boolean>
-    onFlushPending: () => void
-    onAtBottomChange: (atBottom: boolean) => void
+    onViewModeChange: (mode: 'tail' | 'history') => void
     onRetryMessage?: (localId: string) => void
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>
     availableSlashCommands?: readonly SlashCommand[]
@@ -435,7 +462,11 @@ function SessionChatInner(props: SessionChatProps) {
     const { t } = useTranslation()
     const navigate = useNavigate()
     const sessionInactive = !props.session.active
-    const inactiveCanResume = inactiveSessionCanResume(props.session, props.messages.length)
+    const inactiveCanResume = inactiveSessionCanResume(
+        props.session,
+        props.messages.length,
+        props.cursorChatOnDisk
+    )
     const terminalSupported = isRemoteTerminalSupported(props.session.metadata)
     const normalizedCacheRef = useRef<Map<string, { source: DecryptedMessage; normalized: NormalizedMessage | null }>>(new Map())
     const blocksByIdRef = useRef<Map<string, ChatBlock>>(new Map())
@@ -452,7 +483,42 @@ function SessionChatInner(props: SessionChatProps) {
 
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
-    const scratchlist = useScratchlist(props.session.id)
+    const scratchlist = useHubScratchlist(props.session.id, props.api)
+    const { sessions: allSessions } = useSessions(props.api)
+    const resolveSessionMentionTooltip = useCallback((id: string, title: string) => {
+        const hit = allSessions.find((s) => s.id === id) ?? null
+        if (!hit) {
+            return {
+                model: formatSessionMentionTooltip(null, title, id),
+                session: null,
+            }
+        }
+        const attention = classifySessionAttention(hit, {
+            selected: false,
+            lastSeenAt: getSessionLastSeenAt(hit.id),
+        })
+        const attentionLabel = attention
+            ? t(getSessionAttentionLabelKey(attention))
+            : null
+        return {
+            model: formatSessionMentionTooltip(
+                {
+                    id: hit.id,
+                    title: getSessionTitle(hit),
+                    active: hit.active,
+                    lifecycleState: hit.metadata?.lifecycleState ?? null,
+                    path: hit.metadata?.path ?? null,
+                    worktreePath: hit.metadata?.worktree?.worktreePath ?? null,
+                    relativeTime: formatRelativeTime(hit.updatedAt, t),
+                    thinking: hit.thinking,
+                    attentionLabel,
+                },
+                title,
+                id
+            ),
+            session: hit,
+        }
+    }, [allSessions, t])
     const [scratchlistMode, setScratchlistMode] = useState(false)
     // Mode resets across sessions implicitly: SessionChat is keyed by
     // session.id at the public-export boundary, so a session switch
@@ -496,14 +562,7 @@ function SessionChatInner(props: SessionChatProps) {
     }, [])
     /**
      * onSend wrapper: when scratchlist mode is on AND the submission is
-     * pure text (no attachments, no scheduledAt), the operator's submit
-     * is treated as "add to scratchlist" instead of "send to chat".
-     *
-     * If the submission carries attachments or a scheduledAt value,
-     * scratchlist can't represent it (entries are text-only), so we
-     * fall through to the normal chat send. Silently dropping
-     * attachments / schedule while reporting success to the composer
-     * caused PR #798 review's [Major] data-loss finding.
+     * not scheduled, route to scratchlist (text and/or hub attachments).
      *
      * The composer (HappyComposer) uses the boolean return value to
      * decide whether to clear text/attachments/schedule, so we resolve
@@ -519,20 +578,49 @@ function SessionChatInner(props: SessionChatProps) {
             scheduledAt?: number | null,
         ): Promise<boolean> => {
             if (shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)) {
-                return scratchlist.add(text)
+                return scratchlist.add(text, attachments)
+            }
+            // If the user uploaded while scratchlist mode was on, then toggled
+            // it off before send, pending items still carry hub paths. Stage
+            // those through the normal CLI upload dir before chat send.
+            const list = attachments ?? []
+            const hubItems = list.filter((att) => isHubScratchlistAttachmentPath(att.path))
+            if (hubItems.length > 0) {
+                const normalItems = list.filter((att) => !isHubScratchlistAttachmentPath(att.path))
+                const staged = await stageScratchlistAttachmentsForComposeSend(
+                    props.api,
+                    props.session.id,
+                    hubItems,
+                )
+                const accepted = await props.onSend(text, [...normalItems, ...staged], scheduledAt)
+                if (accepted) {
+                    // Hub blobs were copied into the normal upload dir; drop the
+                    // scratchlist copies so they stop counting against the session cap.
+                    await Promise.allSettled(
+                        hubItems.map((att) => props.api.deleteScratchlistAttachment(props.session.id, att.id))
+                    )
+                }
+                return accepted
             }
             return props.onSend(text, attachments, scheduledAt)
         },
-        [props.onSend, scratchlist, scratchlistMode],
+        [props.onSend, props.api, props.session.id, scratchlist, scratchlistMode],
     )
     const agentFlavor = props.session.metadata?.flavor ?? null
     const controlledByUser = props.session.agentState?.controlledByUser === true
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
     const codexModelsState = useCodexModels({
         api: props.api,
-        sessionId: props.session.id,
+        machineId: props.session.metadata?.machineId ?? null,
         enabled: agentFlavor === 'codex' && props.session.active && !controlledByUser
     })
+    const effectiveCodexServiceTier = agentFlavor === 'codex'
+        ? getEffectiveCodexServiceTier(
+            props.session.serviceTier,
+            props.session.model,
+            codexModelsState.models
+        )
+        : undefined
     const codexModelOptions = useMemo(() => {
         if (agentFlavor !== 'codex') {
             return undefined
@@ -577,6 +665,27 @@ function SessionChatInner(props: SessionChatProps) {
             label: opencodeModel.name ?? opencodeModel.modelId
         }))
     }, [agentFlavor, opencodeModelsState.availableModels])
+    const grokModelsState = useGrokModels({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
+    })
+    const grokEffortState = useGrokReasoningEffortOptions({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'grok' && props.session.active && !controlledByUser
+    })
+    const grokModelOptions = useMemo(() => (
+        agentFlavor === 'grok'
+            ? [
+                { value: null, label: 'Default' },
+                ...grokModelsState.availableModels.map((model) => ({
+                    value: model.modelId,
+                    label: model.name ?? model.modelId
+                }))
+            ]
+            : undefined
+    ), [agentFlavor, grokModelsState.availableModels])
     const cursorModelsState = useCursorModels({
         api: props.api,
         sessionId: props.session.id,
@@ -625,6 +734,11 @@ function SessionChatInner(props: SessionChatProps) {
     // Provider-qualified selected model — disambiguates when two providers
     // share a modelId (hub persists this alongside the legacy modelId string).
     const piSelectedModel = piMetadata?.piSelectedModel as { provider: string; modelId: string } | null | undefined
+    const piModels = agentFlavor === 'pi' ? (piModelsState.availableModels.length > 0 ? piModelsState.availableModels : piCachedModels) : undefined
+    const piContextWindow = useMemo(() => {
+        if (agentFlavor !== 'pi' || !props.session.model) return undefined
+        return resolvePiContextWindow(piModels, piSelectedModel, props.session.model)
+    }, [agentFlavor, piModels, piSelectedModel, props.session.model])
     const cursorCatalogReadinessArgs = useMemo(() => ({
         sessionLoading: cursorModelsState.isLoading,
         machineLoading: machineCursorModelsState.isLoading,
@@ -872,8 +986,8 @@ function SessionChatInner(props: SessionChatProps) {
     }, [visibleMessages])
 
     const goalStateSourceMessages = useMemo(
-        () => buildGoalStateMessages(props.messages, props.pendingMessages ?? []),
-        [props.messages, props.pendingMessages]
+        () => buildGoalStateMessages(props.messages),
+        [props.messages]
     )
 
     const normalizedGoalStateMessages: NormalizedMessage[] = useMemo(() => {
@@ -916,14 +1030,14 @@ function SessionChatInner(props: SessionChatProps) {
         visibleGroupsRef.current = visibleBlocks.filter(isToolGroupBlock)
     }, [visibleBlocks])
 
+    // "N new messages" counts rendered blocks, not raw messages: a subagent run
+    // is dozens of sidechain messages but a single Task card, and a tool_use +
+    // tool_result pair is one card.
+    const unseenCount = useUnseenBlockCount(props.viewMode, visibleBlocks)
+
     const outlineItems = useMemo(
         () => buildConversationOutline(reconciled.blocks),
         [reconciled.blocks]
-    )
-
-    const outlineTitle = useMemo(
-        () => getOutlineTitle(props.session),
-        [props.session]
     )
 
     // Permission mode change handler
@@ -1149,12 +1263,16 @@ function SessionChatInner(props: SessionChatProps) {
         if (!props.session.active) {
             return undefined
         }
-        return createAttachmentAdapter(props.api, props.session.id)
-    }, [props.api, props.session.id, props.session.active])
+        return scratchlistMode
+            ? createScratchlistAttachmentAdapter(props.api, props.session.id)
+            : createAttachmentAdapter(props.api, props.session.id)
+    }, [props.api, props.session.id, props.session.active, scratchlistMode])
 
     const runtime = useHappyRuntime({
         session: props.session,
         blocks: visibleBlocks,
+        messagesVersion: props.messagesVersion,
+        historyVersion: props.historyVersion,
         isSending: props.isSending,
         isRunning: props.session.thinking || hasRunningChildAgent,
         onSendMessage: handleSend,
@@ -1168,12 +1286,15 @@ function SessionChatInner(props: SessionChatProps) {
         <div className="flex h-full min-h-0 flex-col">
             <SessionHeader
                 session={props.session}
+                serviceTier={effectiveCodexServiceTier}
                 onBack={props.onBack}
                 onToggleFiles={props.session.metadata?.path ? handleToggleFiles : undefined}
                 filesActive={false}
                 onToggleOutline={handleToggleOutline}
                 outlineActive={outlineOpen}
                 api={props.api}
+                canReopen={inactiveCanResume}
+                reopenDisabledReason={props.reopenDisabledReason}
                 onSessionDeleted={props.onBack}
                 onSessionReopened={(newSessionId) => {
                     navigate({
@@ -1191,12 +1312,10 @@ function SessionChatInner(props: SessionChatProps) {
             )}
 
             {sessionInactive ? (
-                <div className="px-3 pt-3">
-                    <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-[var(--app-hint)]">
-                        {inactiveCanResume
-                            ? t('session.inactive.autoResume')
-                            : t('session.inactive.cannotResume')}
-                    </div>
+                <div className="mx-auto w-full max-w-content bg-[var(--app-subtle-bg)] p-3 text-sm text-[var(--app-hint)]">
+                    {inactiveCanResume
+                        ? t('session.inactive.autoResume')
+                        : t('session.inactive.cannotResume')}
                 </div>
             ) : null}
 
@@ -1211,67 +1330,85 @@ function SessionChatInner(props: SessionChatProps) {
                         // Without prefixes, React may reuse the wrong component's DOM/localStorage.
                         key={`thread-${props.session.id}`}
                         api={props.api}
+                        session={props.session}
                         sessionId={props.session.id}
                         metadata={props.session.metadata}
                         disabled={sessionInactive}
                         onRefresh={props.onRefresh}
                         onRetryMessage={props.onRetryMessage}
-                        onFlushPending={props.onFlushPending}
-                        onAtBottomChange={props.onAtBottomChange}
-                        isLoadingMessages={props.isLoadingMessages}
+                        onViewModeChange={props.onViewModeChange}
+                        isSyncingTail={props.isSyncingTail}
                         messagesWarning={props.messagesWarning}
                         hasMoreMessages={props.hasMoreMessages}
                         isLoadingMoreMessages={props.isLoadingMoreMessages}
                         onLoadMore={props.onLoadMore}
-                        pendingCount={props.pendingCount}
+                        onCancelLoadMore={props.onCancelLoadMore}
+                        unseenCount={unseenCount}
                         rawMessagesCount={visibleMessages.length}
                         normalizedMessagesCount={normalizedMessages.length}
                         messagesVersion={props.messagesVersion}
+                        historyVersion={props.historyVersion}
                         forceScrollToken={forceScrollToken}
                         outlineOpen={outlineOpen}
-                        outlineTitle={outlineTitle}
                         outlineItems={outlineItems}
                         onOutlineOpenChange={setOutlineOpen}
                     />
 
-                    {codexCollaborationModeSupported && codexModelsState.error ? (
-                        <div className="px-3 pb-2">
-                            <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
-                                {t('session.codexModelsLoadFailed')}: {codexModelsState.error}
+                    <div className={outlineOpen ? 'max-sm:hidden' : undefined}>
+                        {codexCollaborationModeSupported && codexModelsState.error ? (
+                            <div className="px-3 pb-2">
+                                <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
+                                    {t('session.codexModelsLoadFailed')}: {codexModelsState.error}
+                                </div>
                             </div>
-                        </div>
-                    ) : null}
-
-                    <div className="px-3">
-                        {/*
-                         * Scratchlist drawer - composer-controlled. Only
-                         * mounted when the operator clicks the notepad icon
-                         * in the composer toolbar. State lives in the
-                         * useScratchlist hook above (so the toolbar counter
-                         * and the drawer share one source of truth).
-                         */}
-                        {scratchlistMode ? (
-                            <ScratchlistDrawerHost
-                                entries={scratchlist.entries}
-                                onMove={scratchlist.move}
-                                onDelete={scratchlist.remove}
-                                onSend={props.onSend}
-                                onExitScratchlistMode={() => setScratchlistMode(false)}
-                            />
                         ) : null}
-                        <QueuedMessagesBar
-                            sessionId={props.session.id}
-                            api={props.api}
-                            onEdit={({ pendingSchedule: restored }) => {
-                                // Restore the schedule so the clock button re-activates
-                                setPendingSchedule(restored)
-                            }}
-                        />
-                    </div>
 
-                    <HappyComposer
+                        {/*
+                         * tiann/hapi#893: one-time banner shown on first
+                         * v2-load when localStorage entries got migrated to
+                         * the hub. Sits above the drawer so the operator
+                         * sees it whether or not the drawer is open.
+                         * Auto-renders nothing unless `migrationStatus ===
+                         * 'completed'`.
+                         */}
+                        <ScratchlistMigrationBanner
+                            migrationStatus={scratchlist.migrationStatus}
+                            onDismiss={scratchlist.dismissMigrationBanner}
+                        />
+
+                        <div className="px-3">
+                            {/*
+                             * Scratchlist drawer - composer-controlled. Only
+                             * mounted when the operator clicks the notepad icon
+                             * in the composer toolbar. State lives in the
+                             * useScratchlist hook above (so the toolbar counter
+                             * and the drawer share one source of truth).
+                             */}
+                            {scratchlistMode ? (
+                                <ScratchlistDrawerHost
+                                    sessionId={props.session.id}
+                                    api={props.api}
+                                    entries={scratchlist.entries}
+                                    onMove={scratchlist.move}
+                                    onDelete={scratchlist.remove}
+                                    onSend={props.onSend}
+                                    onExitScratchlistMode={() => setScratchlistMode(false)}
+                                />
+                            ) : null}
+                            <QueuedMessagesBar
+                                sessionId={props.session.id}
+                                api={props.api}
+                                onEdit={({ pendingSchedule: restored }) => {
+                                    // Restore the schedule so the clock button re-activates
+                                    setPendingSchedule(restored)
+                                }}
+                            />
+                        </div>
+
+                        <HappyComposer
                         key={`composer-${props.session.id}`}
                         sessionId={props.session.id}
+                        resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                         disabled={props.isSending}
                         pendingSchedule={pendingSchedule}
                         onSchedule={setPendingSchedule}
@@ -1296,6 +1433,8 @@ function SessionChatInner(props: SessionChatProps) {
                                     )
                                     : agentFlavor === 'opencode'
                                         ? opencodeModelOptions
+                                        : agentFlavor === 'grok'
+                                            ? grokModelOptions
                                         // Pi uses its own provider-qualified picker (piModels prop).
                                         // Feeding piModelOptions here would make the generic Ctrl/Cmd+M
                                         // cycler (getNextModelForFlavor) post a bare modelId string,
@@ -1304,7 +1443,7 @@ function SessionChatInner(props: SessionChatProps) {
                                         // so Pi model changes go through the dedicated picker only.
                                         : undefined
                         }
-                        piModels={agentFlavor === 'pi' ? (piModelsState.availableModels.length > 0 ? piModelsState.availableModels : piCachedModels) : undefined}
+                        piModels={piModels}
                         piSelectedModel={agentFlavor === 'pi' ? piSelectedModel : undefined}
                         availableModelReasoningEffortOptions={
                             agentFlavor === 'codex'
@@ -1313,6 +1452,11 @@ function SessionChatInner(props: SessionChatProps) {
                                     ? opencodeReasoningEffortState.options
                                     : undefined
                         }
+                        availableEffortOptions={
+                            agentFlavor === 'grok' && grokEffortState.options.length > 0
+                                ? grokEffortState.options
+                                : undefined
+                        }
                         active={props.session.active}
                         allowSendWhenInactive
                         thinking={props.session.thinking}
@@ -1320,7 +1464,8 @@ function SessionChatInner(props: SessionChatProps) {
                         backgroundTaskCount={props.session.backgroundTaskCount}
                         contextSize={reduced.latestUsage?.contextSize}
                         contextCacheRead={reduced.latestUsage?.cacheRead}
-                        contextWindow={reduced.latestUsage?.contextWindow}
+                        contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
+                        contextModel={reduced.latestUsage?.model ?? props.session.model}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser
@@ -1361,6 +1506,10 @@ function SessionChatInner(props: SessionChatProps) {
                                         : undefined)
                                     : agentFlavor === 'pi'
                                         ? (props.session.active && !piModelsState.error ? handleModelChange : undefined)
+                                        : agentFlavor === 'grok'
+                                            ? (props.session.active && !controlledByUser && !grokModelsState.error
+                                                ? handleModelChange
+                                                : undefined)
                                         : handleModelChange
                         }
                         onModelEffortChange={
@@ -1380,8 +1529,14 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? handleModelReasoningEffortChange
                                 : undefined
                         }
-                        onEffortChange={handleEffortChange}
-                        serviceTier={agentFlavor === 'codex' ? props.session.serviceTier : undefined}
+                        onEffortChange={
+                            agentFlavor === 'grok'
+                                ? (props.session.active && !controlledByUser && grokEffortState.options.length > 0
+                                    ? handleEffortChange
+                                    : undefined)
+                                : handleEffortChange
+                        }
+                        serviceTier={effectiveCodexServiceTier}
                         onServiceTierChange={
                             agentFlavor === 'codex'
                                 && props.session.active
@@ -1404,7 +1559,8 @@ function SessionChatInner(props: SessionChatProps) {
                         onScratchlistToggle={handleScratchlistToggle}
                         sendError={props.sendError ?? null}
                         onClearSendError={props.onClearSendError}
-                    />
+                        />
+                    </div>
                 </DragDropZone>
             </AssistantRuntimeProvider>
 

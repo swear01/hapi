@@ -5,26 +5,31 @@ import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
+import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { CopyIcon, CheckIcon, ScheduleIcon } from '@/components/icons'
+import { CopyIcon, CheckIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
-import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
 import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
 import { classifySessionAttention } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
-import { getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
-import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS, useSessionRowTooltipIds } from '@/components/HoverTooltip'
-import { formatRelativeTime } from '@/lib/relativeTime'
-import { formatScheduledTooltipDetail } from '@/lib/scheduledTime'
-import { getCodexImportedAt, subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
+import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
+import { subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
 import { formatReopenError } from '@/lib/reopenError'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 import type { Machine } from '@/types/api'
 import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
-import { MachineGroupHeader } from '@/components/MachineGroupHeader'
+import { MachineFilterBar, MachineFilterMenu } from '@/components/MachineFilterBar'
+import { useSessionListMachineFilter } from '@/hooks/useSessionListMachineFilter'
+import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
+import { SessionRowSummary } from '@/components/SessionRowSummary'
+import { Spinner } from '@/components/Spinner'
+
+export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 
 type SessionGroup = {
     key: string
@@ -34,6 +39,37 @@ type SessionGroup = {
     sessions: SessionSummary[]
     latestUpdatedAt: number
     hasActiveSession: boolean
+}
+
+export type SessionTimeRange = {
+    start: number | null
+    end: number | null
+}
+
+function parseLocalDate(value: string): Date | null {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+    if (!match) return null
+    const year = Number(match[1])
+    const month = Number(match[2])
+    const day = Number(match[3])
+    const date = new Date(year, month - 1, day)
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null
+    return date
+}
+
+export function getSessionTimeRange(start: string, end: string): SessionTimeRange | null {
+    const startDate = parseLocalDate(start)
+    const endDate = parseLocalDate(end)
+    if (!startDate || !endDate) return null
+    if (endDate) endDate.setDate(endDate.getDate() + 1)
+    return { start: startDate.getTime(), end: endDate.getTime() }
+}
+
+export function sessionMatchesTimeRange(session: SessionSummary, range: SessionTimeRange | null): boolean {
+    if (!range) return true
+    if (range.start !== null && session.updatedAt < range.start) return false
+    if (range.end !== null && session.updatedAt >= range.end) return false
+    return true
 }
 
 function SessionsEmptyState(props: {
@@ -184,11 +220,15 @@ export function filterActiveSessionsOnly(sessions: SessionSummary[], selectedSes
     return sessions.filter(session => session.active || session.id === selectedSessionId)
 }
 
-// Paginated "Show N more": reveal one batch (step) at a time instead of expanding
-// every hidden session at once. Always advances by at least one and never exceeds
-// the total so the button reliably reaches a fully-expanded state.
+// Paginated session previews move one batch at a time in either direction.
+// Counts always stay within the configured preview floor and the group total.
 export function getNextSessionVisibleCount(current: number, step: number, total: number): number {
     return Math.min(current + Math.max(1, step), total)
+}
+
+export function getPreviousSessionVisibleCount(current: number, step: number): number {
+    const normalizedStep = Math.max(1, step)
+    return Math.max(normalizedStep, current - normalizedStep)
 }
 
 function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
@@ -244,24 +284,17 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
 
 export function expandSelectedSessionCollapseOverrides(
     overrides: Map<string, boolean>,
-    group: { key: string; machineId: string | null }
+    group: { key: string }
 ): Map<string, boolean> {
+    // Keep auto-expanded paths open after selection moves so content above the
+    // clicked row does not collapse and displace the sidebar viewport.
+    if (overrides.get(group.key) === false) {
+        return overrides
+    }
+
     const next = new Map(overrides)
-    let changed = false
-
-    // Expand project group if collapsed. Project and machine keys use true = collapsed.
-    if (overrides.has(group.key) && overrides.get(group.key)) {
-        next.delete(group.key)
-        changed = true
-    }
-
-    const machineKey = `machine::${group.machineId ?? UNKNOWN_MACHINE_ID}`
-    if (overrides.has(machineKey) && overrides.get(machineKey)) {
-        next.delete(machineKey)
-        changed = true
-    }
-
-    return changed ? next : overrides
+    next.set(group.key, false)
+    return next
 }
 
 function groupByMachine(
@@ -384,42 +417,6 @@ function PlusIcon(props: { className?: string }) {
     )
 }
 
-function LoaderIcon(props: { className?: string }) {
-    return (
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
-            <line x1="12" y1="2" x2="12" y2="6" />
-            <line x1="12" y1="18" x2="12" y2="22" />
-            <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
-            <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
-            <line x1="2" y1="12" x2="6" y2="12" />
-            <line x1="18" y1="12" x2="22" y2="12" />
-            <line x1="4.93" y1="19.07" x2="7.76" y2="16.24" />
-            <line x1="16.24" y1="7.76" x2="19.07" y2="4.93" />
-        </svg>
-    )
-}
-
-function BulbIcon(props: { className?: string }) {
-    return (
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={props.className}
-        >
-            <path d="M9 18h6" />
-            <path d="M10 22h4" />
-            <path d="M12 2a7 7 0 0 0-4 12c.6.6 1 1.2 1 2h6c0-.8.4-1.4 1-2a7 7 0 0 0-4-12Z" />
-        </svg>
-    )
-}
-
 function ChevronIcon(props: { className?: string; collapsed?: boolean }) {
     return (
         <svg
@@ -439,25 +436,29 @@ function ChevronIcon(props: { className?: string; collapsed?: boolean }) {
     )
 }
 
-export function getSessionTitle(session: SessionSummary): string {
-    if (session.metadata?.name) {
-        return session.metadata.name
-    }
-    if (session.metadata?.summary?.text) {
-        return session.metadata.summary.text
-    }
-    if (session.metadata?.path) {
-        const parts = session.metadata.path.split('/').filter(Boolean)
-        return parts.length > 0 ? parts[parts.length - 1] : session.id.slice(0, 8)
-    }
-    return session.id.slice(0, 8)
+function SessionPreviewArrowIcon(props: { direction: 'up' | 'down'; className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+            aria-hidden="true"
+        >
+            {props.direction === 'up' ? (
+                <path d="M12 19V5m-6 6 6-6 6 6" />
+            ) : (
+                <path d="M12 5v14m6-6-6 6-6-6" />
+            )}
+        </svg>
+    )
 }
 
-function getTodoProgress(session: SessionSummary): { completed: number; total: number } | null {
-    if (!session.todoProgress) return null
-    if (session.todoProgress.completed === session.todoProgress.total) return null
-    return session.todoProgress
-}
+export { getSessionTitle } from '@/lib/sessionTitle'
 
 export function normalizeSearch(value: string | null | undefined): string {
     return (value ?? '').trim().toLowerCase()
@@ -467,9 +468,11 @@ export function sessionMatchesQuery(session: SessionSummary, query: string, mach
     if (!query) return true
     const searchable = [
         getSessionTitle(session),
+        getWorktreeSessionLabel(session),
         session.id,
         session.metadata?.path,
         session.metadata?.worktree?.basePath,
+        session.metadata?.worktree?.worktreePath,
         session.metadata?.name,
         session.metadata?.summary?.text,
         session.metadata?.flavor,
@@ -514,63 +517,244 @@ export function getVisibleSessionPreview(
     return visible
 }
 
+function CalendarIcon(props: { className?: string }) {
+    return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}>
+            <rect x="3" y="5" width="18" height="16" rx="2" />
+            <path d="M16 3v4M8 3v4M3 10h18" />
+        </svg>
+    )
+}
+
+function formatDateValue(date: Date): string {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+}
+
+function SessionDateRangePicker(props: {
+    start: string
+    end: string
+    sessionActivityDates: ReadonlySet<string>
+    onChange: (start: string, end: string) => void
+    onClear: () => void
+    onClose: () => void
+}) {
+    const { t } = useTranslation()
+    const initialDate = parseLocalDate(props.start) ?? new Date()
+    const [visibleMonth, setVisibleMonth] = useState(() => new Date(initialDate.getFullYear(), initialDate.getMonth(), 1))
+    const today = formatDateValue(new Date())
+    const firstWeekday = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1).getDay()
+    const daysInMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 0).getDate()
+    const weekdays = Array.from({ length: 7 }, (_, day) => (
+        new Intl.DateTimeFormat(undefined, { weekday: 'narrow' }).format(new Date(2026, 5, 7 + day))
+    ))
+
+    const selectDate = (value: string) => {
+        if (!props.start || props.end) {
+            props.onChange(value, '')
+            return
+        }
+        props.onChange(value < props.start ? value : props.start, value < props.start ? props.start : value)
+        props.onClose()
+    }
+
+    return (
+        <div className="absolute right-0 top-full z-30 mt-2 w-72 rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-3 shadow-xl">
+            <div className="mb-2 flex items-center justify-between">
+                <button
+                    type="button"
+                    onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))}
+                    className="rounded-lg p-1.5 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                    aria-label={t('sessions.timeFilter.previousMonth')}
+                >
+                    <span aria-hidden="true">‹</span>
+                </button>
+                <div className="text-sm font-medium">
+                    {visibleMonth.toLocaleDateString(undefined, { year: 'numeric', month: 'long' })}
+                </div>
+                <button
+                    type="button"
+                    onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))}
+                    className="rounded-lg p-1.5 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                    aria-label={t('sessions.timeFilter.nextMonth')}
+                >
+                    <span aria-hidden="true">›</span>
+                </button>
+            </div>
+            <div className="mb-1 grid grid-cols-7 text-center text-[10px] text-[var(--app-hint)]">
+                {weekdays.map((weekday, index) => <div key={`${weekday}-${index}`} className="py-1">{weekday}</div>)}
+            </div>
+            <div className="grid grid-cols-7 gap-0.5">
+                {Array.from({ length: firstWeekday }, (_, index) => <div key={`blank-${index}`} />)}
+                {Array.from({ length: daysInMonth }, (_, index) => {
+                    const date = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), index + 1)
+                    const value = formatDateValue(date)
+                    const isToday = value === today
+                    const isEndpoint = value === props.start || value === props.end
+                    const isInRange = Boolean(props.start && props.end && value > props.start && value < props.end)
+                    const hasSessionActivity = props.sessionActivityDates.has(value)
+                    const dateLabel = date.toLocaleDateString()
+                    const activityLabel = hasSessionActivity
+                        ? t('sessions.timeFilter.dayWithActivity', { date: dateLabel })
+                        : dateLabel
+                    return (
+                        <button
+                            key={value}
+                            type="button"
+                            onClick={() => selectDate(value)}
+                            aria-label={activityLabel}
+                            aria-current={isToday ? 'date' : undefined}
+                            title={hasSessionActivity ? activityLabel : undefined}
+                            className={cn(
+                                'h-8 rounded-lg text-xs transition-colors',
+                                isEndpoint && 'bg-[var(--app-button)] text-[var(--app-button-text)]',
+                                isInRange && 'bg-[var(--app-link)]/15 text-[var(--app-link)]',
+                                !isEndpoint && !isInRange && isToday && 'bg-[var(--app-subtle-bg)]',
+                                !isEndpoint && !isInRange && hasSessionActivity && 'text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)]',
+                                !isEndpoint && !isInRange && !hasSessionActivity && 'text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)]'
+                            )}
+                        >
+                            {index + 1}
+                        </button>
+                    )
+                })}
+            </div>
+            <div className="mt-2 flex items-center justify-between border-t border-[var(--app-divider)] pt-2 text-xs">
+                <span className="text-[var(--app-hint)]">
+                    {!props.start
+                        ? t('sessions.timeFilter.pickStart')
+                        : !props.end
+                            ? t('sessions.timeFilter.pickEnd')
+                            : `${props.start} – ${props.end}`}
+                </span>
+                {props.start ? (
+                    <button type="button" onClick={props.onClear} className="text-[var(--app-link)]">
+                        {t('sessions.timeFilter.clear')}
+                    </button>
+                ) : null}
+            </div>
+        </div>
+    )
+}
+
 function SessionListSearch(props: {
     value: string
     onChange: (value: string) => void
+    customStart: string
+    customEnd: string
+    sessionActivityDates: ReadonlySet<string>
+    onDateRangeChange: (start: string, end: string) => void
+    expanded: boolean
+    onExpandedChange: (expanded: boolean) => void
 }) {
     const { t } = useTranslation()
+    const [datePickerOpen, setDatePickerOpen] = useState(false)
+    const inputRef = useRef<HTMLInputElement>(null)
+    const hasDateRange = Boolean(props.customStart && props.customEnd)
+    const hasActiveFilters = props.value.length > 0 || hasDateRange
+
+    useEffect(() => {
+        if (props.expanded) {
+            inputRef.current?.focus()
+        } else {
+            setDatePickerOpen(false)
+        }
+    }, [props.expanded])
+
+    if (!props.expanded) {
+        return (
+            <button
+                type="button"
+                onClick={() => props.onExpandedChange(true)}
+                className="relative shrink-0 rounded-full p-1.5 text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                title={t('sessions.search.open')}
+                aria-label={t('sessions.search.open')}
+            >
+                <SearchIcon className="h-5 w-5" />
+                {hasActiveFilters ? <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--app-link)]" /> : null}
+            </button>
+        )
+    }
+
     return (
-        <div className="relative px-3 pb-2">
-            <div className="pointer-events-none absolute inset-y-0 left-5 flex items-center pb-2 text-[var(--app-hint)]">
+        <div
+            className="relative min-w-0 flex-1"
+            onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                    props.onExpandedChange(false)
+                }
+            }}
+        >
+            <div className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-[var(--app-hint)]">
                 <SearchIcon className="h-3.5 w-3.5" />
             </div>
             <input
+                ref={inputRef}
                 type="search"
                 value={props.value}
                 onChange={(event) => props.onChange(event.target.value)}
                 placeholder={t('sessions.search.placeholder')}
-                className="w-full appearance-none rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] py-1.5 pl-8 pr-8 text-sm text-[var(--app-fg)] outline-none transition-colors placeholder:text-[var(--app-hint)] focus:border-[var(--app-link)] [&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden"
+                className="w-full appearance-none rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] py-1.5 pl-8 pr-16 text-sm text-[var(--app-fg)] outline-none transition-colors placeholder:text-[var(--app-hint)] focus:border-[var(--app-link)] [&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden"
             />
             {props.value ? (
                 <button
                     type="button"
-                    onClick={() => props.onChange('')}
-                    className="absolute inset-y-0 right-5 flex items-center pb-2 rounded p-0.5 text-[var(--app-hint)] hover:text-[var(--app-fg)]"
+                    onClick={() => {
+                        props.onChange('')
+                        // The clear button unmounts with the query; keep focus off <body>
+                        // so a later outside click still routes blur through the wrapper.
+                        inputRef.current?.focus()
+                    }}
+                    className="absolute inset-y-0 right-9 flex items-center rounded p-0.5 text-[var(--app-hint)] hover:text-[var(--app-fg)]"
                     title={t('sessions.search.clear')}
                 >
                     <XIcon className="h-3.5 w-3.5" />
                 </button>
             ) : null}
+            <div className="absolute inset-y-0 right-0 flex items-stretch">
+                <button
+                    type="button"
+                    onClick={() => setDatePickerOpen(open => !open)}
+                    className={cn(
+                        'relative flex items-center rounded-r-lg rounded-l-md px-2 transition-colors hover:bg-[var(--app-subtle-bg)]',
+                        hasDateRange ? 'text-[var(--app-link)]' : 'text-[var(--app-hint)]'
+                    )}
+                    title={hasDateRange ? `${props.customStart} – ${props.customEnd}` : t('sessions.timeFilter.label')}
+                    aria-label={t('sessions.timeFilter.label')}
+                    aria-expanded={datePickerOpen}
+                >
+                    <CalendarIcon className="h-5 w-5" />
+                    {hasDateRange ? <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--app-link)]" /> : null}
+                </button>
+                {datePickerOpen ? (
+                    <>
+                        <button type="button" aria-label={t('sessions.timeFilter.close')} className="fixed inset-0 z-20 cursor-default" onClick={() => {
+                            setDatePickerOpen(false)
+                            inputRef.current?.focus()
+                        }} />
+                        <SessionDateRangePicker
+                            start={props.customStart}
+                            end={props.customEnd}
+                            sessionActivityDates={props.sessionActivityDates}
+                            onChange={props.onDateRangeChange}
+                            onClear={() => {
+                                props.onDateRangeChange('', '')
+                                // The footer Clear button unmounts once the range is
+                                // empty; return focus so the wrapper blur still works.
+                                inputRef.current?.focus()
+                            }}
+                            onClose={() => {
+                                setDatePickerOpen(false)
+                                inputRef.current?.focus()
+                            }}
+                        />
+                    </>
+                ) : null}
+            </div>
         </div>
     )
-}
-
-function formatCodexImportedRelativeTime(value: number, t: (key: string, params?: Record<string, string | number>) => string): string | null {
-    const ms = value < 1_000_000_000_000 ? value * 1000 : value
-    if (!Number.isFinite(ms)) return null
-    const delta = Date.now() - ms
-    if (delta < 60_000) return t('session.time.importedFromCodex.justNow')
-    const minutes = Math.floor(delta / 60_000)
-    if (minutes < 60) return t('session.time.importedFromCodex.minutesAgo', { n: minutes })
-    const hours = Math.floor(minutes / 60)
-    if (hours < 24) return t('session.time.importedFromCodex.hoursAgo', { n: hours })
-    const days = Math.floor(hours / 24)
-    if (days < 7) return t('session.time.importedFromCodex.daysAgo', { n: days })
-    return new Date(ms).toLocaleDateString()
-}
-
-function getSessionTimeLabel(session: SessionSummary, t: (key: string, params?: Record<string, string | number>) => string): string | null {
-    const codexSessionId = session.metadata?.agentSessionId
-    const importedAt = session.metadata?.flavor === 'codex'
-        ? getCodexImportedAt(codexSessionId)
-        : null
-
-    // 中文注释：导入标记存在时优先显示“xx 前从 Codex 客户端导入”；等用户在 Hapi 里继续发消息后，再由发送逻辑清除该标记。
-    if (importedAt !== null) {
-        return formatCodexImportedRelativeTime(importedAt, t)
-    }
-
-    return formatRelativeTime(session.updatedAt, t)
 }
 
 function SessionItem(props: {
@@ -587,8 +771,25 @@ function SessionItem(props: {
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
     const [renameOpen, setRenameOpen] = useState(false)
+    const [exportOpen, setExportOpen] = useState(false)
     const [archiveOpen, setArchiveOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
+    const {
+        status: cursorChatStoreStatus,
+        isApplicable: cursorChatStoreApplicable,
+        error: cursorChatStoreError,
+    } = useCursorChatStoreStatus({
+        api,
+        session: s,
+        enabled: menuOpen
+    })
+    const cursorReopenDisabledReason = cursorChatStoreApplicable && cursorChatStoreStatus?.onDisk !== true
+        ? cursorChatStoreError
+            ? t('session.action.reopenCursorCheckFailed')
+            : cursorChatStoreStatus?.onDisk === false
+                ? t('session.action.reopenCursorMissing')
+                : t('session.action.reopenCursorChecking')
+        : undefined
 
     const { archiveSession, reopenSession, renameSession, deleteSession, isPending } = useSessionActions(
         api,
@@ -626,7 +827,6 @@ function SessionItem(props: {
     })
 
     const sessionName = getSessionTitle(s)
-    const todoProgress = getTodoProgress(s)
     const attention = useMemo(
         () => showDetailedStatus
             ? classifySessionAttention(s, {
@@ -636,10 +836,6 @@ function SessionItem(props: {
             : null,
         [s, selected, showDetailedStatus]
     )
-    const attentionLabel = attention ? getAttentionLabel(attention, t) : null
-    const scheduledLabel = s.futureScheduledMessageCount > 1
-        ? t('session.item.scheduledMessages', { count: s.futureScheduledMessageCount })
-        : t('session.item.scheduledMessage')
     const hasScheduleTooltip = showDetailedStatus && s.futureScheduledMessageCount > 0
     const { attentionId, scheduleId, describedBy } = useSessionRowTooltipIds(
         Boolean(attention),
@@ -650,76 +846,33 @@ function SessionItem(props: {
             <button
                 type="button"
                 {...longPressHandlers}
-                className={`session-list-item group/session-row flex w-full flex-col gap-1 px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
                 style={{ WebkitTouchCallout: 'none' }}
                 aria-current={selected ? 'page' : undefined}
                 aria-describedby={describedBy}
             >
-                <div className={`flex items-center justify-between gap-3 ${!s.active ? 'opacity-50' : ''}`}>
-                    <div className="flex items-center gap-2 min-w-0">
-                        <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0" />
-                        <div className={`truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}>
-                            {sessionName}
-                        </div>
-                        {s.active && s.thinking ? (
-                            <LoaderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-hint)] animate-spin-slow" />
-                        ) : attention ? (
-                            <SessionAttentionIndicator
-                                attention={attention}
-                                summary={s}
-                                label={attentionLabel ?? ''}
-                                tooltipId={attentionId!}
-                            />
-                        ) : null}
-                        {hasScheduleTooltip ? (
-                            <HoverTooltip
-                                id={scheduleId!}
-                                target={<ScheduleIcon className="h-3.5 w-3.5 text-[var(--app-hint)]" />}
-                                side="bottom"
-                                align="start"
-                                className="shrink-0"
-                                revealOnParentFocusClass={SESSION_ROW_TOOLTIP_FOCUS_CLASS}
-                            >
-                                <span className="block">
-                                    <span className="block font-medium">{scheduledLabel}</span>
-                                    <span className="mt-1 block text-[var(--app-hint)]">
-                                        {formatScheduledTooltipDetail(s, t)}
-                                    </span>
-                                </span>
-                            </HoverTooltip>
-                        ) : null}
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0 text-xs">
-                        {todoProgress ? (
-                            <span className="flex items-center gap-1 text-[var(--app-hint)]">
-                                <BulbIcon className="h-3 w-3" />
-                                {todoProgress.completed}/{todoProgress.total}
-                            </span>
-                        ) : null}
-                        {!attention && s.pendingRequestsCount > 0 ? (
-                            <span className="text-[var(--app-badge-warning-text)]">
-                                {t('session.item.pending')} {s.pendingRequestsCount}
-                            </span>
-                        ) : null}
-                        <span className="text-[var(--app-hint)]">
-                            {getSessionTimeLabel(s, t)}
-                        </span>
-                    </div>
-                </div>
-                {showPath ? (
-                    <div className="truncate text-xs text-[var(--app-hint)]">
-                        {s.metadata?.path ?? s.id}
-                    </div>
-                ) : null}
+                <SessionRowSummary
+                    session={s}
+                    showPath={showPath}
+                    showDetailedStatus={showDetailedStatus}
+                    selected={selected}
+                    nestedTooltips
+                    attentionTooltipId={attentionId}
+                    scheduleTooltipId={scheduleId}
+                />
             </button>
 
             <SessionActionMenu
                 isOpen={menuOpen}
                 onClose={() => setMenuOpen(false)}
+                sessionId={s.id}
+                sessionTitle={sessionName}
                 sessionActive={s.active}
                 onRename={() => setRenameOpen(true)}
+                onExport={() => setExportOpen(true)}
                 onArchive={() => setArchiveOpen(true)}
-                onReopen={handleReopen}
+                onReopen={cursorReopenDisabledReason ? undefined : handleReopen}
+                reopenDisabledReason={cursorReopenDisabledReason}
                 onDelete={() => setDeleteOpen(true)}
                 anchorPoint={menuAnchorPoint}
             />
@@ -734,42 +887,75 @@ function SessionItem(props: {
                     confirmingLabel={t('dialog.reopen.dismiss')}
                     onConfirm={async () => setReopenError(null)}
                     isPending={false}
+                    centerTitle
                 />
             ) : null}
 
-            <RenameSessionDialog
-                isOpen={renameOpen}
-                onClose={() => setRenameOpen(false)}
-                currentName={sessionName}
-                onRename={renameSession}
-                isPending={isPending}
-            />
+            {renameOpen ? (
+                <RenameSessionDialog
+                    isOpen={true}
+                    onClose={() => setRenameOpen(false)}
+                    currentName={sessionName}
+                    onRename={renameSession}
+                    isPending={isPending}
+                />
+            ) : null}
 
-            <ConfirmDialog
-                isOpen={archiveOpen}
-                onClose={() => setArchiveOpen(false)}
-                title={t('dialog.archive.title')}
-                description={t('dialog.archive.description', { name: sessionName })}
-                confirmLabel={t('dialog.archive.confirm')}
-                confirmingLabel={t('dialog.archive.confirming')}
-                onConfirm={archiveSession}
-                isPending={isPending}
-                destructive
-            />
+            {exportOpen ? (
+                <SessionExportDialog
+                    isOpen={true}
+                    onClose={() => setExportOpen(false)}
+                    sessionId={s.id}
+                    api={api}
+                />
+            ) : null}
 
-            <ConfirmDialog
-                isOpen={deleteOpen}
-                onClose={() => setDeleteOpen(false)}
-                title={t('dialog.delete.title')}
-                description={t('dialog.delete.description', { name: sessionName })}
-                confirmLabel={t('dialog.delete.confirm')}
-                confirmingLabel={t('dialog.delete.confirming')}
-                onConfirm={deleteSession}
-                isPending={isPending}
-                destructive
-            />
+            {archiveOpen ? (
+                <ConfirmDialog
+                    isOpen={true}
+                    onClose={() => setArchiveOpen(false)}
+                    title={t('dialog.archive.title')}
+                    description={t('dialog.archive.description', { name: sessionName })}
+                    confirmLabel={t('dialog.archive.confirm')}
+                    confirmingLabel={t('dialog.archive.confirming')}
+                    onConfirm={archiveSession}
+                    isPending={isPending}
+                    destructive
+                    centerTitle
+                />
+            ) : null}
+
+            {deleteOpen ? (
+                <ConfirmDialog
+                    isOpen={true}
+                    onClose={() => setDeleteOpen(false)}
+                    title={t('dialog.delete.title')}
+                    description={t('dialog.delete.description', { name: sessionName })}
+                    confirmLabel={t('dialog.delete.confirm')}
+                    confirmingLabel={t('dialog.delete.confirming')}
+                    onConfirm={deleteSession}
+                    isPending={isPending}
+                    destructive
+                    centerTitle
+                />
+            ) : null}
         </>
     )
+}
+
+type PullToRefreshState = 'idle' | 'pulling' | 'ready'
+
+const PULL_REFRESH_FEEDBACK_PX = 16
+const PULL_REFRESH_TRIGGER_PX = 64
+
+export function getPullToRefreshState(distancePx: number): PullToRefreshState {
+    if (distancePx >= PULL_REFRESH_TRIGGER_PX) {
+        return 'ready'
+    }
+    if (distancePx >= PULL_REFRESH_FEEDBACK_PX) {
+        return 'pulling'
+    }
+    return 'idle'
 }
 
 export function SessionList(props: {
@@ -778,9 +964,10 @@ export function SessionList(props: {
     onNewSession: () => void
     onNewSessionInDirectory?: (args: { machineId: string | null; directory: string }) => void
     onBrowse?: () => void
-    onRefresh: () => void
+    onRefresh: () => Promise<unknown> | void
     isLoading: boolean
     renderHeader?: boolean
+    headerActions?: React.ReactNode
     api: ApiClient | null
     machineLabelsById?: Record<string, string>
     machinesById?: Record<string, Machine>
@@ -791,11 +978,16 @@ export function SessionList(props: {
     const { sessionPreviewLimit } = useSessionPreviewLimit()
     const { sessionListStatusMode } = useSessionListStatusMode()
     const { showActiveSessionsOnly } = useShowActiveSessionsOnly()
+    const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
     const showDetailedStatus = sessionListStatusMode === 'detailed'
     const [searchQuery, setSearchQuery] = useState('')
+    const [searchExpanded, setSearchExpanded] = useState(false)
+    const [customStart, setCustomStart] = useState('')
+    const [customEnd, setCustomEnd] = useState('')
     const [, setCodexImportedSessionsVersion] = useState(0)
     const normalizedQuery = normalizeSearch(searchQuery)
-    const isSearching = normalizedQuery.length > 0
+    const timeRange = getSessionTimeRange(customStart, customEnd)
+    const isFiltering = normalizedQuery.length > 0 || timeRange !== null
 
     useEffect(() => {
         // 中文注释：监听导入标记变化，让列表在“导入完成”或“用户已在 Hapi 中继续会话”后立即刷新时间文案。
@@ -821,30 +1013,69 @@ export function SessionList(props: {
         },
         [props.sessions, selectedSessionId, showActiveSessionsOnly]
     )
+    const sessionActivityDates = useMemo(
+        () => new Set(allSessions.map(session => formatDateValue(new Date(session.updatedAt)))),
+        [allSessions]
+    )
     const visibleSessions = useMemo(
-        () => isSearching
-            ? allSessions.filter(session => sessionMatchesQuery(
-                session,
-                normalizedQuery,
-                resolveMachineLabel(session.metadata?.machineId ?? null)
+        () => isFiltering
+            ? allSessions.filter(session => (
+                sessionMatchesTimeRange(session, timeRange)
+                && sessionMatchesQuery(
+                    session,
+                    normalizedQuery,
+                    resolveMachineLabel(session.metadata?.machineId ?? null)
+                )
             ))
             : allSessions,
-        [allSessions, isSearching, normalizedQuery, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
+        [allSessions, isFiltering, normalizedQuery, timeRange?.start, timeRange?.end, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
     )
     const allGroups = useMemo(
         () => groupSessionsByDirectory(allSessions),
         [allSessions]
     )
+    const machineFilters = useMemo(
+        () => groupByMachine(allGroups, resolveMachineLabel),
+        [allGroups, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
+    )
+    const machineFilterItems = useMemo(
+        () => machineFilters.map((mg) => {
+            const machine = mg.machineId ? machinesById[mg.machineId] : undefined
+            return {
+                id: mg.machineId ?? UNKNOWN_MACHINE_ID,
+                label: mg.label,
+                sessionCount: mg.totalSessions,
+                healthPresentation: presentMachineHealth(
+                    machine?.health,
+                    getMachinePlatform(machine)
+                )
+            }
+        }),
+        [machineFilters, machinesById]
+    )
+    const showMachineFilterBar = machineFilters.length >= 2
+    // A persisted filter whose machine no longer has sessions falls back to
+    // "All"; with at most one machine the bar is hidden and never filters.
+    const activeMachineFilter = showMachineFilterBar && machineFilter !== null
+        && machineFilters.some(mg => (mg.machineId ?? UNKNOWN_MACHINE_ID) === machineFilter)
+        ? machineFilter
+        : null
+    const machineFilteredSessions = useMemo(
+        () => activeMachineFilter === null
+            ? visibleSessions
+            : visibleSessions.filter(session => (session.metadata?.machineId ?? UNKNOWN_MACHINE_ID) === activeMachineFilter),
+        [visibleSessions, activeMachineFilter]
+    )
     const groups = useMemo(
-        () => groupSessionsByDirectory(visibleSessions),
-        [visibleSessions]
+        () => groupSessionsByDirectory(machineFilteredSessions),
+        [machineFilteredSessions]
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
     const autoExpandedSelectedSessionKeyRef = useRef<string | null>(null)
     const isGroupCollapsed = (group: SessionGroup): boolean => {
-        if (isSearching) return false
+        if (isFiltering) return false
         const override = collapseOverrides.get(group.key)
         if (override !== undefined) return override
         const hasSelectedSession = selectedSessionId
@@ -861,8 +1092,8 @@ export function SessionList(props: {
         })
     }
 
-    // Per-group reveal cap for paginated "Show N more". Absent = collapsed to the
-    // preview limit; each "Show more" bumps it by one batch (step = preview limit).
+    // Per-group reveal cap for paginated session previews. Absent = the configured
+    // preview limit; expand/collapse controls move the cap by one preview-sized batch.
     const [sessionVisibleCounts, setSessionVisibleCounts] = useState<Map<string, number>>(
         () => new Map()
     )
@@ -874,17 +1105,36 @@ export function SessionList(props: {
     const showMoreSessions = (group: SessionGroup) => {
         setSessionVisibleCounts(prev => {
             const next = new Map(prev)
-            const current = prev.get(group.key) ?? sessionPreviewLimit
-            next.set(group.key, getNextSessionVisibleCount(current, sessionPreviewLimit, group.sessions.length))
+            const currentLimit = Math.min(
+                prev.get(group.key) ?? sessionPreviewLimit,
+                group.sessions.length
+            )
+            const currentVisibleCount = getVisibleSessionPreview(group.sessions, {
+                selectedSessionId,
+                limit: currentLimit
+            }).length
+            next.set(group.key, getNextSessionVisibleCount(
+                Math.max(currentLimit, currentVisibleCount),
+                sessionPreviewLimit,
+                group.sessions.length
+            ))
             return next
         })
     }
 
-    const collapseSessionGroup = (group: SessionGroup) => {
+    const showFewerSessions = (group: SessionGroup) => {
         setSessionVisibleCounts(prev => {
-            if (!prev.has(group.key)) return prev
             const next = new Map(prev)
-            next.delete(group.key)
+            const current = Math.min(
+                prev.get(group.key) ?? sessionPreviewLimit,
+                group.sessions.length
+            )
+            const previous = getPreviousSessionVisibleCount(current, sessionPreviewLimit)
+            if (previous <= sessionPreviewLimit) {
+                next.delete(group.key)
+            } else {
+                next.set(group.key, previous)
+            }
             return next
         })
     }
@@ -893,40 +1143,13 @@ export function SessionList(props: {
         return getVisibleSessionPreview(
             group.sessions,
             {
-                expanded: isSearching,
                 selectedSessionId,
                 limit: getGroupVisibleCount(group)
             }
         )
     }
 
-    const machineGroups = useMemo(
-        () => groupByMachine(groups, resolveMachineLabel),
-        [groups, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
-    )
-
-    const isMachineCollapsed = (mg: MachineGroup): boolean => {
-        if (isSearching) return false
-        const key = `machine::${mg.machineId ?? UNKNOWN_MACHINE_ID}`
-        const override = collapseOverrides.get(key)
-        if (override !== undefined) return override
-        const hasSelected = selectedSessionId
-            ? mg.projectGroups.some(pg => pg.sessions.some(s => s.id === selectedSessionId))
-            : false
-        return !mg.hasActiveSession && !hasSelected
-    }
-
-    const toggleMachine = (mg: MachineGroup) => {
-        const key = `machine::${mg.machineId ?? UNKNOWN_MACHINE_ID}`
-        const current = isMachineCollapsed(mg)
-        setCollapseOverrides(prev => {
-            const next = new Map(prev)
-            next.set(key, !current)
-            return next
-        })
-    }
-
-    // Auto-expand group (and machine) containing the selected session only when
+    // Auto-expand group containing the selected session only when
     // the selected-session/group pair changes. Without this guard, every live
     // session-list refresh (for example tool-call updates from a running selected
     // session) reopens a path the user just collapsed.
@@ -957,7 +1180,6 @@ export function SessionList(props: {
             for (const g of allGroups) {
                 knownKeys.add(g.key)
                 knownKeys.add(`sessions::${g.key}`)
-                knownKeys.add(`machine::${g.machineId ?? UNKNOWN_MACHINE_ID}`)
             }
             let changed = false
             for (const key of next.keys()) {
@@ -987,150 +1209,299 @@ export function SessionList(props: {
         })
     }, [allGroups])
 
+    // The search control unmounts when the list empties; reset the expansion so
+    // it cannot suppress header actions (or re-expand on its own when sessions
+    // return) while no search control is rendered.
+    const showSearch = props.sessions.length > 0
+    useEffect(() => {
+        if (!showSearch) setSearchExpanded(false)
+    }, [showSearch])
+
+    const showHeaderRow = showSearch || renderHeader || Boolean(props.headerActions)
+
+    // Pull-to-refresh on the scrollable list. Touch-only gesture mirroring the
+    // pull-to-load-older pattern in HappyThread; desktop has no overscroll
+    // bounce to make a wheel pull feel right, so it stays on live updates.
+    const scrollContainerRef = useRef<HTMLDivElement>(null)
+    const [pullState, setPullState] = useState<PullToRefreshState>('idle')
+    const pullStateRef = useRef<PullToRefreshState>('idle')
+    const [isRefreshing, setIsRefreshing] = useState(false)
+    const isRefreshingRef = useRef(false)
+    const onRefreshRef = useRef(props.onRefresh)
+    useEffect(() => {
+        onRefreshRef.current = props.onRefresh
+    }, [props.onRefresh])
+
+    useEffect(() => {
+        const container = scrollContainerRef.current
+        if (!container) return
+
+        let pullStartY: number | null = null
+
+        const updatePullState = (state: PullToRefreshState) => {
+            if (pullStateRef.current === state) {
+                return
+            }
+            pullStateRef.current = state
+            setPullState(state)
+        }
+
+        const triggerRefresh = () => {
+            if (isRefreshingRef.current) {
+                return
+            }
+            isRefreshingRef.current = true
+            setIsRefreshing(true)
+            void Promise.resolve(onRefreshRef.current()).finally(() => {
+                isRefreshingRef.current = false
+                setIsRefreshing(false)
+            })
+        }
+
+        const handleTouchStart = (event: TouchEvent) => {
+            updatePullState('idle')
+            pullStartY = container.scrollTop <= 0 && !isRefreshingRef.current
+                ? event.touches[0]?.clientY ?? null
+                : null
+        }
+
+        const handleTouchMove = (event: TouchEvent) => {
+            if (pullStartY === null) {
+                return
+            }
+            if (container.scrollTop > 0) {
+                pullStartY = null
+                updatePullState('idle')
+                return
+            }
+            const currentY = event.touches[0]?.clientY
+            if (currentY !== undefined) {
+                updatePullState(getPullToRefreshState(currentY - pullStartY))
+            }
+        }
+
+        const handleTouchEnd = () => {
+            const shouldRefresh = pullStartY !== null
+                && pullStateRef.current === 'ready'
+                && container.scrollTop <= 0
+            pullStartY = null
+            updatePullState('idle')
+            if (shouldRefresh) {
+                triggerRefresh()
+            }
+        }
+
+        const handleTouchCancel = () => {
+            pullStartY = null
+            updatePullState('idle')
+        }
+
+        container.addEventListener('touchstart', handleTouchStart, { passive: true })
+        container.addEventListener('touchmove', handleTouchMove, { passive: true })
+        container.addEventListener('touchend', handleTouchEnd, { passive: true })
+        container.addEventListener('touchcancel', handleTouchCancel, { passive: true })
+        return () => {
+            container.removeEventListener('touchstart', handleTouchStart)
+            container.removeEventListener('touchmove', handleTouchMove)
+            container.removeEventListener('touchend', handleTouchEnd)
+            container.removeEventListener('touchcancel', handleTouchCancel)
+        }
+    }, [])
+
     return (
-        <div className="mx-auto w-full max-w-content flex flex-col">
-            {renderHeader ? (
-                <div className="flex items-center justify-between px-3 py-1">
-                    <div className="text-xs text-[var(--app-hint)]">
-                        {isSearching
-                            ? t('sessions.search.count', { n: visibleSessions.length, total: allSessions.length })
-                            : t('sessions.count', { n: allSessions.length, m: allGroups.length })}
-                    </div>
-                    <button
-                        type="button"
-                        onClick={props.onNewSession}
-                        className="session-list-new-button p-1.5 rounded-full text-[var(--app-link)] transition-colors"
-                        title={t('sessions.new')}
-                    >
-                        <PlusIcon className="h-5 w-5" />
-                    </button>
+        <div className="flex min-h-0 w-full flex-1 flex-col">
+            <div className="session-list-scrollbar-offset mx-auto w-full max-w-content shrink-0">
+            {showHeaderRow ? (
+                <div className="flex items-center gap-1 px-2 py-1">
+                    {showSearch ? (
+                        <SessionListSearch
+                            value={searchQuery}
+                            onChange={setSearchQuery}
+                            customStart={customStart}
+                            customEnd={customEnd}
+                            sessionActivityDates={sessionActivityDates}
+                            onDateRangeChange={(start, end) => {
+                                setCustomStart(start)
+                                setCustomEnd(end)
+                            }}
+                            expanded={searchExpanded}
+                            onExpandedChange={setSearchExpanded}
+                        />
+                    ) : null}
+                    {!(showSearch && searchExpanded) ? (
+                        <>
+                            <div className="flex-1" />
+                            {showMachineFilterBar ? (
+                                <MachineFilterMenu
+                                    machines={machineFilterItems}
+                                    totalCount={allSessions.length}
+                                    value={activeMachineFilter}
+                                    onChange={setMachineFilter}
+                                />
+                            ) : null}
+                            {renderHeader ? (
+                                <button
+                                    type="button"
+                                    onClick={props.onNewSession}
+                                    className="session-list-new-button flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-link)] transition-colors"
+                                    title={t('sessions.new')}
+                                >
+                                    <PlusIcon className="h-5 w-5" />
+                                </button>
+                            ) : null}
+                            {props.headerActions}
+                        </>
+                    ) : null}
                 </div>
             ) : null}
 
-            {props.sessions.length > 0 ? (
-                <SessionListSearch value={searchQuery} onChange={setSearchQuery} />
-            ) : null}
-
-            {props.sessions.length === 0 && (
-                <SessionsEmptyState
-                    onNewSession={props.onNewSession}
-                    onBrowse={props.onBrowse}
+            {showMachineFilterBar ? (
+                <MachineFilterBar
+                    machines={machineFilterItems}
+                    totalCount={allSessions.length}
+                    value={activeMachineFilter}
+                    onChange={setMachineFilter}
                 />
-            )}
+            ) : null}
+            </div>
 
-            {props.sessions.length > 0 && isSearching && visibleSessions.length === 0 ? (
-                <div className="px-4 py-8 text-center text-sm text-[var(--app-hint)]">
-                    {t('sessions.search.noResults')}
+            <div className="relative flex min-h-0 flex-1 flex-col">
+            {isRefreshing || pullState !== 'idle' || props.isLoading ? (
+                <div
+                    role="status"
+                    aria-live="polite"
+                    className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
+                >
+                    {isRefreshing || props.isLoading ? <Spinner size="sm" label={null} className="text-current" /> : null}
+                    <span>
+                        {isRefreshing
+                            ? t('sessions.refresh.refreshing')
+                            : props.isLoading
+                                ? t('misc.loading')
+                                : pullState === 'ready'
+                                    ? t('sessions.refresh.release')
+                                    : t('sessions.refresh.pull')}
+                    </span>
                 </div>
             ) : null}
+            <div ref={scrollContainerRef} className="app-scroll-y session-list-scrollbar-left min-h-0 flex-1">
+            <div className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
+                {props.sessions.length === 0 && !props.isLoading ? (
+                    <SessionsEmptyState
+                        onNewSession={props.onNewSession}
+                        onBrowse={props.onBrowse}
+                    />
+                ) : null}
 
-            <div className="flex flex-col gap-3 px-2 pt-1 pb-2">
-                {machineGroups.map((mg) => {
-                    const machineCollapsed = isMachineCollapsed(mg)
-                    const machine = mg.machineId ? machinesById[mg.machineId] : undefined
-                    const healthPresentation = presentMachineHealth(
-                        machine?.health,
-                        getMachinePlatform(machine)
+                {props.sessions.length > 0 && (isFiltering || activeMachineFilter !== null) && groups.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-sm text-[var(--app-hint)]">
+                        {t('sessions.search.noResults')}
+                    </div>
+                ) : null}
+
+                {groups.map((group) => {
+                    const isCollapsed = isGroupCollapsed(group)
+                    const visibleGroupSessions = getVisibleGroupSessions(group)
+                    const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
+                    const currentLimit = Math.min(
+                        getGroupVisibleCount(group),
+                        group.sessions.length
                     )
+                    const previousLimit = getPreviousSessionVisibleCount(currentLimit, sessionPreviewLimit)
+                    const previousGroupSessions = getVisibleSessionPreview(group.sessions, {
+                        selectedSessionId,
+                        limit: previousLimit
+                    })
+                    const collapseCount = visibleGroupSessions.length - previousGroupSessions.length
+                    const canShowFewerSessions = previousLimit < currentLimit && collapseCount > 0
+                    const expandCount = Math.min(sessionPreviewLimit, hiddenSessionCount)
+                    const canStartInGroupDirectory = group.directory !== 'Other'
+                    // With multiple machines in the unfiltered view, disambiguate
+                    // same-named directories by suffixing the machine label.
+                    const groupTitle = showMachineFilterBar && activeMachineFilter === null
+                        ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
+                        : group.displayName
                     return (
-                        <div key={mg.machineId ?? UNKNOWN_MACHINE_ID}>
-                            <MachineGroupHeader
-                                label={mg.label}
-                                sessionCount={mg.totalSessions}
-                                collapsed={machineCollapsed}
-                                onToggle={() => toggleMachine(mg)}
-                                machine={machine}
-                                healthPresentation={healthPresentation}
-                            />
+                        <div key={group.key}>
+                            <div
+                                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
+                                onClick={() => toggleGroup(group.key, isCollapsed)}
+                                title={group.directory}
+                            >
+                                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+                                <span className="font-medium text-sm truncate flex-1">
+                                    {groupTitle}
+                                </span>
+                                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                                {onNewSessionInDirectory && canStartInGroupDirectory ? (
+                                    <button
+                                        type="button"
+                                        onClick={(event) => {
+                                            event.stopPropagation()
+                                            onNewSessionInDirectory({
+                                                machineId: group.machineId,
+                                                directory: group.directory
+                                            })
+                                        }}
+                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                                        title={t('sessions.group.new')}
+                                        aria-label={t('sessions.group.new')}
+                                    >
+                                        <PlusIcon className="h-3.5 w-3.5" />
+                                    </button>
+                                ) : null}
+                                <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
+                                    ({group.sessions.length})
+                                </span>
+                            </div>
 
-                            {/* Level 2: Projects */}
-                            <div className="collapsible-panel" data-open={!machineCollapsed || undefined}>
+                            {/* Sessions */}
+                            <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
                                 <div className="collapsible-inner">
-                                <div className="flex flex-col ml-3.5 pl-1 mt-0.5">
-                                    {mg.projectGroups.map((group) => {
-                                        const isCollapsed = isGroupCollapsed(group)
-                                        const visibleGroupSessions = getVisibleGroupSessions(group)
-                                        const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
-                                        const canCollapseSessions = getGroupVisibleCount(group) > sessionPreviewLimit
-                                        const showMoreCount = Math.min(sessionPreviewLimit, hiddenSessionCount)
-                                        const canStartInGroupDirectory = group.directory !== 'Other'
-                                        return (
-                                            <div key={group.key}>
-                                                <div
-                                                    className="group/project sticky top-0 z-10 flex items-center gap-2 px-1 py-1.5 text-left rounded-lg transition-colors hover:bg-[var(--app-subtle-bg)] cursor-pointer min-w-0 w-full select-none"
-                                                    onClick={() => toggleGroup(group.key, isCollapsed)}
-                                                    title={group.directory}
+                                <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                                    {visibleGroupSessions.map((s) => (
+                                        <SessionItem
+                                            key={s.id}
+                                            session={s}
+                                            onSelect={props.onSelect}
+                                            showPath={false}
+                                            api={api}
+                                            selected={s.id === selectedSessionId}
+                                            showDetailedStatus={showDetailedStatus}
+                                        />
+                                    ))}
+                                    {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
+                                        <div className="ml-2.5 mr-2 my-1 flex gap-1.5">
+                                            {canShowFewerSessions ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => showFewerSessions(group)}
+                                                    className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-[var(--app-border)] px-2 py-1 text-center text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
                                                 >
-                                                    <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
-                                                    <span className="font-medium text-sm truncate flex-1">
-                                                        {group.displayName}
-                                                    </span>
-                                                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
-                                                    {onNewSessionInDirectory && canStartInGroupDirectory ? (
-                                                        <button
-                                                            type="button"
-                                                            onClick={(event) => {
-                                                                event.stopPropagation()
-                                                                onNewSessionInDirectory({
-                                                                    machineId: group.machineId,
-                                                                    directory: group.directory
-                                                                })
-                                                            }}
-                                                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
-                                                            title={t('sessions.group.new')}
-                                                            aria-label={t('sessions.group.new')}
-                                                        >
-                                                            <PlusIcon className="h-3.5 w-3.5" />
-                                                        </button>
-                                                    ) : null}
-                                                    <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
-                                                        ({group.sessions.length})
-                                                    </span>
-                                                </div>
-
-                                                {/* Level 3: Sessions */}
-                                                <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
-                                                    <div className="collapsible-inner">
-                                                    <div className="flex flex-col gap-0.5 ml-3 pl-1 pr-1 py-1">
-                                                        {visibleGroupSessions.map((s) => (
-                                                            <SessionItem
-                                                                key={s.id}
-                                                                session={s}
-                                                                onSelect={props.onSelect}
-                                                                showPath={false}
-                                                                api={api}
-                                                                selected={s.id === selectedSessionId}
-                                                                showDetailedStatus={showDetailedStatus}
-                                                            />
-                                                        ))}
-                                                        {!isSearching && group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canCollapseSessions) ? (
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => hiddenSessionCount > 0
-                                                                    ? showMoreSessions(group)
-                                                                    : collapseSessionGroup(group)}
-                                                                className={cn(
-                                                                    'mx-2 my-1 rounded-md px-2 py-1 text-left text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',
-                                                                    hiddenSessionCount > 0 && 'border border-dashed border-[var(--app-border)]'
-                                                                )}
-                                                            >
-                                                                {hiddenSessionCount > 0
-                                                                    ? t('sessions.group.showMore', { n: showMoreCount })
-                                                                    : t('sessions.group.showLess')}
-                                                            </button>
-                                                        ) : null}
-                                                    </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        )
-                                    })}
+                                                    <SessionPreviewArrowIcon direction="up" className="h-3 w-3 shrink-0" />
+                                                    {t('sessions.group.collapse', { n: collapseCount })}
+                                                </button>
+                                            ) : null}
+                                            {hiddenSessionCount > 0 ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => showMoreSessions(group)}
+                                                    className="flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-dashed border-[var(--app-border)] px-2 py-1 text-center text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]"
+                                                >
+                                                    <SessionPreviewArrowIcon direction="down" className="h-3 w-3 shrink-0" />
+                                                    {t('sessions.group.expand', { n: expandCount })}
+                                                </button>
+                                            ) : null}
+                                        </div>
+                                    ) : null}
                                 </div>
                                 </div>
                             </div>
                         </div>
                     )
                 })}
+            </div>
+            </div>
             </div>
         </div>
     )

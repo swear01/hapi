@@ -11,6 +11,7 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
+import { filterCatalogAffectingClaudeArgs } from "./sdk/metadataExtractor";
 
 export async function claudeRemote(opts: {
 
@@ -34,6 +35,7 @@ export async function claudeRemote(opts: {
     onSessionFound: (id: string) => void,
     onThinkingChange?: (thinking: boolean) => void,
     onMessage: (message: SDKMessage) => void,
+    onFirstResult?: (initialMessage: string) => void,
     onCompletionEvent?: (message: string) => void,
     onSessionReset?: () => void
 }) {
@@ -112,6 +114,11 @@ export async function claudeRemote(opts: {
 
     // Handle /compact command
     let isCompactCommand = false;
+    // Claude reports the /compact outcome on a `system`/`status` message that
+    // arrives before the `result` message. Hold it here so the completion event
+    // can report what actually happened. Stays null unless a failure is
+    // reported, so an unseen or successful status keeps the success path.
+    let compactFailure: string | null = null;
     if (specialCommand.type === 'compact') {
         logger.debug('[claudeRemote] /compact command detected - will process as normal but with compaction behavior');
         isCompactCommand = true;
@@ -123,6 +130,7 @@ export async function claudeRemote(opts: {
     // Prepare SDK options
     let mode = initial.mode;
     const sdkOptions: Options = {
+        additionalArgs: filterCatalogAffectingClaudeArgs(opts.claudeArgs),
         cwd: opts.path,
         resume: startFrom ?? undefined,
         mcpServers: opts.mcpServers,
@@ -254,6 +262,20 @@ export async function claudeRemote(opts: {
                 }
             }
 
+            // Capture the /compact outcome. Only a reported failure is recorded:
+            // anything else leaves the success path untouched, so a status shape
+            // we do not recognise cannot invent a failure.
+            if (message.type === 'system' && message.subtype === 'status' && isCompactCommand) {
+                const systemStatus = message as SDKSystemMessage;
+                if (systemStatus.compact_result === 'failed') {
+                    const reason = typeof systemStatus.compact_error === 'string'
+                        ? systemStatus.compact_error.trim()
+                        : '';
+                    compactFailure = reason.length > 0 ? reason : 'Compaction failed';
+                    logger.debug(`[claudeRemote] Compaction reported as failed: ${compactFailure}`);
+                }
+            }
+
             // Handle result messages
             if (message.type === 'result') {
                 resultSeq += 1;
@@ -263,13 +285,21 @@ export async function claudeRemote(opts: {
                     `(nextInFlight=${nextMessageFetchInFlight}, inputEnded=${inputEnded})`
                 );
 
+                if (resultSeq === 1 && specialCommand.type === null) {
+                    opts.onFirstResult?.(initial.message);
+                }
+
                 // Send completion messages
                 if (isCompactCommand) {
-                    logger.debug('[claudeRemote] Compaction completed');
+                    const completion = compactFailure
+                        ? `Compaction failed: ${compactFailure}`
+                        : 'Compaction completed';
+                    logger.debug(`[claudeRemote] ${completion}`);
                     if (opts.onCompletionEvent) {
-                        opts.onCompletionEvent('Compaction completed');
+                        opts.onCompletionEvent(completion);
                     }
                     isCompactCommand = false;
+                    compactFailure = null;
                 }
 
                 // Send ready event

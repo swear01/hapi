@@ -24,6 +24,7 @@ describe('cancelQueuedMessage', () => {
         // Row should be gone from uninvoked list
         const remaining = store.messages.getUninvokedLocalMessages(session.id)
         expect(remaining).toHaveLength(0)
+        expect(store.messages.getMessageEpoch(session.id)).toBe(1)
     })
 
     it('already-invoked: returns status=invoked with full message row, row stays in DB', () => {
@@ -67,6 +68,7 @@ describe('cancelQueuedMessage', () => {
         if (second.status === 'cancelled') {
             expect(second.localId).toBeNull()
         }
+        expect(store.messages.getMessageEpoch(session.id)).toBe(1)
     })
 
     it('non-existent messageId: returns status=cancelled with localId=null', () => {
@@ -170,6 +172,90 @@ describe('cancelQueuedMessage', () => {
         // Row still exists
         const messages = store.messages.getMessages(session.id)
         expect(messages.some(m => m.id === msg.id)).toBe(true)
+    })
+})
+
+describe('recordMessagesConsumed', () => {
+    it('rolls back the invocation transition when the session namespace cannot be verified', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'consumed-rollback-wrong-namespace')
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'hello' } }, 'local-rollback')
+        const originalUpdatedAt = store.sessions.getSession(session.id)?.updatedAt
+
+        expect(() => store.recordMessagesConsumed(session.id, ['local-rollback'], 2_000, 'other-namespace'))
+            .toThrow('session not found after messages-consumed transition')
+        expect(store.messages.getLocalMessageStates(session.id, ['local-rollback']))
+            .toEqual([{ localId: 'local-rollback', invokedAt: null }])
+        expect(store.sessions.getSession(session.id)?.updatedAt).toBe(originalUpdatedAt)
+    })
+})
+
+describe('position pagination and structural epochs', () => {
+    it('returns rows strictly after a cursor and respects an inclusive snapshot head', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'position-after')
+        const first = store.messages.addMessage(session.id, { text: 'first' })
+        const second = store.messages.addMessage(session.id, { text: 'second' })
+        const third = store.messages.addMessage(session.id, { text: 'third' })
+        store.messages.addMessage(session.id, { text: 'fourth' })
+
+        const rows = store.messages.getMessagesAfterPosition(
+            session.id,
+            10,
+            { at: first.invokedAt ?? first.createdAt, seq: first.seq },
+            { at: third.invokedAt ?? third.createdAt, seq: third.seq }
+        )
+
+        expect(rows.map((message) => message.id)).toEqual([second.id, third.id])
+    })
+
+    it('reports the newest composite position', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'position-head')
+        const first = store.messages.addMessage(session.id, { text: 'first' })
+        const second = store.messages.addMessage(session.id, { text: 'second' })
+
+        expect(store.messages.getNewestMessagePosition(session.id)).toEqual({
+            at: second.invokedAt ?? second.createdAt,
+            seq: second.seq
+        })
+        expect(first.seq).toBeLessThan(second.seq)
+    })
+
+    it('bumps both epochs when session history is merged', () => {
+        const store = makeStore()
+        const source = makeSession(store, 'epoch-merge-source')
+        const target = makeSession(store, 'epoch-merge-target')
+        store.messages.addMessage(source.id, { text: 'source' })
+        store.messages.addMessage(target.id, { text: 'target' })
+
+        const result = store.messages.mergeSessionMessages(source.id, target.id)
+
+        expect(result.moved).toBe(1)
+        expect(store.messages.getMessageEpoch(source.id)).toBe(1)
+        expect(store.messages.getMessageEpoch(target.id)).toBe(1)
+    })
+
+    it('bumps the target epoch when a copied message lands behind the cached head', () => {
+        const store = makeStore()
+        const target = makeSession(store, 'epoch-copy-target')
+        const head = store.messages.addMessage(target.id, { text: 'head' })
+        const headPosition = {
+            at: head.invokedAt ?? head.createdAt,
+            seq: head.seq
+        }
+
+        const copied = store.messages.copyMessageToSession(target.id, {
+            content: { text: 'historical' },
+            createdAt: headPosition.at - 1_000,
+            localId: null,
+            invokedAt: headPosition.at - 1_000,
+            scheduledAt: null
+        })
+
+        expect(copied.seq).toBeGreaterThan(head.seq)
+        expect(store.messages.getMessagesAfterPosition(target.id, 10, headPosition)).toEqual([])
+        expect(store.messages.getMessageEpoch(target.id)).toBe(1)
     })
 })
 
@@ -346,5 +432,45 @@ describe('countFutureScheduledLocalMessages', () => {
         const nextAt = store.messages.minFutureScheduledAtBySessionIds([sessionA.id, sessionB.id], now)
         expect(nextAt.get(sessionA.id)).toBe(now + 60_000)
         expect(nextAt.get(sessionB.id)).toBeUndefined()
+    })
+})
+
+describe('content codec integration', () => {
+    it('stores large agent content compressed and returns it truncated on read', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'codec-agent')
+        const stdout = 'line\n'.repeat(60_000) // ~300KB, above the truncate limit
+        const content = {
+            role: 'agent',
+            content: { type: 'codex', data: { type: 'tool-call-result', callId: 'c1', output: { stdout } } }
+        }
+
+        const added = store.messages.addMessage(session.id, content)
+        const read = store.messages.getMessages(session.id, 10)
+        expect(read).toHaveLength(1)
+
+        const readContent = read[0]!.content as typeof content
+        expect(readContent.content.data.output.stdout.length).toBeLessThan(stdout.length)
+        expect(readContent.content.data.output.stdout).toContain('[hapi: truncated')
+        expect(readContent.content.data.callId).toBe('c1')
+        // addMessage's return value matches what a later read sees (SSE broadcast uses it)
+        expect(added.content).toEqual(read[0]!.content)
+    })
+
+    it('round-trips large queued user prompts verbatim (delivery path must not truncate)', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'codec-user')
+        const text = 'prompt '.repeat(30_000) // ~210KB user paste
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text } },
+            'lid-big',
+            Date.now() + 60_000
+        )
+
+        const scheduled = store.messages.getMatureScheduledMessages(Date.now() + 120_000)
+        expect(scheduled).toHaveLength(1)
+        const delivered = scheduled[0]!.content as { content: { text: string } }
+        expect(delivered.content.text).toBe(text)
     })
 })
