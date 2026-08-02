@@ -1,6 +1,6 @@
 import * as Popover from '@radix-ui/react-popover'
-import { useAssistantState } from '@assistant-ui/react'
 import { useState } from 'react'
+import { useAuiState } from '@assistant-ui/react'
 import { CheckIcon, CopyIcon, InfoIcon } from '@/components/icons'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { useTranslation } from '@/lib/use-translation'
@@ -40,7 +40,7 @@ export function MessageActions({
 }: MessageActionsProps) {
     const { copied, copy } = useCopyToClipboard()
     const { t } = useTranslation()
-    const threadIsRunning = useAssistantState(({ thread }) => thread?.isRunning ?? false)
+    const threadIsRunning = useAuiState(({ thread }) => thread?.isRunning ?? false)
     const canCopy = Boolean(copyText)
     const hasMetadata = metadata ? buildMessageMetadataLabels(metadata).length > 0 : false
     const [forkOpen, setForkOpen] = useState(false)

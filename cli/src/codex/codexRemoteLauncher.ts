@@ -17,17 +17,17 @@ import { AppServerEventConverter } from './utils/appServerEventConverter';
 import { detectImageMimeType, registerGeneratedImage } from '@/modules/common/generatedImages';
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerConfig';
-import type { ThreadGoal, ThreadGoalStatus } from './appServerTypes';
+import type { SkillMetadata, ThreadGoal, ThreadGoalStatus } from './appServerTypes';
 import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { extractErrorInfo } from '@/utils/errorUtils';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import {
     RemoteLauncherBase,
     type RemoteLauncherDisplayContext,
     type RemoteLauncherExitReason
 } from '@/modules/common/remote/RemoteLauncherBase';
 import { CodexConversationHistory } from './conversationHistory';
-import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
 
 async function registerGeneratedImageFromPath(args: { id: string; path: string; fileName?: string | null }): Promise<ReturnType<typeof registerGeneratedImage> | null> {
@@ -3098,7 +3098,38 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         });
 
+        let nativeSkills: SkillMetadata[] = [];
+        let nativeSkillsAvailable = false;
+        const refreshNativeSkills = async (forceReload: boolean): Promise<void> => {
+            const response = await appServerClient.listSkills({
+                cwds: [session.path],
+                forceReload
+            });
+            const inventory = response.data?.find(entry => entry.cwd === session.path)
+                ?? response.data?.[0];
+            if (!inventory || (inventory.skills.length === 0 && (inventory.errors?.length ?? 0) > 0)) {
+                throw new Error('skills/list returned no usable inventory');
+            }
+            nativeSkills = inventory.skills.filter(skill => skill.enabled);
+            if (!nativeSkillsAvailable) {
+                nativeSkillsAvailable = true;
+                session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ListSkills, async () => ({
+                    success: true,
+                    skills: nativeSkills.map(skill => ({
+                        name: skill.name,
+                        description: skill.description
+                    }))
+                }));
+            }
+        };
+
         appServerClient.setNotificationHandler((method, params) => {
+            if (method === 'skills/changed') {
+                void refreshNativeSkills(true).catch((error) => {
+                    logger.debug(`[Codex] failed to refresh skills: ${errorMessage(error)}`);
+                });
+                return;
+            }
             const events = appServerEventConverter.handleNotification(method, params);
             for (const event of events) {
                 const eventRecord = asRecord(event) ?? { type: undefined };
@@ -3216,6 +3247,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
             return await this.conversationHistory.rewind((payload as { messageLocalId: string }).messageLocalId)
         })
+        try {
+            await refreshNativeSkills(false);
+        } catch (error) {
+            logger.debug(`[Codex] skills/list failed: ${errorMessage(error)}; keeping filesystem fallback`);
+        }
 
         let supportsTurnCollaborationMode = true;
         let supportsGoals = true;
@@ -3760,6 +3796,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     mode,
                     cliOverrides: session.codexCliOverrides,
                     clientUserMessageId,
+                    skills: nativeSkills,
                     overrides: suppressCollaborationMode
                         ? { suppressCollaborationMode: true }
                         : undefined
