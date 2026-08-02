@@ -602,11 +602,13 @@ export class AcpSdkBackend implements AgentBackend {
 
     /**
      * Kick off a soft steer without blocking the hub RPC on turn completion.
-     * Returns a promise that settles when the concurrent `session/prompt` finishes
-     * (or fails) so callers can keep the launcher busy until then. The promise is
-     * also logged on failure; callers may `void` it after recording the waiter.
+     * Separates transport dispatch from prompt completion so callers can commit
+     * queue state only after stdin accepted the request without waiting for the turn.
      */
-    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): {
+        dispatched: Promise<void>;
+        completed: Promise<void>;
+    } {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
@@ -615,13 +617,14 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         const transport = this.transport;
-        const pending = (async () => {
-            this.beginPromptRequest();
+        this.beginPromptRequest();
+        const request = transport.sendRequestWithDispatch('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+        const completed = (async () => {
             try {
-                await transport.sendRequest('session/prompt', {
-                    sessionId,
-                    prompt: content
-                }, { timeoutMs: Infinity });
+                await request.completed;
             } finally {
                 try {
                     await this.waitForSessionUpdateQuiet(
@@ -637,11 +640,11 @@ export class AcpSdkBackend implements AgentBackend {
             }
         })();
 
-        void pending.catch((error) => {
+        void completed.catch((error) => {
             logger.warn('[ACP] soft-steer session/prompt failed', error);
         });
 
-        return pending;
+        return { dispatched: request.dispatched, completed };
     }
 
     async respondToPermission(

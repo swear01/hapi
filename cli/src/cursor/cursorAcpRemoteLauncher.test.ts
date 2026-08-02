@@ -13,6 +13,7 @@ const harness = vi.hoisted(() => ({
     prompts: [] as unknown[][],
     deferPrompt: null as Promise<void> | null,
     deferSoftSteer: null as Promise<void> | null,
+    softSteerDispatchError: null as Error | null,
     backendArgs: null as { command: string; args?: string[] } | null,
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
@@ -110,11 +111,12 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 }
             }),
             cancelPrompt: vi.fn(async () => {}),
-            beginSoftSteerPrompt: vi.fn(async () => {
-                if (harness.deferSoftSteer) {
-                    await harness.deferSoftSteer;
-                }
-            }),
+            beginSoftSteerPrompt: vi.fn(() => ({
+                dispatched: harness.softSteerDispatchError
+                    ? Promise.reject(harness.softSteerDispatchError)
+                    : Promise.resolve(),
+                completed: harness.deferSoftSteer ?? Promise.resolve()
+            })),
             softSteerPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
             onStderrError: vi.fn((handler) => {
@@ -224,6 +226,7 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.prompts = [];
         harness.deferPrompt = null;
         harness.deferSoftSteer = null;
+        harness.softSteerDispatchError = null;
         harness.setConfigOptionCalls = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
@@ -266,6 +269,32 @@ describe('cursorAcpRemoteLauncher', () => {
 
         releaseSoftSteer();
         await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('restores a queued steer when ACP dispatch fails', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.softSteerDispatchError = new Error('stdin closed');
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
+            .resolves.toEqual({ steered: false, error: 'Failed to soft-steer into active turn' });
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
+
+        harness.softSteerDispatchError = null;
+        harness.deferPrompt = null;
+        releasePrompt();
         session.queue.close();
         await runPromise;
     });

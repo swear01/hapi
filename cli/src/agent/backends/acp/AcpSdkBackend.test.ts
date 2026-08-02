@@ -1145,7 +1145,7 @@ describe('AcpSdkBackend', () => {
         const calls: Array<{ method: string; params: unknown }> = [];
         const backendInternal = backend as unknown as {
             transport: {
-                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
                 sendNotification: (method: string, params: unknown) => void;
                 close: () => Promise<void>;
             } | null;
@@ -1153,9 +1153,9 @@ describe('AcpSdkBackend', () => {
         };
         backendInternal.isProcessingMessage = true;
         backendInternal.transport = {
-            sendRequest: async (method, params) => {
+            sendRequestWithDispatch: (method, params) => {
                 calls.push({ method, params });
-                return { stopReason: 'end_turn' };
+                return { dispatched: Promise.resolve(), completed: Promise.resolve({ stopReason: 'end_turn' }) };
             },
             sendNotification: () => {},
             close: async () => {}
@@ -1176,7 +1176,7 @@ describe('AcpSdkBackend', () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const backendInternal = backend as unknown as {
             transport: {
-                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
                 close: () => Promise<void>;
             } | null;
             isProcessingMessage: boolean;
@@ -1187,9 +1187,9 @@ describe('AcpSdkBackend', () => {
         const events: string[] = [];
         backendInternal.isProcessingMessage = true;
         backendInternal.transport = {
-            sendRequest: async () => {
+            sendRequestWithDispatch: () => {
                 events.push('request');
-                return { stopReason: 'end_turn' };
+                return { dispatched: Promise.resolve(), completed: Promise.resolve({ stopReason: 'end_turn' }) };
             },
             close: async () => {}
         };
@@ -1203,7 +1203,7 @@ describe('AcpSdkBackend', () => {
             events.push('late');
         };
 
-        await backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+        await backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).completed;
 
         expect(events).toEqual(['request', 'quiet', 'drain', 'late', 'drain']);
     });
@@ -1213,7 +1213,7 @@ describe('AcpSdkBackend', () => {
         let resolvePrompt: ((value: unknown) => void) | null = null;
         const backendInternal = backend as unknown as {
             transport: {
-                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
                 sendNotification: (method: string, params: unknown) => void;
                 close: () => Promise<void>;
             } | null;
@@ -1221,8 +1221,9 @@ describe('AcpSdkBackend', () => {
         };
         backendInternal.isProcessingMessage = true;
         backendInternal.transport = {
-            sendRequest: () => new Promise((resolve) => {
-                resolvePrompt = resolve;
+            sendRequestWithDispatch: () => ({
+                dispatched: Promise.resolve(),
+                completed: new Promise((resolve) => { resolvePrompt = resolve; })
             }),
             sendNotification: () => {},
             close: async () => {}
@@ -1230,7 +1231,7 @@ describe('AcpSdkBackend', () => {
 
         // Must not hang waiting for the ACP prompt response (hub RPC is 30s).
         let settled = false;
-        const pending = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).then(() => {
+        const pending = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).completed.then(() => {
             settled = true;
         });
         expect(resolvePrompt).not.toBeNull();
@@ -1244,7 +1245,7 @@ describe('AcpSdkBackend', () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         let resolvePrompt: ((value: unknown) => void) | null = null;
         const backendInternal = backend as unknown as {
-            transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null;
+            transport: { sendRequestWithDispatch: () => { dispatched: Promise<void>; completed: Promise<unknown> }; close: () => Promise<void> } | null;
             isProcessingMessage: boolean;
             activePromptRequests: number;
             finishPromptRequest: () => void;
@@ -1254,7 +1255,10 @@ describe('AcpSdkBackend', () => {
         backendInternal.isProcessingMessage = true;
         backendInternal.activePromptRequests = 1;
         backendInternal.transport = {
-            sendRequest: () => new Promise((resolve) => { resolvePrompt = resolve; }),
+            sendRequestWithDispatch: () => ({
+                dispatched: Promise.resolve(),
+                completed: new Promise((resolve) => { resolvePrompt = resolve; })
+            }),
             close: async () => {}
         };
         backendInternal.waitForSessionUpdateQuiet = async () => {};
@@ -1270,7 +1274,7 @@ describe('AcpSdkBackend', () => {
         expect(responseComplete).toBe(false);
 
         resolvePrompt!({ stopReason: 'end_turn' });
-        await pendingSteer;
+        await pendingSteer.completed;
         await responseWait;
         expect(backend.processingMessage).toBe(false);
         expect(responseComplete).toBe(true);

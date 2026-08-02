@@ -346,12 +346,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 // and report a false failure after the inject already started.
                 // Keep the launcher busy until that background prompt settles so we
                 // do not emit ready / start the next backend.prompt() while it runs.
-                let steerDone: Promise<void>;
+                let steer: { dispatched: Promise<void>; completed: Promise<void> };
                 try {
-                    steerDone = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
+                    steer = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
                         type: 'text',
                         text: taken.item.message
                     }]);
+                    await steer.dispatched;
                 } catch (error) {
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     session.queue.restoreReservation(taken);
@@ -364,6 +365,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 messageBuffer.addMessage(taken.item.message, 'user');
                 session.client.emitMessagesConsumed([localId], { steered: true });
 
+                const steerDone = steer.completed;
                 this.softSteerWaiters.push(steerDone);
                 const removeWaiter = () => {
                     this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
