@@ -700,7 +700,8 @@ export function reduceTimeline(
                 attachments: msg.content.attachments,
                 status: msg.status,
                 originalText: msg.originalText,
-                meta: msg.meta
+                meta: msg.meta,
+                steered: msg.steered
             })
             continue
         }
@@ -785,6 +786,7 @@ export function reduceTimeline(
                         imageId: c.imageId,
                         fileName: c.fileName,
                         mimeType: c.mimeType,
+                        source: c.source,
                         meta: msg.meta
                     })
                     continue

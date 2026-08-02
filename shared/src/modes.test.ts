@@ -1,6 +1,9 @@
 import { describe, expect, it, test } from 'bun:test'
 import {
     AGENT_FLAVORS,
+    CODEX_PERSONALITIES,
+    CODEX_PERSONALITY_OPTIONS,
+    CodexPersonalitySchema,
     AgentFlavorSchema,
     CREATABLE_AGENT_FLAVORS,
     getPermissionModeLabel,
@@ -8,7 +11,21 @@ import {
     getPermissionModeTone,
     getPermissionModesForFlavor,
     isPermissionModeAllowedForFlavor,
+    isSteeringSupportedForFlavor,
+    isSteeringSupportedForSession,
 } from './modes'
+
+describe('Codex personality options', () => {
+    test('offers default plus every app-server personality', () => {
+        expect(CODEX_PERSONALITY_OPTIONS.map((option) => option.value)).toEqual([
+            null,
+            ...CODEX_PERSONALITIES
+        ])
+        for (const personality of CODEX_PERSONALITIES) {
+            expect(CodexPersonalitySchema.safeParse(personality).success).toBe(true)
+        }
+    })
+})
 
 describe('Gemini CLI sunset (read-only, not creatable)', () => {
     test('gemini stays a valid flavor so existing stored sessions still validate/load', () => {
@@ -127,5 +144,49 @@ describe('claude auto permission mode', () => {
     it('has a label and tone', () => {
         expect(getPermissionModeLabel('auto')).toBe('Auto')
         expect(getPermissionModeTone('auto')).toBe('warning')
+    })
+})
+
+describe('isSteeringSupportedForFlavor', () => {
+    it('supports codex and cursor only', () => {
+        expect(isSteeringSupportedForFlavor('codex')).toBe(true)
+        expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
+        expect(isSteeringSupportedForFlavor('claude')).toBe(false)
+        expect(isSteeringSupportedForFlavor('opencode')).toBe(false)
+        expect(isSteeringSupportedForFlavor('pi')).toBe(false)
+        expect(isSteeringSupportedForFlavor(undefined)).toBe(false)
+        expect(isSteeringSupportedForFlavor(null)).toBe(false)
+    })
+})
+
+describe('isSteeringSupportedForSession', () => {
+    it('supports codex sessions', () => {
+        expect(isSteeringSupportedForSession({ flavor: 'codex' })).toBe(true)
+    })
+
+    it('supports Cursor ACP sessions', () => {
+        expect(isSteeringSupportedForSession({
+            flavor: 'cursor',
+            cursorSessionProtocol: 'acp',
+            cursorSessionId: 'sess-1',
+        })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'cursor' })).toBe(true)
+    })
+
+    it('rejects legacy Cursor stream-json sessions', () => {
+        expect(isSteeringSupportedForSession({
+            flavor: 'cursor',
+            cursorSessionProtocol: 'stream-json',
+            cursorSessionId: 'legacy-1',
+        })).toBe(false)
+        expect(isSteeringSupportedForSession({
+            flavor: 'cursor',
+            cursorSessionId: 'legacy-without-protocol',
+        })).toBe(false)
+    })
+
+    it('rejects non-steerable flavors', () => {
+        expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
+        expect(isSteeringSupportedForSession(null)).toBe(false)
     })
 })

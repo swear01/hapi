@@ -105,6 +105,8 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 harness.prompts.push(content);
             }),
             cancelPrompt: vi.fn(async () => {}),
+            beginSoftSteerPrompt: vi.fn(async () => {}),
+            softSteerPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
             onStderrError: vi.fn((handler) => {
                 harness.stderrErrorHandler = handler ?? null;
@@ -135,8 +137,14 @@ vi.mock('@/agent/permissionAdapter', () => ({
 vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
     buildHapiMcpBridge: async () => ({
         server: { stop: () => {} },
-        mcpServers: {}
-    })
+        mcpServers: {
+            hapi: { command: 'hapi', args: ['mcp', '--url', 'http://127.0.0.1:1/'] },
+        },
+    }),
+}));
+
+vi.mock('./utils/cursorMcpOverlay', () => ({
+    installCursorMcpOverlay: () => ({ cleanup: () => {} }),
 }));
 
 vi.mock('@/ui/ink/OpencodeDisplay', () => ({

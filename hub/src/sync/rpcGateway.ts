@@ -1,4 +1,4 @@
-import type { AgentFlavor, CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
+import type { AgentFlavor, CodexCollaborationMode, CodexPersonality, PermissionMode } from '@hapi/protocol/types'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import {
     ArchiveCodexSessionRpcResponseSchema,
@@ -165,7 +165,8 @@ export class RpcGateway {
         permissionMode?: PermissionMode,
         serviceTier?: string,
         existingSessionId?: string,
-        collaborationMode?: CodexCollaborationMode
+        collaborationMode?: CodexCollaborationMode,
+        personality?: CodexPersonality
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         try {
             const result = await this.machineRpc(
@@ -186,8 +187,10 @@ export class RpcGateway {
                     serviceTier,
                     existingSessionId,
                     sessionId: existingSessionId,
-                    collaborationMode
+                    collaborationMode,
+                    personality
                 }
+
             )
             if (result && typeof result === 'object') {
                 const obj = result as Record<string, unknown>
@@ -260,6 +263,15 @@ export class RpcGateway {
             { workspacePath, cursorSessionId, homeDir }
         )
         return CursorChatStoreStatusSchema.parse(result)
+    }
+
+    async stopRunner(machineId: string): Promise<void> {
+        await this.machineRpc(machineId, RPC_METHODS.StopRunner, {})
+    }
+
+    async runnerSelfUpgrade(machineId: string, offer: unknown): Promise<unknown> {
+        // Upgrades can take minutes (npm install / artifact download).
+        return await this.machineRpc(machineId, RPC_METHODS.RunnerSelfUpgrade, { offer }, 10 * 60_000)
     }
 
     async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {
@@ -358,6 +370,16 @@ export class RpcGateway {
 
     async listGrokReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListGrokReasoningEffortOptionsResponse> {
         return await this.sessionRpc(sessionId, RPC_METHODS.ListGrokReasoningEffortOptions, {}) as RpcListGrokReasoningEffortOptionsResponse
+    }
+
+    async steerQueuedMessage(
+        sessionId: string,
+        localId: string
+    ): Promise<{ steered: boolean; error?: string }> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
+            steered: boolean
+            error?: string
+        }
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

@@ -81,6 +81,7 @@ export class AcpSdkBackend implements AgentBackend {
     private usageUpdateListener: ((msg: AgentMessage) => void) | null = null;
     private sessionInfoUpdateListener: ((update: AcpSessionInfoUpdate) => void) | null = null;
     private lastForwardedUsageUpdate: AcpUsageUpdate | null = null;
+    private sessionUpdateQueue: Promise<void> = Promise.resolve();
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -118,6 +119,7 @@ export class AcpSdkBackend implements AgentBackend {
         args?: string[];
         env?: Record<string, string>;
         textChunkMode?: AcpTextChunkMode;
+        flavor?: AgentFlavor;
     }) {}
 
     async initialize(): Promise<void> {
@@ -490,8 +492,12 @@ export class AcpSdkBackend implements AgentBackend {
             AcpSdkBackend.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
             AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
         );
+        await this.sessionUpdateQueue;
         this.messageHandler?.drainBuffers();
-        this.messageHandler = new AcpMessageHandler(onUpdate, { textChunkMode: this.options.textChunkMode });
+        this.messageHandler = new AcpMessageHandler(onUpdate, {
+            textChunkMode: this.options.textChunkMode,
+            flavor: this.options.flavor,
+        });
         this.isProcessingMessage = true;
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
@@ -515,12 +521,17 @@ export class AcpSdkBackend implements AgentBackend {
                 AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
                 AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
             );
+            await this.sessionUpdateQueue;
             this.messageHandler?.drainBuffers();
             // Block here until the model truly stops streaming straggler
             // chunks (or LATE_FLUSH_WINDOW_MS elapses), so turn_complete and
             // the launcher's ready signal only fire once every chunk has been
             // emitted to this turn's onUpdate.
             await this.drainLateBuffers();
+            // Late window can enqueue async image registration; drain again
+            // before turn_complete so generated_image precedes turn boundary.
+            await this.sessionUpdateQueue;
+            this.messageHandler?.drainBuffers();
             try {
                 const latestUsageUpdate = this.readLatestUsageUpdate();
                 if (promptUsage) {
@@ -568,6 +579,57 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         this.transport.sendNotification('session/cancel', { sessionId });
+    }
+
+    /**
+     * Soft-inject a follow-up `session/prompt` while another prompt is in flight.
+     *
+     * Used for Cursor mid-turn steer (GUI "Send" / next-opportune soft send).
+     * Does **not** cancel the active prompt and does **not** swap message handlers —
+     * `session/update` notifications keep flowing to the in-flight turn's handler.
+     *
+     * Awaits the full concurrent `session/prompt` JSON-RPC response (turn completion
+     * for that inject). Do **not** call this from the hub `SteerQueuedMessage` handler —
+     * that RPC uses a 30s Socket.IO timeout. Use {@link beginSoftSteerPrompt} there.
+     */
+    async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        await this.transport.sendRequest('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+    }
+
+    /**
+     * Kick off a soft steer without blocking the hub RPC on turn completion.
+     * Returns a promise that settles when the concurrent `session/prompt` finishes
+     * (or fails) so callers can keep the launcher busy until then. The promise is
+     * also logged on failure; callers may `void` it after recording the waiter.
+     */
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        const pending = this.transport.sendRequest('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity }).then(() => undefined);
+
+        void pending.catch((error) => {
+            logger.warn('[ACP] soft-steer session/prompt failed', error);
+        });
+
+        return pending;
     }
 
     async respondToPermission(
@@ -699,6 +761,7 @@ export class AcpSdkBackend implements AgentBackend {
             clearTimeout(timer);
         }
         this.sessionInfoRefreshTimers.clear();
+        await this.sessionUpdateQueue;
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
@@ -720,12 +783,23 @@ export class AcpSdkBackend implements AgentBackend {
         }
         this.lastSessionUpdateAt = Date.now();
         const update = params.update;
+        // Title/usage/commands stay synchronous (#1028). Only message-handler
+        // work is queued so async image registration preserves event order.
         if (sessionId) {
             this.captureAvailableCommands(sessionId, update);
         }
         this.forwardSessionInfoUpdate(sessionId, update);
         this.captureUsageUpdate(update);
-        this.messageHandler?.handleUpdate(update);
+        this.sessionUpdateQueue = this.sessionUpdateQueue
+            .then(async () => {
+                await this.messageHandler?.handleUpdate(update);
+            })
+            .catch((error) => {
+                logger.debug(
+                    '[AcpSdkBackend] session update failed:',
+                    error instanceof Error ? error.message : String(error)
+                );
+            });
     }
 
     private forwardSessionInfoUpdate(sessionId: string | null, update: unknown): void {

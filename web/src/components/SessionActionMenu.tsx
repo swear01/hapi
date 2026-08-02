@@ -1,18 +1,11 @@
-import {
-    useCallback,
-    useEffect,
-    useId,
-    useLayoutEffect,
-    useRef,
-    useState,
-    type CSSProperties
-} from 'react'
+import { useId } from 'react'
 import { useTranslation } from '@/lib/use-translation'
 import { HoverTooltip } from '@/components/HoverTooltip'
 import { safeCopyToClipboard } from '@/lib/clipboard'
 import { buildSessionReferenceText } from '@/lib/sessionReference'
 import { usePlatform } from '@/hooks/usePlatform'
 import { CopyIcon } from '@/components/icons'
+import { useAnchoredMenu } from '@/hooks/useAnchoredMenu'
 
 type SessionActionMenuProps = {
     isOpen: boolean
@@ -26,6 +19,8 @@ type SessionActionMenuProps = {
     onArchive: () => void
     onReopen?: () => void
     reopenDisabledReason?: string
+    /** Soft-fail tip when reopen is allowed but chat-store probe could not verify. */
+    reopenHint?: string
     onDelete: () => void
     anchorPoint: { x: number; y: number }
     menuId?: string
@@ -158,12 +153,6 @@ function TrashIcon(props: { className?: string }) {
     )
 }
 
-type MenuPosition = {
-    top: number
-    left: number
-    transformOrigin: string
-}
-
 export function SessionActionMenu(props: SessionActionMenuProps) {
     const { t } = useTranslation()
     const { haptic } = usePlatform()
@@ -179,12 +168,12 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onArchive,
         onReopen,
         reopenDisabledReason,
+        reopenHint,
         onDelete,
         anchorPoint,
         menuId
     } = props
-    const menuRef = useRef<HTMLDivElement | null>(null)
-    const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
+    const { menuRef, menuStyle } = useAnchoredMenu({ isOpen, onClose, anchorPoint })
     const internalId = useId()
     const resolvedMenuId = menuId ?? `session-action-menu-${internalId}`
     const headingId = `${resolvedMenuId}-heading`
@@ -229,90 +218,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onDelete()
     }
 
-    const updatePosition = useCallback(() => {
-        const menuEl = menuRef.current
-        if (!menuEl) return
-
-        const menuRect = menuEl.getBoundingClientRect()
-        const viewportWidth = window.innerWidth
-        const viewportHeight = window.innerHeight
-        const padding = 8
-        const gap = 8
-
-        const spaceBelow = viewportHeight - anchorPoint.y
-        const spaceAbove = anchorPoint.y
-        const openAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow
-
-        let top = openAbove ? anchorPoint.y - menuRect.height - gap : anchorPoint.y + gap
-        let left = anchorPoint.x - menuRect.width / 2
-        const transformOrigin = openAbove ? 'bottom center' : 'top center'
-
-        top = Math.min(Math.max(top, padding), viewportHeight - menuRect.height - padding)
-        left = Math.min(Math.max(left, padding), viewportWidth - menuRect.width - padding)
-
-        setMenuPosition({ top, left, transformOrigin })
-    }, [anchorPoint])
-
-    useLayoutEffect(() => {
-        if (!isOpen) return
-        updatePosition()
-    }, [isOpen, updatePosition])
-
-    useEffect(() => {
-        if (!isOpen) {
-            setMenuPosition(null)
-            return
-        }
-
-        const handlePointerDown = (event: PointerEvent) => {
-            const target = event.target as Node
-            if (menuRef.current?.contains(target)) return
-            onClose()
-        }
-
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
-                onClose()
-            }
-        }
-
-        const handleReflow = () => {
-            updatePosition()
-        }
-
-        document.addEventListener('pointerdown', handlePointerDown)
-        document.addEventListener('keydown', handleKeyDown)
-        window.addEventListener('resize', handleReflow)
-        window.addEventListener('scroll', handleReflow, true)
-
-        return () => {
-            document.removeEventListener('pointerdown', handlePointerDown)
-            document.removeEventListener('keydown', handleKeyDown)
-            window.removeEventListener('resize', handleReflow)
-            window.removeEventListener('scroll', handleReflow, true)
-        }
-    }, [isOpen, onClose, updatePosition])
-
-    useEffect(() => {
-        if (!isOpen) return
-
-        const frame = window.requestAnimationFrame(() => {
-            const firstItem = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')
-            firstItem?.focus()
-        })
-
-        return () => window.cancelAnimationFrame(frame)
-    }, [isOpen])
-
     if (!isOpen) return null
-
-    const menuStyle: CSSProperties | undefined = menuPosition
-        ? {
-            top: `max(${menuPosition.top}px, calc(env(safe-area-inset-top) + 8px))`,
-            left: menuPosition.left,
-            transformOrigin: menuPosition.transformOrigin
-        }
-        : undefined
 
     const baseItemClassName =
         'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
@@ -391,7 +297,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                     </button>
                 ) : (
                     <>
-                        {onReopen || reopenDisabledReason ? (
+                        {onReopen || reopenDisabledReason || reopenHint ? (
                             <HoverTooltip
                                 id={`${resolvedMenuId}-reopen-tooltip`}
                                 className="w-full [&>span:first-child]:w-full"
@@ -402,7 +308,11 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                                         type="button"
                                         role="menuitem"
                                         aria-disabled={reopenDisabledReason ? true : undefined}
-                                        aria-describedby={reopenDisabledReason ? `${resolvedMenuId}-reopen-tooltip` : undefined}
+                                        aria-describedby={
+                                            reopenDisabledReason || reopenHint
+                                                ? `${resolvedMenuId}-reopen-tooltip`
+                                                : undefined
+                                        }
                                         className={`${baseItemClassName} ${reopenDisabledReason
                                             ? 'cursor-not-allowed opacity-50'
                                             : 'hover:bg-[var(--app-subtle-bg)]'}`}
@@ -413,7 +323,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                                     </button>
                                 )}
                             >
-                                {reopenDisabledReason ?? t('session.action.reopen')}
+                                {reopenDisabledReason ?? reopenHint ?? t('session.action.reopen')}
                             </HoverTooltip>
                         ) : null}
                         <button

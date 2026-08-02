@@ -62,15 +62,10 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
     app.post('/sessions/:id/messages/queued-state', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
-        if (engine instanceof Response) {
-            return engine
-        }
+        if (engine instanceof Response) return engine
 
         const sessionResult = requireSessionFromParam(c, engine)
-        if (sessionResult instanceof Response) {
-            return sessionResult
-        }
-        const sessionId = sessionResult.sessionId
+        if (sessionResult instanceof Response) return sessionResult
 
         const body = await c.req.json().catch(() => null)
         const parsed = QueuedStateRequestSchema.safeParse(body)
@@ -82,7 +77,20 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (localIds.length === 0) {
             return c.json({ queuedLocalIds: [], invokedLocalMessages: [] })
         }
-        return c.json(engine.getQueuedState(sessionId, localIds))
+        return c.json(engine.getQueuedState(sessionResult.sessionId, localIds))
+    })
+
+    app.post('/sessions/:id/messages/:messageId/steer', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+
+        return c.json(await engine.steerQueuedMessage(
+            sessionResult.sessionId,
+            c.req.param('messageId')
+        ))
     })
 
     app.post('/sessions/:id/messages', async (c) => {
