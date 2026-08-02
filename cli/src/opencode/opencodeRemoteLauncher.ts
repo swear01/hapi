@@ -129,6 +129,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
     private setEffortSupported: boolean | undefined = undefined;
     private activeAcpSessionId: string | null = null;
     private stallErrorReportedForPrompt = false;
+    private promptInFlight = false;
 
     constructor(
         session: OpencodeSession,
@@ -561,6 +562,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
             }];
 
             this.stallErrorReportedForPrompt = false;
+            this.promptInFlight = true;
             session.onThinkingChange(true);
 
             try {
@@ -572,6 +574,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 logger.warn('[opencode-remote] prompt failed', error);
                 this.surfaceAgentError('OpenCode prompt failed. Check logs for details.');
             } finally {
+                this.promptInFlight = false;
                 session.onThinkingChange(false);
                 await this.permissionHandler?.cancelAll('Prompt finished');
                 if (session.queue.size() === 0 && !this.shouldExit) {
@@ -620,7 +623,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
 
     private handleAcpStderrError(error: AcpStderrError): void {
         logger.debug('[opencode-remote] stderr error', error);
-        const isStall = isAcpStallStderrError(error);
+        const isStall = isAcpStallStderrError(error) && this.promptInFlight;
         if (isStall && this.stallErrorReportedForPrompt) {
             return;
         }

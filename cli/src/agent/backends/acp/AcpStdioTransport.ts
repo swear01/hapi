@@ -122,6 +122,7 @@ export class AcpStdioTransport {
             logger.debug(`[ACP][stderr] ${text}`);
             this.parseStderrRecords(raw);
             this.flushActionableStderrTail();
+            this.stderrParseBuffer = this.stderrParseBuffer.slice(-AcpStdioTransport.RECENT_STDERR_WINDOW);
         });
 
         // Block new stdin writes as soon as the process exits, but defer markClosed
@@ -418,7 +419,7 @@ export class AcpStdioTransport {
     }
 
     private parseStderrRecords(raw: string): void {
-        const lines = (this.stderrParseBuffer + raw).split(/\r?\n/);
+        const lines = (this.stderrParseBuffer + raw).split(/\r\n|[\r\n]/);
         this.stderrParseBuffer = lines.pop() ?? '';
         for (const line of lines) {
             const text = line.trim();

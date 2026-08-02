@@ -391,6 +391,21 @@ describe('AcpStdioTransport closed stdin writes', () => {
         ]);
     });
 
+    test('bounds newline-free unclassified stderr tails', () => {
+        const transport = new AcpStdioTransport({ command: 'agent' });
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (value: string) => void);
+
+        for (const handler of handlers) handler('x'.repeat(20_000));
+
+        const buffer = (transport as unknown as { stderrParseBuffer: string }).stderrParseBuffer;
+        expect(buffer.length).toBeLessThanOrEqual(8_000);
+    });
+
     test('rejects pending requests when stdin.write throws', async () => {
         spawnState.stdinWrite.mockImplementation(() => {
             throw new Error('WritableIterable is closed');
