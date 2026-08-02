@@ -43,4 +43,3 @@ export function normalizeCopilotAgentMode(value: unknown): CopilotAgentMode {
     }
     return isCopilotAgentMode(value) ? value : 'interactive'
 }
-
