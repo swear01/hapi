@@ -373,6 +373,7 @@ export function useSSE(options: {
                 const summary = {
                     ...toSessionSummary(session),
                     futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0,
+                    uninvokedScheduledMessageCount: existing?.uninvokedScheduledMessageCount ?? 0,
                     nextScheduledAt: existing?.nextScheduledAt ?? null,
                     scratchlistUpdatedAt: existing?.scratchlistUpdatedAt
                 }

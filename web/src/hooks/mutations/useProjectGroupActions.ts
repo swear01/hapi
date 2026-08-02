@@ -65,7 +65,7 @@ export function useProjectGroupActions(
             const deletedSessions: SessionSummary[] = []
             for (const session of sessions) {
                 if (isOldInactiveSession(session, now)) {
-                    await api.deleteSession(session.id)
+                    await api.deleteSession(session.id, { cleanOld: true })
                     deletedSessions.push(session)
                 }
             }

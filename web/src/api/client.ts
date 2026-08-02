@@ -765,8 +765,9 @@ export class ApiClient {
         })
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    async deleteSession(sessionId: string, options?: { cleanOld?: boolean }): Promise<void> {
+        const suffix = options?.cleanOld ? '?cleanOld=1' : ''
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
             method: 'DELETE'
         })
     }

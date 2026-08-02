@@ -134,7 +134,7 @@ describe('useProjectGroupActions - cleanOldSessions', () => {
         })
 
         expect(deleteSession).toHaveBeenCalledTimes(2)
-        expect(deleteSession).toHaveBeenNthCalledWith(1, 'old')
-        expect(deleteSession).toHaveBeenNthCalledWith(2, 'boundary')
+        expect(deleteSession).toHaveBeenNthCalledWith(1, 'old', { cleanOld: true })
+        expect(deleteSession).toHaveBeenNthCalledWith(2, 'boundary', { cleanOld: true })
     })
 })
