@@ -45,7 +45,7 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                 {t('session.status.title')}
                 <span className="ml-auto text-[10px] text-[var(--app-hint)] transition-transform group-open:rotate-180" aria-hidden="true">▼</span>
             </summary>
-            <div className="grid gap-3 border-t border-[var(--app-border)] px-3 py-2.5 sm:grid-cols-2">
+            <div className="grid max-h-[min(50dvh,24rem)] gap-3 overflow-y-auto border-t border-[var(--app-border)] px-3 py-2.5 sm:grid-cols-2">
                 {data.goal ? (
                     <Section title={t('session.status.goal')}>
                         <div className="break-words text-sm text-[var(--app-fg)]">{data.goal.objective}</div>

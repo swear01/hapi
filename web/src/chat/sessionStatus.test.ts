@@ -134,5 +134,12 @@ describe('buildSessionStatusData', () => {
             messages: [],
             backgroundTaskCount: 2
         })).toMatchObject({ terminals: [], undiscoveredTerminalCount: 2 })
+        expect(buildSessionStatusData({
+            goal: null,
+            tasks: [],
+            blocks,
+            messages: [taskNotification()],
+            backgroundTaskCount: 1
+        })).toMatchObject({ terminals: [], undiscoveredTerminalCount: 1 })
     })
 })

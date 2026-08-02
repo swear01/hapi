@@ -69,8 +69,12 @@ function collectToolBlocks(blocks: readonly ChatBlock[]): ToolCallBlock[] {
     return tools
 }
 
-function completedBackgroundTaskIds(messages: readonly NormalizedMessage[]): Set<string> {
+function backgroundTaskCompletions(messages: readonly NormalizedMessage[]): {
+    ids: Set<string>
+    latestUnknownAt: number | null
+} {
     const ids = new Set<string>()
+    let latestUnknownAt: number | null = null
 
     for (const message of messages) {
         if (message.role !== 'agent') continue
@@ -80,10 +84,11 @@ function completedBackgroundTaskIds(messages: readonly NormalizedMessage[]): Set
             if (!prompt.startsWith('<task-notification>')) continue
             const taskId = prompt.match(TASK_ID_RE)?.[1]?.trim()
             if (taskId) ids.add(taskId)
+            else latestUnknownAt = Math.max(latestUnknownAt ?? 0, message.createdAt)
         }
     }
 
-    return ids
+    return { ids, latestUnknownAt }
 }
 
 function buildBackgroundTerminals(
@@ -93,8 +98,11 @@ function buildBackgroundTerminals(
     const terminals = tools
         .map(terminalFromBlock)
         .filter((terminal): terminal is SessionStatusTerminal => terminal !== null)
-    const completedIds = completedBackgroundTaskIds(messages)
-    return terminals.filter((terminal) => !completedIds.has(terminal.id))
+    const completions = backgroundTaskCompletions(messages)
+    return terminals.filter((terminal) => (
+        !completions.ids.has(terminal.id)
+        && (completions.latestUnknownAt === null || terminal.startedAt > completions.latestUnknownAt)
+    ))
 }
 
 function subagentTitle(block: ToolCallBlock): string {
