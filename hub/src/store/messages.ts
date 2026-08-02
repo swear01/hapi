@@ -200,7 +200,7 @@ export function copyMessagesToSession(
             insert.run({
                 id: randomUUID(),
                 session_id: sessionId,
-                content: JSON.stringify(message.content),
+                content: encodeMessageContent(message.content),
                 created_at: createdAt,
                 seq: nextSeq,
                 local_id: localId ?? null,
@@ -813,7 +813,7 @@ export function truncateMessagesFromLocalId(
             `).run(
                 id,
                 sessionId,
-                JSON.stringify(message.content),
+                encodeMessageContent(message.content),
                 createdAt,
                 msgSeqRow.nextSeq,
                 rowLocalId,
