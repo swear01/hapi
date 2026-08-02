@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from '@/api/client'
-import type {
-    TranscriptionMode,
-    TranscriptionProvider,
-    TranscriptionProviderInfo,
-    VoiceMode
+import {
+    BROWSER_LOCAL_TRANSCRIPTION_PROVIDER,
+    type TranscriptionMode,
+    type TranscriptionProvider,
+    type TranscriptionProviderInfo,
+    type VoiceMode
 } from '@hapi/protocol/voice'
 
 const VOICE_MODE_KEY = 'hapi-voice-mode'
@@ -14,6 +15,17 @@ const CHANGE_EVENT = 'hapi-voice-input-change'
 
 function notifyChange(): void {
     window.dispatchEvent(new Event(CHANGE_EVENT))
+}
+
+function browserLocalTranscriptionSupported(): boolean {
+    const constructor = (globalThis as typeof globalThis & {
+        SpeechRecognition?: { prototype: object; available?: unknown }
+    }).SpeechRecognition
+    return Boolean(
+        constructor
+        && typeof constructor.available === 'function'
+        && 'processLocally' in constructor.prototype
+    )
 }
 
 function readVoiceMode(): VoiceMode {
@@ -33,7 +45,8 @@ function resolveMode(
     stored: string | null
 ): TranscriptionMode {
     const modes = providers.find((candidate) => candidate.id === provider)?.modes ?? ['standard']
-    return stored === 'realtime' && modes.includes('realtime') ? 'realtime' : 'standard'
+    if ((stored === 'standard' || stored === 'realtime') && modes.includes(stored)) return stored
+    return modes[0] ?? 'standard'
 }
 
 export function useVoiceInputPreferences(api: ApiClient | null) {
@@ -45,8 +58,11 @@ export function useVoiceInputPreferences(api: ApiClient | null) {
     useEffect(() => {
         if (!api) return
         let cancelled = false
-        api.fetchTranscriptionProviders().then(({ providers: available }) => {
+        api.fetchTranscriptionProviders().then(({ providers: configured }) => {
             if (cancelled) return
+            const available = browserLocalTranscriptionSupported()
+                ? [...configured, BROWSER_LOCAL_TRANSCRIPTION_PROVIDER]
+                : configured
             setProviders(available)
             const selectedProvider = resolveProvider(available, localStorage.getItem(TRANSCRIPTION_PROVIDER_KEY))
             setProviderState(selectedProvider)

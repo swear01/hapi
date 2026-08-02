@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { I18nProvider } from '@/lib/i18n-context'
 import { useVoiceSettings } from './useVoiceSettings'
@@ -26,6 +26,8 @@ function Wrapper(props: { children: React.ReactNode }) {
 }
 
 describe('useVoiceSettings', () => {
+    afterEach(() => vi.unstubAllGlobals())
+
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
@@ -79,5 +81,20 @@ describe('useVoiceSettings', () => {
         expect(play).toHaveBeenCalledOnce()
         unmount()
         expect(pause).toHaveBeenCalled()
+    })
+
+    it('uses realtime for the realtime-only browser provider', async () => {
+        class MockSpeechRecognition {
+            static available() { return Promise.resolve('available') }
+            processLocally = false
+        }
+        Object.defineProperty(MockSpeechRecognition.prototype, 'processLocally', { value: false })
+        vi.stubGlobal('SpeechRecognition', MockSpeechRecognition)
+        localStorage.setItem('hapi-transcription-mode', 'standard')
+
+        const { result } = renderHook(() => useVoiceSettings(), { wrapper: Wrapper })
+
+        await waitFor(() => expect(result.current.provider).toBe('browser-local'))
+        expect(result.current.transcriptionMode).toBe('realtime')
     })
 })

@@ -952,6 +952,16 @@ export class ApiClient {
         return await this.request('/api/voice/transcription', { method: 'POST', body: form })
     }
 
+    async fetchRealtimeTranscriptionToken(
+        provider: 'openai' | 'elevenlabs' | 'deepgram',
+        language?: string
+    ): Promise<{ token: string }> {
+        return await this.request('/api/voice/transcription/realtime-token', {
+            method: 'POST',
+            body: JSON.stringify({ provider, language })
+        })
+    }
+
     async fetchQwenToken(): Promise<{
         allowed: boolean
         wsUrl?: string
