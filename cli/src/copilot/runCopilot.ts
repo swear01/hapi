@@ -143,6 +143,7 @@ export async function runCopilot(opts: {
                 const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
                 messageQueue.push(formattedText, buildMode(), localId);
             };
+            let recognizedSlash = false;
             try {
                 if (wasCancelled()) return;
                 let text = message.content.text;
@@ -156,6 +157,7 @@ export async function runCopilot(opts: {
                 });
 
                 if (slash.kind !== 'passthrough') {
+                    recognizedSlash = true;
                     if (sessionWrapperRef.current?.mode === 'local'
                         && (slash.updates?.permissionMode !== undefined
                             || slash.updates?.model !== undefined
@@ -214,9 +216,20 @@ export async function runCopilot(opts: {
                 messageQueue.push(formattedText, buildMode(), localId);
             } catch (error) {
                 logger.debug('[copilot] Failed to handle user message', error);
-                if (!wasCancelled()) {
-                    pushPlain();
+                if (wasCancelled()) return;
+                if (recognizedSlash) {
+                    if (localId) {
+                        session.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+                    }
+                    session.sendAgentMessage({
+                        type: 'message',
+                        message: error instanceof Error ? error.message : 'Failed to apply Copilot slash command',
+                        id: randomUUID()
+                    });
+                    sessionWrapperRef.current?.onThinkingChange(false);
+                    return;
                 }
+                pushPlain();
             } finally {
                 if (localId) {
                     preparingLocalIds.delete(localId);
