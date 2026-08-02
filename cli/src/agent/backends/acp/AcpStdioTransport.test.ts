@@ -340,6 +340,26 @@ describe('AcpStdioTransport closed stdin writes', () => {
         expect(seen.map((error) => error.type)).toEqual([type]);
     });
 
+    test('reports a completed non-HTTP/2 cancellation record', () => {
+        const transport = new AcpStdioTransport({ command: 'agent' });
+        const seen: Array<{ type: string; message: string; raw: string }> = [];
+        transport.onStderrError((error) => seen.push(error));
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (value: string) => void);
+
+        for (const handler of handlers) handler('Error: request canceled by provider\n');
+
+        expect(seen).toEqual([{
+            type: 'unknown',
+            message: 'Error: request canceled by provider',
+            raw: 'Error: request canceled by provider'
+        }]);
+    });
+
     test('parses stall signatures split across stderr chunks without waiting for close', () => {
         const transport = new AcpStdioTransport({ command: 'opencode' });
         const seen: Array<{ type: string; message: string; raw: string }> = [];

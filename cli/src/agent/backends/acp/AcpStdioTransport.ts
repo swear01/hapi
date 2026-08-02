@@ -425,7 +425,7 @@ export class AcpStdioTransport {
         for (const line of lines) {
             const text = line.trim();
             if (text) {
-                this.parseStderrError(text);
+                this.parseStderrError(text, true);
                 this.stderrPartialErrorReported = false;
             }
         }
@@ -443,12 +443,15 @@ export class AcpStdioTransport {
         const text = this.stderrParseBuffer.trim();
         this.stderrParseBuffer = '';
         if (text) {
-            this.parseStderrError(text);
+            this.parseStderrError(text, true);
         }
         this.stderrPartialErrorReported = false;
     }
 
-    private parseStderrError(text: string): 'none' | 'reported-partial' | 'reported-complete' {
+    private parseStderrError(
+        text: string,
+        completeRecord = false
+    ): 'none' | 'reported-partial' | 'reported-complete' {
         if (!this.stderrErrorHandler) {
             return 'none';
         }
@@ -536,7 +539,7 @@ export class AcpStdioTransport {
         }
 
         // Keep cancellation errors buffered until a later chunk can classify them.
-        if (lowerText.includes('canceled')) {
+        if (lowerText.includes('canceled') && !completeRecord) {
             return 'none';
         }
 
