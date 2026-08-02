@@ -74,6 +74,7 @@ describe('buildSessionStatusData', () => {
         const blocks: ChatBlock[] = [
             toolBlock({ name: 'CodexAgent', tool: { id: 'agent-1', state: 'running', input: { summary: 'Inspect API', activity: 'Reading files' } } }),
             toolBlock({ name: 'Agent', tool: { id: 'agent-2', state: 'error', input: { description: 'Review changes' } } }),
+            toolBlock({ name: 'Agent', tool: { id: 'agent-pending', state: 'pending', input: { description: 'Needs permission' } } }),
             toolBlock({
                 name: 'Task',
                 tool: { id: 'agent-3', state: 'completed', input: { description: 'Done' } },
@@ -86,6 +87,7 @@ describe('buildSessionStatusData', () => {
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toEqual([
             expect.objectContaining({ id: 'agent-1', title: 'Inspect API', detail: 'Reading files', state: 'running', endedAt: null }),
             expect.objectContaining({ id: 'agent-2', title: 'Review changes', state: 'error', endedAt: 100 }),
+            expect.objectContaining({ id: 'agent-pending', state: 'waiting', startedAt: null }),
             expect.objectContaining({ id: 'agent-4', title: 'Nested work', state: 'running' })
         ])
     })
@@ -113,6 +115,10 @@ describe('buildSessionStatusData', () => {
                         input: { command: 'bun test --watch' },
                         result: [{ type: 'text', text: 'Command running in background with ID: bg-2' }]
                     }
+                }),
+                toolBlock({
+                    name: 'Read',
+                    tool: { result: 'Command running in background with ID: not-a-terminal' }
                 })
             ]
         })]

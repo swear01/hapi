@@ -21,8 +21,8 @@ function subagentTone(state: SessionStatusSubagent['state']): string {
     return 'text-emerald-600'
 }
 
-function elapsedSince(startedAt: number, now: number): string | null {
-    if (startedAt <= 0) return null
+function elapsedSince(startedAt: number | null, now: number): string | null {
+    if (startedAt === null || startedAt <= 0) return null
     return formatDuration(Math.max(0, now - startedAt))
 }
 
@@ -30,7 +30,7 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
     const { t } = useTranslation()
     const completedTasks = data.tasks.filter((task) => task.status === 'completed').length
     const hasLiveElapsed = data.terminals.length > 0
-        || data.subagents.some((subagent) => subagent.endedAt === null)
+        || data.subagents.some((subagent) => subagent.endedAt === null && subagent.startedAt !== null)
     const [now, setNow] = useState(() => Date.now())
 
     useEffect(() => {

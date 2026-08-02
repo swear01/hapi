@@ -10,7 +10,7 @@ export type SessionStatusSubagent = {
     title: string
     detail: string | null
     state: 'running' | 'waiting' | 'error'
-    startedAt: number
+    startedAt: number | null
     endedAt: number | null
 }
 
@@ -32,11 +32,14 @@ export type SessionStatusData = {
 const BACKGROUND_START_RE = /Command running in background with ID:\s*([^\s<]+)/
 const TASK_ID_RE = /<task-id>\s*([^<]+?)\s*<\/task-id>/
 
-function textFromUnknown(value: unknown): string {
-    if (typeof value === 'string') return value
-    if (Array.isArray(value)) return value.map(textFromUnknown).join('\n')
-    if (!isObject(value)) return ''
-    return Object.values(value).map(textFromUnknown).join('\n')
+function findBackgroundTaskId(value: unknown): string | null {
+    if (typeof value === 'string') return value.match(BACKGROUND_START_RE)?.[1] ?? null
+    const values = Array.isArray(value) ? value : isObject(value) ? Object.values(value) : []
+    for (const item of values) {
+        const taskId = findBackgroundTaskId(item)
+        if (taskId) return taskId
+    }
+    return null
 }
 
 function commandFromInput(input: unknown): string | null {
@@ -48,8 +51,8 @@ function commandFromInput(input: unknown): string | null {
 }
 
 function terminalFromBlock(block: ToolCallBlock): SessionStatusTerminal | null {
-    const resultText = textFromUnknown(block.tool.result)
-    const taskId = resultText.match(BACKGROUND_START_RE)?.[1]
+    if (block.tool.name !== 'Bash') return null
+    const taskId = findBackgroundTaskId(block.tool.result)
     if (!taskId) return null
 
     return {
@@ -126,14 +129,15 @@ function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
         : latestChild?.kind === 'tool-call'
             ? latestChild.tool.nativeTitle ?? latestChild.tool.name
             : null
-    const waiting = activity?.toLowerCase().startsWith('waiting') ?? false
+    const waiting = block.tool.state === 'pending'
+        || (activity?.toLowerCase().startsWith('waiting') ?? false)
 
     return {
         id: block.tool.id,
         title: subagentTitle(block),
         detail: activity,
         state: block.tool.state === 'error' ? 'error' : waiting ? 'waiting' : 'running',
-        startedAt: block.tool.startedAt ?? block.createdAt,
+        startedAt: block.tool.startedAt ?? (block.tool.state === 'pending' ? null : block.createdAt),
         endedAt: block.tool.state === 'error'
             ? block.tool.completedAt ?? block.tool.startedAt ?? block.createdAt
             : null
