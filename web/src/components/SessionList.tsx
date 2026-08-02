@@ -13,6 +13,7 @@ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { CopyIcon, CheckIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
+import { safeCopyToClipboard } from '@/lib/clipboard'
 import { useTranslation } from '@/lib/use-translation'
 import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
@@ -400,8 +401,13 @@ function ProjectGroupHeader(props: {
         threshold: 500
     })
 
-    const handleCopyPath = () => {
-        void navigator.clipboard.writeText(group.directory)
+    const handleCopyPath = async () => {
+        try {
+            await safeCopyToClipboard(group.directory)
+            haptic.notification('success')
+        } catch {
+            haptic.notification('error')
+        }
     }
 
     return (
