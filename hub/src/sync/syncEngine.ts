@@ -389,12 +389,27 @@ export class SyncEngine {
 
     handleRealtimeEvent(event: SyncEvent): void {
         if (event.type === 'session-updated' && event.sessionId) {
-            // Snapshot agent session IDs before refresh — safe because JS is single-threaded
-            // and refreshSession replaces the Map entry with a new object.
             const before = this.sessionCache.getSession(event.sessionId)
+            const beforeMetadata = before?.metadata ?? null
+            const patchApplied = event.data
+                ? this.sessionCache.applySessionPatch(event.sessionId, event.data, event.namespace)
+                : false
+
+            if (patchApplied) {
+                this.eventPublisher.emit(event)
+                const after = this.sessionCache.getSession(event.sessionId)
+                if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
+                    if (!this.canRunCursorDedup(after)) {
+                        return
+                    }
+                    void this.sessionCache.deduplicateByAgentSessionId(event.sessionId).catch(() => {})
+                }
+                return
+            }
+
             this.sessionCache.refreshSession(event.sessionId)
             const after = this.sessionCache.getSession(event.sessionId)
-            if (after?.metadata && !this.hasSameAgentSessionIds(before?.metadata ?? null, after.metadata)) {
+            if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
                 if (!this.canRunCursorDedup(after)) {
                     return
                 }
@@ -407,6 +422,7 @@ export class SyncEngine {
 
         if (event.type === 'machine-updated' && event.machineId) {
             this.machineCache.refreshMachine(event.machineId)
+            void this.maybeFleetUpgradeMachine(event.machineId)
             return
         }
 
@@ -1812,11 +1828,12 @@ async uploadScratchlistAttachment(
                     }
                 }
             } catch (error) {
-                return {
-                    type: 'error',
-                    message: error instanceof Error ? error.message : 'Failed to inspect Cursor chat store',
-                    code: 'resume_failed'
-                }
+                const message = error instanceof Error ? error.message : 'Failed to inspect Cursor chat store'
+                console.warn('[resume] Cursor chat-store probe failed; proceeding with reopen attempt', {
+                    sessionId: access.sessionId,
+                    machineId: targetMachine.id,
+                    message
+                })
             }
         }
 

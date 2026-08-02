@@ -1163,6 +1163,7 @@ describe('AcpSdkBackend', () => {
             } | null;
             handleSessionUpdate: (params: unknown) => void;
             messageHandler: unknown;
+            sessionUpdateQueue: Promise<void>;
         };
         backendInternal.transport = {
             sendRequest: async () => ({ stopReason: 'end_turn' }),
@@ -1198,6 +1199,7 @@ describe('AcpSdkBackend', () => {
         // ordinary straggler-forwarding (covered elsewhere) is unaffected.
         expect(backendInternal.messageHandler).toBe(handlerBeforeSuppression);
         emitPlanUpdate();
+        await backendInternal.sessionUpdateQueue;
         expect(turn1.some((m) => m.type === 'plan')).toBe(true);
     });
 
@@ -1221,6 +1223,7 @@ describe('AcpSdkBackend', () => {
             } | null;
             handleSessionUpdate: (params: unknown) => void;
             messageHandler: unknown;
+            sessionUpdateQueue: Promise<void>;
         };
         backendInternal.transport = {
             sendRequest: async () => ({ stopReason: 'end_turn' }),
@@ -1268,6 +1271,7 @@ describe('AcpSdkBackend', () => {
 
         // Normal forwarding resumes once actually restored.
         emitPlanUpdate();
+        await backendInternal.sessionUpdateQueue;
         expect(turn1.some((m) => m.type === 'plan')).toBe(true);
     });
 });

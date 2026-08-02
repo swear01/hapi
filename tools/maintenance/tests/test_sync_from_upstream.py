@@ -70,6 +70,27 @@ class SyncFromUpstreamTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn('REHEARSAL_OK', result.stdout)
 
+    def test_accepts_release_paths_relative_to_the_checkout(self):
+        maintenance = self.repo / 'maintenance'
+        patch_dir = maintenance / 'patches'
+        patch_dir.mkdir(parents=True)
+        (patch_dir / '0001.patch').write_text((self.patch_dir / '0001.patch').read_text())
+        manifest = maintenance / 'manifest.tsv'
+        manifest.write_text(self.manifest.read_text())
+
+        result = run(
+            str(SCRIPT),
+            '--repo', '.',
+            '--patch-dir', 'maintenance/patches',
+            '--manifest', 'maintenance/manifest.tsv',
+            '--skip-tests',
+            cwd=self.repo,
+            check=False,
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn('REHEARSAL_OK', result.stdout)
+
     def test_refreshes_origin_tracking_ref_after_force_rewrite(self):
         run('git', '-C', str(self.seed), 'reset', '--hard', 'upstream/main')
         (self.seed / 'replacement.txt').write_text('replacement\n')

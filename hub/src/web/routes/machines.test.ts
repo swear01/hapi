@@ -101,8 +101,8 @@ describe('machines routes', () => {
         })
 
         expect(response.status).toBe(200)
-        expect(capturedArgs[12]).toBeUndefined()
-        expect(capturedArgs[13]).toBe('plan')
+        expect(capturedArgs[13]).toBeUndefined()
+        expect(capturedArgs[14]).toBe('plan')
     })
 
     it('returns Codex models for an online machine', async () => {

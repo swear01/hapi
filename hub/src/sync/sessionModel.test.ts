@@ -1105,6 +1105,7 @@ describe('session model', () => {
                 _permissionMode?: string,
                 _serviceTier?: string,
                 _existingSessionId?: string,
+                _startingMode?: string,
                 _collaborationMode?: string,
                 personality?: string
             ) => {

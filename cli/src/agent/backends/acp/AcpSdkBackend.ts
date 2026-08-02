@@ -790,9 +790,10 @@ export class AcpSdkBackend implements AgentBackend {
         }
         this.forwardSessionInfoUpdate(sessionId, update);
         this.captureUsageUpdate(update);
+        const messageHandler = this.messageHandler;
         this.sessionUpdateQueue = this.sessionUpdateQueue
             .then(async () => {
-                await this.messageHandler?.handleUpdate(update);
+                await messageHandler?.handleUpdate(update);
             })
             .catch((error) => {
                 logger.debug(

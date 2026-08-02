@@ -1,7 +1,7 @@
 import type { ClientToServerEvents } from '@hapi/protocol'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import type { CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
+import type { AgentState, CodexCollaborationMode, CodexPersonality, Metadata, PermissionMode } from '@hapi/protocol/types'
 import { isRedundantGoalStatusEventContent } from '@hapi/protocol/messages'
 import type { Store, StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
@@ -24,6 +24,7 @@ type SessionAlivePayload = {
     effort?: string | null
     serviceTier?: string | null
     collaborationMode?: CodexCollaborationMode
+    personality?: CodexPersonality | null
 }
 
 type SessionEndPayload = {
@@ -125,7 +126,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         if (todos) {
             const updated = store.sessions.setSessionTodos(sid, todos, msg.createdAt, session.namespace)
             if (updated) {
-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+                const stored = store.sessions.getSession(sid)
+                onWebappEvent?.({
+                    type: 'session-updated',
+                    sessionId: sid,
+                    data: { todos, updatedAt: stored?.updatedAt ?? msg.createdAt }
+                })
             }
         }
 
@@ -136,7 +142,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             const newTeamState = applyTeamStateDelta(existingTeamState ?? null, teamDelta)
             const updated = store.sessions.setSessionTeamState(sid, newTeamState, msg.createdAt, session.namespace)
             if (updated) {
-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+                const stored = store.sessions.getSession(sid)
+                onWebappEvent?.({
+                    type: 'session-updated',
+                    sessionId: sid,
+                    data: { teamState: newTeamState, updatedAt: stored?.updatedAt ?? msg.createdAt }
+                })
             }
         }
 
@@ -206,6 +217,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
 
         if (result.result === 'success') {
+            const stored = store.sessions.getSession(sid)
             const update = {
                 id: randomUUID(),
                 seq: Date.now(),
@@ -224,7 +236,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 }
             }
             socket.to(`session:${sid}`).emit('update', update)
-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+            onWebappEvent?.({
+                type: 'session-updated',
+                sessionId: sid,
+                data: {
+                    metadata: { version: result.version, value: result.value as Metadata | null },
+                    updatedAt: stored?.updatedAt ?? Date.now()
+                }
+            })
         }
     }
 
@@ -259,6 +278,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
 
         if (result.result === 'success') {
+            const stored = store.sessions.getSession(sid)
             const update = {
                 id: randomUUID(),
                 seq: Date.now(),
@@ -271,7 +291,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 }
             }
             socket.to(`session:${sid}`).emit('update', update)
-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+            onWebappEvent?.({
+                type: 'session-updated',
+                sessionId: sid,
+                data: {
+                    agentState: { version: result.version, value: agentState as AgentState | null },
+                    updatedAt: stored?.updatedAt ?? Date.now()
+                }
+            })
         }
     }
 
@@ -301,7 +328,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         onSessionReady?.(data)
     })
 
-    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean }) => {
+    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => {
         if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
             return
         }
@@ -345,7 +372,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         // Emit only after the DB transaction succeeds. This is an ACK-level
         // batch contract, so preserve its original timestamp even when IDs are
         // heterogeneous, replayed, or unknown.
-        onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
+        onWebappEvent?.({
+            type: 'messages-consumed',
+            sessionId: data.sid,
+            localIds,
+            invokedAt,
+            ...(data.steered === true ? { steered: true } : {})
+        })
     })
 
     socket.on('session-end', (data: SessionEndPayload) => {
