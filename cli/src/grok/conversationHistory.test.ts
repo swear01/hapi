@@ -2,6 +2,19 @@ import { describe, expect, it, vi } from 'vitest'
 import { GrokConversationHistory } from './conversationHistory'
 
 describe('GrokConversationHistory', () => {
+    it('probes fork independently from rewind support', async () => {
+        const send = vi.fn(async (method: string) => {
+            if (method === '_x.ai/session/fork') throw new Error('Method not found: -32601')
+            return { points: [] }
+        })
+        const history = new GrokConversationHistory(() => ({ sendExtensionRequest: send }) as never)
+        history.setSession('sess-1', '/tmp/proj')
+        await history.probeCapabilities()
+        expect(history.getCapabilitiesForMetadata()?.conversationHistory).toEqual({
+            rewindToMessage: true
+        })
+    })
+
     it('current fork omits targetPromptIndex', async () => {
         const send = vi.fn(async (method: string, params: Record<string, unknown>) => {
             expect(method).toBe('_x.ai/session/fork')

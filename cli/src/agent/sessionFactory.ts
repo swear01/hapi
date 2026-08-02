@@ -323,17 +323,20 @@ export async function bootstrapExistingSession(options: {
         workingDirectory: options.workingDirectory,
         machineId
     })
-    const metadata = {
-        ...baseMetadata,
-        ...pickExistingSessionMetadata(sessionInfo.metadata),
-        ...options.metadataOverrides
+    const buildUpdatedMetadata = (current: Metadata | null | undefined): Metadata => {
+        const preserved = pickExistingSessionMetadata(current)
+        return {
+            ...baseMetadata,
+            ...preserved,
+            ...options.metadataOverrides,
+            capabilities: {
+                ...baseMetadata.capabilities,
+                ...preserved.capabilities,
+                ...options.metadataOverrides?.capabilities
+            }
+        }
     }
-
-    const buildUpdatedMetadata = (current: Metadata): Metadata => ({
-        ...baseMetadata,
-        ...pickExistingSessionMetadata(current),
-        ...options.metadataOverrides
-    })
+    const metadata = buildUpdatedMetadata(sessionInfo.metadata)
 
     const session = api.sessionSyncClient(sessionInfo)
     session.updateMetadata(buildUpdatedMetadata)

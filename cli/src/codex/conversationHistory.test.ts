@@ -7,6 +7,7 @@ function createClient(overrides?: {
     read?: () => Promise<{ thread: { id: string; turns: Array<Record<string, unknown>> } }>
 }) {
     return {
+        supportsMethod: async () => true,
         forkThread: overrides?.fork ?? (async () => ({ thread: { id: 'forked-1' } })),
         rollbackThread: overrides?.rollback ?? (async () => ({ thread: { id: 'thread-1' } })),
         readThread: overrides?.read ?? (async () => ({
@@ -23,6 +24,20 @@ function createClient(overrides?: {
 }
 
 describe('CodexConversationHistory', () => {
+    it('only publishes methods confirmed by the app server', async () => {
+        const supportsMethod = vi.fn(async (method: string) => method === 'thread/fork')
+        const history = new CodexConversationHistory(() => ({
+            ...createClient(),
+            supportsMethod
+        }) as never)
+        history.setThreadId('thread-1')
+        await history.probeCapabilities()
+        expect(history.getCapabilitiesForMetadata()?.conversationHistory).toEqual({
+            forkCurrent: true,
+            forkAtMessage: true
+        })
+    })
+
     it('forks current without a turn boundary', async () => {
         const fork = vi.fn(async (params: Record<string, unknown>) => {
             expect(params.beforeTurnId).toBeUndefined()

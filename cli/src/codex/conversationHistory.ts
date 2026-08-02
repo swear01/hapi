@@ -87,25 +87,19 @@ export class CodexConversationHistory {
         if (!client || !threadId) return
 
         if (this.states.forkCurrent === 'unknown' || this.states.forkAtMessage === 'unknown') {
-            try {
-                // Dry capability: fork with ephemeral if supported; otherwise assume fork works
-                // once thread/fork is callable. We don't actually leave a fork — probe via
-                // reading params acceptance by attempting fork current and immediately...
-                // Too expensive. Mark supported when experimental API is connected; demote on error.
+            if (await client.supportsMethod('thread/fork')) {
                 this.states = markSupported(this.states, 'forkCurrent')
                 this.states = markSupported(this.states, 'forkAtMessage')
-            } catch (error) {
-                if (isMethodNotFound(error)) {
-                    this.states = markUnsupported(this.states, 'forkCurrent')
-                    this.states = markUnsupported(this.states, 'forkAtMessage')
-                }
+            } else {
+                this.states = markUnsupported(this.states, 'forkCurrent')
+                this.states = markUnsupported(this.states, 'forkAtMessage')
             }
         }
 
         if (this.states.rewindToMessage === 'unknown') {
-            // Rollback is deprecated but still used for safety-buffering.
-            // Mark supported until a call returns method-not-found.
-            this.states = markSupported(this.states, 'rewindToMessage')
+            this.states = await client.supportsMethod('thread/rollback')
+                ? markSupported(this.states, 'rewindToMessage')
+                : markUnsupported(this.states, 'rewindToMessage')
         }
 
         await this.publishCapabilities?.()

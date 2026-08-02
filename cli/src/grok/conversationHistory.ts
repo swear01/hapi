@@ -90,17 +90,10 @@ export class GrokConversationHistory {
         const sessionId = this.sessionId
         if (!backend || !sessionId) return
 
-        if (this.states.forkCurrent === 'unknown') {
-            // Defer actual fork probe; mark unknown until first successful call or method-not-found.
-            // Optimistic display forbidden — leave unknown until we confirm via a lightweight points call.
-        }
-
         if (this.states.rewindToMessage === 'unknown' || this.states.forkAtMessage === 'unknown') {
             try {
                 await backend.sendExtensionRequest('_x.ai/rewind/points', { sessionId })
                 this.states = markSupported(this.states, 'rewindToMessage')
-                this.states = markSupported(this.states, 'forkCurrent')
-                this.states = markSupported(this.states, 'forkAtMessage')
             } catch (error) {
                 if (isMethodNotFound(error)) {
                     this.states = markUnsupported(this.states, 'rewindToMessage')
@@ -109,14 +102,23 @@ export class GrokConversationHistory {
             }
         }
 
-        if (this.states.forkCurrent === 'unknown') {
-            // Assume supported until method-not-found on actual fork; still don't show until supported.
-            // Use a no-op probe: if rewind points worked, fork usually exists; else try listing via same transport.
+        if (this.states.forkCurrent === 'unknown' || this.states.forkAtMessage === 'unknown') {
             try {
-                // Don't actually fork. If rewind/points worked we already marked fork supported.
-                // If still unknown, leave unknown (hidden).
-            } catch {
-                // ignore
+                await backend.sendExtensionRequest('_x.ai/session/fork', {
+                    sourceSessionId: '__hapi_capability_probe__',
+                    sourceCwd: this.cwd ?? '',
+                    newCwd: this.cwd ?? ''
+                })
+                this.states = markSupported(this.states, 'forkCurrent')
+                this.states = markSupported(this.states, 'forkAtMessage')
+            } catch (error) {
+                if (isMethodNotFound(error)) {
+                    this.states = markUnsupported(this.states, 'forkCurrent')
+                    this.states = markUnsupported(this.states, 'forkAtMessage')
+                } else {
+                    this.states = markSupported(this.states, 'forkCurrent')
+                    this.states = markSupported(this.states, 'forkAtMessage')
+                }
             }
         }
 
