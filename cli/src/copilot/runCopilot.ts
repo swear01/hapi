@@ -175,9 +175,6 @@ export async function runCopilot(opts: {
                     }
                     if (slash.updates) {
                         const requestedAgentMode = slash.updates.agentMode;
-                        if (localId && requestedAgentMode !== undefined && requestedAgentMode !== currentAgentMode) {
-                            preparingLocalIds.delete(localId);
-                        }
                         currentAgentMode = await applyCopilotSlashAgentMode(
                             currentAgentMode,
                             requestedAgentMode,
@@ -191,6 +188,7 @@ export async function runCopilot(opts: {
                             resolvedModel = resolveCopilotQueueModel(sessionModel);
                         }
                         syncSessionMode();
+                        if (wasCancelled()) return;
                     }
                     if (slash.kind === 'handled') {
                         if (localId) {

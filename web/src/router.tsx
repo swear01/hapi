@@ -625,7 +625,7 @@ function SessionPage() {
                     for (const file of response.files) {
                         // Codex App Server expects @"path"; Copilot CLI uses @path (relative preferred).
                         const mentionText = agentType === 'copilot'
-                            ? `@${file.filePath || file.fullPath}`
+                            ? `@${file.fullPath}`
                             : `@"${file.fullPath.replace(/(["\\])/g, '\\$1')}"`
                         fileHits.push({
                             key: mentionText,
