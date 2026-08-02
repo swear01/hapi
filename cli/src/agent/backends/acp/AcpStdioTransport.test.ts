@@ -319,6 +319,27 @@ describe('AcpStdioTransport closed stdin writes', () => {
         }]);
     });
 
+    test.each([
+        ['status 401', 'authentication'],
+        ['status 404', 'model_not_found'],
+        ['Cannot use this model: stale-id', 'model_not_found'],
+        ['unexpected error', 'unknown']
+    ])('reports newline-free %s stderr immediately', (chunk, type) => {
+        const transport = new AcpStdioTransport({ command: 'agent' });
+        const seen: Array<{ type: string }> = [];
+        transport.onStderrError((error) => seen.push(error));
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (value: string) => void);
+
+        for (const handler of handlers) handler(chunk);
+
+        expect(seen.map((error) => error.type)).toEqual([type]);
+    });
+
     test('parses stall signatures split across stderr chunks without waiting for close', () => {
         const transport = new AcpStdioTransport({ command: 'opencode' });
         const seen: Array<{ type: string; message: string; raw: string }> = [];

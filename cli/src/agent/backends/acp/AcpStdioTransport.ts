@@ -430,10 +430,8 @@ export class AcpStdioTransport {
 
     private flushActionableStderrTail(): void {
         const pending = this.stderrParseBuffer.trim();
-        const quotaOrRateLimit = /status 429|ratelimitexceeded|rate limit|quota|resource exhausted|resourceexhausted/i.test(pending);
-        if (quotaOrRateLimit || matchesAcpRetryBackoff(pending) || matchesAcpHttp2Cancel(pending)) {
+        if (pending && this.parseStderrError(pending)) {
             this.stderrParseBuffer = '';
-            this.parseStderrError(pending);
         }
     }
 
@@ -445,9 +443,9 @@ export class AcpStdioTransport {
         }
     }
 
-    private parseStderrError(text: string): void {
+    private parseStderrError(text: string): boolean {
         if (!this.stderrErrorHandler) {
-            return;
+            return false;
         }
 
         const lowerText = text.toLowerCase();
@@ -460,7 +458,7 @@ export class AcpStdioTransport {
         const modelRejection = text.match(/Cannot use this model:\s*\S[\s\S]*/i);
         if (modelRejection) {
             if (this.emittedModelRejection) {
-                return;
+                return true;
             }
             const message = modelRejection[0].trim();
             this.emittedModelRejection = true;
@@ -469,7 +467,7 @@ export class AcpStdioTransport {
                 message,
                 raw: message
             });
-            return;
+            return true;
         }
 
         // Rate limit errors (429)
@@ -479,7 +477,7 @@ export class AcpStdioTransport {
                 message: 'Rate limit exceeded. Please wait before sending more requests.',
                 raw: text
             });
-            return;
+            return true;
         }
 
         // Model not found errors (404)
@@ -489,7 +487,7 @@ export class AcpStdioTransport {
                 message: `Model not found. Available models: ${GEMINI_MODEL_PRESETS.join(', ')}`,
                 raw: text
             });
-            return;
+            return true;
         }
 
         // Authentication errors (401/403)
@@ -501,7 +499,7 @@ export class AcpStdioTransport {
                 message: 'Authentication failed. Please check your credentials or run "gemini auth login".',
                 raw: text
             });
-            return;
+            return true;
         }
 
         // Quota exceeded
@@ -511,7 +509,7 @@ export class AcpStdioTransport {
                 message: 'API quota exceeded. Please check your billing or wait for quota reset.',
                 raw: text
             });
-            return;
+            return true;
         }
 
         if (matchesAcpRetryBackoff(text)) {
@@ -520,7 +518,7 @@ export class AcpStdioTransport {
                 message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
                 raw: text
             });
-            return;
+            return true;
         }
 
         if (matchesAcpHttp2Cancel(text)) {
@@ -529,7 +527,12 @@ export class AcpStdioTransport {
                 message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
                 raw: text
             });
-            return;
+            return true;
+        }
+
+        // Keep a split HTTP/2 cancellation signature buffered until its next chunk.
+        if (/canceled.*http\/?$/i.test(text)) {
+            return false;
         }
 
         // Only report as unknown if it looks like an actual error
@@ -539,6 +542,8 @@ export class AcpStdioTransport {
                 message: text,
                 raw: text
             });
+            return true;
         }
+        return false;
     }
 }
