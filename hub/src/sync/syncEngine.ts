@@ -1221,7 +1221,12 @@ async uploadScratchlistAttachment(
             return { type: 'success', sessionId: childId }
         } catch (error) {
             if (childCreated) {
-                await this.cleanupFailedForkChild(childId)
+                try {
+                    await this.cleanupFailedForkChild(childId)
+                } catch (cleanupError) {
+                    const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+                    return { type: 'error', message: `Fork failed; child cleanup was not confirmed: ${message}` }
+                }
             }
             return { type: 'error', message: error instanceof Error ? error.message : String(error) }
         }
@@ -1229,16 +1234,12 @@ async uploadScratchlistAttachment(
 
     /** Kill an active fork child (if any) then delete the HAPI row. */
     private async cleanupFailedForkChild(childId: string): Promise<void> {
-        try {
-            const child = this.sessionCache.refreshSession(childId)
-            if (child?.active) {
-                await this.rpcGateway.killSession(childId).catch(() => {})
-                this.handleSessionEnd({ sid: childId, time: Date.now(), reason: 'error' })
-            }
-            await this.deleteSession(childId)
-        } catch {
-            // best-effort cleanup
+        const child = this.sessionCache.refreshSession(childId)
+        if (child?.active) {
+            await this.rpcGateway.killSession(childId)
+            this.handleSessionEnd({ sid: childId, time: Date.now(), reason: 'error' })
         }
+        await this.deleteSession(childId)
     }
 
     async rewindConversation(

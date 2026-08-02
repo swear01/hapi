@@ -339,8 +339,16 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return sessionResult
         }
 
-        const body = await c.req.json().catch(() => ({}))
-        const parsed = ForkConversationRequestSchema.safeParse(body ?? {})
+        const rawBody = await c.req.text()
+        let body: unknown = {}
+        if (rawBody.trim()) {
+            try {
+                body = JSON.parse(rawBody)
+            } catch {
+                return c.json({ error: 'Invalid JSON body' }, 400)
+            }
+        }
+        const parsed = ForkConversationRequestSchema.safeParse(body)
         if (!parsed.success) {
             return c.json({ error: 'Invalid body' }, 400)
         }
