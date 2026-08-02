@@ -196,6 +196,7 @@ function FixtureThread() {
             <div className="flex h-screen min-h-0 flex-col">
                 <HappyThread
                     api={fakeApi}
+                    session={fakeSession}
                     sessionId={SESSION_ID}
                     metadata={null}
                     disabled={false}

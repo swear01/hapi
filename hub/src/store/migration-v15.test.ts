@@ -6,22 +6,22 @@ import { tmpdir } from 'node:os'
 import { Store } from './index'
 
 /**
- * Tests for V14→V15 schema migration: adds `session_scratchlist.attachments`
- * for tiann/hapi#921 (scratchlist v2.2 hub attachment storage).
+ * Tests for the combined V14→V15 schema migration: adds `sessions.personality`
+ * and `session_scratchlist.attachments`.
  *
  * Ladder: V11→V12 = session_scratchlist (#896), V12–V14 = message_epochs
  * reconciliation, V14→V15 = attachments column (#921).
  */
-describe('Store V14→V15 migration: scratchlist attachments column', () => {
-    it('fresh DB has session_scratchlist.attachments', () => {
+describe('Store V14→V15 migration: personality and scratchlist attachments', () => {
+    it('fresh DB has personality and session_scratchlist.attachments', () => {
         const store = new Store(':memory:')
-        const cols = getColumns(store, 'session_scratchlist')
-        expect(cols).toContain('attachments')
+        expect(getColumns(store, 'sessions')).toContain('personality')
+        expect(getColumns(store, 'session_scratchlist')).toContain('attachments')
         expect(getUserVersion(store)).toBe(15)
         store.close()
     })
 
-    it('V14 text-only scratchlist migrates to V15 and gains attachments column', () => {
+    it('V14 DB migrates to V15 and gains personality and attachments columns', () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v14-to-v15-'))
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
@@ -34,8 +34,8 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
             db.close()
 
             store = new Store(dbPath)
-            const cols = getColumns(store, 'session_scratchlist')
-            expect(cols).toContain('attachments')
+            expect(getColumns(store, 'sessions')).toContain('personality')
+            expect(getColumns(store, 'session_scratchlist')).toContain('attachments')
             expect(getUserVersion(store)).toBe(15)
         } finally {
             store?.close()

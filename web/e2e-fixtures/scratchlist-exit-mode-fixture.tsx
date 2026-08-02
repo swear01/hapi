@@ -7,6 +7,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import '../src/index.css'
+import type { ApiClient } from '../src/api/client'
+import type { ScratchlistEntry } from '../src/lib/scratchlist-storage'
 import { I18nProvider } from '../src/lib/i18n-context'
 import { useScratchlist } from '../src/lib/use-scratchlist'
 import { ScratchlistDrawer } from '../src/components/AssistantChat/ScratchlistPanel'
@@ -21,6 +23,8 @@ declare global {
         }
     }
 }
+
+const fakeApi = {} as ApiClient
 
 function getInitialSessionId(): string {
     const url = new URL(window.location.href)
@@ -65,8 +69,8 @@ function App() {
     }, [])
 
     // Mirror ScratchlistDrawerHost.handlePromoteToQueue (SessionChat.tsx).
-    const handlePromoteToQueue = React.useCallback(async (text: string) => {
-        const accepted = await handleSend(text)
+    const handlePromoteToQueue = React.useCallback(async (entry: ScratchlistEntry) => {
+        const accepted = await handleSend(entry.text)
         if (accepted) {
             setScratchlistMode(false)
         }
@@ -117,6 +121,8 @@ function App() {
                 {scratchlistMode ? (
                     <ScratchlistDrawer
                         entries={scratchlist.entries}
+                        sessionId={sessionId}
+                        api={fakeApi}
                         onMove={scratchlist.move}
                         onDelete={scratchlist.remove}
                         onPromoteToComposer={() => setScratchlistMode(false)}
