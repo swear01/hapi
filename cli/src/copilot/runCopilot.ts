@@ -248,6 +248,9 @@ export async function runCopilot(opts: {
         const applied: Record<string, unknown> = {};
 
         if (config.permissionMode !== undefined) {
+            if (sessionWrapperRef.current?.mode === 'local') {
+                throw new Error('Copilot permission mode can only be changed for remote sessions');
+            }
             currentPermissionMode = resolvePermissionMode(config.permissionMode);
             applied.permissionMode = currentPermissionMode;
         }
