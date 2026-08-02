@@ -60,6 +60,8 @@ import { useTranslation } from '@/lib/use-translation'
 import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
 import { TeamPanel } from '@/components/TeamPanel'
+import { SessionStatusPanel } from '@/components/SessionStatusPanel'
+import { buildSessionStatusData } from '@/chat/sessionStatus'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
@@ -1030,6 +1032,22 @@ function SessionChatInner(props: SessionChatProps) {
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
         [reduced.blocks]
     )
+    const sessionStatus = useMemo(
+        () => buildSessionStatusData({
+            goal: reduced.latestGoal,
+            tasks: props.session.todos,
+            blocks: reconciled.blocks,
+            messages: normalizedMessages,
+            backgroundTaskCount: props.session.backgroundTaskCount
+        }),
+        [
+            reduced.latestGoal,
+            props.session.todos,
+            props.session.backgroundTaskCount,
+            reconciled.blocks,
+            normalizedMessages
+        ]
+    )
     const hasRunningChildAgent = useMemo(
         () => hasAbortableAgentRun(reduced.blocks),
         [reduced.blocks]
@@ -1339,6 +1357,8 @@ function SessionChatInner(props: SessionChatProps) {
 
             <CursorMigrationBanner metadata={props.session.metadata} />
 
+            {sessionStatus ? <SessionStatusPanel data={sessionStatus} /> : null}
+
             {props.session.teamState && (
                 <TeamPanel teamState={props.session.teamState} />
             )}
@@ -1448,7 +1468,6 @@ function SessionChatInner(props: SessionChatProps) {
                         permissionMode={props.session.permissionMode}
                         collaborationMode={codexCollaborationModeSupported ? props.session.collaborationMode : undefined}
                         copilotAgentMode={agentFlavor === 'copilot' ? props.session.copilotAgentMode : undefined}
-                        threadGoal={reduced.latestGoal}
                         model={props.session.model}
                         modelReasoningEffort={agentFlavor === 'codex' || agentFlavor === 'opencode' ? props.session.modelReasoningEffort : undefined}
                         effort={props.session.effort}
