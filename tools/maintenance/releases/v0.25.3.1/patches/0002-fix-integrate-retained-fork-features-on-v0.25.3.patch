@@ -1,0 +1,1332 @@
+From db48afa75c9e3eec53fc3ab4cce21352296eab6e Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:06:33 +0800
+Subject: [PATCH 02/19] fix: integrate retained fork features on v0.25.3
+
+---
+ bun.lock                                      |   2 +
+ cli/src/claude/sdk/metadataExtractor.ts       |   1 -
+ cli/src/codex/loop.ts                         |   9 +-
+ cli/src/opencode/opencodeRemoteLauncher.ts    |   3 +
+ hub/src/sync/syncEngine.ts                    | 188 ++++++++++++++++-
+ hub/src/web/server.ts                         |  57 ++++--
+ shared/src/cursorCliSku.test.ts               |  10 +
+ shared/src/cursorCliSku.ts                    |  13 ++
+ shared/src/sessionSummary.ts                  | 106 +++++-----
+ web/src/api/client.ts                         |  47 ++++-
+ .../AssistantChat/HappyComposer.tsx           |  12 ++
+ .../components/NewSession/MachineSelector.tsx |  20 ++
+ web/src/components/SessionChat.tsx            |  95 +--------
+ web/src/components/SessionList.tsx            |   2 +-
+ web/src/components/ShareSeedConsumer.test.tsx |   4 +-
+ web/src/components/ShareSeedConsumer.tsx      |   6 +-
+ web/src/hooks/useSSE.ts                       | 190 +++++++++++++-----
+ web/src/lib/query-keys.ts                     |   1 +
+ web/src/router.tsx                            |  10 +-
+ web/src/routes/share/index.tsx                |   2 +
+ 20 files changed, 544 insertions(+), 234 deletions(-)
+
+diff --git a/bun.lock b/bun.lock
+index a25ae81b..aa0bf7d9 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -1096,6 +1096,8 @@
+ 
+     "@twsxtd/hapi-linux-x64": ["@twsxtd/hapi-linux-x64@0.25.3", "", { "os": "linux", "cpu": "x64", "bin": { "hapi": "bin/hapi" } }, "sha512-mLe7mJKctdEIeMmf19u0wWcpf4Lj7sA/SJT65cd+4G5wWRy632SAPcJ7pl+KSdsbEu9TMTyrXm1L4usB0xc4Gg=="],
+ 
++    "@twsxtd/hapi-win32-x64": ["@twsxtd/hapi-win32-x64@0.25.3", "", { "os": "win32", "cpu": "x64", "bin": { "hapi": "bin/hapi.exe" } }, "sha512-K1zhYTj8eAPt5W7q92U4ywdUs0122faulU2kywHOuzmwO95nI4zQ0CXlCNkJlGpTv6AYj7GiQdU21sR1NJSYFg=="],
++
+     "@types/aria-query": ["@types/aria-query@5.0.4", "", {}, "sha512-rfT93uj5s0PRL7EzccGMs3brplhcrghnDoV26NqKhCAS1hVo+WdNsPvE/yb6ilfr5hi2MEk6d5EWJTKdxg8jVw=="],
+ 
+     "@types/babel__core": ["@types/babel__core@7.20.5", "", { "dependencies": { "@babel/parser": "^7.20.7", "@babel/types": "^7.20.7", "@types/babel__generator": "*", "@types/babel__template": "*", "@types/babel__traverse": "*" } }, "sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA=="],
+diff --git a/cli/src/claude/sdk/metadataExtractor.ts b/cli/src/claude/sdk/metadataExtractor.ts
+index de146727..c0429de7 100644
+--- a/cli/src/claude/sdk/metadataExtractor.ts
++++ b/cli/src/claude/sdk/metadataExtractor.ts
+@@ -106,7 +106,6 @@ export async function extractSDKMetadata(options: {
+         const sdkQuery = query({
+             prompt: 'hello',
+             options: {
+-                cwd: options.cwd,
+                 additionalArgs: filterCatalogAffectingClaudeArgs(options.claudeArgs),
+                 allowedTools: ['Bash(echo)'],
+                 maxTurns: 1,
+diff --git a/cli/src/codex/loop.ts b/cli/src/codex/loop.ts
+index 3f3d0c3d..bb36e22e 100644
+--- a/cli/src/codex/loop.ts
++++ b/cli/src/codex/loop.ts
+@@ -7,13 +7,12 @@ import { codexRemoteLauncher } from './codexRemoteLauncher';
+ import { ApiClient, ApiSessionClient } from '@/lib';
+ import type { CodexCliOverrides } from './utils/codexCliOverrides';
+ import type { ReasoningEffort } from './appServerTypes';
+-import type { CodexCollaborationMode, CodexPermissionMode } from '@hapi/protocol/types';
++import type { CodexCollaborationMode, CodexPermissionMode, CodexPersonality as ProtocolCodexPersonality } from '@hapi/protocol/types';
+ 
+ export type PermissionMode = CodexPermissionMode;
++export type CodexPersonality = ProtocolCodexPersonality;
+ 
+ /** Codex response style. Omit from mode to inherit config.toml / thread default. */
+-export type CodexPersonality = 'friendly' | 'pragmatic' | 'none';
+-
+ export interface EnhancedMode {
+     permissionMode: PermissionMode;
+     model?: string;
+@@ -26,7 +25,7 @@ export interface EnhancedMode {
+      */
+     serviceTier?: string | null;
+     /** When set, forwarded to app-server thread/turn params. */
+-    personality?: CodexPersonality;
++    personality?: CodexPersonality | null;
+ }
+ 
+ interface LoopOptions {
+@@ -43,6 +42,7 @@ interface LoopOptions {
+     model?: string;
+     modelReasoningEffort?: ReasoningEffort;
+     collaborationMode?: CodexCollaborationMode;
++    personality?: CodexPersonality | null;
+     resumeSessionId?: string;
+     sourceSessionId?: string;
+     replayTranscriptHistoryOnStart?: boolean;
+@@ -70,6 +70,7 @@ export async function loop(opts: LoopOptions): Promise<void> {
+         model: opts.model,
+         modelReasoningEffort: opts.modelReasoningEffort,
+         collaborationMode: opts.collaborationMode ?? 'default',
++        personality: opts.personality,
+         sourceSessionId: opts.sourceSessionId,
+         replayTranscriptHistoryOnStart: opts.replayTranscriptHistoryOnStart ?? false
+     });
+diff --git a/cli/src/opencode/opencodeRemoteLauncher.ts b/cli/src/opencode/opencodeRemoteLauncher.ts
+index 3dea38e0..494fac62 100644
+--- a/cli/src/opencode/opencodeRemoteLauncher.ts
++++ b/cli/src/opencode/opencodeRemoteLauncher.ts
+@@ -796,6 +796,9 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+             case 'error':
+                 this.messageBuffer.addMessage(message.message, 'status');
+                 break;
++            case 'generated_image':
++                this.messageBuffer.addMessage(`Generated image: ${message.fileName}`, 'assistant');
++                break;
+             case 'turn_complete':
+                 this.messageBuffer.addMessage('Turn complete', 'status');
+                 break;
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index adf4cd17..cd537e6b 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -7,9 +7,18 @@
+  * - No E2E encryption; data is stored as JSON in SQLite
+  */
+ 
+-import { isKnownFlavor, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
++import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
++import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
++import {
++    DEFAULT_FLEET_UPGRADE_POLICY,
++    machineTrailsUpgradeOffer,
++    type FleetUpgradePolicy,
++    type HubUpgradeOffer,
++    type RunnerSelfUpgradeResponse,
++} from '@hapi/protocol/upgradeChannel'
+ import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+ import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
++import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
+ import type { Server } from 'socket.io'
+ import type { Store, CancelQueuedMessageResult } from '../store'
+@@ -93,6 +102,12 @@ export type CursorChatStoreStatusResult =
+     | { type: 'success'; status: CursorChatStoreStatus }
+     | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'resume_unavailable' | 'no_machine_online' | 'probe_failed' }
+ 
++export type SyncEngineOptions = {
++    getUpgradeOffer?: () => HubUpgradeOffer
++    prepareArtifactOffer?: (offer: HubUpgradeOffer, platform: string, arch: string) => Promise<HubUpgradeOffer>
++    getFleetUpgradePolicy?: () => FleetUpgradePolicy
++}
++
+ function asRecord(value: unknown): Record<string, unknown> | null {
+     return value !== null && typeof value === 'object' && !Array.isArray(value)
+         ? value as Record<string, unknown>
+@@ -159,16 +174,25 @@ export class SyncEngine {
+     private readonly piUnexpectedTempOriginalIds = new Map<string, string>()
+     /** Serialize scratchlist uploads per session so disk-byte caps cannot race. */
+     private readonly scratchlistUploadTails = new Map<string, Promise<unknown>>()
++    private readonly fleetUpgradeAttemptAt = new Map<string, number>()
++    private static readonly FLEET_UPGRADE_COOLDOWN_MS = 15 * 60_000
++    private readonly getUpgradeOffer: (() => HubUpgradeOffer) | null
++    private readonly prepareArtifactOffer: SyncEngineOptions['prepareArtifactOffer']
++    private readonly getFleetUpgradePolicy: () => FleetUpgradePolicy
+ 
+     constructor(
+         private readonly store: Store,
+         io: Server,
+         rpcRegistry: RpcRegistry,
+-        sseManager: SSEManager
++        sseManager: SSEManager,
++        options?: SyncEngineOptions,
+     ) {
++        this.getUpgradeOffer = options?.getUpgradeOffer ?? null
++        this.prepareArtifactOffer = options?.prepareArtifactOffer
++        this.getFleetUpgradePolicy = options?.getFleetUpgradePolicy ?? (() => DEFAULT_FLEET_UPGRADE_POLICY)
+         this.eventPublisher = new EventPublisher(sseManager, (event) => this.resolveNamespace(event))
+         this.sessionCache = new SessionCache(store, this.eventPublisher)
+-        this.machineCache = new MachineCache(store, this.eventPublisher)
++        this.machineCache = new MachineCache(store, this.eventPublisher, rpcRegistry)
+         this.messageService = new MessageService(
+             store,
+             io,
+@@ -743,6 +767,118 @@ async uploadScratchlistAttachment(
+ 
+     handleMachineAlive(payload: { machineId: string; time: number; health?: unknown }): void {
+         this.machineCache.handleMachineAlive(payload)
++        void this.maybeFleetUpgradeMachine(payload.machineId)
++    }
++
++    private async maybeFleetUpgradeMachine(machineId: string): Promise<void> {
++        if (!this.getUpgradeOffer || this.getFleetUpgradePolicy() !== 'auto') return
++        const offer = this.getUpgradeOffer()
++        const machine = this.machineCache.getMachine(machineId)
++        if (
++            offer.channel === 'off'
++            || !machine?.active
++            || !machine.metadata
++            || machine.metadata.versionHandoffDisabled === true
++            || !machineTrailsUpgradeOffer(offer, machine.metadata.happyCliVersion, machine.metadata.capabilities)
++        ) return
++        const last = this.fleetUpgradeAttemptAt.get(machineId) ?? 0
++        if (Date.now() - last < SyncEngine.FLEET_UPGRADE_COOLDOWN_MS) return
++        this.fleetUpgradeAttemptAt.set(machineId, Date.now())
++        await this.upgradeMachineRunner(machineId, machine.namespace).catch(() => undefined)
++    }
++
++    async restartMachineRunner(machineId: string, namespace: string): Promise<
++        | { type: 'success'; message: string }
++        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'restart_failed' }
++    > {
++        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
++            ?? this.machineCache.refreshMachine(machineId)
++        if (!machine || machine.namespace !== namespace) {
++            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
++        }
++        if (!machine.active) return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
++        try {
++            await this.rpcGateway.stopRunner(machineId)
++            return { type: 'success', message: 'Runner restart requested' }
++        } catch (error) {
++            return {
++                type: 'error',
++                message: error instanceof Error ? error.message : 'Failed to restart runner',
++                code: 'restart_failed',
++            }
++        }
++    }
++
++    async upgradeMachineRunner(machineId: string, namespace: string): Promise<
++        | { type: 'success'; message: string; response: RunnerSelfUpgradeResponse }
++        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'upgrade_unavailable' | 'upgrade_failed' }
++    > {
++        if (!this.getUpgradeOffer) {
++            return { type: 'error', message: 'Upgrade offer not configured', code: 'upgrade_unavailable' }
++        }
++        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
++            ?? this.machineCache.refreshMachine(machineId)
++        if (!machine || machine.namespace !== namespace) {
++            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
++        }
++        if (!machine.active) return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
++        let offer = this.getUpgradeOffer()
++        if (offer.channel === 'off') {
++            return { type: 'error', message: 'Fleet upgrade disabled (HAPI_UPGRADE_CHANNEL=off)', code: 'upgrade_unavailable' }
++        }
++        if (machine.metadata?.versionHandoffDisabled === true) {
++            return {
++                type: 'error',
++                message: 'Runner opted out of version handoff (soup/rebuild-only or HAPI_DISABLE_VERSION_HANDOFF=1); rematerialize soup or clear the opt-out',
++                code: 'upgrade_unavailable'
++            }
++        }
++        if (!(machine.metadata?.capabilities ?? []).includes(MACHINE_CAPABILITIES.RunnerSelfUpgrade)) {
++            return {
++                type: 'error',
++                message: 'Runner does not support self-upgrade; upgrade the CLI manually and restart the runner',
++                code: 'upgrade_unavailable'
++            }
++        }
++        if (offer.channel === 'hub-artifact') {
++            const platform = machine.metadata?.platform
++            const arch = machine.metadata?.arch
++            if (!this.prepareArtifactOffer) {
++                return { type: 'error', message: 'Artifact builder not configured', code: 'upgrade_unavailable' }
++            }
++            if (!platform || !arch) {
++                return {
++                    type: 'error',
++                    message: 'Machine platform/arch unavailable for hub-artifact upgrade',
++                    code: 'upgrade_unavailable'
++                }
++            }
++            try {
++                offer = await this.prepareArtifactOffer(offer, platform, arch)
++            } catch (error) {
++                return {
++                    type: 'error',
++                    message: error instanceof Error ? error.message : 'Failed to prepare CLI artifact',
++                    code: 'upgrade_unavailable',
++                }
++            }
++            if (!offer.artifact?.sha256) {
++                return { type: 'error', message: 'Artifact missing sha256', code: 'upgrade_unavailable' }
++            }
++        }
++        try {
++            const response = await this.rpcGateway.runnerSelfUpgrade(machineId, offer) as RunnerSelfUpgradeResponse
++            if (response.status === 'failed' || response.status === 'unsupported') {
++                return { type: 'error', message: response.message || `Upgrade ${response.status}`, code: 'upgrade_failed' }
++            }
++            return { type: 'success', message: response.message || 'Upgrade started', response }
++        } catch (error) {
++            return {
++                type: 'error',
++                message: error instanceof Error ? error.message : 'Fleet upgrade RPC failed',
++                code: 'upgrade_failed',
++            }
++        }
+     }
+ 
+     private expireInactive(): void {
+@@ -822,6 +958,50 @@ async uploadScratchlistAttachment(
+         return this.messageService.cancelQueuedMessage(sessionId, messageId)
+     }
+ 
++    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
++        const session = this.getSession(sessionId)
++        if (!session) return { status: 'failed', error: 'Session not found', localId: null }
++        if (!isSteeringSupportedForSession(session.metadata)) {
++            return { status: 'failed', error: 'Steering is not supported for this agent', localId: null }
++        }
++        if (session.agentState?.controlledByUser === true) {
++            return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
++        }
++        const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
++        if (lookup.status === 'absent') return { status: 'failed', error: 'Message not found', localId: null }
++        if (lookup.status === 'invoked') {
++            const message = lookup.message
++            return {
++                status: 'invoked',
++                message: {
++                    id: message.id,
++                    seq: message.seq,
++                    localId: message.localId,
++                    content: message.content,
++                    createdAt: message.createdAt,
++                    invokedAt: message.invokedAt,
++                    scheduledAt: message.scheduledAt
++                }
++            }
++        }
++        if (!lookup.localId) return { status: 'failed', error: 'Message has no localId', localId: null }
++        if (lookup.scheduledAt != null && lookup.scheduledAt > Date.now()) {
++            return { status: 'failed', error: 'Scheduled messages cannot be steered', localId: lookup.localId }
++        }
++        try {
++            const result = await this.rpcGateway.steerQueuedMessage(sessionId, lookup.localId)
++            return result.steered
++                ? { status: 'steered', localId: lookup.localId }
++                : { status: 'failed', error: result.error ?? 'Steer failed', localId: lookup.localId }
++        } catch (error) {
++            return {
++                status: 'failed',
++                error: error instanceof Error ? error.message : 'Steer failed',
++                localId: lookup.localId
++            }
++        }
++    }
++
+     sweepImmediateQueuedOnSessionEnd(sessionId: string, invokedAt: number): void {
+         this.messageService.sweepImmediateQueuedOnSessionEnd(sessionId, invokedAt)
+     }
+@@ -1061,6 +1241,7 @@ async uploadScratchlistAttachment(
+             effort?: string | null
+             serviceTier?: string | null
+             collaborationMode?: CodexCollaborationMode
++            personality?: Session['personality']
+         }
+     ): Promise<void> {
+         const session = this.sessionCache.getSession(sessionId)
+@@ -1085,6 +1266,7 @@ async uploadScratchlistAttachment(
+                 effort?: Session['effort']
+                 serviceTier?: Session['serviceTier']
+                 collaborationMode?: Session['collaborationMode']
++                personality?: Session['personality']
+             }
+         }
+         if (typeof obj.error === 'string' && obj.error.trim().length > 0) {
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index b9668b27..43a23e0c 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -19,9 +19,12 @@ import { createMessagesRoutes } from './routes/messages'
+ import { createPermissionsRoutes } from './routes/permissions'
+ import { createMachinesRoutes } from './routes/machines'
+ import { createStorageRoutes } from './routes/storage'
++import { createUpgradeRoutes, createUpgradeCliRoutes } from './routes/upgrade'
+ import { createGitRoutes } from './routes/git'
+ import { createCliRoutes } from './routes/cli'
+ import { createCodexDesktopRoutes } from './routes/codexDesktop'
++import { createClaudeDesktopRoutes } from './routes/claudeDesktop'
++import { createCursorImportRoutes } from './routes/cursorImport'
+ import { createPushRoutes } from './routes/push'
+ import { createDevicesRoutes } from './routes/devices'
+ import { createVoiceRoutes } from './routes/voice'
+@@ -192,19 +195,19 @@ function findWebappDistDir(): { distDir: string; indexHtmlPath: string } {
+     return { distDir, indexHtmlPath: join(distDir, 'index.html') }
+ }
+ 
+-function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
+-    const headers: Record<string, string> = {
+-        'Content-Type': asset.mimeType
+-    }
+-
+-    if (asset.path === '/sw.js') {
+-        headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+-        headers['CDN-Cache-Control'] = 'no-store'
+-        headers['Cloudflare-CDN-Cache-Control'] = 'no-store'
+-    }
++export function getWebAssetCacheHeaders(path: string): Record<string, string> {
++    return path.startsWith('/assets/')
++        ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
++        : {
++            'Cache-Control': 'no-cache, no-store, must-revalidate',
++            'CDN-Cache-Control': 'no-store',
++            'Cloudflare-CDN-Cache-Control': 'no-store'
++        }
++}
+ 
++function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
+     return new Response(Bun.file(asset.sourcePath), {
+-        headers
++        headers: { 'Content-Type': asset.mimeType, ...getWebAssetCacheHeaders(asset.path) }
+     })
+ }
+ 
+@@ -232,13 +235,14 @@ function createWebApp(options: {
+     const corsOriginOption = corsOrigins.includes('*') ? '*' : corsOrigins
+     const corsMiddleware = cors({
+         origin: corsOriginOption,
+-        allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
++        allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+         allowHeaders: ['authorization', 'content-type']
+     })
+     app.use('/api/*', corsMiddleware)
+     app.use('/cli/*', corsMiddleware)
+ 
+     app.route('/cli', createCliRoutes(options.getSyncEngine))
++    app.route('/cli', createUpgradeCliRoutes())
+ 
+     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
+     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
+@@ -250,12 +254,15 @@ function createWebApp(options: {
+     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
+     app.route('/api', createMachinesRoutes(options.getSyncEngine))
+     app.route('/api', createStorageRoutes(configuration.dbPath))
++    app.route('/api', createUpgradeRoutes())
+     app.route('/api', createGitRoutes(options.getSyncEngine))
+     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
+     app.route('/api', createCodexDesktopRoutes({
+         store: options.store,
+         getSyncEngine: options.getSyncEngine
+     }))
++    app.route('/api', createClaudeDesktopRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
++    app.route('/api', createCursorImportRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
+     app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
+     app.route('/api', createDevicesRoutes(options.store))
+     app.route('/api', createVoiceRoutes())
+@@ -340,7 +347,12 @@ from GitHub Pages instead of through the relay tunnel.
+         return app
+     }
+ 
+-    app.use('/assets/*', serveStatic({ root: distDir }))
++    app.use('/assets/*', serveStatic({
++        root: distDir,
++        onFound: (_path, c) => {
++            for (const [name, value] of Object.entries(getWebAssetCacheHeaders(c.req.path))) c.header(name, value)
++        }
++    }))
+ 
+     app.use('*', async (c, next) => {
+         if (c.req.path.startsWith('/api')) {
+@@ -348,7 +360,14 @@ from GitHub Pages instead of through the relay tunnel.
+             return
+         }
+ 
+-        return await serveStatic({ root: distDir })(c, next)
++        return await serveStatic({
++            root: distDir,
++            onFound: (_path, staticContext) => {
++                for (const [name, value] of Object.entries(getWebAssetCacheHeaders(staticContext.req.path))) {
++                    staticContext.header(name, value)
++                }
++            }
++        })(c, next)
+     })
+ 
+     app.get('*', async (c, next) => {
+@@ -357,7 +376,15 @@ from GitHub Pages instead of through the relay tunnel.
+             return
+         }
+ 
+-        return await serveStatic({ root: distDir, path: 'index.html' })(c, next)
++        return await serveStatic({
++            root: distDir,
++            path: 'index.html',
++            onFound: (_path, staticContext) => {
++                for (const [name, value] of Object.entries(getWebAssetCacheHeaders('/index.html'))) {
++                    staticContext.header(name, value)
++                }
++            }
++        })(c, next)
+     })
+ 
+     return app
+diff --git a/shared/src/cursorCliSku.test.ts b/shared/src/cursorCliSku.test.ts
+index 0734a8c7..7d4bb11d 100644
+--- a/shared/src/cursorCliSku.test.ts
++++ b/shared/src/cursorCliSku.test.ts
+@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
+ import {
+     cursorCliSkuBaseId,
+     findBestCliSkuForAcpWire,
++    isCursorAcpCatalogModelId,
+     isCursorAcpWireModelId,
+     matchCliSkuToAcpWireId,
+     parseCursorAvailableModelsFromRejection,
+@@ -202,3 +203,12 @@ describe('isCursorAcpWireModelId', () => {
+         expect(isCursorAcpWireModelId('gpt-5.5-high-fast')).toBe(false);
+     });
+ });
++
++describe('isCursorAcpCatalogModelId', () => {
++    it('accepts ACP ids and rejects CLI variants/defaults', () => {
++        expect(isCursorAcpCatalogModelId('composer-2.5[fast=false]')).toBe(true);
++        expect(isCursorAcpCatalogModelId('composer-2.5')).toBe(true);
++        expect(isCursorAcpCatalogModelId('gpt-5.5-high-fast')).toBe(false);
++        expect(isCursorAcpCatalogModelId('default')).toBe(false);
++    });
++});
+diff --git a/shared/src/cursorCliSku.ts b/shared/src/cursorCliSku.ts
+index 088dc3ae..4cc3d4b5 100644
+--- a/shared/src/cursorCliSku.ts
++++ b/shared/src/cursorCliSku.ts
+@@ -61,6 +61,19 @@ export function cursorCliSkuBaseId(slug: string): string {
+     return base;
+ }
+ 
++export function isCursorCliSkuVariantId(modelId: string): boolean {
++    const trimmed = modelId.trim();
++    return Boolean(trimmed)
++        && !isCursorAcpWireModelId(trimmed)
++        && cursorCliSkuBaseId(trimmed) !== trimmed;
++}
++
++export function isCursorAcpCatalogModelId(modelId: string): boolean {
++    const trimmed = modelId.trim();
++    if (!trimmed || trimmed === 'auto' || trimmed === 'default') return false;
++    return isCursorAcpWireModelId(trimmed) || !isCursorCliSkuVariantId(trimmed);
++}
++
+ export function parseCursorWireParams(modelId: string): Record<string, string> {
+     const variant = modelId.includes('[') ? modelId.slice(modelId.indexOf('[') + 1).replace(/\]$/, '') : '';
+     if (!variant) {
+diff --git a/shared/src/sessionSummary.ts b/shared/src/sessionSummary.ts
+index ba010cb7..c3381c49 100644
+--- a/shared/src/sessionSummary.ts
++++ b/shared/src/sessionSummary.ts
+@@ -1,4 +1,4 @@
+-import type { Metadata, Session, WorktreeMetadata } from './schemas'
++import type { AgentState, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
+ import { isKnownFlavor } from './flavors'
+ import type { AgentFlavor } from './modes'
+ 
+@@ -39,7 +39,9 @@ export type SessionSummaryMetadata = {
+     flavor?: string | null
+     worktree?: WorktreeMetadata
+     agentSessionId?: string
++    claudeSessionId?: string
+     lifecycleState?: string
++    hapiMcpUrl?: string
+ }
+ 
+ export type SessionSummary = {
+@@ -65,47 +67,61 @@ export type SessionSummary = {
+     effort: string | null
+ }
+ 
+-export function getPendingRequests(
+-    session: Session,
++export function computePendingRequestKinds(agentState: AgentState | null | undefined): PendingRequestKind[] {
++    const requests = agentState?.requests
++    if (!requests) return []
++    const kinds = new Set(Object.values(requests).map((request) => classifyKind(request.tool)))
++    return kinds.has('permission') && kinds.has('input') ? ['permission', 'input'] : Array.from(kinds)
++}
++
++export function computePendingRequests(
++    agentState: AgentState | null | undefined,
++    fallbackSince: number,
+     cap: number = PENDING_REQUEST_SUMMARY_CAP
+ ): PendingRequest[] {
+-    const requests = session.agentState?.requests
+-    if (!requests) {
+-        return []
+-    }
++    const items = Object.entries(agentState?.requests ?? {}).map(([id, request]) => ({
++        id,
++        kind: classifyKind(request.tool),
++        tool: request.tool,
++        since: typeof request.createdAt === 'number' ? request.createdAt : fallbackSince
++    }))
++    items.sort((a, b) => a.since - b.since || a.id.localeCompare(b.id))
++    return cap >= items.length ? items : items.slice(0, cap)
++}
+ 
+-    const items: PendingRequest[] = []
+-    for (const [id, request] of Object.entries(requests)) {
+-        items.push({
+-            id,
+-            kind: classifyKind(request.tool),
+-            tool: request.tool,
+-            since: typeof request.createdAt === 'number' ? request.createdAt : session.updatedAt
+-        })
+-    }
++export function computePendingRequestsCount(agentState: AgentState | null | undefined): number {
++    return Object.keys(agentState?.requests ?? {}).length
++}
+ 
+-    items.sort((a, b) => {
+-        if (a.since !== b.since) return a.since - b.since
+-        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+-    })
++export function computeTodoProgress(todos: TodoItem[] | undefined): SessionSummary['todoProgress'] {
++    if (!todos?.length) return null
++    return { completed: todos.filter((todo) => todo.status === 'completed').length, total: todos.length }
++}
+ 
+-    return cap >= items.length ? items : items.slice(0, cap)
++export function getPendingRequests(
++    session: Session,
++    cap: number = PENDING_REQUEST_SUMMARY_CAP
++): PendingRequest[] {
++    return computePendingRequests(session.agentState, session.updatedAt, cap)
+ }
+ 
+ export function getPendingRequestKinds(session: Session): PendingRequestKind[] {
+-    const requests = session.agentState?.requests
+-    if (!requests) {
+-        return []
+-    }
+-
+-    const kinds = new Set<PendingRequestKind>()
+-    for (const request of Object.values(requests)) {
+-        kinds.add(classifyKind(request.tool))
+-    }
++    return computePendingRequestKinds(session.agentState)
++}
+ 
+-    return kinds.has('permission') && kinds.has('input')
+-        ? ['permission', 'input']
+-        : Array.from(kinds)
++export function toSessionSummaryMetadata(metadata: Metadata | null | undefined): SessionSummaryMetadata | null {
++    return metadata ? {
++        name: metadata.name,
++        path: metadata.path,
++        machineId: metadata.machineId ?? undefined,
++        summary: metadata.summary ? { text: metadata.summary.text } : undefined,
++        flavor: metadata.flavor ?? null,
++        worktree: metadata.worktree,
++        agentSessionId: getSummaryAgentSessionId(metadata),
++        claudeSessionId: metadata.claudeSessionId ?? undefined,
++        lifecycleState: metadata.lifecycleState,
++        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined
++    } : null
+ }
+ 
+ const AGENT_SESSION_ID_FIELD_BY_FLAVOR = {
+@@ -141,33 +157,15 @@ function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
+ }
+ 
+ export function toSessionSummary(session: Session): SessionSummary {
+-    const pendingRequestsCount = session.agentState?.requests ? Object.keys(session.agentState.requests).length : 0
+-
+-    const metadata: SessionSummaryMetadata | null = session.metadata ? {
+-        name: session.metadata.name,
+-        path: session.metadata.path,
+-        machineId: session.metadata.machineId ?? undefined,
+-        summary: session.metadata.summary ? { text: session.metadata.summary.text } : undefined,
+-        flavor: session.metadata.flavor ?? null,
+-        worktree: session.metadata.worktree,
+-        agentSessionId: getSummaryAgentSessionId(session.metadata),
+-        lifecycleState: session.metadata.lifecycleState
+-    } : null
+-
+-    const todoProgress = session.todos?.length ? {
+-        completed: session.todos.filter(t => t.status === 'completed').length,
+-        total: session.todos.length
+-    } : null
+-
+     return {
+         id: session.id,
+         active: session.active,
+         thinking: session.thinking,
+         activeAt: session.activeAt,
+         updatedAt: session.updatedAt,
+-        metadata,
+-        todoProgress,
+-        pendingRequestsCount,
++        metadata: toSessionSummaryMetadata(session.metadata),
++        todoProgress: computeTodoProgress(session.todos),
++        pendingRequestsCount: computePendingRequestsCount(session.agentState),
+         pendingRequestKinds: getPendingRequestKinds(session),
+         pendingRequests: getPendingRequests(session),
+         backgroundTaskCount: session.backgroundTaskCount ?? 0,
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 17c1b9a3..0a3c1e6e 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -46,7 +46,13 @@ import type {
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
+ import type { AgentFlavor } from '@hapi/protocol'
+-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
++import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
++import type { FleetUpgradePolicy, HubUpgradeOffer } from '@hapi/protocol/upgradeChannel'
++
++export type UpgradeInfoResponse = {
++    offer: HubUpgradeOffer
++    policy: FleetUpgradePolicy
++}
+ 
+ type ApiClientOptions = {
+     baseUrl?: string
+@@ -460,6 +466,13 @@ export class ApiClient {
+         return response as CancelMessageResponse
+     }
+ 
++    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
++        return await this.request<SteerQueuedMessageResponse>(
++            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
++            { method: 'POST', body: '{}' }
++        )
++    }
++
+     async abortSession(sessionId: string): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+             method: 'POST',
+@@ -550,6 +563,13 @@ export class ApiClient {
+         })
+     }
+ 
++    async setPersonality(sessionId: string, personality: import('@hapi/protocol').CodexPersonality | null): Promise<void> {
++        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/personality`, {
++            method: 'POST',
++            body: JSON.stringify({ personality })
++        })
++    }
++
+     async setModel(sessionId: string, model: { provider: string; modelId: string } | string | null): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+             method: 'POST',
+@@ -626,6 +646,31 @@ export class ApiClient {
+         return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
+     }
+ 
++    async restartMachineRunner(machineId: string): Promise<{ message: string }> {
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/restart-runner`, {
++            method: 'POST',
++            body: '{}'
++        })
++    }
++
++    async upgradeMachineRunner(machineId: string): Promise<{ message: string; response?: unknown }> {
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/upgrade-runner`, {
++            method: 'POST',
++            body: '{}'
++        })
++    }
++
++    async getUpgradeInfo(): Promise<UpgradeInfoResponse> {
++        return await this.request<UpgradeInfoResponse>('/api/upgrade/offer')
++    }
++
++    async setFleetUpgradePolicy(policy: FleetUpgradePolicy): Promise<{ policy: FleetUpgradePolicy }> {
++        return await this.request('/api/upgrade/policy', {
++            method: 'PUT',
++            body: JSON.stringify({ policy })
++        })
++    }
++
+     async listMachineDirectory(
+         machineId: string,
+         path: string
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index c4209e71..c3290173 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -123,6 +123,18 @@ export function useRichComposerBridge(
+ 
+ const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
+ 
++export function resolveVisibleModelEffortSelectedValue(args: {
++    options: ReadonlyArray<{ value: string }> | null | undefined
++    selectedModelVariant?: string | null
++    cursorDrillDownDefaultVariant?: string | null
++    model?: string | null
++}): string | null | undefined {
++    const selectedVisibleVariant = args.options?.some(
++        (option) => option.value === args.selectedModelVariant
++    ) ? args.selectedModelVariant : null
++    return selectedVisibleVariant ?? args.cursorDrillDownDefaultVariant ?? args.model
++}
++
+ export function ModelEffortSettingsSection(props: {
+     agentFlavor?: string | null
+     options: Array<{ value: string; label: string }>
+diff --git a/web/src/components/NewSession/MachineSelector.tsx b/web/src/components/NewSession/MachineSelector.tsx
+index 1ee076e4..52414d2e 100644
+--- a/web/src/components/NewSession/MachineSelector.tsx
++++ b/web/src/components/NewSession/MachineSelector.tsx
+@@ -1,4 +1,9 @@
+ import type { Machine } from '@/types/api'
++import {
++    machineTrailsUpgradeOffer,
++    type FleetUpgradePolicy,
++    type HubUpgradeOffer,
++} from '@hapi/protocol/upgradeChannel'
+ import { useTranslation } from '@/lib/use-translation'
+ import { SelectControl } from '@/components/ui/select-control'
+ 
+@@ -8,6 +13,21 @@ function getMachineTitle(machine: Machine): string {
+     return machine.id.slice(0, 8)
+ }
+ 
++export function machineNeedsUpdateLabel(
++    machine: Machine,
++    offer: HubUpgradeOffer | null | undefined,
++    policy: FleetUpgradePolicy,
++): boolean {
++    return policy !== 'silent'
++        && Boolean(offer)
++        && machine.active
++        && machineTrailsUpgradeOffer(
++            offer!,
++            machine.metadata?.happyCliVersion,
++            machine.metadata?.capabilities,
++        )
++}
++
+ export function MachineSelector(props: {
+     machines: Machine[]
+     machineId: string | null
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 4c30da81..41a23b38 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -45,6 +45,7 @@ import { ScratchlistMigrationBanner } from '@/components/AssistantChat/Scratchli
+ import { useHappyRuntime } from '@/lib/assistant-runtime'
+ import type { OlderLoadOutcome } from '@/lib/message-window-store'
+ import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
++import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
+ import { createScratchlistAttachmentAdapter } from '@/lib/scratchlistAttachmentAdapter'
+ import {
+     rehydrateScratchlistAttachmentsToComposer,
+@@ -52,9 +53,6 @@ import {
+ } from '@/lib/scratchlistAttachmentFlow'
+ import type { ScratchlistEntry } from '@/lib/scratchlist'
+ import { isHubScratchlistAttachmentPath } from '@hapi/protocol'
+-import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
+-import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
+-import { getDraft } from '@/lib/composer-drafts'
+ import { useTranslation } from '@/lib/use-translation'
+ import { SessionHeader } from '@/components/SessionHeader'
+ import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
+@@ -222,97 +220,6 @@ function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
+     return message.invokedAt == null && message.scheduledAt != null
+ }
+ 
+-/**
+- * Consumes a pending Web Share Target transfer once the assistant runtime
+- * is mounted and the session is active enough to accept attachments.
+- *
+- * Lifecycle:
+- *  - A mount effect reads the transfer id out of sessionStorage *once*
+- *    via consumeSharePendingTransfer() (not during render — StrictMode
+- *    would consume on the discarded pass). The id is stashed in a ref.
+- *  - The actual seed (composer.setText + composer.addAttachment per file)
+- *    runs once `props.sessionActive` is true. Inactive sessions disable
+- *    the attachmentAdapter, so writing attachments while inactive would
+- *    no-op and leak Blobs in IDB. The seed waits in a re-renderable
+- *    effect for the active flip.
+- *  - `consumedRef` gates the effect to a single seed per component
+- *    instance — refs survive a StrictMode mount/cleanup/remount pair, so
+- *    the second invoke early-returns and the first invoke's async chain
+- *    completes naturally (we deliberately don't cancel on cleanup; the
+- *    upload is idempotent and the only side effects on the composer are
+- *    no-ops once the runtime is unmounted).
+- *  - The IDB row is deleted after the seed completes so a back-button
+- *    refresh of /sessions/:id doesn't re-attach the same payload.
+- */
+-function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
+-    const assistantApi = useAui()
+-    const composerText = useAuiState((s) => s.composer.text)
+-    const composerTextRef = useRef(composerText)
+-    const initRef = useRef(false)
+-    const transferIdRef = useRef<string | null>(null)
+-    const consumedRef = useRef(false)
+-    const [transferReady, setTransferReady] = useState(false)
+-
+-    useEffect(() => {
+-        composerTextRef.current = composerText
+-    }, [composerText])
+-
+-    // Consume in an effect, not during render — React.StrictMode double-
+-    // invokes render functions in dev; a render-time consume deletes the
+-    // sessionStorage key on the discarded pass and the committed render
+-    // then sees no transfer.
+-    useEffect(() => {
+-        if (initRef.current) return
+-        initRef.current = true
+-        transferIdRef.current = consumeSharePendingTransfer()
+-        setTransferReady(true)
+-    }, [])
+-
+-    useEffect(() => {
+-        if (!transferReady) return
+-        if (consumedRef.current) return
+-        const transferId = transferIdRef.current
+-        if (!transferId) return
+-        if (!props.sessionActive) return
+-        consumedRef.current = true
+-
+-        void (async () => {
+-            try {
+-                const payload = await getShareTransfer(transferId)
+-                if (!payload) return
+-                const seedText = [payload.title, payload.text, payload.url]
+-                    .filter((part) => typeof part === 'string' && part.length > 0)
+-                    .join('\n')
+-                    .trim()
+-                if (seedText.length > 0) {
+-                    const existingText = composerTextRef.current.trim().length > 0
+-                        ? composerTextRef.current
+-                        : getDraft(props.sessionId)
+-                    const nextText = [existingText.trim(), seedText]
+-                        .filter((part) => part.length > 0)
+-                        .join('\n\n')
+-                    if (nextText.length > 0) {
+-                        assistantApi.composer().setText(nextText)
+-                    }
+-                }
+-                for (const file of payload.files) {
+-                    const reconstructed = new File([file.blob], file.name, { type: file.type })
+-                    try {
+-                        await assistantApi.composer().addAttachment(reconstructed)
+-                    } catch (err) {
+-                        console.error('share-seed addAttachment failed', err)
+-                    }
+-                }
+-                await deleteShareTransfer(transferId).catch(() => {})
+-            } catch (err) {
+-                console.error('share-seed pull failed', err)
+-            }
+-        })()
+-    }, [transferReady, props.sessionActive, props.sessionId, assistantApi])
+-
+-    return null
+-}
+-
+ /**
+  * Mounts the per-session scratchlist DRAWER (composer-controlled).
+  *
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index d27ed862..29af261c 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -639,7 +639,7 @@ function SessionDateRangePicker(props: {
+     )
+ }
+ 
+-function SessionListSearch(props: {
++export function SessionListSearch(props: {
+     value: string
+     onChange: (value: string) => void
+     customStart: string
+diff --git a/web/src/components/ShareSeedConsumer.test.tsx b/web/src/components/ShareSeedConsumer.test.tsx
+index 26372d8a..82b45aaa 100644
+--- a/web/src/components/ShareSeedConsumer.test.tsx
++++ b/web/src/components/ShareSeedConsumer.test.tsx
+@@ -16,10 +16,10 @@ const { setText, addAttachment, getShareTransfer, deleteShareTransfer } = vi.hoi
+ }))
+ 
+ vi.mock('@assistant-ui/react', () => ({
+-    useAssistantApi: () => ({
++    useAui: () => ({
+         composer: () => ({ setText, addAttachment }),
+     }),
+-    useAssistantState: (selector: (state: { composer: { text: string } }) => unknown) =>
++    useAuiState: (selector: (state: { composer: { text: string } }) => unknown) =>
+         selector({ composer: { text: '' } }),
+ }))
+ 
+diff --git a/web/src/components/ShareSeedConsumer.tsx b/web/src/components/ShareSeedConsumer.tsx
+index 043632bb..45d6ee1f 100644
+--- a/web/src/components/ShareSeedConsumer.tsx
++++ b/web/src/components/ShareSeedConsumer.tsx
+@@ -1,5 +1,5 @@
+ import { useEffect, useRef } from 'react'
+-import { useAssistantApi, useAssistantState } from '@assistant-ui/react'
++import { useAui, useAuiState } from '@assistant-ui/react'
+ import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
+ import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
+ import { getDraft } from '@/lib/composer-drafts'
+@@ -31,8 +31,8 @@ import { getDraft } from '@/lib/composer-drafts'
+  *    refresh of /sessions/:id doesn't re-attach the same payload.
+  */
+ export function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
+-    const assistantApi = useAssistantApi()
+-    const composerText = useAssistantState(({ composer }) => composer.text)
++    const assistantApi = useAui()
++    const composerText = useAuiState(({ composer }) => composer.text)
+     const composerTextRef = useRef(composerText)
+     const consumedRef = useRef(false)
+ 
+diff --git a/web/src/hooks/useSSE.ts b/web/src/hooks/useSSE.ts
+index 82e662ae..89814ba5 100644
+--- a/web/src/hooks/useSSE.ts
++++ b/web/src/hooks/useSSE.ts
+@@ -1,6 +1,14 @@
+ import { useEffect, useMemo, useRef, useState } from 'react'
+ import { useQueryClient } from '@tanstack/react-query'
+-import { isObject, toSessionSummary } from '@hapi/protocol'
++import {
++    computePendingRequestKinds,
++    computePendingRequests,
++    computePendingRequestsCount,
++    computeTodoProgress,
++    isObject,
++    toSessionSummary,
++    toSessionSummaryMetadata
++} from '@hapi/protocol'
+ import { MachinePatchSchema, MachineSchema, SessionPatchSchema, SessionSchema } from '@hapi/protocol/schemas'
+ import type {
+     Machine,
+@@ -34,6 +42,33 @@ export function isGlobalScopedMessageStreamEvent(scope: SSEScope, eventType: Syn
+     return scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(eventType)
+ }
+ 
++// Version-monotonicity gate for structured patches carrying metadata or
++// agentState. SSE reconnects + per-query invalidation can leave the cache
++// holding state that's NEWER than a buffered older patch about to replay;
++// applying that older patch would regress resume / session-id / pending-
++// requests state. Mirrors the CLI room handler contract: strictly newer
++// only. Exported so the rule is unit-testable in isolation from the hook.
++export function isNewerVersionedPatch(patchVersion: number, currentVersion: number): boolean {
++    return patchVersion > currentVersion
++}
++
++/**
++ * Versioned metadata/agentState summary patches need a detail-cache version
++ * source. Without it, defaulting to version 0 would let a stale buffered SSE
++ * patch overwrite a freshly refetched session list (and suppress list
++ * invalidation because `patched` stayed true). Non-versioned fields (active,
++ * todos, …) do not need this gate.
++ */
++export function canApplyVersionedSummaryPatch(
++    patch: Pick<SessionPatch, 'metadata' | 'agentState'>,
++    detailPresent: boolean
++): boolean {
++    if (patch.metadata === undefined && patch.agentState === undefined) {
++        return true
++    }
++    return detailPresent
++}
++
+ type VisibilityState = 'visible' | 'hidden'
+ 
+ type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
+@@ -55,49 +90,15 @@ function sortSessionSummaries(left: SessionSummary, right: SessionSummary): numb
+     return right.updatedAt - left.updatedAt
+ }
+ 
+-/**
+- * True when applying `patch` to `session` would change nothing that renders.
+- *
+- * Keep-alive patches re-send fields about every ~10s. SessionHeader reads
+- * `activeAt` for relative age, but `formatRelativeTime` only changes at
+- * minute boundaries (`just now` while delta < 60s). Sub-minute `activeAt`
+- * moves are therefore skipped here so the detail cache does not replace the
+- * Session object (and re-render SessionChat / HappyThread) six times a
+- * minute for an invisible label change. A delta of ≥60s is still
+- * render-relevant so the header stays on `just now` for live sessions.
+- * The session-list path still uses {@link isRenderIrrelevantPatch}, which
+- * ignores `activeAt` entirely.
+- */
+ export function isRenderIrrelevantSessionPatch(session: Session, patch: SessionPatch): boolean {
+     const current = session as unknown as Record<string, unknown>
+-    for (const [key, value] of Object.entries(patch)) {
+-        if (
+-            key === 'activeAt'
+-            && typeof value === 'number'
+-            && Math.abs(value - session.activeAt) < 60_000
+-        ) {
+-            continue
+-        }
+-        if (current[key] !== value) {
+-            return false
+-        }
+-    }
+-    return true
+-}
+-
+-function isSessionRecord(value: unknown): value is Session {
+-    return SessionSchema.safeParse(value).success
++    return Object.entries(patch).every(([key, value]) => (
++        key === 'activeAt'
++        && typeof value === 'number'
++        && Math.abs(value - session.activeAt) < 60_000
++    ) || current[key] === value)
+ }
+ 
+-/**
+- * True when the only difference between two summaries is `activeAt`.
+- *
+- * The CLI keep-alive makes the hub re-broadcast a full session patch about
+- * every 10s per active session even when nothing changed, and `activeAt` is
+- * the sole field that moves. No component reads `activeAt` - the list shows
+- * `updatedAt` and sorts on active/pendingRequestsCount/updatedAt - so storing
+- * it costs a new object identity and a full list re-render for nothing.
+- */
+ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSummary): boolean {
+     return current.active === next.active
+         && current.thinking === next.thinking
+@@ -109,6 +110,10 @@ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSu
+         && current.pendingRequestsCount === next.pendingRequestsCount
+ }
+ 
++function isSessionRecord(value: unknown): value is Session {
++    return SessionSchema.safeParse(value).success
++}
++
+ function getSessionPatch(value: unknown): SessionPatch | null {
+     const parsed = SessionPatchSchema.safeParse(value)
+     if (!parsed.success) {
+@@ -408,7 +413,11 @@ export function useSSE(options: {
+                     active: patch.active ?? current.active,
+                     thinking: patch.thinking ?? current.thinking,
+                     activeAt: patch.activeAt ?? current.activeAt,
+-                    updatedAt: patch.updatedAt ?? current.updatedAt,
++                    // Monotonic: stale versioned-patch replays can carry an
++                    // older updatedAt; never move the list clock backward.
++                    updatedAt: patch.updatedAt !== undefined
++                        ? Math.max(current.updatedAt, patch.updatedAt)
++                        : current.updatedAt,
+                     backgroundTaskCount: Object.prototype.hasOwnProperty.call(patch, 'backgroundTaskCount')
+                         ? patch.backgroundTaskCount ?? 0
+                         : current.backgroundTaskCount,
+@@ -419,14 +428,43 @@ export function useSSE(options: {
+                     effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
+                 }
+ 
+-                patched = true
+-                // The keep-alive patch repeats every field every ~10s per active
+-                // session, and `activeAt` is the only one that actually moves.
+-                // Nothing renders `activeAt`, so writing a new object for it just
+-                // hands React Query a fresh reference and re-renders the list.
+-                if (isRenderIrrelevantPatch(current, nextSummary)) {
++                // Structured-patch fields (todos / agentState / metadata) feed
++                // the SessionSummary derivations. Recompute the touched fields
++                // so the session list stays consistent with the detail cache.
++                //
++                // Version-monotonicity gate, derived from the detail cache
++                // (the source of truth for metadata/agentState versions; the
++                // SessionSummary doesn't carry them). The callsite below runs
++                // `patchSessionDetail` BEFORE `patchSessionSummary`, so when
++                // detail accepts a newer patch the detail cache already
++                // reflects the new version — use `>=` so summary matches it.
++                // When detail rejects (stale), detail cache still holds the
++                // older-at-write-but-newer-than-patch version, and `>=` keeps
++                // summary aligned with detail's rejection.
++                //
++                // Missing detail + versioned fields: refuse the whole summary
++                // patch (return previous → patched=false → list invalidation).
++                // Defaulting versions to 0 would apply stale buffered SSE onto
++                // a freshly refetched list and suppress that invalidation.
++                const detailForVersion = queryClient.getQueryData<SessionResponse>(queryKeys.session(sessionId))?.session
++                if (!canApplyVersionedSummaryPatch(patch, detailForVersion !== undefined)) {
+                     return previous
+                 }
++                const detailMetadataVersion = detailForVersion?.metadataVersion ?? 0
++                const detailAgentStateVersion = detailForVersion?.agentStateVersion ?? 0
++                if (patch.todos !== undefined) {
++                    nextSummary.todoProgress = computeTodoProgress(patch.todos)
++                }
++                if (patch.agentState !== undefined && patch.agentState.version >= detailAgentStateVersion) {
++                    nextSummary.pendingRequestsCount = computePendingRequestsCount(patch.agentState.value)
++                    nextSummary.pendingRequestKinds = computePendingRequestKinds(patch.agentState.value)
++                    nextSummary.pendingRequests = computePendingRequests(patch.agentState.value, nextSummary.updatedAt)
++                }
++                if (patch.metadata !== undefined && patch.metadata.version >= detailMetadataVersion) {
++                    nextSummary.metadata = toSessionSummaryMetadata(patch.metadata.value)
++                }
++
++                patched = true
+                 nextSessions[index] = nextSummary
+                 nextSessions.sort(sortSessionSummaries)
+                 return { ...previous, sessions: nextSessions }
+@@ -441,15 +479,57 @@ export function useSSE(options: {
+                     return previous
+                 }
+                 patched = true
+-                if (isRenderIrrelevantSessionPatch(previous.session, patch)) {
+-                    return previous
++                const nextSession: Session = { ...previous.session }
++                if (patch.active !== undefined) nextSession.active = patch.active
++                if (patch.thinking !== undefined) nextSession.thinking = patch.thinking
++                if (patch.activeAt !== undefined) nextSession.activeAt = patch.activeAt
++                // Monotonic with hub applySessionPatch: a rejected stale
++                // metadata/agentState replay must not rewind updatedAt.
++                if (patch.updatedAt !== undefined) {
++                    nextSession.updatedAt = Math.max(nextSession.updatedAt, patch.updatedAt)
++                }
++                if (patch.model !== undefined) nextSession.model = patch.model
++                if (patch.modelReasoningEffort !== undefined) nextSession.modelReasoningEffort = patch.modelReasoningEffort
++                if (patch.effort !== undefined) nextSession.effort = patch.effort
++                if (Object.prototype.hasOwnProperty.call(patch, 'serviceTier')) {
++                    nextSession.serviceTier = patch.serviceTier ?? null
++                }
++                if (patch.permissionMode !== undefined) nextSession.permissionMode = patch.permissionMode
++                if (patch.collaborationMode !== undefined) nextSession.collaborationMode = patch.collaborationMode
++                if (patch.backgroundTaskCount !== undefined) nextSession.backgroundTaskCount = patch.backgroundTaskCount
++                if (patch.todos !== undefined) nextSession.todos = patch.todos
++                // teamState uses `null` on the wire as the explicit clear
++                // signal (TeamDelete events). hasOwnProperty discriminates
++                // "field absent" vs "field is null"; null → undefined to
++                // match the cached Session.teamState shape.
++                if (Object.prototype.hasOwnProperty.call(patch, 'teamState')) {
++                    nextSession.teamState = patch.teamState ?? undefined
++                }
++                // Versioned fields arrive as { version, value } — unwrap into
++                // the Session's flat metadata/metadataVersion pair (same for
++                // agentState). Spreading the patch wholesale would corrupt
++                // session.metadata with a { version, value } object.
++                //
++                // Version-monotonicity gate (PR #897 review, HAPI Bot
++                // 2026-06-16 Major): on SSE reconnect the per-query
++                // invalidation path can repopulate the detail cache via a
++                // fresh REST refetch BEFORE a buffered older patch replays.
++                // Applying the older patch would regress resume / session-id
++                // / pending-requests state. Mirror the CLI room handler's
++                // `incoming.version > currentVersion` guard so the cache
++                // only moves forward. `nextSession.metadataVersion` is the
++                // pre-patch value because it was just spread from `previous`.
++                if (patch.metadata !== undefined && isNewerVersionedPatch(patch.metadata.version, nextSession.metadataVersion)) {
++                    nextSession.metadata = patch.metadata.value
++                    nextSession.metadataVersion = patch.metadata.version
++                }
++                if (patch.agentState !== undefined && isNewerVersionedPatch(patch.agentState.version, nextSession.agentStateVersion)) {
++                    nextSession.agentState = patch.agentState.value
++                    nextSession.agentStateVersion = patch.agentState.version
+                 }
+                 return {
+                     ...previous,
+-                    session: {
+-                        ...previous.session,
+-                        ...patch
+-                    }
++                    session: nextSession
+                 }
+             })
+             return patched
+@@ -544,7 +624,7 @@ export function useSSE(options: {
+                 // reconnect gaps or while another session is selected, only the global
+                 // connection may be alive — still clear the queued bar / optimistic rows.
+                 if (event.type === 'messages-consumed') {
+-                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
++                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+                 }
+                 if (event.type === 'message-cancelled') {
+                     removeOptimisticMessage(event.sessionId, event.messageId)
+@@ -554,7 +634,7 @@ export function useSSE(options: {
+             }
+ 
+             if (event.type === 'messages-consumed') {
+-                markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
++                markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+             }
+ 
+             if (event.type === 'message-cancelled') {
+diff --git a/web/src/lib/query-keys.ts b/web/src/lib/query-keys.ts
+index bd601720..82d246af 100644
+--- a/web/src/lib/query-keys.ts
++++ b/web/src/lib/query-keys.ts
+@@ -4,6 +4,7 @@ export const queryKeys = {
+     messages: (sessionId: string) => ['messages', sessionId] as const,
+     machines: ['machines'] as const,
+     sqliteStorage: ['sqlite-storage'] as const,
++    upgradeInfo: ['upgrade-info'] as const,
+     machineCodexModels: (machineId: string) => ['machine-codex-models', machineId] as const,
+     gitStatus: (sessionId: string) => ['git-status', sessionId] as const,
+     sessionFiles: (sessionId: string, query: string) => ['session-files', sessionId, query] as const,
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 19cb63de..bf6b5840 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -52,6 +52,7 @@ import TerminalPage from '@/routes/sessions/terminal'
+ import SettingsLayout from '@/routes/settings/layout'
+ import SettingsHubPage from '@/routes/settings'
+ import SettingsGeneralPage from '@/routes/settings/general'
++import SettingsRunnerManagementPage from '@/routes/settings/runner-management'
+ import SettingsDisplayPage from '@/routes/settings/display'
+ import SettingsChatPage from '@/routes/settings/chat'
+ import SettingsVoicePage from '@/routes/settings/voice'
+@@ -773,7 +774,7 @@ function NewSessionPage() {
+ 
+     const handleSuccess = useCallback((sessionId: string) => {
+         if (shareTransferId) {
+-            setSharePendingTransfer(shareTransferId)
++            setSharePendingTransfer(shareTransferId, sessionId)
+         }
+         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+         // Replace current page with /sessions to clear spawn flow from history
+@@ -1046,6 +1047,12 @@ const settingsGeneralRoute = createRoute({
+     component: SettingsGeneralPage,
+ })
+ 
++const settingsRunnerManagementRoute = createRoute({
++    getParentRoute: () => settingsRoute,
++    path: 'general/runners',
++    component: SettingsRunnerManagementPage,
++})
++
+ const settingsDisplayRoute = createRoute({
+     getParentRoute: () => settingsRoute,
+     path: 'display',
+@@ -1128,6 +1135,7 @@ export const routeTree = rootRoute.addChildren([
+     settingsRoute.addChildren([
+         settingsIndexRoute,
+         settingsGeneralRoute,
++        settingsRunnerManagementRoute,
+         settingsDisplayRoute,
+         settingsChatRoute,
+         settingsVoiceRoute,
+diff --git a/web/src/routes/share/index.tsx b/web/src/routes/share/index.tsx
+index 0ca065fd..b7336aae 100644
+--- a/web/src/routes/share/index.tsx
++++ b/web/src/routes/share/index.tsx
+@@ -307,6 +307,8 @@ export default function SharePage() {
+                                 setCustomStart(start)
+                                 setCustomEnd(end)
+                             }}
++                            expanded
++                            onExpandedChange={() => {}}
+                         />
+                         {pickerSessions === null ? (
+                             <LoadingState label={t('share.loading')} className="text-sm py-4" />

@@ -1,0 +1,505 @@
+From ba20bf3902a4e77e2deb3515c9d680a19a32b843 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:09:04 +0800
+Subject: [PATCH 09/19] carry: upstream PR #1321
+
+---
+ web/src/hooks/useActiveSuggestions.test.tsx | 252 ++++++++++++++++++++
+ web/src/hooks/useActiveSuggestions.ts       | 160 +++++++++----
+ 2 files changed, 365 insertions(+), 47 deletions(-)
+ create mode 100644 web/src/hooks/useActiveSuggestions.test.tsx
+
+diff --git a/web/src/hooks/useActiveSuggestions.test.tsx b/web/src/hooks/useActiveSuggestions.test.tsx
+new file mode 100644
+index 00000000..5091d6ca
+--- /dev/null
++++ b/web/src/hooks/useActiveSuggestions.test.tsx
+@@ -0,0 +1,252 @@
++import { act, renderHook, waitFor } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++import { type Suggestion, useActiveSuggestions } from './useActiveSuggestions'
++
++function suggestion(key: string): Suggestion {
++    return {
++        key,
++        text: key,
++        label: key,
++    }
++}
++
++function deferred<T>() {
++    let resolve!: (value: T | PromiseLike<T>) => void
++    const promise = new Promise<T>((resolvePromise) => {
++        resolve = resolvePromise
++    })
++    return { promise, resolve }
++}
++
++describe('useActiveSuggestions', () => {
++    it('hides published suggestions immediately while a replacement query is pending', async () => {
++        const first = deferred<Suggestion[]>()
++        const second = deferred<Suggestion[]>()
++        const handler = vi.fn((query: string) => query === '@a' ? first.promise : second.promise)
++        const { result, rerender } = renderHook(
++            ({ query }) => useActiveSuggestions(query, handler),
++            { initialProps: { query: '@a' } }
++        )
++
++        await waitFor(() => expect(handler).toHaveBeenCalledWith('@a'))
++
++        await act(async () => {
++            first.resolve([suggestion('published-a')])
++            await first.promise
++        })
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['published-a']))
++
++        rerender({ query: '@ab' })
++        expect(result.current[0]).toEqual([])
++        expect(result.current[1]).toBe(-1)
++
++        await waitFor(() => expect(handler).toHaveBeenCalledWith('@ab'))
++
++        await act(async () => {
++            second.resolve([suggestion('current')])
++            await second.promise
++        })
++
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['current']))
++        expect(result.current[1]).toBe(0)
++    })
++
++    it('does not publish an older query when it resolves after a newer query is entered', async () => {
++        const first = deferred<Suggestion[]>()
++        const second = deferred<Suggestion[]>()
++        const handler = vi.fn((query: string) => query === '@a' ? first.promise : second.promise)
++        const { result, rerender } = renderHook(
++            ({ query }) => useActiveSuggestions(query, handler),
++            { initialProps: { query: '@a' } }
++        )
++
++        await waitFor(() => expect(handler).toHaveBeenCalledWith('@a'))
++        rerender({ query: '@ab' })
++
++        await act(async () => {
++            first.resolve([suggestion('stale')])
++            await first.promise
++        })
++
++        await waitFor(() => expect(handler).toHaveBeenCalledWith('@ab'))
++        expect(result.current[0]).toEqual([])
++        expect(result.current[1]).toBe(-1)
++
++        await act(async () => {
++            second.resolve([suggestion('current')])
++            await second.promise
++        })
++
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['current']))
++        expect(result.current[1]).toBe(0)
++    })
++
++    it('does not revive a previous matching input after an intervening query', async () => {
++        const firstA = deferred<Suggestion[]>()
++        const pendingB = deferred<Suggestion[]>()
++        const secondA = deferred<Suggestion[]>()
++        let aRequests = 0
++        const handler = vi.fn((query: string) => {
++            if (query === '@a') {
++                aRequests += 1
++                return aRequests === 1 ? firstA.promise : secondA.promise
++            }
++            return pendingB.promise
++        })
++        const { result, rerender } = renderHook(
++            ({ query }) => useActiveSuggestions(query, handler),
++            { initialProps: { query: '@a' } }
++        )
++
++        await waitFor(() => expect(handler).toHaveBeenCalledWith('@a'))
++        await act(async () => {
++            firstA.resolve([suggestion('first-a')])
++            await firstA.promise
++        })
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['first-a']))
++
++        rerender({ query: '@b' })
++        await waitFor(() => expect(handler).toHaveBeenCalledWith('@b'))
++
++        rerender({ query: '@a' })
++        expect(result.current[0]).toEqual([])
++        expect(result.current[1]).toBe(-1)
++
++        await act(async () => {
++            pendingB.resolve([suggestion('stale-b')])
++            await pendingB.promise
++        })
++        await waitFor(() => expect(handler).toHaveBeenCalledTimes(3))
++        expect(result.current[0]).toEqual([])
++
++        await act(async () => {
++            secondA.resolve([suggestion('second-a')])
++            await secondA.promise
++        })
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['second-a']))
++    })
++
++    it('uses a committed replacement handler and discards the old handler result', async () => {
++        const oldRequest = deferred<Suggestion[]>()
++        const newRequest = deferred<Suggestion[]>()
++        const oldHandler = vi.fn(() => oldRequest.promise)
++        const replacementHandler = vi.fn(() => newRequest.promise)
++        const { result, rerender } = renderHook(
++            ({ handler }) => useActiveSuggestions('@query', handler),
++            { initialProps: { handler: oldHandler } }
++        )
++
++        await waitFor(() => expect(oldHandler).toHaveBeenCalledWith('@query'))
++
++        await act(async () => {
++            oldRequest.resolve([suggestion('old-handler')])
++            await oldRequest.promise
++        })
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['old-handler']))
++
++        rerender({ handler: replacementHandler })
++        expect(result.current[0]).toEqual([])
++        expect(result.current[1]).toBe(-1)
++
++        await waitFor(() => expect(replacementHandler).toHaveBeenCalledWith('@query'))
++        expect(oldHandler).toHaveBeenCalledTimes(1)
++
++        await act(async () => {
++            newRequest.resolve([suggestion('replacement-handler')])
++            await newRequest.promise
++        })
++
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['replacement-handler']))
++        expect(result.current[1]).toBe(0)
++    })
++
++    it('preserves the selected suggestion by key when a refreshed list is reordered', async () => {
++        const initialHandler = vi.fn(async () => [suggestion('one'), suggestion('two'), suggestion('three')])
++        const reorderedHandler = vi.fn(async () => [suggestion('two'), suggestion('three'), suggestion('one')])
++        const { result, rerender } = renderHook(
++            ({ handler }) => useActiveSuggestions('@query', handler),
++            { initialProps: { handler: initialHandler } }
++        )
++
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['one', 'two', 'three']))
++        expect(result.current[1]).toBe(0)
++
++        act(() => result.current[3]())
++        expect(result.current[1]).toBe(1)
++
++        rerender({ handler: reorderedHandler })
++
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['two', 'three', 'one']))
++        expect(result.current[1]).toBe(0)
++    })
++
++    it('clamps when the selected key disappears and clears the selection for empty results', async () => {
++        const initialHandler = vi.fn(async () => [suggestion('one'), suggestion('two'), suggestion('three')])
++        const filteredHandler = vi.fn(async () => [suggestion('one')])
++        const emptyHandler = vi.fn(async () => [])
++        const { result, rerender } = renderHook(
++            ({ handler }) => useActiveSuggestions('@query', handler),
++            { initialProps: { handler: initialHandler } }
++        )
++
++        await waitFor(() => expect(result.current[0]).toHaveLength(3))
++        act(() => {
++            result.current[3]()
++            result.current[3]()
++        })
++        expect(result.current[1]).toBe(2)
++
++        rerender({ handler: filteredHandler })
++        await waitFor(() => expect(result.current[0].map((item) => item.key)).toEqual(['one']))
++        expect(result.current[1]).toBe(0)
++
++        rerender({ handler: emptyHandler })
++        await waitFor(() => expect(result.current[0]).toEqual([]))
++        expect(result.current[1]).toBe(-1)
++    })
++
++    it('leaves the first item unselected when autoSelectFirst is disabled', async () => {
++        const handler = vi.fn(async () => [suggestion('one')])
++        const { result } = renderHook(
++            () => useActiveSuggestions('@query', handler, { autoSelectFirst: false })
++        )
++
++        await waitFor(() => expect(result.current[0]).toHaveLength(1))
++        expect(result.current[1]).toBe(-1)
++    })
++
++    it('wraps selection at list boundaries when wrapAround is enabled', async () => {
++        const handler = vi.fn(async () => [suggestion('one'), suggestion('two')])
++        const { result } = renderHook(
++            () => useActiveSuggestions('@query', handler, { wrapAround: true })
++        )
++
++        await waitFor(() => expect(result.current[0]).toHaveLength(2))
++        expect(result.current[1]).toBe(0)
++
++        act(() => result.current[2]())
++        expect(result.current[1]).toBe(1)
++
++        act(() => result.current[3]())
++        expect(result.current[1]).toBe(0)
++    })
++
++    it('clamps selection at list boundaries when wrapAround is disabled', async () => {
++        const handler = vi.fn(async () => [suggestion('one'), suggestion('two')])
++        const { result } = renderHook(
++            () => useActiveSuggestions('@query', handler, { wrapAround: false })
++        )
++
++        await waitFor(() => expect(result.current[0]).toHaveLength(2))
++        expect(result.current[1]).toBe(0)
++
++        act(() => result.current[2]())
++        expect(result.current[1]).toBe(0)
++
++        act(() => {
++            result.current[3]()
++            result.current[3]()
++        })
++        expect(result.current[1]).toBe(1)
++    })
++})
+diff --git a/web/src/hooks/useActiveSuggestions.ts b/web/src/hooks/useActiveSuggestions.ts
+index 78c50dfd..65690518 100644
+--- a/web/src/hooks/useActiveSuggestions.ts
++++ b/web/src/hooks/useActiveSuggestions.ts
+@@ -1,4 +1,4 @@
+-import { useState, useCallback, useEffect, useRef } from 'react'
++import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+ 
+ export interface Suggestion {
+     key: string
+@@ -11,8 +11,19 @@ export interface Suggestion {
+     sessionMention?: { id: string; title: string }
+ }
+ 
++type SuggestionHandler = (query: string) => Promise<Suggestion[]>
++
++interface SuggestionInput {
++    query: string | null
++    handler: SuggestionHandler
++    clampSelection: boolean
++    autoSelectFirst: boolean
++    allowEmptyQuery: boolean
++    version: number
++}
++
+ interface SuggestionOptions {
+-    clampSelection?: boolean   // If true, clamp instead of preserving exact position
++    clampSelection?: boolean   // Legacy option; matching suggestion keys are always preserved before clamping
+     autoSelectFirst?: boolean  // If true, automatically select first item when suggestions appear
+     wrapAround?: boolean       // If true, wrap around when reaching top/bottom
+     allowEmptyQuery?: boolean  // If true, allow empty string queries
+@@ -64,13 +75,18 @@ class ValueSync<T> {
+     }
+ }
+ 
++interface SuggestionRequest {
++    input: SuggestionInput
++    generation: number
++}
++
+ /**
+  * Hook that manages autocomplete suggestions based on an active word query
+  * Returns: [suggestions, selectedIndex, moveUp, moveDown]
+  */
+ export function useActiveSuggestions(
+     query: string | null,
+-    handler: (query: string) => Promise<Suggestion[]>,
++    handler: SuggestionHandler,
+     options: SuggestionOptions = {}
+ ) {
+     const {
+@@ -80,13 +96,46 @@ export function useActiveSuggestions(
+         allowEmptyQuery = false
+     } = options
+ 
++    const latestInputRef = useRef<SuggestionInput>({
++        query,
++        handler,
++        clampSelection,
++        autoSelectFirst,
++        allowEmptyQuery,
++        version: 0,
++    })
++
++    // Commit the active input before passive request effects or any settled promise
++    // can publish. A layout effect avoids leaking an abandoned concurrent render.
++    useLayoutEffect(() => {
++        const latestInput = latestInputRef.current
++        if (
++            latestInput.query !== query
++            || latestInput.handler !== handler
++            || latestInput.clampSelection !== clampSelection
++            || latestInput.autoSelectFirst !== autoSelectFirst
++            || latestInput.allowEmptyQuery !== allowEmptyQuery
++        ) {
++            latestInputRef.current = {
++                query,
++                handler,
++                clampSelection,
++                autoSelectFirst,
++                allowEmptyQuery,
++                version: latestInput.version + 1,
++            }
++        }
++    }, [query, handler, clampSelection, autoSelectFirst, allowEmptyQuery])
++
+     // State for suggestions
+     const [state, setState] = useState<{
+         suggestions: Suggestion[]
+         selected: number
++        input: SuggestionInput | null
+     }>({
+         suggestions: [],
+-        selected: -1
++        selected: -1,
++        input: null
+     })
+ 
+     const moveUp = useCallback(() => {
+@@ -128,57 +177,50 @@ export function useActiveSuggestions(
+     }, [wrapAround])
+ 
+     const clear = useCallback(() => {
+-        setState({ suggestions: [], selected: -1 })
++        setState({ suggestions: [], selected: -1, input: null })
+     }, [])
+ 
+-    // Sync query to suggestions
+-    const handlerRef = useRef(handler)
+-    handlerRef.current = handler
+-
+-    const syncRef = useRef<ValueSync<string | null> | null>(null)
++    const syncRef = useRef<ValueSync<SuggestionRequest> | null>(null)
++    const generationRef = useRef(0)
+ 
+     useEffect(() => {
+-        const sync = new ValueSync<string | null>(async (nextQuery) => {
++        const sync = new ValueSync<SuggestionRequest>(async ({ input, generation }) => {
++            const { query: nextQuery, handler: requestHandler } = input
+             if (nextQuery === null || (!allowEmptyQuery && nextQuery === '')) return
+ 
+-            const suggestions = await handlerRef.current(nextQuery)
++            const suggestions = await requestHandler(nextQuery)
++
++            const isCurrentRequest = () => {
++                const latest = latestInputRef.current
++                return generation === generationRef.current
++                    && input.version === latest.version
++                    && nextQuery === latest.query
++            }
++
++            // ValueSync serializes work, but a previous request can still finish after a
++            // newer query has been queued. Only the current query generation may publish.
++            if (!isCurrentRequest()) return
+ 
+             setState((prev) => {
+-                if (clampSelection) {
+-                    // Simply clamp the selection to valid range
+-                    let newSelected = prev.selected
+-
+-                    if (suggestions.length === 0) {
+-                        newSelected = -1
+-                    } else if (autoSelectFirst && prev.suggestions.length === 0) {
+-                        // First time showing suggestions, auto-select first
+-                        newSelected = 0
+-                    } else if (prev.selected >= suggestions.length) {
+-                        // Selection is out of bounds, clamp to last item
+-                        newSelected = suggestions.length - 1
+-                    } else if (prev.selected < 0 && suggestions.length > 0 && autoSelectFirst) {
+-                        // No selection but we have suggestions
+-                        newSelected = 0
+-                    }
++                // React may defer this updater until another query is current.
++                if (!isCurrentRequest()) return prev
+ 
+-                    return { suggestions, selected: newSelected }
+-                } else {
+-                    // Try to preserve selection by key (old behavior)
+-                    if (prev.selected >= 0 && prev.selected < prev.suggestions.length) {
+-                        const previousKey = prev.suggestions[prev.selected].key
+-                        const newIndex = suggestions.findIndex(s => s.key === previousKey)
+-                        if (newIndex !== -1) {
+-                            // Found the same key, keep it selected
+-                            return { suggestions, selected: newIndex }
+-                        }
++                if (prev.selected >= 0 && prev.selected < prev.suggestions.length) {
++                    const previousKey = prev.suggestions[prev.selected].key
++                    const newIndex = suggestions.findIndex(s => s.key === previousKey)
++                    if (newIndex !== -1) {
++                        // Preserve the user's logical selection across a refreshed or reordered list.
++                        return { suggestions, selected: newIndex, input }
+                     }
++                }
+ 
+-                    // Key not found or no previous selection, clamp the selection
+-                    const clampedSelection = Math.min(prev.selected, suggestions.length - 1)
+-                    return {
+-                        suggestions,
+-                        selected: clampedSelection < 0 && suggestions.length > 0 && autoSelectFirst ? 0 : clampedSelection
+-                    }
++                // The selected key disappeared (or there was no selection): retain the
++                // existing fallback semantics and clamp the index to the new list.
++                const clampedSelection = Math.min(prev.selected, suggestions.length - 1)
++                return {
++                    suggestions,
++                    selected: clampedSelection < 0 && suggestions.length > 0 && autoSelectFirst ? 0 : clampedSelection,
++                    input
+                 }
+             })
+         })
+@@ -187,6 +229,7 @@ export function useActiveSuggestions(
+ 
+         return () => {
+             sync.stop()
++            generationRef.current += 1
+             if (syncRef.current === sync) {
+                 syncRef.current = null
+             }
+@@ -194,11 +237,34 @@ export function useActiveSuggestions(
+     }, [clampSelection, autoSelectFirst, allowEmptyQuery])
+ 
+     useEffect(() => {
+-        syncRef.current?.setValue(query)
++        const generation = ++generationRef.current
++        const latestInput = latestInputRef.current
++        syncRef.current?.setValue({
++            input: latestInput,
++            generation,
++        })
+     }, [query, handler, clampSelection, autoSelectFirst, allowEmptyQuery])
+ 
+-    // If no query return empty suggestions
+-    if (query === null || (!allowEmptyQuery && query === '')) {
++    const latestInput = latestInputRef.current
++    const currentInputVersion = latestInput.query === query
++        && latestInput.handler === handler
++        && latestInput.clampSelection === clampSelection
++        && latestInput.autoSelectFirst === autoSelectFirst
++        && latestInput.allowEmptyQuery === allowEmptyQuery
++        ? latestInput.version
++        : latestInput.version + 1
++
++    const stateMatchesInput = state.input !== null
++        && state.input.query === query
++        && state.input.handler === handler
++        && state.input.clampSelection === clampSelection
++        && state.input.autoSelectFirst === autoSelectFirst
++        && state.input.allowEmptyQuery === allowEmptyQuery
++        && state.input.version === currentInputVersion
++
++    // Hide published suggestions as soon as a new input renders. Keep the old state
++    // internally so the replacement result can still preserve selection by key.
++    if (query === null || (!allowEmptyQuery && query === '') || !stateMatchesInput) {
+         return [[], -1, moveUp, moveDown, clear] as const
+     }
+ 

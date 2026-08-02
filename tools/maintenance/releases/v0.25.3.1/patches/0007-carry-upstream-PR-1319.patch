@@ -1,0 +1,598 @@
+From e1312d19d211e681b33be36f65f855c43dfd0915 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:07:14 +0800
+Subject: [PATCH 07/19] carry: upstream PR #1319
+
+---
+ .../AssistantChat/ComposerButtons.test.tsx    |  30 ++++-
+ .../AssistantChat/ComposerButtons.tsx         |  83 +++++++++++++-
+ .../HappyComposer.expandSelection.test.tsx    | 105 +++++++++++++++++
+ .../AssistantChat/HappyComposer.tsx           | 106 ++++++++++++++++--
+ .../settings/ComposerToolbarLayoutControl.tsx |   1 +
+ .../hooks/useComposerToolbarLayout.test.ts    |   3 +-
+ web/src/hooks/useComposerToolbarLayout.ts     |   1 +
+ web/src/lib/locales/en.ts                     |   3 +
+ web/src/lib/locales/zh-CN.ts                  |   3 +
+ 9 files changed, 320 insertions(+), 15 deletions(-)
+ create mode 100644 web/src/components/AssistantChat/HappyComposer.expandSelection.test.tsx
+
+diff --git a/web/src/components/AssistantChat/ComposerButtons.test.tsx b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+index c8fe33ca..314559d6 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.test.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+@@ -1,8 +1,8 @@
+ import type { ReactElement } from 'react'
+-import { cleanup, render, screen } from '@testing-library/react'
+-import { afterEach, describe, expect, it } from 'vitest'
++import { cleanup, fireEvent, render, screen } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { I18nProvider } from '@/lib/i18n-context'
+-import { UnifiedButton } from './ComposerButtons'
++import { ComposerExpandButton, UnifiedButton } from './ComposerButtons'
+ 
+ function renderInProviders(ui: ReactElement) {
+     return render(<I18nProvider>{ui}</I18nProvider>)
+@@ -82,3 +82,27 @@ describe('UnifiedButton — routesToScratchlist visual state', () => {
+         expect(btn.className).not.toContain('bg-amber-500')
+     })
+ })
++
++describe('ComposerExpandButton', () => {
++    afterEach(() => {
++        cleanup()
++    })
++
++    it('announces and triggers expansion', () => {
++        const onToggle = vi.fn()
++        renderInProviders(<ComposerExpandButton expanded={false} onToggle={onToggle} />)
++
++        const button = getButton('Expand message editor')
++        expect(button.getAttribute('aria-pressed')).toBe('false')
++        fireEvent.click(button)
++        expect(onToggle).toHaveBeenCalledOnce()
++    })
++
++    it('announces the collapse action while expanded', () => {
++        renderInProviders(<ComposerExpandButton expanded onToggle={() => {}} />)
++
++        const button = getButton('Collapse message editor')
++        expect(button.getAttribute('aria-pressed')).toBe('true')
++        expect(button.className).toContain('text-[var(--app-link)]')
++    })
++})
+diff --git a/web/src/components/AssistantChat/ComposerButtons.tsx b/web/src/components/AssistantChat/ComposerButtons.tsx
+index 89b1d96c..5b18fc53 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.tsx
+@@ -171,6 +171,77 @@ function AttachmentIcon() {
+     )
+ }
+ 
++function ComposerExpandIcon(props: { expanded: boolean }) {
++    return props.expanded ? (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            width="18"
++            height="18"
++            viewBox="0 0 24 24"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++        >
++            <path d="M8 3v5H3" />
++            <path d="m3 3 5 5" />
++            <path d="M16 3v5h5" />
++            <path d="m21 3-5 5" />
++            <path d="M8 21v-5H3" />
++            <path d="m3 21 5-5" />
++            <path d="M16 21v-5h5" />
++            <path d="m21 21-5-5" />
++        </svg>
++    ) : (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            width="18"
++            height="18"
++            viewBox="0 0 24 24"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++        >
++            <path d="M8 3H3v5" />
++            <path d="m3 3 5 5" />
++            <path d="M16 3h5v5" />
++            <path d="m21 3-5 5" />
++            <path d="M8 21H3v-5" />
++            <path d="m3 21 5-5" />
++            <path d="M16 21h5v-5" />
++            <path d="m21 21-5-5" />
++        </svg>
++    )
++}
++
++export function ComposerExpandButton(props: {
++    expanded: boolean
++    onToggle: () => void
++}) {
++    const { t } = useTranslation()
++    const label = props.expanded ? t('composer.collapse') : t('composer.expand')
++
++    return (
++        <button
++            type="button"
++            aria-label={label}
++            title={label}
++            aria-pressed={props.expanded}
++            className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
++                props.expanded
++                    ? 'bg-[var(--app-bg)] text-[var(--app-link)]'
++                    : 'text-[var(--app-fg)]/60 hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)]'
++            }`}
++            onClick={props.onToggle}
++        >
++            <ComposerExpandIcon expanded={props.expanded} />
++        </button>
++    )
++}
++
+ function AbortIcon(props: { spinning: boolean }) {
+     if (props.spinning) {
+         return (
+@@ -248,6 +319,7 @@ export function ComposerToolbarItemPreview(props: { item: ComposerToolbarItemId;
+         switch (props.item) {
+             case 'attachment': return <AttachmentIcon />
+             case 'settings': return <SettingsIcon />
++            case 'expand': return <ComposerExpandIcon expanded={false} />
+             case 'terminal': return <TerminalIcon />
+             case 'abort': return <AbortIcon spinning={false} />
+             case 'switch': return <SwitchToRemoteIcon />
+@@ -483,6 +555,8 @@ export function ComposerButtons(props: {
+     controlsDisabled: boolean
+     showSettingsButton: boolean
+     onSettingsToggle: () => void
++    expanded: boolean
++    onExpandedToggle: () => void
+     showTerminalButton: boolean
+     terminalDisabled: boolean
+     terminalLabel: string
+@@ -541,7 +615,7 @@ export function ComposerButtons(props: {
+             : 'justify-start'
+ 
+     return (
+-        <div className="flex items-center gap-1 px-2 pb-2">
++        <div className="flex shrink-0 items-center gap-1 px-2 pb-2">
+             <div className={`flex min-w-0 flex-1 items-center gap-1 ${toolbarAlignmentClass}`}>
+                 <OrderedToolbarItems layout={layout}>
+                 <ToolbarItemSlot item="attachment">
+@@ -570,6 +644,13 @@ export function ComposerButtons(props: {
+                 ) : null}
+                 </ToolbarItemSlot>
+ 
++                <ToolbarItemSlot item="expand">
++                <ComposerExpandButton
++                    expanded={props.expanded}
++                    onToggle={props.onExpandedToggle}
++                />
++                </ToolbarItemSlot>
++
+                 <ToolbarItemSlot item="piModel">
+                 {props.piModelLabel ? (
+                     <button
+diff --git a/web/src/components/AssistantChat/HappyComposer.expandSelection.test.tsx b/web/src/components/AssistantChat/HappyComposer.expandSelection.test.tsx
+new file mode 100644
+index 00000000..c480d73a
+--- /dev/null
++++ b/web/src/components/AssistantChat/HappyComposer.expandSelection.test.tsx
+@@ -0,0 +1,105 @@
++import {
++    AssistantRuntimeProvider,
++    type ChatModelAdapter,
++    useLocalRuntime,
++} from '@assistant-ui/react'
++import { fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { HappyComposer } from './HappyComposer'
++
++vi.mock('@/components/AssistantChat/ComposerButtons', () => ({
++    ComposerButtons: (props: { expanded: boolean; onExpandedToggle: () => void }) => (
++        <button
++            type="button"
++            aria-label={props.expanded ? 'Collapse message editor' : 'Expand message editor'}
++            onClick={props.onExpandedToggle}
++        />
++    ),
++}))
++
++vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }))
++vi.mock('@/hooks/useComposerDraft', () => ({ useComposerDraft: () => {} }))
++vi.mock('@/hooks/usePlatform', () => ({
++    usePlatform: () => ({
++        isTelegram: false,
++        isTouch: false,
++        haptic: {
++            impact: () => {},
++            notification: () => {},
++            selection: () => {},
++        },
++    }),
++}))
++vi.mock('@/hooks/usePWAInstall', () => ({
++    usePWAInstall: () => ({
++        installState: 'idle',
++        canInstall: false,
++        canInstallIOS: false,
++        isStandalone: false,
++        isIOS: false,
++        promptInstall: async () => false,
++        dismissInstall: () => {},
++    }),
++}))
++vi.mock('@/lib/use-translation', () => ({
++    useTranslation: () => ({
++        t: (key: string) => key === 'misc.typeAMessage' ? 'Type a message' : key,
++    }),
++}))
++
++const adapter: ChatModelAdapter = {
++    async *run() {},
++}
++
++function TestRuntime() {
++    const runtime = useLocalRuntime(adapter)
++    return (
++        <AssistantRuntimeProvider runtime={runtime}>
++            <HappyComposer />
++        </AssistantRuntimeProvider>
++    )
++}
++
++describe('HappyComposer plain-text expansion', () => {
++    beforeEach(() => {
++        localStorage.clear()
++        localStorage.setItem('hapi.composer.richMentions', '0')
++    })
++
++    it('preserves draft text and selection across expand and collapse', async () => {
++        render(<TestRuntime />)
++
++        const draft = 'A long draft with a selection in the middle that must survive both editor layout changes.'
++        const collapsedInput = screen.getByRole('textbox') as HTMLTextAreaElement
++        fireEvent.change(collapsedInput, { target: { value: draft } })
++        collapsedInput.setSelectionRange(12, 36, 'forward')
++
++        fireEvent.click(screen.getByRole('button', { name: 'Expand message editor' }))
++
++        await waitFor(() => {
++            expect(screen.getByRole('button', { name: 'Collapse message editor' })).toBeInTheDocument()
++            const expandedInput = screen.getByRole('textbox') as HTMLTextAreaElement
++            expect(expandedInput).not.toBe(collapsedInput)
++            expect(expandedInput.value).toBe(draft)
++            expect(expandedInput.selectionStart).toBe(12)
++            expect(expandedInput.selectionEnd).toBe(36)
++            expect(expandedInput.selectionDirection).toBe('forward')
++            expect(document.activeElement).toBe(expandedInput)
++        })
++
++        const expandedInput = screen.getByRole('textbox') as HTMLTextAreaElement
++        expandedInput.setSelectionRange(42, 67, 'backward')
++        fireEvent.click(screen.getByRole('button', { name: 'Collapse message editor' }))
++
++        await waitFor(() => {
++            expect(screen.getByRole('button', { name: 'Expand message editor' })).toBeInTheDocument()
++            const nextCollapsedInput = screen.getByRole('textbox') as HTMLTextAreaElement
++            expect(nextCollapsedInput).not.toBe(expandedInput)
++            expect(nextCollapsedInput.value).toBe(draft)
++            expect(nextCollapsedInput.selectionStart).toBe(42)
++            expect(nextCollapsedInput.selectionEnd).toBe(67)
++            expect(nextCollapsedInput.selectionDirection).toBe('backward')
++            expect(document.activeElement).toBe(nextCollapsedInput)
++        })
++    })
++})
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index c3290173..27ae731e 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -348,6 +348,7 @@ export function HappyComposer(props: {
+         text: '',
+         selection: { start: 0, end: 0 }
+     })
++    const [isExpanded, setIsExpanded] = useState(false)
+     const [showSettings, setShowSettings] = useState(false)
+     const [showPiModelPanel, setShowPiModelPanel] = useState(false)
+     const [showPiThinkingPanel, setShowPiThinkingPanel] = useState(false)
+@@ -472,6 +473,39 @@ export function HappyComposer(props: {
+         }
+     }, [platformHaptic])
+ 
++    const handleExpandedToggle = useCallback(() => {
++        const currentInput = textareaRef.current
++        const selection = currentInput ? {
++            start: currentInput.selectionStart,
++            end: currentInput.selectionEnd,
++            direction: currentInput.selectionDirection,
++        } : null
++
++        setIsExpanded((expanded) => !expanded)
++        haptic('light')
++        setTimeout(() => {
++            if (richMentionsEnabled) {
++                richInputRef.current?.focus()
++                return
++            }
++            const input = textareaRef.current
++            if (!input) return
++            try {
++                input.focus({ preventScroll: true })
++            } catch {
++                input.focus()
++            }
++            if (selection) {
++                const maxOffset = input.value.length
++                input.setSelectionRange(
++                    Math.min(selection.start, maxOffset),
++                    Math.min(selection.end, maxOffset),
++                    selection.direction,
++                )
++            }
++        }, 0)
++    }, [haptic, richMentionsEnabled])
++
+     const handleSuggestionSelect = useCallback((index: number) => {
+         const suggestion = suggestions[index]
+         if (!suggestion) return
+@@ -707,6 +741,12 @@ export function HappyComposer(props: {
+             }
+         }
+ 
++        if (key === 'Escape' && isExpanded) {
++            e.preventDefault()
++            handleExpandedToggle()
++            return
++        }
++
+         if (key === 'Escape' && threadIsRunning) {
+             e.preventDefault()
+             handleAbort()
+@@ -739,6 +779,8 @@ export function HappyComposer(props: {
+         composerEnterBehavior,
+         richMentionsEnabled,
+         flushAndSend,
++        isExpanded,
++        handleExpandedToggle,
+     ])
+ 
+     useEffect(() => {
+@@ -956,6 +998,10 @@ export function HappyComposer(props: {
+         haptic('light')
+     }, [controlsDisabled, haptic])
+ 
++    const overlayPositionClass = isExpanded
++        ? 'absolute z-10 bottom-12 mb-2'
++        : 'absolute z-10 bottom-[100%] mb-2'
++
+     const overlays = useMemo(() => {
+         // Pi flavor: separate floating panels for model and thinking level.
+         // (Pi RPC mode has no runtime permission switching → no permission panel.)
+@@ -966,7 +1012,7 @@ export function HappyComposer(props: {
+             if (showPiModelPanel && piModels && piModels.length > 0) {
+                 const currentPiModel = selectedPiModel ?? null
+                 panels.push(
+-                    <div key="model" className="absolute bottom-[100%] mb-2 left-2 w-64">
++                    <div key="model" className={`${overlayPositionClass} left-2 w-64`}>
+                         <PiModelPanel
+                             models={piModels}
+                             currentModel={currentPiModel ? { provider: currentPiModel.provider, modelId: currentPiModel.modelId } : null}
+@@ -983,7 +1029,7 @@ export function HappyComposer(props: {
+             // Thinking level panel
+             if (showPiThinkingPanel && selectedPiModel?.reasoning !== false) {
+                 panels.push(
+-                    <div key="thinking" className="absolute bottom-[100%] mb-2 left-2 w-48">
++                    <div key="thinking" className={`${overlayPositionClass} left-2 w-48`}>
+                         <PiThinkingLevelPanel
+                             currentLevel={effort}
+                             reasoning={selectedPiModel?.reasoning}
+@@ -1002,7 +1048,7 @@ export function HappyComposer(props: {
+         // Non-Pi flavors: original unified gear menu
+         if (showSettings && (showCollaborationSettings || showPermissionSettings || showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings || showFastModeSettings)) {
+             return (
+-                <div className="absolute bottom-[100%] mb-2 w-full">
++                <div className={`${overlayPositionClass} w-full`}>
+                     <FloatingOverlay maxHeight={320}>
+                         {showCollaborationSettings ? (
+                             <div className="py-2">
+@@ -1314,7 +1360,7 @@ export function HappyComposer(props: {
+ 
+         if (suggestions.length > 0) {
+             return (
+-                <div className="absolute bottom-[100%] mb-2 w-full">
++                <div className={`${overlayPositionClass} w-full`}>
+                     <FloatingOverlay>
+                         <Autocomplete
+                             suggestions={suggestions}
+@@ -1367,13 +1413,27 @@ export function HappyComposer(props: {
+         handleEffortChange,
+         handleServiceTierChange,
+         handleSuggestionSelect,
++        overlayPositionClass,
+         t
+     ])
+ 
++    const shellClassName = isExpanded
++        ? `z-[60] flex min-h-0 flex-col bg-[var(--app-bg)] px-3 ${bottomPaddingClass} max-sm:fixed max-sm:inset-x-0 max-sm:top-0 max-sm:h-[var(--tg-viewport-stable-height,var(--app-viewport-height,100dvh))] max-sm:pt-[calc(0.5rem+env(safe-area-inset-top))] sm:absolute sm:inset-0 sm:pt-2`
++        : `bg-[var(--app-bg)] px-3 ${bottomPaddingClass} pt-2`
++    const innerClassName = isExpanded
++        ? 'mx-auto flex min-h-0 w-full max-w-content flex-1 flex-col'
++        : 'mx-auto w-full max-w-content'
++    const rootClassName = isExpanded
++        ? 'relative flex min-h-0 flex-1 flex-col'
++        : 'relative'
++    const editorClassName = isExpanded
++        ? 'h-full min-h-[1.5rem] flex-1 overflow-y-auto whitespace-pre-wrap break-words bg-transparent text-base leading-snug text-[var(--app-fg)] focus:outline-none'
++        : 'max-h-[7.5rem] min-h-[1.5rem] flex-1 overflow-y-auto whitespace-pre-wrap break-words bg-transparent text-base leading-snug text-[var(--app-fg)] focus:outline-none'
++
+     return (
+-        <div className={`px-3 ${bottomPaddingClass} pt-2 bg-[var(--app-bg)]`}>
+-            <div className="mx-auto w-full max-w-content">
+-                <ComposerPrimitive.Root className="relative" onSubmit={handleSubmit}>
++        <div className={shellClassName} data-testid="composer-shell" data-expanded={isExpanded || undefined}>
++            <div className={innerClassName}>
++                <ComposerPrimitive.Root className={rootClassName} onSubmit={handleSubmit}>
+                     {overlays}
+ 
+                     <StatusBar
+@@ -1418,16 +1478,22 @@ export function HappyComposer(props: {
+ 
+                     <div
+                         className={`overflow-hidden rounded-[20px] bg-[var(--app-secondary-bg)] ${
++                            isExpanded ? 'flex min-h-0 flex-1 flex-col' : ''
++                        } ${
+                             sendError ? 'ring-1 ring-red-500' : ''
+                         }`}
+                     >
+                         {attachments.length > 0 ? (
+-                            <div className="flex flex-wrap gap-2 px-4 pt-3">
++                            <div className={`flex flex-wrap gap-2 px-4 pt-3 ${
++                                isExpanded ? 'max-h-[35%] shrink-0 overflow-y-auto' : ''
++                            }`}>
+                                 <ComposerPrimitive.Attachments components={{ Attachment: AttachmentItem }} />
+                             </div>
+                         ) : null}
+ 
+-                        <div className="flex items-center px-4 py-3">
++                        <div className={`flex px-4 py-3 ${
++                            isExpanded ? 'min-h-0 flex-1 items-stretch' : 'items-center'
++                        }`}>
+                             {richMentionsEnabled ? (
+                                 <RichComposerInput
+                                     ref={richInputRef}
+@@ -1441,8 +1507,26 @@ export function HappyComposer(props: {
+                                     onPaste={handlePaste}
+                                     resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                                     onEdit={handleRichEdit}
+-                                    className="max-h-[7.5rem] min-h-[1.5rem] flex-1 overflow-y-auto whitespace-pre-wrap break-words bg-transparent text-base leading-snug text-[var(--app-fg)] focus:outline-none"
++                                    className={editorClassName}
+                                 />
++                            ) : isExpanded ? (
++                                <ComposerPrimitive.Input
++                                    asChild
++                                    ref={textareaRef}
++                                    autoFocus={!controlsDisabled && !isTouch}
++                                    submitOnEnter={false}
++                                    cancelOnEscape={false}
++                                    onChange={handleChange}
++                                    onSelect={handleSelect}
++                                    onKeyDown={handleKeyDown}
++                                    onPaste={handlePaste}
++                                >
++                                    <textarea
++                                        placeholder={showContinueHint ? t('misc.typeMessage') : t('misc.typeAMessage')}
++                                        disabled={controlsDisabled}
++                                        className="h-full min-h-0 flex-1 resize-none overflow-y-auto bg-transparent text-base leading-snug text-[var(--app-fg)] placeholder-[var(--app-hint)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
++                                    />
++                                </ComposerPrimitive.Input>
+                             ) : (
+                                 <ComposerPrimitive.Input
+                                     ref={textareaRef}
+@@ -1466,6 +1550,8 @@ export function HappyComposer(props: {
+                             controlsDisabled={controlsDisabled}
+                             showSettingsButton={showSettingsButton}
+                             onSettingsToggle={handleSettingsToggle}
++                            expanded={isExpanded}
++                            onExpandedToggle={handleExpandedToggle}
+                             showTerminalButton={showTerminalButton}
+                             terminalDisabled={terminalDisabled}
+                             terminalLabel={terminalLabel}
+diff --git a/web/src/components/settings/ComposerToolbarLayoutControl.tsx b/web/src/components/settings/ComposerToolbarLayoutControl.tsx
+index 13247779..665fd488 100644
+--- a/web/src/components/settings/ComposerToolbarLayoutControl.tsx
++++ b/web/src/components/settings/ComposerToolbarLayoutControl.tsx
+@@ -15,6 +15,7 @@ import { SettingsChoiceGroup } from './SettingsPrimitives'
+ const ITEM_LABEL_KEYS: Record<ComposerToolbarItemId, string> = {
+     attachment: 'settings.chat.composerToolbar.item.attachment',
+     settings: 'settings.chat.composerToolbar.item.settings',
++    expand: 'settings.chat.composerToolbar.item.expand',
+     piModel: 'settings.chat.composerToolbar.item.piModel',
+     piThinking: 'settings.chat.composerToolbar.item.piThinking',
+     terminal: 'settings.chat.composerToolbar.item.terminal',
+diff --git a/web/src/hooks/useComposerToolbarLayout.test.ts b/web/src/hooks/useComposerToolbarLayout.test.ts
+index a1f2baa7..077373d6 100644
+--- a/web/src/hooks/useComposerToolbarLayout.test.ts
++++ b/web/src/hooks/useComposerToolbarLayout.test.ts
+@@ -11,6 +11,7 @@ describe('DEFAULT_COMPOSER_TOOLBAR_LAYOUT', () => {
+         expect(DEFAULT_COMPOSER_TOOLBAR_LAYOUT.left).toEqual([
+             'attachment',
+             'settings',
++            'expand',
+             'piModel',
+             'piThinking',
+             'terminal',
+@@ -80,9 +81,9 @@ describe('normalizeComposerToolbarLayout', () => {
+             'piModel',
+             'piThinking',
+             'terminal',
++            'expand',
+             'abort',
+             'switch',
+-            'voiceMic',
+             'attachment',
+         ])
+         expect(result.left).toHaveLength(layout.left.length)
+diff --git a/web/src/hooks/useComposerToolbarLayout.ts b/web/src/hooks/useComposerToolbarLayout.ts
+index d4782c30..6576ecb8 100644
+--- a/web/src/hooks/useComposerToolbarLayout.ts
++++ b/web/src/hooks/useComposerToolbarLayout.ts
+@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
+ export const COMPOSER_TOOLBAR_ITEM_IDS = [
+     'attachment',
+     'settings',
++    'expand',
+     'piModel',
+     'piThinking',
+     'terminal',
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index a14b4d36..02e681b0 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -517,6 +517,8 @@ export default {
+   'composer.abort': 'Abort',
+   'composer.switchRemote': 'Switch to remote mode',
+   'composer.attach': 'Attach file',
++  'composer.expand': 'Expand message editor',
++  'composer.collapse': 'Collapse message editor',
+   'composer.dropToAttach': 'Drop to attach',
+   'composer.send': 'Send',
+   'composer.stop': 'Stop',
+@@ -748,6 +750,7 @@ export default {
+   'settings.chat.composerToolbar.moveLater': 'Move later',
+   'settings.chat.composerToolbar.item.attachment': 'Add attachment',
+   'settings.chat.composerToolbar.item.settings': 'Session settings',
++  'settings.chat.composerToolbar.item.expand': 'Expand message editor',
+   'settings.chat.composerToolbar.item.piModel': 'Pi model',
+   'settings.chat.composerToolbar.item.piThinking': 'Pi thinking level',
+   'settings.chat.composerToolbar.item.terminal': 'Terminal',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index f175d13b..9e8e0648 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -521,6 +521,8 @@ export default {
+   'composer.abort': '中止',
+   'composer.switchRemote': '切换到远程模式',
+   'composer.attach': '添加文件',
++  'composer.expand': '展开消息编辑器',
++  'composer.collapse': '收起消息编辑器',
+   'composer.dropToAttach': '松开以添加文件',
+   'composer.send': '发送',
+   'composer.stop': '停止',
+@@ -752,6 +754,7 @@ export default {
+   'settings.chat.composerToolbar.moveLater': '向后移动',
+   'settings.chat.composerToolbar.item.attachment': '添加附件',
+   'settings.chat.composerToolbar.item.settings': '会话设置',
++  'settings.chat.composerToolbar.item.expand': '展开消息编辑器',
+   'settings.chat.composerToolbar.item.piModel': 'Pi 模型',
+   'settings.chat.composerToolbar.item.piThinking': 'Pi 思考等级',
+   'settings.chat.composerToolbar.item.terminal': '终端',

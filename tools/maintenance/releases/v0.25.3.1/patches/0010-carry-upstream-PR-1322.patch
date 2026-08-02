@@ -1,0 +1,418 @@
+From 954f03d59519a0f0d8ff14d6ce931311ec436a5a Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:09:08 +0800
+Subject: [PATCH 10/19] carry: upstream PR #1322
+
+---
+ .../AssistantChat/AttachmentItem.test.tsx     | 107 ++++++++++++++++++
+ .../AssistantChat/AttachmentItem.tsx          |  40 ++++++-
+ web/src/components/ImagePreview.test.tsx      |  18 +++
+ web/src/components/ImagePreview.tsx           |   6 +-
+ web/src/lib/attachmentAdapter.test.ts         |  47 ++++++++
+ web/src/lib/attachmentAdapter.ts              |  62 +++++-----
+ 6 files changed, 246 insertions(+), 34 deletions(-)
+ create mode 100644 web/src/components/AssistantChat/AttachmentItem.test.tsx
+
+diff --git a/web/src/components/AssistantChat/AttachmentItem.test.tsx b/web/src/components/AssistantChat/AttachmentItem.test.tsx
+new file mode 100644
+index 00000000..4bce8df1
+--- /dev/null
++++ b/web/src/components/AssistantChat/AttachmentItem.test.tsx
+@@ -0,0 +1,107 @@
++import type { ComponentProps, ReactNode } from 'react'
++import { cleanup, fireEvent, render, screen } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++
++const mocks = vi.hoisted(() => ({
++    attachment: {
++        name: 'photo.png',
++        status: { type: 'requires-action', reason: 'composer-send' },
++        previewUrl: 'data:image/png;base64,cGhvdG8='
++    } as Record<string, unknown>
++}))
++
++vi.mock('@assistant-ui/react', () => ({
++    useThreadComposerAttachment: () => mocks.attachment,
++    AttachmentPrimitive: {
++        Root: ({ children, ...props }: ComponentProps<'div'>) => <div {...props}>{children}</div>,
++        Remove: ({ children, ...props }: ComponentProps<'button'> & { children?: ReactNode }) => (
++            <button {...props}>{children}</button>
++        )
++    }
++}))
++
++import { AttachmentItem } from './AttachmentItem'
++
++afterEach(() => cleanup())
++
++function renderAttachment() {
++    return render(
++        <I18nProvider>
++            <AttachmentItem />
++        </I18nProvider>
++    )
++}
++
++describe('AttachmentItem', () => {
++    it('renders an image preview with its filename and an always-visible remove button', () => {
++        mocks.attachment = {
++            name: 'photo.png',
++            status: { type: 'requires-action', reason: 'composer-send' },
++            previewUrl: 'data:image/png;base64,cGhvdG8='
++        }
++
++        renderAttachment()
++
++        expect(screen.getByRole('img', { name: 'photo.png' })).toHaveAttribute(
++            'src',
++            'data:image/png;base64,cGhvdG8='
++        )
++        expect(screen.getAllByText('photo.png')).toHaveLength(2)
++        expect(screen.getByRole('button', { name: 'Remove attachment' })).not.toHaveClass('opacity-0')
++    })
++
++    it('keeps the upload indicator on top of an image preview while uploading', () => {
++        mocks.attachment = {
++            name: 'uploading.png',
++            status: { type: 'running', reason: 'uploading', progress: 0 },
++            previewUrl: 'data:image/png;base64,dXBsb2FkaW5n'
++        }
++
++        const { container } = renderAttachment()
++
++        expect(screen.getByRole('img', { name: 'uploading.png' })).toBeInTheDocument()
++        expect(container.querySelector('[class*="bg-black/40"]')).not.toBeNull()
++    })
++
++    it('opens the same zoomable image viewer used by sent attachments', () => {
++        mocks.attachment = {
++            name: 'zoom-me.png',
++            status: { type: 'requires-action', reason: 'composer-send' },
++            previewUrl: 'data:image/png;base64,em9vbQ=='
++        }
++
++        renderAttachment()
++        fireEvent.click(screen.getByTitle('Click to zoom'))
++
++        const dialog = screen.getByRole('dialog', { name: 'zoom-me.png' })
++        expect(dialog).toBeInTheDocument()
++        expect(screen.getAllByRole('img', { name: 'zoom-me.png' })).toHaveLength(2)
++    })
++
++    it('keeps non-image attachments in the filename chip layout', () => {
++        mocks.attachment = {
++            name: 'notes.txt',
++            status: { type: 'requires-action', reason: 'composer-send' }
++        }
++
++        renderAttachment()
++
++        expect(screen.queryByRole('img')).not.toBeInTheDocument()
++        expect(screen.getByText('notes.txt')).toBeInTheDocument()
++    })
++
++    it('keeps upload errors in the existing error layout', () => {
++        mocks.attachment = {
++            name: 'broken.png',
++            status: { type: 'incomplete', reason: 'error' },
++            previewUrl: 'data:image/png;base64,YnJva2Vu'
++        }
++
++        renderAttachment()
++
++        expect(screen.queryByRole('img')).not.toBeInTheDocument()
++        expect(screen.getByText('Upload failed')).toBeInTheDocument()
++        expect(screen.getByText('broken.png')).toHaveClass('line-through')
++    })
++})
+diff --git a/web/src/components/AssistantChat/AttachmentItem.tsx b/web/src/components/AssistantChat/AttachmentItem.tsx
+index af08ff4f..76e64126 100644
+--- a/web/src/components/AssistantChat/AttachmentItem.tsx
++++ b/web/src/components/AssistantChat/AttachmentItem.tsx
+@@ -1,6 +1,12 @@
+ import { AttachmentPrimitive, useThreadComposerAttachment } from '@assistant-ui/react'
++import type { PendingAttachment } from '@assistant-ui/react'
++import { ImagePreview } from '@/components/ImagePreview'
+ import { Spinner } from '@/components/Spinner'
+ 
++type ComposerAttachmentWithPreview = PendingAttachment & {
++    previewUrl?: string
++}
++
+ function ErrorIcon() {
+     return (
+         <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none">
+@@ -31,10 +37,42 @@ function RemoveIcon() {
+ }
+ 
+ export function AttachmentItem() {
+-    const { name, status } = useThreadComposerAttachment()
++    const { name, status, previewUrl } = useThreadComposerAttachment() as ComposerAttachmentWithPreview
+     const isUploading = status.type === 'running'
+     const isError = status.type === 'incomplete'
+ 
++    if (previewUrl && !isError) {
++        return (
++            <AttachmentPrimitive.Root className="group relative h-16 w-24 overflow-hidden rounded-lg bg-[var(--app-subtle-bg)]">
++                <ImagePreview
++                    src={previewUrl}
++                    fileName={name}
++                    label={name}
++                    galleryId="composer-attachments"
++                    buttonClassName="group h-full w-full cursor-zoom-in overflow-hidden rounded-lg text-left"
++                    imageClassName="h-full w-full object-cover transition-opacity group-hover:opacity-85"
++                    caption={(
++                        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-1.5 pb-1 pt-3">
++                            <span className="block truncate text-[10px] leading-tight text-white">{name}</span>
++                        </div>
++                    )}
++                />
++                {isUploading ? (
++                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/40">
++                        <Spinner size="sm" label={null} className="text-white" />
++                    </div>
++                ) : null}
++                <AttachmentPrimitive.Remove
++                    className="absolute right-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/65 text-white transition-colors hover:bg-black/85 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white"
++                    aria-label="Remove attachment"
++                    title="Remove attachment"
++                >
++                    <RemoveIcon />
++                </AttachmentPrimitive.Remove>
++            </AttachmentPrimitive.Root>
++        )
++    }
++
+     return (
+         <AttachmentPrimitive.Root className="flex items-center gap-2 rounded-lg bg-[var(--app-subtle-bg)] px-3 py-2 text-base text-[var(--app-fg)]">
+             {isUploading ? <Spinner size="sm" label={null} className="text-[var(--app-hint)]" /> : null}
+diff --git a/web/src/components/ImagePreview.test.tsx b/web/src/components/ImagePreview.test.tsx
+index 14a98123..e4b8ebc8 100644
+--- a/web/src/components/ImagePreview.test.tsx
++++ b/web/src/components/ImagePreview.test.tsx
+@@ -40,4 +40,22 @@ describe('ImagePreview gallery navigation', () => {
+         fireEvent.keyDown(window, { key: 'ArrowLeft' })
+         expect(screen.getByRole('dialog', { name: 'First image' })).toBeInTheDocument()
+     })
++
++    it('keeps named galleries separate from ungrouped previews', () => {
++        render(
++            <>
++                <ImagePreview src="/sent.png" fileName="sent.png" label="Sent image" />
++                <ImagePreview src="/draft-one.png" fileName="draft-one.png" label="First draft" galleryId="composer-attachments" />
++                <ImagePreview src="/draft-two.png" fileName="draft-two.png" label="Second draft" galleryId="composer-attachments" />
++            </>
++        )
++
++        fireEvent.click(screen.getByRole('button', { name: /first draft/i }))
++
++        const dialog = screen.getByRole('dialog', { name: 'First draft' })
++        expect(within(dialog).getByText('1 / 2')).toBeInTheDocument()
++        fireEvent.click(within(dialog).getByRole('button', { name: 'Next image' }))
++        expect(screen.getByRole('dialog', { name: 'Second draft' })).toBeInTheDocument()
++        expect(within(screen.getByRole('dialog')).queryByRole('img', { name: 'Sent image' })).not.toBeInTheDocument()
++    })
+ })
+diff --git a/web/src/components/ImagePreview.tsx b/web/src/components/ImagePreview.tsx
+index f904d159..084cb2bc 100644
+--- a/web/src/components/ImagePreview.tsx
++++ b/web/src/components/ImagePreview.tsx
+@@ -37,6 +37,7 @@ export function ImagePreview(props: {
+     imageClassName?: string
+     imageStyle?: CSSProperties
+     caption?: ReactNode
++    galleryId?: string
+ }) {
+     const [viewerOpen, setViewerOpen] = useState(false)
+     const [previewImages, setPreviewImages] = useState<PreviewImage[]>([])
+@@ -57,7 +58,9 @@ export function ImagePreview(props: {
+     const openViewer = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+         event.preventDefault()
+         event.stopPropagation()
++        const galleryId = props.galleryId ?? ''
+         const triggers = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-image-preview-trigger]'))
++            .filter((trigger) => (trigger.dataset.imagePreviewGallery ?? '') === galleryId)
+         const images = triggers.flatMap((trigger): PreviewImage[] => {
+             const image = trigger.querySelector('img')
+             if (!image) return []
+@@ -71,7 +74,7 @@ export function ImagePreview(props: {
+         setPreviewImages(images)
+         setPreviewIndex(index >= 0 ? index : 0)
+         setViewerOpen(true)
+-    }, [])
++    }, [props.galleryId])
+ 
+     const updateScale = useCallback((next: number | ((current: number) => number)) => {
+         setScale((current) => {
+@@ -263,6 +266,7 @@ export function ImagePreview(props: {
+                 data-image-preview-trigger=""
+                 data-image-preview-file-name={props.fileName}
+                 data-image-preview-label={props.label}
++                data-image-preview-gallery={props.galleryId ?? ''}
+                 className={props.buttonClassName ?? 'group flex min-h-[18rem] w-full items-center justify-center overflow-auto rounded-md border border-[var(--app-border)] bg-[var(--app-code-bg)] p-3 text-left'}
+                 title="Click to zoom"
+             >
+diff --git a/web/src/lib/attachmentAdapter.test.ts b/web/src/lib/attachmentAdapter.test.ts
+index df08060b..36ea9c84 100644
+--- a/web/src/lib/attachmentAdapter.test.ts
++++ b/web/src/lib/attachmentAdapter.test.ts
+@@ -1,5 +1,21 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
++async function collectAdditions(
++    file: File,
++    uploadFile = vi.fn(async () => ({ success: true, path: '/uploads/file' }))
++) {
++    const { createAttachmentAdapter } = await import('./attachmentAdapter')
++    const adapter = createAttachmentAdapter({ uploadFile } as never, 'session-1')
++    const additions = adapter.add({ file }) as AsyncIterable<Record<string, unknown>>
++    const emitted: Record<string, unknown>[] = []
++
++    for await (const attachment of additions) {
++        emitted.push(attachment)
++    }
++
++    return { emitted, uploadFile }
++}
++
+ describe('attachmentAdapter', () => {
+     beforeEach(() => {
+         vi.stubGlobal('indexedDB', undefined)
+@@ -47,3 +63,34 @@ describe('attachmentAdapter', () => {
+         })])
+     })
+ })
++
++describe('attachmentAdapter image previews', () => {
++    it('includes the preview URL in every image upload state', async () => {
++        const file = new File(['image'], 'photo.png', { type: 'image/png' })
++        const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL')
++        const { emitted } = await collectAdditions(file)
++
++        expect(emitted).toHaveLength(3)
++        expect(emitted[0]).toMatchObject({
++            previewUrl: 'data:image/png;base64,aW1hZ2U=',
++            status: { type: 'running', progress: 0 }
++        })
++        expect(emitted[1]).toMatchObject({
++            previewUrl: 'data:image/png;base64,aW1hZ2U=',
++            status: { type: 'running', progress: 50 }
++        })
++        expect(emitted[2]).toMatchObject({
++            previewUrl: 'data:image/png;base64,aW1hZ2U=',
++            status: { type: 'requires-action' }
++        })
++        expect(readSpy).toHaveBeenCalledTimes(1)
++    })
++
++    it('does not generate previews for non-image attachments', async () => {
++        const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
++        const { emitted } = await collectAdditions(file)
++
++        expect(emitted).toHaveLength(3)
++        expect(emitted.every((attachment) => attachment.previewUrl === undefined)).toBe(true)
++    })
++})
+diff --git a/web/src/lib/attachmentAdapter.ts b/web/src/lib/attachmentAdapter.ts
+index 06e099b9..76fff51c 100644
+--- a/web/src/lib/attachmentAdapter.ts
++++ b/web/src/lib/attachmentAdapter.ts
+@@ -50,16 +50,21 @@ export function createAttachmentAdapter(api: ApiClient, sessionId: string): Atta
+             const id = randomId()
+             const contentType = file.type || 'application/octet-stream'
+ 
+-            yield {
+-                id,
+-                type: 'file',
+-                name: file.name,
+-                contentType,
+-                file,
+-                status: { type: 'running', reason: 'uploading', progress: 0 }
+-            }
+-
+             try {
++                const previewUrl = isImageMimeType(contentType) && file.size <= MAX_PREVIEW_BYTES
++                    ? await fileToDataUrl(file)
++                    : undefined
++
++                yield {
++                    id,
++                    type: 'file',
++                    name: file.name,
++                    contentType,
++                    file,
++                    status: { type: 'running', reason: 'uploading', progress: 0 },
++                    previewUrl
++                } as PendingUploadAttachment
++
+                 if (cancelledAttachmentIds.has(id)) {
+                     return
+                 }
+@@ -76,7 +81,9 @@ export function createAttachmentAdapter(api: ApiClient, sessionId: string): Atta
+                     return
+                 }
+ 
+-                const content = await fileToBase64(file)
++                const content = previewUrl
++                    ? base64FromDataUrl(previewUrl)
++                    : await fileToBase64(file)
+                 if (cancelledAttachmentIds.has(id)) {
+                     return
+                 }
+@@ -87,8 +94,9 @@ export function createAttachmentAdapter(api: ApiClient, sessionId: string): Atta
+                     name: file.name,
+                     contentType,
+                     file,
+-                    status: { type: 'running', reason: 'uploading', progress: 50 }
+-                }
++                    status: { type: 'running', reason: 'uploading', progress: 50 },
++                    previewUrl
++                } as PendingUploadAttachment
+ 
+                 const result = await api.uploadFile(sessionId, file.name, content, contentType)
+                 if (cancelledAttachmentIds.has(id)) {
+@@ -110,12 +118,6 @@ export function createAttachmentAdapter(api: ApiClient, sessionId: string): Atta
+                     return
+                 }
+ 
+-                // Generate preview URL for images under 5MB
+-                let previewUrl: string | undefined
+-                if (isImageMimeType(contentType) && file.size <= MAX_PREVIEW_BYTES) {
+-                    previewUrl = await fileToDataUrl(file)
+-                }
+-
+                 yield {
+                     id,
+                     type: 'file',
+@@ -172,20 +174,16 @@ export function createAttachmentAdapter(api: ApiClient, sessionId: string): Atta
+ }
+ 
+ async function fileToBase64(file: File): Promise<string> {
+-    return new Promise((resolve, reject) => {
+-        const reader = new FileReader()
+-        reader.onload = () => {
+-            const result = reader.result as string
+-            const base64 = result.split(',')[1]
+-            if (!base64) {
+-                reject(new Error('Failed to read file'))
+-                return
+-            }
+-            resolve(base64)
+-        }
+-        reader.onerror = reject
+-        reader.readAsDataURL(file)
+-    })
++    return base64FromDataUrl(await fileToDataUrl(file))
++}
++
++function base64FromDataUrl(dataUrl: string): string {
++    const separatorIndex = dataUrl.indexOf(',')
++    const base64 = separatorIndex >= 0 ? dataUrl.slice(separatorIndex + 1) : ''
++    if (!base64) {
++        throw new Error('Failed to read file')
++    }
++    return base64
+ }
+ 
+ async function fileToDataUrl(file: File): Promise<string> {

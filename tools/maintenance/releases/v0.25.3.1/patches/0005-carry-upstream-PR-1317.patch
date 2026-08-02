@@ -1,0 +1,160 @@
+From 7e488a3f598a974c9229288ca4cf39224e5127a8 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:06:52 +0800
+Subject: [PATCH 05/19] carry: upstream PR #1317
+
+---
+ shared/src/voice.backends.test.ts           | 12 +++++++++--
+ shared/src/voice.ts                         | 22 +++++++++++++--------
+ web/src/api/voice.ts                        |  8 ++++----
+ web/src/lib/voicePickerPreferences.ts       |  4 ++--
+ web/src/routes/settings/useVoiceSettings.ts |  2 +-
+ 5 files changed, 31 insertions(+), 17 deletions(-)
+
+diff --git a/shared/src/voice.backends.test.ts b/shared/src/voice.backends.test.ts
+index f53f9940..322c209e 100644
+--- a/shared/src/voice.backends.test.ts
++++ b/shared/src/voice.backends.test.ts
+@@ -15,8 +15,8 @@ describe('listConfiguredVoiceBackends', () => {
+         expect(backends).toEqual(['elevenlabs', 'gemini-live', 'qwen-realtime'])
+     })
+ 
+-    test('falls back to elevenlabs when no keys configured', () => {
+-        expect(listConfiguredVoiceBackends({})).toEqual(['elevenlabs'])
++    test('returns empty when no keys configured', () => {
++        expect(listConfiguredVoiceBackends({})).toEqual([])
+     })
+ })
+ 
+@@ -37,6 +37,10 @@ describe('resolveHubVoiceBackend', () => {
+         })
+         expect(backend).toBe('elevenlabs')
+     })
++
++    test('returns null when no backends configured', () => {
++        expect(resolveHubVoiceBackend({})).toBeNull()
++    })
+ })
+ 
+ describe('resolveEffectiveVoiceBackend', () => {
+@@ -50,4 +54,8 @@ describe('resolveEffectiveVoiceBackend', () => {
+         expect(resolveEffectiveVoiceBackend(configured, 'gemini-live', null)).toBe('gemini-live')
+         expect(resolveEffectiveVoiceBackend(configured, 'gemini-live', 'qwen-realtime')).toBe('gemini-live')
+     })
++
++    test('returns null when no backends configured', () => {
++        expect(resolveEffectiveVoiceBackend([], null, null)).toBeNull()
++    })
+ })
+diff --git a/shared/src/voice.ts b/shared/src/voice.ts
+index 7cc4738c..004f5bf3 100644
+--- a/shared/src/voice.ts
++++ b/shared/src/voice.ts
+@@ -260,25 +260,31 @@ export function listConfiguredVoiceBackends(env: VoiceBackendEnv): VoiceBackendT
+     if (env.DASHSCOPE_API_KEY?.trim() || env.QWEN_API_KEY?.trim()) {
+         backends.push('qwen-realtime')
+     }
+-    return backends.length > 0 ? backends : [DEFAULT_VOICE_BACKEND]
++    return backends
+ }
+ 
+-/** Hub default from VOICE_BACKEND when configured, else first available backend. */
+-export function resolveHubVoiceBackend(env: VoiceBackendEnv): VoiceBackendType {
++/** Hub default from VOICE_BACKEND when configured, else first available backend. null when none configured. */
++export function resolveHubVoiceBackend(env: VoiceBackendEnv): VoiceBackendType | null {
+     const configured = listConfiguredVoiceBackends(env)
++    if (configured.length === 0) {
++        return null
++    }
+     const raw = env.VOICE_BACKEND
+     const fromEnv = VOICE_BACKEND_VALUES.includes(raw as VoiceBackendType)
+         ? (raw as VoiceBackendType)
+         : DEFAULT_VOICE_BACKEND
+-    return configured.includes(fromEnv) ? fromEnv : (configured[0] ?? DEFAULT_VOICE_BACKEND)
++    return configured.includes(fromEnv) ? fromEnv : configured[0]!
+ }
+ 
+ /** User preference wins when valid; otherwise hub default. */
+ export function resolveEffectiveVoiceBackend(
+     configured: readonly VoiceBackendType[],
+-    hubDefault: VoiceBackendType,
++    hubDefault: VoiceBackendType | null,
+     storedPreference: string | null | undefined
+-): VoiceBackendType {
++): VoiceBackendType | null {
++    if (configured.length === 0) {
++        return null
++    }
+     if (
+         storedPreference
+         && VOICE_BACKEND_VALUES.includes(storedPreference as VoiceBackendType)
+@@ -286,10 +292,10 @@ export function resolveEffectiveVoiceBackend(
+     ) {
+         return storedPreference as VoiceBackendType
+     }
+-    if (configured.includes(hubDefault)) {
++    if (hubDefault && configured.includes(hubDefault)) {
+         return hubDefault
+     }
+-    return configured[0] ?? hubDefault
++    return configured[0] ?? null
+ }
+ 
+ export const GEMINI_LIVE_MODEL = 'gemini-2.5-flash-native-audio-latest'
+diff --git a/web/src/api/voice.ts b/web/src/api/voice.ts
+index 9df55841..4b8679d5 100644
+--- a/web/src/api/voice.ts
++++ b/web/src/api/voice.ts
+@@ -205,7 +205,7 @@ export async function fetchQwenToken(api: ApiClient): Promise<QwenTokenResponse>
+ 
+ export interface VoiceBackendResponse {
+     /** Hub default (VOICE_BACKEND env, validated against configured backends). */
+-    backend: VoiceBackendType
++    backend: VoiceBackendType | null
+     /** Backends with API keys configured on the hub. */
+     backends: VoiceBackendType[]
+ }
+@@ -229,12 +229,12 @@ function isVoiceBackendType(value: string): value is VoiceBackendType {
+ export async function fetchVoiceBackend(api: ApiClient): Promise<VoiceBackendResponse> {
+     const result = await api.fetchVoiceBackend()
+     const { backend } = result
+-    if (!isVoiceBackendType(backend)) {
++    if (backend !== null && !isVoiceBackendType(backend)) {
+         throw new Error(`Unrecognised voice backend: ${backend}`)
+     }
+-    const rawBackends = Array.isArray(result.backends) ? result.backends : [backend]
++    const rawBackends = Array.isArray(result.backends) ? result.backends : backend !== null ? [backend] : []
+     const backends = rawBackends.filter(isVoiceBackendType)
+-    if (backends.length === 0) {
++    if (backend !== null && backends.length === 0) {
+         backends.push(backend)
+     }
+     return { backend, backends }
+diff --git a/web/src/lib/voicePickerPreferences.ts b/web/src/lib/voicePickerPreferences.ts
+index d0ccc3d9..5b78581a 100644
+--- a/web/src/lib/voicePickerPreferences.ts
++++ b/web/src/lib/voicePickerPreferences.ts
+@@ -58,8 +58,8 @@ export function writeStoredVoiceBackendPreference(backend: VoiceBackendType): vo
+ 
+ export function resolveSelectedVoiceBackend(
+     configured: readonly VoiceBackendType[],
+-    hubDefault: VoiceBackendType
+-): VoiceBackendType {
++    hubDefault: VoiceBackendType | null
++): VoiceBackendType | null {
+     return resolveEffectiveVoiceBackend(
+         configured,
+         hubDefault,
+diff --git a/web/src/routes/settings/useVoiceSettings.ts b/web/src/routes/settings/useVoiceSettings.ts
+index 1ebcd261..34e2b343 100644
+--- a/web/src/routes/settings/useVoiceSettings.ts
++++ b/web/src/routes/settings/useVoiceSettings.ts
+@@ -31,7 +31,7 @@ export function useVoiceSettings() {
+             setConfiguredBackends(response.backends)
+             const selected = resolveSelectedVoiceBackend(response.backends, response.backend)
+             setBackendState(selected)
+-            setVoiceIdState(readStoredVoiceSelection(selected))
++            setVoiceIdState(selected ? readStoredVoiceSelection(selected) : null)
+         }).catch(() => {
+             if (cancelled) return
+             setConfiguredBackends(['elevenlabs'])

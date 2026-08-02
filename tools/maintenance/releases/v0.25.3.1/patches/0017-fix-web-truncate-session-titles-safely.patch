@@ -1,0 +1,192 @@
+From 636ef50a146fe4eb15d4cd93ba92f40276a4c7c1 Mon Sep 17 00:00:00 2001
+From: KorenKrita <KorenKrita@gmail.com>
+Date: Mon, 3 Aug 2026 01:50:19 +0800
+Subject: [PATCH 17/19] fix(web): truncate session titles safely
+
+---
+ web/src/lib/composerSegments.test.ts |  9 +++++
+ web/src/lib/composerSegments.ts      |  3 +-
+ web/src/lib/graphemes.test.ts        | 52 ++++++++++++++++++++++++++++
+ web/src/lib/graphemes.ts             | 22 ++++++++++++
+ web/src/lib/sessionReference.test.ts | 13 +++++++
+ web/src/lib/sessionReference.ts      |  3 +-
+ 6 files changed, 100 insertions(+), 2 deletions(-)
+ create mode 100644 web/src/lib/graphemes.test.ts
+ create mode 100644 web/src/lib/graphemes.ts
+
+diff --git a/web/src/lib/composerSegments.test.ts b/web/src/lib/composerSegments.test.ts
+index 9c09521b..6a93ed1d 100644
+--- a/web/src/lib/composerSegments.test.ts
++++ b/web/src/lib/composerSegments.test.ts
+@@ -59,6 +59,14 @@ describe('serializeComposerSegments', () => {
+             { type: 'text', text: ' after' },
+         ])).toBe('before  after')
+     })
++
++    it('truncates mention titles at 120 graphemes without splitting an emoji', () => {
++        const title = `${'a'.repeat(119)}😀x`
++        const expectedTitle = `${'a'.repeat(119)}😀`
++        expect(serializeComposerSegments([
++            { type: 'session', id: 'emoji-session', title },
++        ])).toBe(`[${expectedTitle}](/sessions/emoji-session)`)
++    })
+ })
+ 
+ describe('parseComposerSegments', () => {
+@@ -226,6 +234,7 @@ describe('serializeComposerSelection', () => {
+         const segments: ComposerSegment[] = [{ type: 'text', text: 'abc' }]
+         expect(serializeComposerSelection(segments, { start: 1, end: 1 })).toBeNull()
+     })
++
+ })
+ 
+ describe('insertSegmentsInComposerSegments', () => {
+diff --git a/web/src/lib/composerSegments.ts b/web/src/lib/composerSegments.ts
+index cfe4396f..b251020a 100644
+--- a/web/src/lib/composerSegments.ts
++++ b/web/src/lib/composerSegments.ts
+@@ -1,4 +1,5 @@
+ import { buildSessionReferencePath, parseSessionPathHref } from '@/lib/sessionReference'
++import { truncateGraphemes } from '@/lib/graphemes'
+ import { findActiveWord } from '@/utils/findActiveWord'
+ 
+ /** Object Replacement Character — one mirror slot per session atom. */
+@@ -23,7 +24,7 @@ export type ComposerSelection = {
+ }
+ 
+ function sanitizeMentionTitle(title: string): string {
+-    return title.replace(/\s+/g, ' ').trim().slice(0, 120)
++    return truncateGraphemes(title.replace(/\s+/g, ' ').trim(), 120)
+ }
+ 
+ function escapeMarkdownLinkLabel(title: string): string {
+diff --git a/web/src/lib/graphemes.test.ts b/web/src/lib/graphemes.test.ts
+new file mode 100644
+index 00000000..f8b72d9f
+--- /dev/null
++++ b/web/src/lib/graphemes.test.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from 'vitest'
++import { truncateGraphemes } from './graphemes'
++
++const ASCII_PREFIX = 'a'.repeat(119)
++const BOUNDARY_SAMPLES = [
++    '😀',
++    'e\u0301',
++    '👨\u200D👩\u200D👧\u200D👦',
++]
++
++const CODE_POINT_FALLBACK_SAMPLES = [
++    ...BOUNDARY_SAMPLES,
++    '한',
++    'क्\u200Dष',
++    'a\u200Db',
++]
++
++function expectBoundarySafeTruncation(): void {
++    for (const grapheme of BOUNDARY_SAMPLES) {
++        expect(truncateGraphemes(`${ASCII_PREFIX}${grapheme}x`, 120)).toBe(
++            `${ASCII_PREFIX}${grapheme}`
++        )
++    }
++}
++
++describe('truncateGraphemes', () => {
++    it('keeps the 120th emoji, combining sequence, and ZWJ sequence intact', () => {
++        expectBoundarySafeTruncation()
++    })
++
++    it('uses a bounded code-point fallback when Intl.Segmenter is unavailable', () => {
++        const descriptor = Object.getOwnPropertyDescriptor(Intl, 'Segmenter')
++        Object.defineProperty(Intl, 'Segmenter', { configurable: true, value: undefined })
++        try {
++            for (const grapheme of CODE_POINT_FALLBACK_SAMPLES) {
++                const source = `${ASCII_PREFIX}${grapheme}x`
++                const result = truncateGraphemes(source, 120)
++                expect(result).toBe(Array.from(source).slice(0, 120).join(''))
++                expect(Array.from(result).length).toBeLessThanOrEqual(120)
++                expect(result).not.toMatch(/[\uD800-\uDBFF]$/)
++            }
++            expect(truncateGraphemes('abc', 0)).toBe('')
++        } finally {
++            if (descriptor) {
++                Object.defineProperty(Intl, 'Segmenter', descriptor)
++            } else {
++                const mutableIntl = Intl as { Segmenter?: unknown }
++                delete mutableIntl.Segmenter
++            }
++        }
++    })
++})
+diff --git a/web/src/lib/graphemes.ts b/web/src/lib/graphemes.ts
+new file mode 100644
+index 00000000..f5d4a4bf
+--- /dev/null
++++ b/web/src/lib/graphemes.ts
+@@ -0,0 +1,22 @@
++/**
++ * Truncate by user-perceived grapheme clusters when the platform provides the
++ * Unicode segmenter. The fallback is code-point-safe rather than a complete
++ * UAX grapheme implementation, so it never creates a lone surrogate.
++ */
++export function truncateGraphemes(value: string, maxLength: number): string {
++    if (maxLength <= 0 || !value) return ''
++
++    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
++        const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
++        let result = ''
++        let count = 0
++        for (const entry of segmenter.segment(value)) {
++            if (count >= maxLength) break
++            result += entry.segment
++            count += 1
++        }
++        return result
++    }
++
++    return Array.from(value).slice(0, maxLength).join('')
++}
+diff --git a/web/src/lib/sessionReference.test.ts b/web/src/lib/sessionReference.test.ts
+index d40ac043..e31b2297 100644
+--- a/web/src/lib/sessionReference.test.ts
++++ b/web/src/lib/sessionReference.test.ts
+@@ -58,6 +58,19 @@ describe('buildSessionReferenceText', () => {
+             'See HAPI session /sessions/abc-def for context'
+         )
+     })
++
++    it('truncates session-reference titles by grapheme without splitting combining or ZWJ sequences', () => {
++        const prefix = 'a'.repeat(119)
++        const combining = `${prefix}e\u0301x`
++        const family = `${prefix}👨\u200D👩\u200D👧\u200D👦x`
++
++        expect(buildSessionReferenceText(combining, 'combining')).toBe(
++            `See session ${JSON.stringify(`${prefix}e\u0301`)} (/sessions/combining) for context`
++        )
++        expect(buildSessionReferenceText(family, 'family')).toBe(
++            `See session ${JSON.stringify(`${prefix}👨\u200D👩\u200D👧\u200D👦`)} (/sessions/family) for context`
++        )
++    })
+ })
+ 
+ describe('matchSessionsForMention', () => {
+diff --git a/web/src/lib/sessionReference.ts b/web/src/lib/sessionReference.ts
+index d3dc5653..fbccee0a 100644
+--- a/web/src/lib/sessionReference.ts
++++ b/web/src/lib/sessionReference.ts
+@@ -1,5 +1,6 @@
+ import type { SessionSummary } from '@/types/api'
+ import { normalizeSearch, sessionMatchesQuery } from '@/components/SessionList'
++import { truncateGraphemes } from '@/lib/graphemes'
+ import { getSessionTitle } from '@/lib/sessionTitle'
+ 
+ export function buildSessionReferencePath(sessionId: string): string {
+@@ -9,7 +10,7 @@ export function buildSessionReferencePath(sessionId: string): string {
+ }
+ 
+ function sanitizeSessionReferenceTitle(sessionTitle: string): string {
+-    return sessionTitle.replace(/\s+/g, ' ').trim().slice(0, 120)
++    return truncateGraphemes(sessionTitle.replace(/\s+/g, ' ').trim(), 120)
+ }
+ 
+ /** Clipboard text for citing this session in another HAPI chat (not a public share link). */

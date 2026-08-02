@@ -1,0 +1,84 @@
+From 7a8fa46dbb1f738f2bebd4998f223cf884c81914 Mon Sep 17 00:00:00 2001
+From: KorenKrita <KorenKrita@gmail.com>
+Date: Mon, 3 Aug 2026 02:13:14 +0800
+Subject: [PATCH 19/19] fix(web): normalize empty wrapper offsets
+
+---
+ .../RichComposerInput.segments.test.ts        | 37 +++++++++++++++++++
+ .../AssistantChat/RichComposerInput.tsx       | 12 ++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/web/src/components/AssistantChat/RichComposerInput.segments.test.ts b/web/src/components/AssistantChat/RichComposerInput.segments.test.ts
+index d3f75363..3d957d29 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.segments.test.ts
++++ b/web/src/components/AssistantChat/RichComposerInput.segments.test.ts
+@@ -248,9 +248,46 @@ describe('mirrorOffsetFromPoint', () => {
+         // visible block start; the wrapper itself creates no new mirror slot.
+         expect(mirrorOffsetFromPoint(root, root, 1)).toBe(4)
+         expect(mirrorOffsetFromPoint(root, root, 2)).toBe(4)
++        const empty = root.children[1] as HTMLElement
++        expect(mirrorOffsetFromPoint(root, empty, 0)).toBe(4)
+ 
+         const trailingEmpty = document.createElement('div')
+         trailingEmpty.innerHTML = '<div>one</div><div></div>'
+         expect(mirrorComposerSegments(segmentsFromEditor(trailingEmpty))).toBe('one')
++        expect(mirrorOffsetFromPoint(trailingEmpty, trailingEmpty.children[1]!, 0)).toBe(3)
++
++        const leadingEmpty = document.createElement('div')
++        leadingEmpty.innerHTML = '<div></div><div>two</div>'
++        expect(mirrorOffsetFromPoint(leadingEmpty, leadingEmpty.children[0]!, 0)).toBe(0)
++
++        const nestedEmpty = document.createElement('div')
++        nestedEmpty.innerHTML = '<div>one<div></div><div>two</div></div>'
++        const nested = nestedEmpty.firstChild as HTMLElement
++        expect(mirrorOffsetFromPoint(nestedEmpty, nested.children[0]!, 0)).toBe(4)
++
++        const sectionWrapped = document.createElement('div')
++        sectionWrapped.innerHTML = '<div>one</div><section><div></div></section><div>two</div>'
++        const section = sectionWrapped.children[1] as HTMLElement
++        const sectionInner = section.firstElementChild!
++        expect(mirrorOffsetFromPoint(sectionWrapped, sectionWrapped, 1)).toBe(4)
++        expect(mirrorOffsetFromPoint(sectionWrapped, sectionWrapped, 2)).toBe(4)
++        expect(mirrorOffsetFromPoint(sectionWrapped, section, 0)).toBe(4)
++        expect(mirrorOffsetFromPoint(sectionWrapped, sectionInner, 0)).toBe(4)
++
++        const listWrapped = document.createElement('div')
++        listWrapped.innerHTML = '<div>one</div><ul><li></li></ul><div>two</div>'
++        const list = listWrapped.children[1] as HTMLElement
++        const listItem = list.firstElementChild!
++        expect(mirrorOffsetFromPoint(listWrapped, listWrapped, 1)).toBe(4)
++        expect(mirrorOffsetFromPoint(listWrapped, listWrapped, 2)).toBe(4)
++        expect(mirrorOffsetFromPoint(listWrapped, list, 0)).toBe(4)
++        expect(mirrorOffsetFromPoint(listWrapped, listItem, 0)).toBe(4)
++
++        const inline = document.createElement('div')
++        inline.innerHTML = '<span></span>one<span></span>two'
++        expect(mirrorComposerSegments(segmentsFromEditor(inline))).toBe('onetwo')
++        expect(mirrorOffsetFromPoint(inline, inline.children[0]!, 0)).toBe(0)
++        expect(mirrorOffsetFromPoint(inline, inline.children[1]!, 0)).toBe(3)
++        expect(mirrorOffsetFromPoint(inline, inline, 2)).toBe(3)
+     })
+ })
+diff --git a/web/src/components/AssistantChat/RichComposerInput.tsx b/web/src/components/AssistantChat/RichComposerInput.tsx
+index 5dd2a1c0..2f297ef4 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.tsx
+@@ -358,6 +358,18 @@ function mirrorOffsetWithinElement(
+     const span = mapping.spans.get(container)
+     if (!span) return mapping.mirrorLength
+ 
++    // Any zero-output element has no mirror position of its own. Normalize it
++    // to the boundary immediately after that element in its parent; this
++    // deliberately climbs only to strict parents, including empty non-block
++    // wrappers such as <section> or <ul> around an empty block.
++    if (!span.producesOutput) {
++        const parent = container.parentElement
++        if (parent) {
++            const index = Array.from(parent.childNodes).indexOf(container)
++            if (index >= 0) return mirrorOffsetWithinElement(parent, index + 1, mapping)
++        }
++    }
++
+     const children = Array.from(container.childNodes)
+     const childOffset = Math.max(0, Math.min(offset, children.length))
+     // A parent boundary before a later block belongs at that block's visible
