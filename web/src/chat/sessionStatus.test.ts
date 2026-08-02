@@ -146,6 +146,10 @@ describe('buildSessionStatusData', () => {
             blocks,
             messages: [taskNotification()],
             backgroundTaskCount: 1
-        })).toMatchObject({ terminals: [], undiscoveredTerminalCount: 1 })
+        })).toMatchObject({
+            terminals: [],
+            undiscoveredTerminalCount: 1,
+            possibleTerminalCommands: ['bun run dev', 'bun test --watch']
+        })
     })
 })

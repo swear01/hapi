@@ -110,9 +110,19 @@ export function SessionStatusPanel({ data }: { data: SessionStatusData }) {
                                 )
                             })}
                             {data.undiscoveredTerminalCount > 0 ? (
-                                <div className="text-xs text-[var(--app-hint)]">
-                                    {t('session.status.terminalsUnavailable', { count: data.undiscoveredTerminalCount })}
-                                </div>
+                                <>
+                                    <div className="text-xs text-[var(--app-hint)]">
+                                        {t('session.status.terminalsUnavailable', { count: data.undiscoveredTerminalCount })}
+                                    </div>
+                                    {data.possibleTerminalCommands.length > 0 ? (
+                                        <div className="text-[11px] text-[var(--app-hint)]">
+                                            {t('session.status.terminalsPossible')}
+                                            {data.possibleTerminalCommands.map((command, index) => (
+                                                <code key={`${command}:${index}`} className="block overflow-hidden text-ellipsis whitespace-nowrap" title={command}>{command}</code>
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                </>
                             ) : null}
                         </div>
                     </Section>

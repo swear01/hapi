@@ -27,6 +27,7 @@ export type SessionStatusData = {
     subagents: SessionStatusSubagent[]
     terminals: SessionStatusTerminal[]
     undiscoveredTerminalCount: number
+    possibleTerminalCommands: string[]
 }
 
 const BACKGROUND_START_RE = /Command running in background with ID:\s*([^\s<]+)/
@@ -97,15 +98,18 @@ function backgroundTaskCompletions(messages: readonly NormalizedMessage[]): {
 function buildBackgroundTerminals(
     tools: readonly ToolCallBlock[],
     messages: readonly NormalizedMessage[]
-): SessionStatusTerminal[] {
+): { confirmed: SessionStatusTerminal[]; uncertain: SessionStatusTerminal[] } {
     const terminals = tools
         .map(terminalFromBlock)
         .filter((terminal): terminal is SessionStatusTerminal => terminal !== null)
     const completions = backgroundTaskCompletions(messages)
-    return terminals.filter((terminal) => (
-        !completions.ids.has(terminal.id)
-        && (completions.latestUnknownAt === null || terminal.startedAt > completions.latestUnknownAt)
-    ))
+    const remaining = terminals.filter((terminal) => !completions.ids.has(terminal.id))
+    const latestUnknownAt = completions.latestUnknownAt
+    if (latestUnknownAt === null) return { confirmed: remaining, uncertain: [] }
+    return {
+        confirmed: remaining.filter((terminal) => terminal.startedAt > latestUnknownAt),
+        uncertain: remaining.filter((terminal) => terminal.startedAt <= latestUnknownAt)
+    }
 }
 
 function subagentTitle(block: ToolCallBlock): string {
@@ -154,13 +158,16 @@ export function buildSessionStatusData(args: {
     const tools = collectToolBlocks(args.blocks)
     const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
     const terminals = args.backgroundTaskCount === undefined
-        ? detectedTerminals
+        ? [...detectedTerminals.confirmed, ...detectedTerminals.uncertain]
         : args.backgroundTaskCount > 0
-            ? detectedTerminals.slice(-args.backgroundTaskCount)
+            ? detectedTerminals.confirmed.slice(-args.backgroundTaskCount)
             : []
     const undiscoveredTerminalCount = args.backgroundTaskCount === undefined
         ? 0
         : Math.max(0, args.backgroundTaskCount - terminals.length)
+    const possibleTerminalCommands = undiscoveredTerminalCount > 0
+        ? detectedTerminals.uncertain.map((terminal) => terminal.command)
+        : []
     const data: SessionStatusData = {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
@@ -168,7 +175,8 @@ export function buildSessionStatusData(args: {
             .map(subagentFromBlock)
             .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
         terminals,
-        undiscoveredTerminalCount
+        undiscoveredTerminalCount,
+        possibleTerminalCommands
     }
 
     return data.goal
