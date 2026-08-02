@@ -16,6 +16,25 @@ async function collectAdditions(
     return { emitted, uploadFile }
 }
 
+function stubPreviewReadFailureThenUploadSuccess(): void {
+    let readCount = 0
+    class FileReaderMock {
+        result: string | ArrayBuffer | null = null
+        onload: FileReader['onload'] = null
+        onerror: FileReader['onerror'] = null
+        readAsDataURL(): void {
+            readCount += 1
+            if (readCount === 1) {
+                this.onerror?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>)
+                return
+            }
+            this.result = 'data:image/png;base64,dXBsb2Fk'
+            this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>)
+        }
+    }
+    vi.stubGlobal('FileReader', FileReaderMock)
+}
+
 describe('attachmentAdapter', () => {
     beforeEach(() => {
         vi.stubGlobal('indexedDB', undefined)
@@ -62,6 +81,51 @@ describe('attachmentAdapter', () => {
             status: { type: 'requires-action', reason: 'composer-send' },
         })])
     })
+
+    it('keeps a successful upload ready when image preview generation fails', async () => {
+        stubPreviewReadFailureThenUploadSuccess()
+        const { createAttachmentAdapter } = await import('./attachmentAdapter')
+        const uploadFile = vi.fn().mockResolvedValue({ success: true, path: '/uploads/proof.png' })
+        const deleteUploadFile = vi.fn().mockResolvedValue({ success: true })
+        const adapter = createAttachmentAdapter({ uploadFile, deleteUploadFile } as never, 'session-1')
+        const file = new File(['proof'], 'proof.png', { type: 'image/png' })
+        const states: import('@assistant-ui/react').PendingAttachment[] = []
+
+        for await (const state of adapter.add({ file }) as AsyncGenerator<import('@assistant-ui/react').PendingAttachment>) {
+            states.push(state)
+        }
+
+        const ready = states.at(-1) as import('@assistant-ui/react').PendingAttachment & {
+            path?: string
+            previewUrl?: string
+        }
+        expect(uploadFile).toHaveBeenCalledTimes(1)
+        expect(uploadFile).toHaveBeenCalledWith('session-1', 'proof.png', 'dXBsb2Fk', 'image/png')
+        expect(ready).toMatchObject({
+            type: 'file',
+            name: 'proof.png',
+            status: { type: 'requires-action', reason: 'composer-send' },
+            path: '/uploads/proof.png',
+        })
+        expect(ready.id).toEqual(expect.any(String))
+        expect(ready.previewUrl).toBeUndefined()
+
+        const sent = await adapter.send(ready)
+        expect(JSON.parse((sent.content[0] as { text: string }).text)).toEqual({
+            __attachmentMetadata: {
+                id: ready.id,
+                filename: 'proof.png',
+                mimeType: 'image/png',
+                size: file.size,
+                path: '/uploads/proof.png',
+            },
+        })
+
+        await adapter.remove(ready)
+        expect(deleteUploadFile).toHaveBeenCalledWith('session-1', '/uploads/proof.png')
+    })
+
+
 })
 
 describe('attachmentAdapter image previews', () => {
