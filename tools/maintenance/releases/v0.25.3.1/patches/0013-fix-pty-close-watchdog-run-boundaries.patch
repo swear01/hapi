@@ -1,0 +1,106 @@
+From d7e829c32d9faf8efe07fb272b2fbd4fb8983aed Mon Sep 17 00:00:00 2001
+From: Junmo Kim <me@junmo.kim>
+Date: Mon, 3 Aug 2026 02:14:31 +0900
+Subject: [PATCH 13/19] fix(pty): close watchdog run boundaries
+
+---
+ cli/src/agent/__tests__/runAgentPty.test.ts | 66 ++++++++++++++++++++-
+ cli/src/agent/runAgentPty.ts                |  1 +
+ 2 files changed, 66 insertions(+), 1 deletion(-)
+
+diff --git a/cli/src/agent/__tests__/runAgentPty.test.ts b/cli/src/agent/__tests__/runAgentPty.test.ts
+index ccf63e75..23caa181 100644
+--- a/cli/src/agent/__tests__/runAgentPty.test.ts
++++ b/cli/src/agent/__tests__/runAgentPty.test.ts
+@@ -91,7 +91,7 @@ async function reachReady() {
+ }
+ 
+ describe('runAgentPty', () => {
+-    afterEach(() => { harness.reset() })
++    afterEach(() => { vi.useRealTimers(); harness.reset() })
+ 
+     it('rejects (does not silently return) when the PTY fails to spawn', async () => {
+         // A real failure such as `claude` not installed or the terminal failing
+@@ -168,6 +168,70 @@ describe('runAgentPty', () => {
+         await promise
+     })
+ 
++    it('closes the run boundary once when the silence watchdog fires before a late idle marker', async () => {
++        vi.useFakeTimers()
++        const completion = deferred<void>()
++        const nextMessage = vi.fn()
++            .mockResolvedValueOnce({ message: 'first' })
++            .mockResolvedValueOnce({ message: 'second' })
++            .mockResolvedValueOnce(null)
++        const onAgentRunCompleted = vi.fn(() => completion.promise)
++        const promise = runAgentPty(makeOpts({
++            promptMarkers: ['READY'],
++            busyMarkers: ['Generating'],
++            idleMarkers: ['? for shortcuts'],
++            requirePromptMarker: true,
++            nextMessage,
++            onAgentRunCompleted,
++        }))
++
++        harness.triggerData('READY')
++        await vi.advanceTimersByTimeAsync(520)
++        expect(harness.m.write).toHaveBeenCalledWith('first')
++        harness.triggerData('Generating...')
++        await vi.advanceTimersByTimeAsync(3000)
++        expect(onAgentRunCompleted).toHaveBeenCalledTimes(1)
++        expect(harness.m.write).not.toHaveBeenCalledWith('second')
++
++        harness.triggerData('? for shortcuts')
++        expect(onAgentRunCompleted).toHaveBeenCalledTimes(1)
++        completion.resolve()
++        await vi.advanceTimersByTimeAsync(520)
++        expect(harness.m.write).toHaveBeenCalledWith('second')
++        harness.triggerExit(0)
++        await vi.advanceTimersByTimeAsync(100)
++        await promise
++        vi.useRealTimers()
++    })
++
++    it('does not let an armed silence watchdog complete a run after its idle marker already did', async () => {
++        vi.useFakeTimers()
++        const done = deferred<{ message: string } | null>()
++        const onAgentRunCompleted = vi.fn()
++        const promise = runAgentPty(makeOpts({
++            promptMarkers: ['READY'],
++            busyMarkers: ['Generating'],
++            idleMarkers: ['? for shortcuts'],
++            requirePromptMarker: true,
++            nextMessage: vi.fn()
++                .mockResolvedValueOnce({ message: 'first' })
++                .mockImplementationOnce(() => done.promise),
++            onAgentRunCompleted,
++        }))
++
++        harness.triggerData('READY')
++        await vi.advanceTimersByTimeAsync(520)
++        harness.triggerData('Generating...')
++        harness.triggerData('? for shortcuts')
++        expect(onAgentRunCompleted).toHaveBeenCalledTimes(1)
++        await vi.advanceTimersByTimeAsync(3000)
++        expect(onAgentRunCompleted).toHaveBeenCalledTimes(1)
++
++        done.resolve(null)
++        await promise
++        vi.useRealTimers()
++    })
++
+     it('rejects (and never calls onReady) if the PTY exits before becoming ready', async () => {
+         // Spawn succeeds, but the agent exits before rendering a usable prompt
+         // (bad config, invalid args, auth failure). This must be treated as a
+diff --git a/cli/src/agent/runAgentPty.ts b/cli/src/agent/runAgentPty.ts
+index 85633d44..5d62e2da 100644
+--- a/cli/src/agent/runAgentPty.ts
++++ b/cli/src/agent/runAgentPty.ts
+@@ -254,6 +254,7 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
+                 // prompt is usable again — let the next queued message proceed.
+                 inputReady = true
+                 opts.onThinkingChange?.(false)
++                completeAgentRun()
+             }
+         }, IDLE_SILENCE_MS)
+         idleWatchdog.unref?.()

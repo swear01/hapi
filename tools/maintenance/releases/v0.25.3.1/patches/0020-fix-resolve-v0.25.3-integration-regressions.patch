@@ -1,0 +1,1302 @@
+From 4a82b005bf600ed19995675f217bd079f52b9c96 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:52:55 +0800
+Subject: [PATCH] fix: resolve v0.25.3 integration regressions
+
+---
+ .../agent/backends/acp/AcpSdkBackend.test.ts  |   4 +
+ cli/src/agent/backends/acp/AcpSdkBackend.ts   |   3 +-
+ ...claudeRemoteLauncher.launchFailure.test.ts |   2 +-
+ cli/src/claude/sdk/query.ts                   |   2 +
+ cli/src/claude/utils/startHappyServer.test.ts |   6 +-
+ cli/src/claude/utils/startHappyServer.ts      | 111 +++++++++-----
+ cli/src/codex/runCodex.ts                     |  30 +++-
+ .../codex/utils/buildHapiMcpBridge.test.ts    |  14 +-
+ cli/src/codex/utils/slashCommands.test.ts     |  15 --
+ cli/src/codex/utils/slashCommands.ts          |   6 +-
+ e2e/history-load.spec.ts                      |  19 +--
+ e2e/share-turn.spec.ts                        |   2 +-
+ .../socket/handlers/cli/sessionHandlers.ts    |  47 +++++-
+ hub/src/sync/sessionModel.test.ts             |   1 +
+ hub/src/sync/syncEngine.ts                    |  33 +++-
+ hub/src/web/routes/machines.test.ts           |   4 +-
+ tools/maintenance/sync-from-upstream.sh       |   5 +
+ .../tests/test_sync_from_upstream.py          |  21 +++
+ .../components/AssistantChat/HappyThread.tsx  |  12 +-
+ .../NewSession/newSessionCursorModels.test.ts |  46 +++++-
+ web/src/lib/cursorPickerState.test.ts         |   2 +-
+ web/src/lib/locales/en.ts                     | 144 ++++++++++++++++++
+ web/src/lib/locales/zh-CN.ts                  | 144 ++++++++++++++++++
+ 23 files changed, 565 insertions(+), 108 deletions(-)
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+index 096e9dee..b82cb188 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+@@ -1163,6 +1163,7 @@ describe('AcpSdkBackend', () => {
+             } | null;
+             handleSessionUpdate: (params: unknown) => void;
+             messageHandler: unknown;
++            sessionUpdateQueue: Promise<void>;
+         };
+         backendInternal.transport = {
+             sendRequest: async () => ({ stopReason: 'end_turn' }),
+@@ -1198,6 +1199,7 @@ describe('AcpSdkBackend', () => {
+         // ordinary straggler-forwarding (covered elsewhere) is unaffected.
+         expect(backendInternal.messageHandler).toBe(handlerBeforeSuppression);
+         emitPlanUpdate();
++        await backendInternal.sessionUpdateQueue;
+         expect(turn1.some((m) => m.type === 'plan')).toBe(true);
+     });
+ 
+@@ -1221,6 +1223,7 @@ describe('AcpSdkBackend', () => {
+             } | null;
+             handleSessionUpdate: (params: unknown) => void;
+             messageHandler: unknown;
++            sessionUpdateQueue: Promise<void>;
+         };
+         backendInternal.transport = {
+             sendRequest: async () => ({ stopReason: 'end_turn' }),
+@@ -1268,6 +1271,7 @@ describe('AcpSdkBackend', () => {
+ 
+         // Normal forwarding resumes once actually restored.
+         emitPlanUpdate();
++        await backendInternal.sessionUpdateQueue;
+         expect(turn1.some((m) => m.type === 'plan')).toBe(true);
+     });
+ });
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index ef0c3e03..c0c43a5b 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -790,9 +790,10 @@ export class AcpSdkBackend implements AgentBackend {
+         }
+         this.forwardSessionInfoUpdate(sessionId, update);
+         this.captureUsageUpdate(update);
++        const messageHandler = this.messageHandler;
+         this.sessionUpdateQueue = this.sessionUpdateQueue
+             .then(async () => {
+-                await this.messageHandler?.handleUpdate(update);
++                await messageHandler?.handleUpdate(update);
+             })
+             .catch((error) => {
+                 logger.debug(
+diff --git a/cli/src/claude/claudeRemoteLauncher.launchFailure.test.ts b/cli/src/claude/claudeRemoteLauncher.launchFailure.test.ts
+index 2a9ad79f..d9416b7d 100644
+--- a/cli/src/claude/claudeRemoteLauncher.launchFailure.test.ts
++++ b/cli/src/claude/claudeRemoteLauncher.launchFailure.test.ts
+@@ -136,7 +136,7 @@ describe('claudeRemoteLauncher launch-failure recovery', () => {
+         // restored to the queue before attempt 2, not silently dropped.
+         expect(queueSizeOnSecondAttempt).toBe(1);
+         expect(restoredMessageText).toBe('hello');
+-    });
++    }, 15_000);
+ 
+     it('restores a joined batch as separate items with each original localId and order preserved', async () => {
+         // MessageQueue2.collectBatch() joins same-mode messages into a single
+diff --git a/cli/src/claude/sdk/query.ts b/cli/src/claude/sdk/query.ts
+index a8fc1d08..f8d43348 100644
+--- a/cli/src/claude/sdk/query.ts
++++ b/cli/src/claude/sdk/query.ts
+@@ -310,6 +310,7 @@ export function query(config: {
+             permissionMode = 'default',
+             continue: continueConversation,
+             resume,
++            forkSession,
+             model,
+             effort,
+             fallbackModel,
+@@ -342,6 +343,7 @@ export function query(config: {
+     }
+     if (continueConversation) args.push('--continue')
+     if (resume) args.push('--resume', resume)
++    if (forkSession) args.push('--fork-session')
+     args.push(...additionalArgs)
+     if (settingsPath) args.push('--settings', settingsPath)
+     if (allowedTools.length > 0) args.push('--allowedTools', allowedTools.join(','))
+diff --git a/cli/src/claude/utils/startHappyServer.test.ts b/cli/src/claude/utils/startHappyServer.test.ts
+index 1a1a9ed2..4656b748 100644
+--- a/cli/src/claude/utils/startHappyServer.test.ts
++++ b/cli/src/claude/utils/startHappyServer.test.ts
+@@ -108,6 +108,7 @@ describe('startHappyServer skill_lookup', () => {
+         expect(tools.tools.map((tool) => tool.name)).toEqual([
+             'change_title',
+             'display_image',
++            'display_video',
+             'ping_peer',
+             'inspect_peer'
+         ])
+@@ -127,9 +128,10 @@ describe('startHappyServer skill_lookup', () => {
+         await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url)))
+         const tools = await mcp.listTools()
+ 
+-        expect(server.toolNames).toEqual(['display_image', 'ping_peer', 'inspect_peer'])
++        expect(server.toolNames).toEqual(['display_image', 'display_video', 'ping_peer', 'inspect_peer'])
+         expect(tools.tools.map((tool) => tool.name)).toEqual([
+             'display_image',
++            'display_video',
+             'ping_peer',
+             'inspect_peer'
+         ])
+@@ -142,12 +144,14 @@ describe('toClaudeAllowedHapiMcpTools', () => {
+         expect(toClaudeAllowedHapiMcpTools([
+             'change_title',
+             'display_image',
++            'display_video',
+             'ping_peer',
+             'inspect_peer',
+             'skill_lookup'
+         ])).toEqual([
+             'mcp__hapi__change_title',
+             'mcp__hapi__display_image',
++            'mcp__hapi__display_video',
+             'mcp__hapi__skill_lookup'
+         ])
+     })
+diff --git a/cli/src/claude/utils/startHappyServer.ts b/cli/src/claude/utils/startHappyServer.ts
+index ba2c0b48..a8a1c617 100644
+--- a/cli/src/claude/utils/startHappyServer.ts
++++ b/cli/src/claude/utils/startHappyServer.ts
+@@ -12,7 +12,9 @@ import { z } from "zod";
+ import { logger } from "@/ui/logger";
+ import { ApiSessionClient } from "@/api/apiSession";
+ import { randomUUID } from "node:crypto";
+-import { detectImageMimeType, registerGeneratedImage } from "@/modules/common/generatedImages";
++import { detectImageMimeType, detectVideoMimeType, registerGeneratedImage } from "@/modules/common/generatedImages";
++import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
++import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from "@/modules/common/displayImagePrompt";
+ import { resolveSkill } from "@/modules/common/skills";
+ import { PingPeerError, formatInspectPeerReport, inspectPeer, pingPeer } from "@/modules/pingPeer/pingPeer";
+ 
+@@ -76,6 +78,11 @@ function createHapiMcpServer(
+         title: z.string().optional().describe('Optional display title or filename for the image'),
+     });
+ 
++    const displayVideoInputSchema: z.ZodTypeAny = z.object({
++        path: z.string().describe('Local filesystem path of the video to display inline (mp4 or webm)'),
++        title: z.string().optional().describe('Optional display title or filename for the video'),
++    });
++
+     const pingPeerInputSchema: z.ZodTypeAny = z.object({
+         sessionIdPrefix: z.string().trim().min(1).describe(
+             'Target HAPI session id or unique id prefix (another session - not this chat). Prefer the full UUID from a [title](/sessions/<id>) citation.'
+@@ -96,6 +103,48 @@ function createHapiMcpServer(
+         name: z.string().trim().min(1).max(128).describe('Exact skill name shown by HAPI skill autocomplete'),
+     });
+ 
++    const maxInlineMediaBytes = 25 * 1024 * 1024;
++
++    async function displayInlineMedia(
++        args: { path: string; title?: string },
++        mediaKind: 'image' | 'video',
++        toolName: 'display_image' | 'display_video'
++    ) {
++        const info = await lstat(args.path);
++        if (!info.isFile()) {
++            throw new Error('Path is not a regular file');
++        }
++        if (info.size > maxInlineMediaBytes) {
++            throw new Error('File is too large to display inline');
++        }
++
++        const bytes = await readFile(args.path);
++        const mimeType = mediaKind === 'video'
++            ? detectVideoMimeType(bytes)
++            : detectImageMimeType(bytes);
++        if (!mimeType) {
++            throw new Error(mediaKind === 'video' ? 'Unsupported video content' : 'Unsupported image content');
++        }
++
++        const media = registerGeneratedImage({
++            id: randomUUID(),
++            path: args.path,
++            fileName: args.title,
++            mimeType,
++            bytes
++        });
++        const source: InlineMediaSource = { ingress: 'mcp', toolName };
++        client.sendAgentMessage({
++            type: 'generated-image',
++            imageId: media.id,
++            fileName: media.fileName,
++            mimeType: media.mimeType,
++            id: randomUUID(),
++            source,
++        });
++        return media;
++    }
++
+     if (enableChangeTitle) {
+         mcp.registerTool<any, any>('change_title', {
+             description: 'Change the title of the current chat session',
+@@ -130,44 +179,14 @@ function createHapiMcpServer(
+     }
+ 
+     mcp.registerTool<any, any>('display_image', {
+-        description: 'Display a local image file inline in the current HAPI chat session',
++        description: `Display a local image file inline in the current HAPI chat session. ${DISPLAY_IMAGE_PROMPT_CURSOR}`,
+         title: 'Display Image',
+         inputSchema: displayImageInputSchema,
+     }, async (args: { path: string; title?: string }) => {
+         logger.debug('[hapiMCP] Display image:', args.path);
+ 
+         try {
+-            const info = await lstat(args.path);
+-            if (!info.isFile()) {
+-                throw new Error('Path is not a regular file');
+-            }
+-
+-            const maxImageBytes = 25 * 1024 * 1024;
+-            if (info.size > maxImageBytes) {
+-                throw new Error('Image is too large to display inline');
+-            }
+-
+-            const bytes = await readFile(args.path);
+-            const mimeType = detectImageMimeType(bytes);
+-            if (!mimeType) {
+-                throw new Error('Unsupported image content');
+-            }
+-
+-            const image = registerGeneratedImage({
+-                id: randomUUID(),
+-                path: args.path,
+-                fileName: args.title,
+-                mimeType,
+-                bytes
+-            });
+-
+-            client.sendAgentMessage({
+-                type: 'generated-image',
+-                imageId: image.id,
+-                fileName: image.fileName,
+-                mimeType: image.mimeType,
+-                id: randomUUID()
+-            });
++            const image = await displayInlineMedia(args, 'image', 'display_image');
+ 
+             return {
+                 content: [
+@@ -193,6 +212,28 @@ function createHapiMcpServer(
+         }
+     });
+ 
++    mcp.registerTool<any, any>('display_video', {
++        description: `Display a local mp4 or webm file inline in the current HAPI chat session. ${DISPLAY_VIDEO_PROMPT_CURSOR}`,
++        title: 'Display Video',
++        inputSchema: displayVideoInputSchema,
++    }, async (args: { path: string; title?: string }) => {
++        logger.debug('[hapiMCP] Display video:', args.path);
++        try {
++            const video = await displayInlineMedia(args, 'video', 'display_video');
++            return {
++                content: [{ type: 'text' as const, text: `Displayed video: ${video.fileName}` }],
++                isError: false,
++            };
++        } catch (error) {
++            const message = error instanceof Error ? error.message : String(error);
++            logger.debug('[hapiMCP] Failed to display video:', message);
++            return {
++                content: [{ type: 'text' as const, text: `Failed to display video: ${message}` }],
++                isError: true,
++            };
++        }
++    });
++
+     mcp.registerTool<any, any>('ping_peer', {
+         description: 'Send a message to another HAPI session (peer handoff / nudge). Resolves by session id prefix, resumes if inactive, then POSTs the message on the same hub/namespace. Prefer this (or `hapi ping-peer`) over reinventing JWT+curl. Targets another session - not the current chat. When the user cites [title](/sessions/<id>), pass that <id> as sessionIdPrefix.',
+         title: 'Ping Peer Session',
+@@ -391,8 +432,8 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
+     }));
+ 
+     const toolNames = enableChangeTitle
+-        ? ['change_title', 'display_image', 'ping_peer', 'inspect_peer']
+-        : ['display_image', 'ping_peer', 'inspect_peer'];
++        ? ['change_title', 'display_image', 'display_video', 'ping_peer', 'inspect_peer']
++        : ['display_image', 'display_video', 'ping_peer', 'inspect_peer'];
+     if (options.skillLookup) {
+         toolNames.push('skill_lookup');
+     }
+diff --git a/cli/src/codex/runCodex.ts b/cli/src/codex/runCodex.ts
+index aa3da7cb..ca24720d 100644
+--- a/cli/src/codex/runCodex.ts
++++ b/cli/src/codex/runCodex.ts
+@@ -32,6 +32,7 @@ export async function runCodex(opts: {
+     modelReasoningEffort?: ReasoningEffort;
+     serviceTier?: string;
+     collaborationMode?: EnhancedMode['collaborationMode'];
++    personality?: CodexPersonality | null;
+     existingSessionId?: string;
+     workingDirectory?: string;
+ }): Promise<void> {
+@@ -101,8 +102,9 @@ export async function runCodex(opts: {
+     // thread immediately runs with the right tier; otherwise seed from the
+     // persisted session. A persisted/absent `null` stays untouched (omitted).
+     let currentServiceTier: string | null | undefined = opts.serviceTier ?? sessionInfo.serviceTier ?? undefined;
+-    /** In-session override only. Undefined = omit app-server field (inherit Codex config/thread). */
+-    let currentPersonality: CodexPersonality | undefined;
++    let currentPersonality: CodexPersonality | null | undefined = opts.personality !== undefined
++        ? opts.personality
++        : sessionInfo.personality ?? undefined;
+ 
+     const lifecycle = createRunnerLifecycle({
+         session,
+@@ -135,6 +137,9 @@ export async function runCodex(opts: {
+             sessionInstance.setServiceTier(currentServiceTier);
+         }
+         sessionInstance.setCollaborationMode(currentCollaborationMode);
++        if (currentPersonality !== undefined) {
++            sessionInstance.setPersonality(currentPersonality);
++        }
+         logger.debug(
+             `[Codex] Synced session config for keepalive: ` +
+             `permissionMode=${currentPermissionMode}, model=${currentModel ?? 'auto'}, ` +
+@@ -149,7 +154,7 @@ export async function runCodex(opts: {
+         collaborationMode?: EnhancedMode['collaborationMode'];
+         serviceTier?: string | null;
+         proactiveMultiAgent?: boolean;
+-        personality?: CodexPersonality;
++        personality?: CodexPersonality | null;
+     } | undefined): void => {
+         if (!updates) return;
+         if (updates.permissionMode !== undefined) {
+@@ -170,9 +175,7 @@ export async function runCodex(opts: {
+         if (updates.proactiveMultiAgent !== undefined) {
+             currentProactiveMultiAgent = updates.proactiveMultiAgent;
+         }
+-        if (updates.personality !== undefined) {
+-            currentPersonality = updates.personality;
+-        }
++        if (updates.personality !== undefined) currentPersonality = updates.personality;
+         applyCurrentConfigToSession();
+     };
+ 
+@@ -197,6 +200,8 @@ export async function runCodex(opts: {
+         if (sessionServiceTier !== undefined) {
+             currentServiceTier = sessionServiceTier;
+         }
++        const sessionPersonality = sessionWrapperRef.current?.getPersonality();
++        if (sessionPersonality !== undefined) currentPersonality = sessionPersonality;
+     };
+ 
+     let userMessageChain: Promise<void> = Promise.resolve();
+@@ -372,7 +377,7 @@ export async function runCodex(opts: {
+         if (!payload || typeof payload !== 'object') {
+             throw new Error('Invalid session config payload');
+         }
+-        const config = payload as { permissionMode?: unknown; model?: unknown; modelReasoningEffort?: unknown; collaborationMode?: unknown; serviceTier?: unknown };
++        const config = payload as { permissionMode?: unknown; model?: unknown; modelReasoningEffort?: unknown; collaborationMode?: unknown; serviceTier?: unknown; personality?: unknown };
+ 
+         if (config.permissionMode !== undefined) {
+             currentPermissionMode = resolvePermissionMode(config.permissionMode);
+@@ -394,6 +399,12 @@ export async function runCodex(opts: {
+         if (config.serviceTier !== undefined) {
+             currentServiceTier = resolveServiceTier(config.serviceTier);
+         }
++        if (config.personality !== undefined) {
++            if (config.personality !== null && !['friendly', 'pragmatic', 'none'].includes(String(config.personality))) {
++                throw new Error('Invalid Codex personality');
++            }
++            currentPersonality = config.personality as CodexPersonality | null;
++        }
+ 
+         applyCurrentConfigToSession({ syncModel: shouldSyncModel });
+         const applied: {
+@@ -402,11 +413,13 @@ export async function runCodex(opts: {
+             modelReasoningEffort: ReasoningEffort | null;
+             collaborationMode: EnhancedMode['collaborationMode'];
+             serviceTier: string | null;
++            personality: CodexPersonality | null;
+         } = {
+             permissionMode: currentPermissionMode,
+             modelReasoningEffort: currentModelReasoningEffort ?? null,
+             collaborationMode: currentCollaborationMode,
+-            serviceTier: currentServiceTier ?? null
++            serviceTier: currentServiceTier ?? null,
++            personality: currentPersonality ?? null
+         };
+         if (shouldSyncModel) {
+             applied.model = currentModel ?? null;
+@@ -432,6 +445,7 @@ export async function runCodex(opts: {
+             model: currentModel,
+             modelReasoningEffort: currentModelReasoningEffort ?? undefined,
+             collaborationMode: currentCollaborationMode,
++            personality: currentPersonality,
+             resumeSessionId: opts.resumeSessionId,
+             sourceSessionId: codexSourceSessionId,
+             replayTranscriptHistoryOnStart,
+diff --git a/cli/src/codex/utils/buildHapiMcpBridge.test.ts b/cli/src/codex/utils/buildHapiMcpBridge.test.ts
+index 80ba6a0b..390a1237 100644
+--- a/cli/src/codex/utils/buildHapiMcpBridge.test.ts
++++ b/cli/src/codex/utils/buildHapiMcpBridge.test.ts
+@@ -14,8 +14,8 @@ vi.mock('@/claude/utils/startHappyServer', () => ({
+         return {
+             url: 'http://127.0.0.1:43006/',
+             toolNames: options.skillLookup
+-                ? ['change_title', 'display_image', 'ping_peer', 'inspect_peer', 'skill_lookup']
+-                : ['change_title', 'display_image', 'ping_peer', 'inspect_peer'],
++                ? ['change_title', 'display_image', 'display_video', 'ping_peer', 'inspect_peer', 'skill_lookup']
++                : ['change_title', 'display_image', 'display_video', 'ping_peer', 'inspect_peer'],
+             stop: vi.fn()
+         }
+     })
+@@ -71,10 +71,12 @@ describe('buildHapiMcpBridge skill lookup config', () => {
+             '--url',
+             'http://127.0.0.1:43006/',
+             '--tools',
+-            'change_title,display_image,ping_peer,inspect_peer,skill_lookup'
++            'change_title,display_image,display_video,ping_peer,inspect_peer,skill_lookup'
+         ])
+         expect(bridge.mcpServers.hapi.tools).toEqual({
+             change_title: { approval_mode: 'approve' },
++            display_image: { approval_mode: 'prompt' },
++            display_video: { approval_mode: 'prompt' },
+             skill_lookup: { approval_mode: 'approve' }
+         })
+     })
+@@ -82,9 +84,11 @@ describe('buildHapiMcpBridge skill lookup config', () => {
+     it('does not expose skill_lookup for native-skill bridge callers', async () => {
+         const bridge = await buildHapiMcpBridge(createClient())
+ 
+-        expect(harness.cliArgs.at(-1)).toBe('change_title,display_image,ping_peer,inspect_peer')
++        expect(harness.cliArgs.at(-1)).toBe('change_title,display_image,display_video,ping_peer,inspect_peer')
+         expect(bridge.mcpServers.hapi.tools).toEqual({
+-            change_title: { approval_mode: 'approve' }
++            change_title: { approval_mode: 'approve' },
++            display_image: { approval_mode: 'prompt' },
++            display_video: { approval_mode: 'prompt' }
+         })
+     })
+ 
+diff --git a/cli/src/codex/utils/slashCommands.test.ts b/cli/src/codex/utils/slashCommands.test.ts
+index b39908c1..f1efe622 100644
+--- a/cli/src/codex/utils/slashCommands.test.ts
++++ b/cli/src/codex/utils/slashCommands.test.ts
+@@ -138,21 +138,6 @@ describe('resolveCodexSlashCommand', () => {
+         });
+     });
+ 
+-    it('shows, sets, clears, and validates Codex personality', () => {
+-        expect(resolveCodexSlashCommand('/personality', state)).toEqual({
+-            kind: 'handled', message: 'Codex personality: default'
+-        });
+-        expect(resolveCodexSlashCommand('/personality friendly', state)).toMatchObject({
+-            updates: { personality: 'friendly' }
+-        });
+-        expect(resolveCodexSlashCommand('/personality default', { ...state, personality: 'pragmatic' })).toMatchObject({
+-            updates: { personality: null }
+-        });
+-        expect(resolveCodexSlashCommand('/personality loud', state)).toEqual({
+-            kind: 'handled', message: 'Unknown Codex personality: loud'
+-        });
+-    });
+-
+     it('resolves Codex goal commands for native handling', () => {
+         expect(resolveCodexSlashCommand('/goal', state)).toEqual({
+             kind: 'goal',
+diff --git a/cli/src/codex/utils/slashCommands.ts b/cli/src/codex/utils/slashCommands.ts
+index accd4706..ece88af6 100644
+--- a/cli/src/codex/utils/slashCommands.ts
++++ b/cli/src/codex/utils/slashCommands.ts
+@@ -36,7 +36,7 @@ export type CodexSlashResolution =
+             modelReasoningEffort?: ReasoningEffort | null;
+             serviceTier?: string | null;
+             proactiveMultiAgent?: boolean;
+-            personality?: CodexPersonality;
++            personality?: CodexPersonality | null;
+         };
+     }
+     | {
+@@ -50,7 +50,7 @@ export type CodexSlashResolution =
+             modelReasoningEffort?: ReasoningEffort | null;
+             serviceTier?: string | null;
+             proactiveMultiAgent?: boolean;
+-            personality?: CodexPersonality;
++            personality?: CodexPersonality | null;
+         };
+     }
+     | {
+@@ -70,7 +70,7 @@ export function resolveCodexSlashCommand(
+         modelReasoningEffort?: ReasoningEffort;
+         serviceTier?: string | null;
+         proactiveMultiAgent?: boolean;
+-        personality?: CodexPersonality;
++        personality?: CodexPersonality | null;
+     }
+ ): CodexSlashResolution {
+     const match = /^\s*\/([a-z0-9:_-]+)(?:\s+([\s\S]*))?$/i.exec(text);
+diff --git a/e2e/history-load.spec.ts b/e2e/history-load.spec.ts
+index 4b9793f2..ef853e80 100644
+--- a/e2e/history-load.spec.ts
++++ b/e2e/history-load.spec.ts
+@@ -143,19 +143,16 @@ test('reversing toward newer history cancels a prepend at the row cap', async ({
+ 
+     const newerAnchor = await page.evaluate(() => {
+         const viewport = document.querySelector('.app-scroll-y') as HTMLElement
+-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - 1000)
++        const target = Array.from(
++            viewport.querySelectorAll<HTMLElement>('.happy-thread-messages > [id]')
++        ).find((candidate) => Number(candidate.id.match(/m-(\d+)/)?.[1]) > 1000)
++        if (!target) throw new Error('Expected newer-history target')
++        target.scrollIntoView({ block: 'start' })
+         viewport.dispatchEvent(new Event('scroll'))
+         const viewportRect = viewport.getBoundingClientRect()
+-        const message = Array.from(
+-            viewport.querySelectorAll<HTMLElement>('.happy-thread-messages > [id]')
+-        ).find((candidate) => {
+-            const rect = candidate.getBoundingClientRect()
+-            return rect.bottom > viewportRect.top && rect.top < viewportRect.bottom
+-        })
+-        if (!message) throw new Error('Expected a visible newer-history anchor')
+         return {
+-            id: message.id,
+-            topOffset: message.getBoundingClientRect().top - viewportRect.top
++            id: target.id,
++            topOffset: target.getBoundingClientRect().top - viewportRect.top
+         }
+     })
+     const anchorSequence = Number(newerAnchor.id.match(/m-(\d+)/)?.[1])
+@@ -565,10 +562,10 @@ test('touch pull shows staged feedback and loads older on release', async ({ pag
+     )).toBe(1)
+ 
+     await dispatchTouch('touchend', 164)
++    await expect(page.getByText('Loading…', { exact: true })).toBeVisible()
+     await expect.poll(async () => await page.evaluate(() =>
+         window.__probe.requests.filter((request) => request.direction === 'before').length
+     )).toBe(2)
+-    await expect(page.getByText('Loading…', { exact: true })).toBeVisible()
+ })
+ 
+ // Regression: scroll/resize signals emitted while a failed page is in backoff
+diff --git a/e2e/share-turn.spec.ts b/e2e/share-turn.spec.ts
+index abe4acf5..f9e233fd 100644
+--- a/e2e/share-turn.spec.ts
++++ b/e2e/share-turn.spec.ts
+@@ -86,7 +86,7 @@ test('exports a text-only user fallback alongside assistant DOM', async ({ page
+     await page.getByRole('button', { name: 'Open share preview' }).click()
+ 
+     const dialog = page.getByRole('dialog')
+-    await expect(dialog.getByText(/请导出这一轮复杂对话/)).toBeVisible()
++    await expect(dialog.getByText(/这个失败不用说吧/)).toBeVisible()
+     await expect(dialog.getByText('Complex response fixture')).toBeVisible()
+     await dialog.screenshot({ path: testInfo.outputPath('fallback-preview.png') })
+ 
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index 24f58cdf..920f72eb 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -1,7 +1,7 @@
+ import type { ClientToServerEvents } from '@hapi/protocol'
+ import { z } from 'zod'
+ import { randomUUID } from 'node:crypto'
+-import type { CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
++import type { AgentState, CodexCollaborationMode, CodexPersonality, Metadata, PermissionMode } from '@hapi/protocol/types'
+ import { isRedundantGoalStatusEventContent } from '@hapi/protocol/messages'
+ import type { Store, StoredSession } from '../../../store'
+ import type { SyncEvent } from '../../../sync/syncEngine'
+@@ -24,6 +24,7 @@ type SessionAlivePayload = {
+     effort?: string | null
+     serviceTier?: string | null
+     collaborationMode?: CodexCollaborationMode
++    personality?: CodexPersonality | null
+ }
+ 
+ type SessionEndPayload = {
+@@ -125,7 +126,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         if (todos) {
+             const updated = store.sessions.setSessionTodos(sid, todos, msg.createdAt, session.namespace)
+             if (updated) {
+-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++                const stored = store.sessions.getSession(sid)
++                onWebappEvent?.({
++                    type: 'session-updated',
++                    sessionId: sid,
++                    data: { todos, updatedAt: stored?.updatedAt ?? msg.createdAt }
++                })
+             }
+         }
+ 
+@@ -136,7 +142,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             const newTeamState = applyTeamStateDelta(existingTeamState ?? null, teamDelta)
+             const updated = store.sessions.setSessionTeamState(sid, newTeamState, msg.createdAt, session.namespace)
+             if (updated) {
+-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++                const stored = store.sessions.getSession(sid)
++                onWebappEvent?.({
++                    type: 'session-updated',
++                    sessionId: sid,
++                    data: { teamState: newTeamState, updatedAt: stored?.updatedAt ?? msg.createdAt }
++                })
+             }
+         }
+ 
+@@ -206,6 +217,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         }
+ 
+         if (result.result === 'success') {
++            const stored = store.sessions.getSession(sid)
+             const update = {
+                 id: randomUUID(),
+                 seq: Date.now(),
+@@ -224,7 +236,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+                 }
+             }
+             socket.to(`session:${sid}`).emit('update', update)
+-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++            onWebappEvent?.({
++                type: 'session-updated',
++                sessionId: sid,
++                data: {
++                    metadata: { version: result.version, value: result.value as Metadata | null },
++                    updatedAt: stored?.updatedAt ?? Date.now()
++                }
++            })
+         }
+     }
+ 
+@@ -259,6 +278,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         }
+ 
+         if (result.result === 'success') {
++            const stored = store.sessions.getSession(sid)
+             const update = {
+                 id: randomUUID(),
+                 seq: Date.now(),
+@@ -271,7 +291,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+                 }
+             }
+             socket.to(`session:${sid}`).emit('update', update)
+-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++            onWebappEvent?.({
++                type: 'session-updated',
++                sessionId: sid,
++                data: {
++                    agentState: { version: result.version, value: agentState as AgentState | null },
++                    updatedAt: stored?.updatedAt ?? Date.now()
++                }
++            })
+         }
+     }
+ 
+@@ -301,7 +328,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         onSessionReady?.(data)
+     })
+ 
+-    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean }) => {
++    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => {
+         if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
+             return
+         }
+@@ -345,7 +372,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         // Emit only after the DB transaction succeeds. This is an ACK-level
+         // batch contract, so preserve its original timestamp even when IDs are
+         // heterogeneous, replayed, or unknown.
+-        onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
++        onWebappEvent?.({
++            type: 'messages-consumed',
++            sessionId: data.sid,
++            localIds,
++            invokedAt,
++            ...(data.steered === true ? { steered: true } : {})
++        })
+     })
+ 
+     socket.on('session-end', (data: SessionEndPayload) => {
+diff --git a/hub/src/sync/sessionModel.test.ts b/hub/src/sync/sessionModel.test.ts
+index 7da66576..5e302a1f 100644
+--- a/hub/src/sync/sessionModel.test.ts
++++ b/hub/src/sync/sessionModel.test.ts
+@@ -1105,6 +1105,7 @@ describe('session model', () => {
+                 _permissionMode?: string,
+                 _serviceTier?: string,
+                 _existingSessionId?: string,
++                _startingMode?: string,
+                 _collaborationMode?: string,
+                 personality?: string
+             ) => {
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index c50f0e53..bd0b72e5 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -389,12 +389,27 @@ export class SyncEngine {
+ 
+     handleRealtimeEvent(event: SyncEvent): void {
+         if (event.type === 'session-updated' && event.sessionId) {
+-            // Snapshot agent session IDs before refresh — safe because JS is single-threaded
+-            // and refreshSession replaces the Map entry with a new object.
+             const before = this.sessionCache.getSession(event.sessionId)
++            const beforeMetadata = before?.metadata ?? null
++            const patchApplied = event.data
++                ? this.sessionCache.applySessionPatch(event.sessionId, event.data, event.namespace)
++                : false
++
++            if (patchApplied) {
++                this.eventPublisher.emit(event)
++                const after = this.sessionCache.getSession(event.sessionId)
++                if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
++                    if (!this.canRunCursorDedup(after)) {
++                        return
++                    }
++                    void this.sessionCache.deduplicateByAgentSessionId(event.sessionId).catch(() => {})
++                }
++                return
++            }
++
+             this.sessionCache.refreshSession(event.sessionId)
+             const after = this.sessionCache.getSession(event.sessionId)
+-            if (after?.metadata && !this.hasSameAgentSessionIds(before?.metadata ?? null, after.metadata)) {
++            if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
+                 if (!this.canRunCursorDedup(after)) {
+                     return
+                 }
+@@ -407,6 +422,7 @@ export class SyncEngine {
+ 
+         if (event.type === 'machine-updated' && event.machineId) {
+             this.machineCache.refreshMachine(event.machineId)
++            void this.maybeFleetUpgradeMachine(event.machineId)
+             return
+         }
+ 
+@@ -1812,11 +1828,12 @@ async uploadScratchlistAttachment(
+                     }
+                 }
+             } catch (error) {
+-                return {
+-                    type: 'error',
+-                    message: error instanceof Error ? error.message : 'Failed to inspect Cursor chat store',
+-                    code: 'resume_failed'
+-                }
++                const message = error instanceof Error ? error.message : 'Failed to inspect Cursor chat store'
++                console.warn('[resume] Cursor chat-store probe failed; proceeding with reopen attempt', {
++                    sessionId: access.sessionId,
++                    machineId: targetMachine.id,
++                    message
++                })
+             }
+         }
+ 
+diff --git a/hub/src/web/routes/machines.test.ts b/hub/src/web/routes/machines.test.ts
+index 8291c560..107f6926 100644
+--- a/hub/src/web/routes/machines.test.ts
++++ b/hub/src/web/routes/machines.test.ts
+@@ -101,8 +101,8 @@ describe('machines routes', () => {
+         })
+ 
+         expect(response.status).toBe(200)
+-        expect(capturedArgs[12]).toBeUndefined()
+-        expect(capturedArgs[13]).toBe('plan')
++        expect(capturedArgs[13]).toBeUndefined()
++        expect(capturedArgs[14]).toBe('plan')
+     })
+ 
+     it('returns Codex models for an online machine', async () => {
+diff --git a/tools/maintenance/sync-from-upstream.sh b/tools/maintenance/sync-from-upstream.sh
+index 3439fabe..ecfd8e10 100755
+--- a/tools/maintenance/sync-from-upstream.sh
++++ b/tools/maintenance/sync-from-upstream.sh
+@@ -2,6 +2,7 @@
+ set -euo pipefail
+ 
+ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++caller_dir="$PWD"
+ repo="${HAPI_REPO:-$PWD}"
+ base_dir="$script_dir"
+ patch_dir="$base_dir/patches"
+@@ -20,6 +21,10 @@ while [ "$#" -gt 0 ]; do
+     esac
+ done
+ 
++case "$repo" in /*) ;; *) repo="$caller_dir/$repo" ;; esac
++case "$patch_dir" in /*) ;; *) patch_dir="$caller_dir/$patch_dir" ;; esac
++case "$manifest" in /*) ;; *) manifest="$caller_dir/$manifest" ;; esac
++
+ if [ "$push" -eq 1 ] && [ "${HAPI_SYNC_CONFIRM:-}" != "RESET_ORIGIN_MAIN_WITH_FORCE_WITH_LEASE" ]; then
+     echo "--push requires HAPI_SYNC_CONFIRM=RESET_ORIGIN_MAIN_WITH_FORCE_WITH_LEASE" >&2
+     exit 3
+diff --git a/tools/maintenance/tests/test_sync_from_upstream.py b/tools/maintenance/tests/test_sync_from_upstream.py
+index 6cbd1bd7..f398189f 100644
+--- a/tools/maintenance/tests/test_sync_from_upstream.py
++++ b/tools/maintenance/tests/test_sync_from_upstream.py
+@@ -70,6 +70,27 @@ class SyncFromUpstreamTest(unittest.TestCase):
+         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+         self.assertIn('REHEARSAL_OK', result.stdout)
+ 
++    def test_accepts_release_paths_relative_to_the_checkout(self):
++        maintenance = self.repo / 'maintenance'
++        patch_dir = maintenance / 'patches'
++        patch_dir.mkdir(parents=True)
++        (patch_dir / '0001.patch').write_text((self.patch_dir / '0001.patch').read_text())
++        manifest = maintenance / 'manifest.tsv'
++        manifest.write_text(self.manifest.read_text())
++
++        result = run(
++            str(SCRIPT),
++            '--repo', '.',
++            '--patch-dir', 'maintenance/patches',
++            '--manifest', 'maintenance/manifest.tsv',
++            '--skip-tests',
++            cwd=self.repo,
++            check=False,
++        )
++
++        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
++        self.assertIn('REHEARSAL_OK', result.stdout)
++
+     def test_refreshes_origin_tracking_ref_after_force_rewrite(self):
+         run('git', '-C', str(self.seed), 'reset', '--hard', 'upstream/main')
+         (self.seed / 'replacement.txt').write_text('replacement\n')
+diff --git a/web/src/components/AssistantChat/HappyThread.tsx b/web/src/components/AssistantChat/HappyThread.tsx
+index a2a1835a..46aa5e38 100644
+--- a/web/src/components/AssistantChat/HappyThread.tsx
++++ b/web/src/components/AssistantChat/HappyThread.tsx
+@@ -38,7 +38,7 @@ type PendingScrollRestore = {
+ }
+ 
+ type HistoryLoadSource = 'coverage' | 'user' | 'consumer'
+-type PullToLoadState = 'idle' | 'pulling' | 'ready'
++type PullToLoadState = 'idle' | 'pulling' | 'ready' | 'loading'
+ 
+ type HistoryLoaderState = {
+     runId: number
+@@ -832,9 +832,11 @@ export function HappyThread(props: {
+                 && pullToLoadStateRef.current === 'ready'
+                 && viewport.scrollTop <= 0
+             pullStartY = null
+-            updatePullToLoadState('idle')
+             if (shouldLoad) {
+-                void requestOlderRef.current('user')
++                updatePullToLoadState('loading')
++                void requestOlderRef.current('user').finally(() => updatePullToLoadState('idle'))
++            } else {
++                updatePullToLoadState('idle')
+             }
+         }
+ 
+@@ -1454,11 +1456,11 @@ export function HappyThread(props: {
+                         aria-live="polite"
+                         className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
+                     >
+-                        {props.isLoadingMoreMessages ? (
++                        {props.isLoadingMoreMessages || pullToLoadState === 'loading' ? (
+                             <Spinner size="sm" label={null} className="text-current" />
+                         ) : null}
+                         <span>
+-                            {props.isLoadingMoreMessages
++                            {props.isLoadingMoreMessages || pullToLoadState === 'loading'
+                                 ? t('misc.loading')
+                                 : pullToLoadState === 'ready'
+                                     ? t('misc.releaseToLoadOlder')
+diff --git a/web/src/components/NewSession/newSessionCursorModels.test.ts b/web/src/components/NewSession/newSessionCursorModels.test.ts
+index 1c574074..0851325d 100644
+--- a/web/src/components/NewSession/newSessionCursorModels.test.ts
++++ b/web/src/components/NewSession/newSessionCursorModels.test.ts
+@@ -19,7 +19,7 @@ const acpModels = [
+ ] as const
+ 
+ describe('shouldShowCursorModelsUnavailable', () => {
+-    it('shows hint when cursor agent has no ACP wire models and is not loading', () => {
++    it('shows hint when cursor agent has no ACP catalog models and is not loading', () => {
+         expect(shouldShowCursorModelsUnavailable({
+             agent: 'cursor',
+             isLoading: false,
+@@ -30,10 +30,19 @@ describe('shouldShowCursorModelsUnavailable', () => {
+             agent: 'cursor',
+             isLoading: false,
+             error: null,
+-            availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }]
++            availableModels: [{ modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' }]
+         })).toBe(true)
+     })
+ 
++    it('hides hint when bare ACP bases are present (#1129)', () => {
++        expect(shouldShowCursorModelsUnavailable({
++            agent: 'cursor',
++            isLoading: false,
++            error: null,
++            availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }]
++        })).toBe(false)
++    })
++
+     it('hides hint while loading or on error', () => {
+         expect(shouldShowCursorModelsUnavailable({
+             agent: 'cursor',
+@@ -69,6 +78,17 @@ describe('pickCursorModelsForPicker', () => {
+             { modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' },
+         ])
+     })
++
++    it('keeps bare ACP bases and drops CLI effort/speed SKUs', () => {
++        const mixed = [
++            { modelId: 'composer-2.5', name: 'Composer 2.5' },
++            { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
++            { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
++        ]
++        expect(pickCursorModelsForPicker(mixed)).toEqual([
++            { modelId: 'composer-2.5', name: 'Composer 2.5' },
++        ])
++    })
+ })
+ 
+ describe('shouldShowNewSessionCursorVariantPicker', () => {
+@@ -147,20 +167,38 @@ describe('new session cursor select values', () => {
+ })
+ 
+ describe('probe slug catalog (New Session cold start)', () => {
+-    it('does not inject CLI slug current model when machine list has no wire ids', () => {
++    it('keeps bare ACP/base ids and ignores CLI effort SKUs as top-level rows', () => {
+         const probeOnly = [
+             { modelId: 'composer-2.5', name: 'Composer 2.5' },
+             { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
+         ]
+         const picker = buildNewSessionCursorPickerState(probeOnly, 'composer-2.5')
+         expect(picker.mode).toBe('flat')
+-        expect(picker.modelOptions).toEqual([{ value: 'auto', label: 'Auto' }])
++        expect(picker.modelOptions).toEqual([
++            { value: 'auto', label: 'Auto' },
++            { value: 'composer-2.5', label: 'composer-2.5' },
++        ])
+         expect(picker.effortOptions).toEqual([])
+         expect(shouldShowCursorModelsUnavailable({
+             agent: 'cursor',
+             isLoading: false,
+             error: null,
+             availableModels: [...probeOnly]
++        })).toBe(false)
++    })
++
++    it('shows unavailable when only CLI effort/speed SKUs are present', () => {
++        const skuOnly = [
++            { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
++            { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
++        ]
++        const picker = buildNewSessionCursorPickerState(skuOnly, 'composer-2.5-fast')
++        expect(picker.modelOptions).toEqual([{ value: 'auto', label: 'Auto' }])
++        expect(shouldShowCursorModelsUnavailable({
++            agent: 'cursor',
++            isLoading: false,
++            error: null,
++            availableModels: [...skuOnly]
+         })).toBe(true)
+     })
+ })
+diff --git a/web/src/lib/cursorPickerState.test.ts b/web/src/lib/cursorPickerState.test.ts
+index 50da6257..e5ca4ae3 100644
+--- a/web/src/lib/cursorPickerState.test.ts
++++ b/web/src/lib/cursorPickerState.test.ts
+@@ -171,7 +171,7 @@ describe('live bare ACP catalog (#1129)', () => {
+         expect(picker.modelOptions.some((row) => row.value === 'composer-2.5-fast')).toBe(false)
+         // Default tokens stay out of the catalog rows (Default row is synthetic auto).
+         expect(picker.modelOptions.some((row) => row.value === 'default')).toBe(false)
+-        expect(picker.modelOptions[0]).toEqual({ value: 'auto', label: 'Default' })
++        expect(picker.modelOptions[0]).toEqual({ value: 'auto', label: 'Auto' })
+     })
+ 
+     it('attaches CLI SKUs under bare ACP bases for dual/nested variant UX', () => {
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 5b5ffd70..b0021eb8 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -966,4 +966,148 @@ export default {
+   'session.status.subagent.running': 'Running',
+   'session.status.subagent.waiting': 'Waiting',
+   'session.status.subagent.error': 'Error',
++
++  // Maintained-fork UI strings.
++  'quote.action': 'Quote',
++  'quote.copySelection': 'Copy selection',
++  'quote.remove': 'Remove quote',
++  'quote.jumpToSource': 'Jump to source',
++  'sessions.group.showMore': 'Show {n} more',
++  'sessions.group.showLess': 'Show less',
++  'sessions.group.actions': 'Group actions',
++  'sessions.group.copyPath': 'Copy Path',
++  'sessions.group.archiveAll': 'Archive All Sessions',
++  'sessions.group.cleanOld': 'Clean Old Sessions ({count})',
++  'sessions.group.cleanOldHint': 'No inactive sessions older than 7 days',
++  'sessions.group.delete': 'Delete Group',
++  'sessions.group.deleteHint': 'Stop or archive active sessions first',
++  'agentImport.tooltip': 'Import sessions from another agent into Hapi',
++  'agentImport.confirm.title': 'Import sessions',
++  'agentImport.flavor.label': 'Choose source agent',
++  'agentImport.flavor.codex': 'Codex',
++  'agentImport.flavor.cursor': 'Cursor',
++  'agentImport.flavor.claude': 'Claude',
++  'cursorSync.confirm.description': 'Choose Cursor chats to import into Hapi. Strict ACP-only: any chat that fails the ACP verify probe is unimportable.',
++  'cursorSync.confirm.selectedCount': '{n} chats selected',
++  'cursorSync.confirm.selectAll': 'Select all',
++  'cursorSync.confirm.clearAll': 'Clear all',
++  'cursorSync.confirm.confirm': 'Import',
++  'cursorSync.confirm.confirming': 'Importing…',
++  'cursorSync.confirm.loading': 'Loading local Cursor chats…',
++  'cursorSync.confirm.empty': 'No local Cursor chats found',
++  'cursorSync.confirm.emptyForWorkdir': 'No Cursor chats in this workspace',
++  'cursorSync.confirm.cwd': 'Workspace',
++  'cursorSync.confirm.cwdFilter': 'Workspace',
++  'cursorSync.confirm.cwdFilterAll': 'All workspaces',
++  'cursorSync.confirm.sourceAcp': 'ACP',
++  'cursorSync.confirm.sourceLegacy': 'Legacy',
++  'cursorSync.confirm.alreadyImported': 'Already imported',
++  'cursorSync.confirm.acpStrictHint': 'Imports run agent acp verify-probe before any Hapi row is created. Chats that fail are reported per-row with a reason; no partial state is left behind.',
++  'cursorSync.outcome.ok': 'Imported',
++  'cursorSync.success.title': 'Cursor import complete',
++  'cursorSync.success.body': 'Imported {n} Cursor chat(s) into Hapi.',
++  'cursorSync.partial.title': 'Cursor import partially succeeded',
++  'cursorSync.partial.body': 'Imported {ok} of {total} Cursor chats. See per-row details for the rest.',
++  'cursorSync.failed.title': 'Failed to import Cursor chats',
++  'cursorSync.failed.body': 'Failed to import Cursor chats.',
++  'cursorSync.refusal.verify_load_failed': 'agent acp could not load this chat',
++  'cursorSync.refusal.missing_on_disk_store': 'On-disk store.db is missing',
++  'cursorSync.refusal.target_already_exists': 'Target ACP session directory already exists',
++  'cursorSync.refusal.already_imported': 'Already imported as a Hapi session',
++  'cursorSync.refusal.agent_binary_not_found': '`agent` (cursor-agent) binary is not on PATH',
++  'cursorSync.refusal.verify_timeout': 'agent acp verify timed out',
++  'cursorSync.refusal.corrupted_store': 'On-disk store.db looks corrupted',
++  'cursorSync.refusal.ambiguous_legacy_store': 'Multiple workspace drawers contain this chat; specify a workspace',
++  'cursorSync.refusal.internal_error': 'Internal error during import',
++  'claudeSync.tooltip': 'Import sessions from Claude into Hapi',
++  'claudeSync.confirm.title': 'Import Claude sessions',
++  'claudeSync.confirm.description': 'Choose Claude sessions to import into Hapi',
++  'claudeSync.confirm.selectAll': 'Select all',
++  'claudeSync.confirm.clearAll': 'Clear all',
++  'claudeSync.confirm.selectedCount': '{n} sessions selected',
++  'claudeSync.confirm.empty': 'No local Claude sessions found',
++  'claudeSync.confirm.current': 'Linked',
++  'claudeSync.confirm.cwd': 'Working directory',
++  'claudeSync.confirm.cwdFilter': 'Work directory',
++  'claudeSync.confirm.cwdFilterAll': 'All work directories',
++  'claudeSync.confirm.emptyForWorkdir': 'No Claude sessions in this work directory',
++  'claudeSync.confirm.confirm': 'Import',
++  'claudeSync.confirm.confirming': 'Importing…',
++  'claudeSync.confirm.loading': 'Loading local Claude sessions…',
++  'claudeSync.success.title': 'Import complete',
++  'claudeSync.success.body': 'Imported {n} Claude session(s) into Hapi.',
++  'claudeSync.failed.title': 'Failed to import Claude sessions',
++  'claudeSync.failed.body': 'Failed to import Claude sessions.',
++  'claudeSync.failed.bodyWithReason': 'Import failed: {reason}',
++  'session.action.reopenCursorUnverified': 'Could not verify Cursor chat data (runner may be outdated). Reopen is still available — upgrade the CLI on that machine if reopen fails.',
++  'runner.skew.banner.title': 'Runner out of date on {host}',
++  'runner.skew.banner.body': 'This hub needs a newer HAPI CLI on {host} (running {version}). Upgrade the CLI on that machine, then restart the runner (`systemctl --user restart hapi-runner` or `hapi runner start`). This banner stays until the runner reports the required capabilities.',
++  'runner.skew.banner.bodyUnknownVersion': 'This hub needs a newer HAPI CLI on {host}. Upgrade the CLI on that machine, then restart the runner (`systemctl --user restart hapi-runner` or `hapi runner start`). This banner stays until the runner reports the required capabilities.',
++  'runner.skew.banner.summaryTitle': '{count} runner(s) out of date',
++  'runner.skew.banner.summaryBody': 'This hub can upgrade connected runners to match. Use Upgrade per host, or wait for the automatic attempt. Minimize or snooze this banner to reach sessions underneath.',
++  'runner.skew.banner.minimized': '{count} outdated runner(s): {hosts} — tap to expand',
++  'runner.skew.banner.minimize': 'Minimize',
++  'runner.skew.banner.dismissTemp': 'Snooze 1h',
++  'runner.skew.banner.upgrade': 'Upgrade',
++  'runner.skew.banner.upgrading': 'Upgrading…',
++  'runner.skew.banner.restart': 'Restart only',
++  'runner.skew.banner.restartUnavailable': 'Upgrade CLI first',
++  'runner.skew.banner.restartNeedsNewerBinary': 'Restart only helps after a newer HAPI CLI is already installed. Prefer Upgrade to pull from the hub.',
++  'runner.skew.banner.restartNeedsSupervisor': 'Restart (stop) is only for rebuild-only / supervised hosts. Prefer Upgrade for a handoff relaunch.',
++  'runner.skew.banner.restarting': 'Restarting…',
++  'runner.skew.banner.binaryUpdatedHint': '(newer CLI on disk — restart can load it)',
++  'runner.skew.banner.upgradeCliFirst': '(behind hub — Upgrade pulls matching CLI)',
++  'runner.skew.banner.handoffDisabledHint': '(rebuild-only — Upgrade disabled; Restart is the escape hatch)',
++  'runner.skew.banner.upgradeNeedsHandoff': 'This host opted out of version handoff (soup/rebuild-only). Rematerialize soup or clear HAPI_DISABLE_VERSION_HANDOFF, or use Restart.',
++  'runner.skew.banner.handoffHint': 'Fleet upgrade: hub detects npm vs source install and upgrades remotes accordingly (npm registry or hub-built artifact). Upgrade never SSHs; the runner installs on itself. Set HAPI_UPGRADE_CHANNEL=off to disable.',
++  'runner.skew.restartFailed': 'Failed to restart runner',
++  'runner.skew.upgradeFailed': 'Failed to upgrade runner',
++  'runner.skew.alreadyCurrent': 'Runner reports it is already at the hub target',
++  'runner.skew.upgradeStarted': 'Upgrade started on the runner',
++  'dialog.archiveAll.title': 'Archive All Sessions',
++  'dialog.archiveAll.description': 'Archive all active sessions in "{name}"? This will disconnect them.',
++  'dialog.archiveAll.confirm': 'Archive All',
++  'dialog.archiveAll.confirming': 'Archiving…',
++  'dialog.cleanOldSessions.title': 'Clean Old Sessions',
++  'dialog.cleanOldSessions.description': 'Delete {count} inactive sessions in "{name}" that have not been updated for at least 7 days? This action cannot be undone.',
++  'dialog.cleanOldSessions.confirm': 'Clean Sessions',
++  'dialog.cleanOldSessions.confirming': 'Cleaning…',
++  'dialog.deleteGroup.title': 'Delete Group',
++  'dialog.deleteGroup.description': 'Delete "{name}" and all {count} sessions? This action cannot be undone.',
++  'dialog.deleteGroup.confirm': 'Delete Group',
++  'dialog.deleteGroup.confirming': 'Deleting…',
++  'queuedMessages.title': 'Queued',
++  'queuedMessages.listAriaLabel': 'Queued messages',
++  'queuedMessages.pendingAriaLabel': '{count} queued messages pending',
++  'queuedMessages.edit': 'Edit',
++  'queuedMessages.cancel': 'Cancel',
++  'queuedMessages.steerNow': 'Steer',
++  'queuedMessages.steerFailed': 'Could not steer message',
++  'queuedMessages.steerAlreadyInvoked': 'Message already sent',
++  'queuedMessages.steeredBadge': '↳ Steered',
++  'queuedMessages.steeredBadgeTitle': 'Steered into the active turn',
++  'settings.runnerMgmt.title': 'Runner management',
++  'settings.runnerMgmt.linkHint': 'How connected runners track the hub version',
++  'settings.runnerMgmt.body': 'This hub can keep connected runners on its own HAPI CLI version. When the hub upgrades, runners self-update to match — no SSH, each runner installs on itself. Most people never need to change this.',
++  'settings.runnerMgmt.policyLabel': 'When a runner drifts from the hub version',
++  'settings.runnerMgmt.policySilent': 'No alert',
++  'settings.runnerMgmt.policySilentHint': 'Ignore drift',
++  'settings.runnerMgmt.policyAlert': 'Alert',
++  'settings.runnerMgmt.policyAlertHint': 'Show a banner; upgrade by hand',
++  'settings.runnerMgmt.policyAuto': 'Auto-upgrade',
++  'settings.runnerMgmt.policyAutoHint': 'Upgrade runners for me',
++  'settings.runnerMgmt.optOutLabel': 'Want a runner ahead of the hub?',
++  'settings.runnerMgmt.optOutBody': 'Auto-upgrade pulls runners back to match the hub, so a deliberately newer runner would be downgraded. To keep one ahead, choose No alert or Alert above (fleet-wide), or set HAPI_DISABLE_VERSION_HANDOFF=1 on just that runner and restart it. HAPI_UPGRADE_CHANNEL=off on the hub disables all upgrades regardless.',
++  'settings.chat.toolGrouping': 'Group Tools',
++  'settings.chat.toolGrouping.grouped': 'Grouped',
++  'settings.chat.toolGrouping.classified': 'Classified',
++  'misc.changeModel': 'Change model…',
++  'misc.backToModelList': '← Models',
++  'misc.percentLeft': '{percent}% left',
++  'button.refresh': 'Refresh',
++  'sessions.refresh.success.title': 'Refreshed',
++  'sessions.refresh.success.body': 'Session list updated.',
++  'share.searchResults': 'Matching sessions',
++  'share.noSearchResults': 'No sessions match your search.',
++  'share.searchForMore': '{n} more active sessions — search to find them.',
+ } as const
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index ffcff309..6f645742 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -965,4 +965,148 @@ export default {
+   'session.status.subagent.running': '运行中',
+   'session.status.subagent.waiting': '等待中',
+   'session.status.subagent.error': '错误',
++
++  // Maintained-fork UI strings.
++  'quote.action': '引用',
++  'quote.copySelection': '复制选中文本',
++  'quote.remove': '移除引用',
++  'quote.jumpToSource': '跳到原文',
++  'sessions.group.showMore': '再显示 {n} 个',
++  'sessions.group.showLess': '收起',
++  'sessions.group.actions': '分组操作',
++  'sessions.group.copyPath': '复制路径',
++  'sessions.group.archiveAll': '归档所有会话',
++  'sessions.group.cleanOld': '清理旧会话（{count}）',
++  'sessions.group.cleanOldHint': '没有超过 7 天未更新的非活动会话',
++  'sessions.group.delete': '删除分组',
++  'sessions.group.deleteHint': '请先停止或归档活动会话',
++  'agentImport.tooltip': '从其他代理导入会话到 Hapi',
++  'agentImport.confirm.title': '导入会话',
++  'agentImport.flavor.label': '选择来源代理',
++  'agentImport.flavor.codex': 'Codex',
++  'agentImport.flavor.cursor': 'Cursor',
++  'agentImport.flavor.claude': 'Claude',
++  'cursorSync.confirm.description': '选择要导入 Hapi 的 Cursor 聊天。严格 ACP 模式：任何无法通过 ACP 校验的会话都不可导入。',
++  'cursorSync.confirm.selectedCount': '已选 {n} 个聊天',
++  'cursorSync.confirm.selectAll': '全选',
++  'cursorSync.confirm.clearAll': '清空',
++  'cursorSync.confirm.confirm': '导入',
++  'cursorSync.confirm.confirming': '导入中…',
++  'cursorSync.confirm.loading': '正在加载本地 Cursor 聊天…',
++  'cursorSync.confirm.empty': '未找到本地 Cursor 聊天',
++  'cursorSync.confirm.emptyForWorkdir': '该工作目录下没有 Cursor 聊天',
++  'cursorSync.confirm.cwd': '工作区',
++  'cursorSync.confirm.cwdFilter': '工作区',
++  'cursorSync.confirm.cwdFilterAll': '所有工作区',
++  'cursorSync.confirm.sourceAcp': 'ACP',
++  'cursorSync.confirm.sourceLegacy': '旧版',
++  'cursorSync.confirm.alreadyImported': '已导入',
++  'cursorSync.confirm.acpStrictHint': '导入前会运行 agent acp 校验探针；未通过的会话会逐条返回失败原因,不会留下半完成状态。',
++  'cursorSync.outcome.ok': '已导入',
++  'cursorSync.success.title': 'Cursor 导入完成',
++  'cursorSync.success.body': '已将 {n} 个 Cursor 聊天导入到 Hapi。',
++  'cursorSync.partial.title': 'Cursor 导入部分成功',
++  'cursorSync.partial.body': '共 {total} 个聊天,成功 {ok} 个;其余请见每行原因。',
++  'cursorSync.failed.title': '导入 Cursor 聊天失败',
++  'cursorSync.failed.body': '导入 Cursor 聊天失败。',
++  'cursorSync.refusal.verify_load_failed': 'agent acp 无法加载该聊天',
++  'cursorSync.refusal.missing_on_disk_store': '本地未找到 store.db',
++  'cursorSync.refusal.target_already_exists': 'ACP 目标目录已存在',
++  'cursorSync.refusal.already_imported': '该会话已在 Hapi 中存在',
++  'cursorSync.refusal.agent_binary_not_found': '在 PATH 中未找到 cursor-agent (`agent`) 可执行文件',
++  'cursorSync.refusal.verify_timeout': 'agent acp 校验超时',
++  'cursorSync.refusal.corrupted_store': '本地 store.db 似乎已损坏',
++  'cursorSync.refusal.ambiguous_legacy_store': '同一会话存在于多个工作区目录;请指定工作区',
++  'cursorSync.refusal.internal_error': '导入过程中发生内部错误',
++  'claudeSync.tooltip': '从 Claude 导入会话到 Hapi',
++  'claudeSync.confirm.title': '导入 Claude 会话',
++  'claudeSync.confirm.description': '选择需要导入到 Hapi 的 Claude 会话',
++  'claudeSync.confirm.selectAll': '全选',
++  'claudeSync.confirm.clearAll': '全取消',
++  'claudeSync.confirm.selectedCount': '已选择 {n} 个会话',
++  'claudeSync.confirm.empty': '未找到本地 Claude 会话',
++  'claudeSync.confirm.current': '当前关联',
++  'claudeSync.confirm.cwd': '工作目录',
++  'claudeSync.confirm.cwdFilter': '工作目录',
++  'claudeSync.confirm.cwdFilterAll': '全部工作目录',
++  'claudeSync.confirm.emptyForWorkdir': '此工作目录下没有 Claude 会话',
++  'claudeSync.confirm.confirm': '导入',
++  'claudeSync.confirm.confirming': '导入中…',
++  'claudeSync.confirm.loading': '正在读取本地 Claude 会话…',
++  'claudeSync.success.title': '导入完成',
++  'claudeSync.success.body': '已导入 {n} 个 Claude 会话到 Hapi。',
++  'claudeSync.failed.title': '导入 Claude 会话失败',
++  'claudeSync.failed.body': '导入 Claude 会话失败。',
++  'claudeSync.failed.bodyWithReason': '导入失败：{reason}',
++  'session.action.reopenCursorUnverified': '无法验证 Cursor 聊天数据（运行器可能过旧）。仍可尝试重新打开——若失败，请在该机器上升级 CLI。',
++  'runner.skew.banner.title': '{host} 上的运行器版本过旧',
++  'runner.skew.banner.body': '此 Hub 需要 {host} 上更新的 HAPI CLI（当前 {version}）。请在该机器上升级 CLI，然后重启运行器（`systemctl --user restart hapi-runner` 或 `hapi runner start`）。在运行器报告所需能力之前，此横幅会一直显示。',
++  'runner.skew.banner.bodyUnknownVersion': '此 Hub 需要 {host} 上更新的 HAPI CLI。请在该机器上升级 CLI，然后重启运行器（`systemctl --user restart hapi-runner` 或 `hapi runner start`）。在运行器报告所需能力之前，此横幅会一直显示。',
++  'runner.skew.banner.summaryTitle': '{count} 个运行器版本过旧',
++  'runner.skew.banner.summaryBody': '此 Hub 可将已连接的运行器升级到匹配版本。可对每台主机点 Upgrade，或等待自动尝试。可最小化或 snooze 本横幅以操作下方会话。',
++  'runner.skew.banner.minimized': '{count} 个过旧运行器：{hosts} — 点按展开',
++  'runner.skew.banner.minimize': '最小化',
++  'runner.skew.banner.dismissTemp': '暂隐 1 小时',
++  'runner.skew.banner.upgrade': '升级',
++  'runner.skew.banner.upgrading': '正在升级…',
++  'runner.skew.banner.restart': '仅重启',
++  'runner.skew.banner.restartUnavailable': '请先升级 CLI',
++  'runner.skew.banner.restartNeedsNewerBinary': '仅当该主机已安装更新的 HAPI CLI 时，重启才有意义。请优先使用 Upgrade 从 Hub 拉取。',
++  'runner.skew.banner.restartNeedsSupervisor': 'Restart（停止）仅适用于 soup/有进程监督的主机。普通主机请用 Upgrade 完成交接重启。',
++  'runner.skew.banner.restarting': '正在重启…',
++  'runner.skew.banner.binaryUpdatedHint': '（磁盘上已有更新 CLI — 重启可加载）',
++  'runner.skew.banner.upgradeCliFirst': '（落后于 Hub — Upgrade 可拉取匹配 CLI）',
++  'runner.skew.banner.handoffDisabledHint': '（仅重建 — 已禁用 Upgrade；请用 Restart）',
++  'runner.skew.banner.upgradeNeedsHandoff': '该主机已退出版本交接（soup/仅重建）。请重建 soup 或清除 HAPI_DISABLE_VERSION_HANDOFF，或使用 Restart。',
++  'runner.skew.banner.handoffHint': '集群升级：Hub 会识别 npm 或源码安装，并据此升级远端（npm 仓库或 Hub 构建的产物）。Upgrade 不经 SSH；由运行器自行安装。设置 HAPI_UPGRADE_CHANNEL=off 可关闭。',
++  'runner.skew.restartFailed': '重启运行器失败',
++  'runner.skew.upgradeFailed': '升级运行器失败',
++  'runner.skew.alreadyCurrent': '运行器报告已处于 Hub 目标版本',
++  'runner.skew.upgradeStarted': '已在运行器上开始升级',
++  'dialog.archiveAll.title': '归档所有会话',
++  'dialog.archiveAll.description': '归档 "{name}" 中所有活动会话吗？这将断开这些会话。',
++  'dialog.archiveAll.confirm': '全部归档',
++  'dialog.archiveAll.confirming': '归档中…',
++  'dialog.cleanOldSessions.title': '清理旧会话',
++  'dialog.cleanOldSessions.description': '删除“{name}”中 {count} 个至少 7 天未更新的非活动会话吗？此操作无法撤销。',
++  'dialog.cleanOldSessions.confirm': '清理会话',
++  'dialog.cleanOldSessions.confirming': '清理中…',
++  'dialog.deleteGroup.title': '删除分组',
++  'dialog.deleteGroup.description': '删除 "{name}" 及其全部 {count} 个会话吗？此操作无法撤销。',
++  'dialog.deleteGroup.confirm': '删除分组',
++  'dialog.deleteGroup.confirming': '删除中…',
++  'queuedMessages.title': '排队中',
++  'queuedMessages.listAriaLabel': '排队消息',
++  'queuedMessages.pendingAriaLabel': '{count} 条排队消息待发送',
++  'queuedMessages.edit': '编辑',
++  'queuedMessages.cancel': '取消',
++  'queuedMessages.steerNow': '立即发出',
++  'queuedMessages.steerFailed': '无法立即发出',
++  'queuedMessages.steerAlreadyInvoked': '消息已发出',
++  'queuedMessages.steeredBadge': '↳ 已介入',
++  'queuedMessages.steeredBadgeTitle': '已介入当前进行中的回合',
++  'settings.runnerMgmt.title': '运行器管理',
++  'settings.runnerMgmt.linkHint': '已连接的运行器如何跟随 Hub 版本',
++  'settings.runnerMgmt.body': '本 Hub 可以让已连接的运行器保持与自身相同的 HAPI CLI 版本。当 Hub 升级时，运行器会自行更新以匹配 — 无需 SSH，每个运行器自行安装。大多数人无需更改此设置。',
++  'settings.runnerMgmt.policyLabel': '当运行器版本与 Hub 不一致时',
++  'settings.runnerMgmt.policySilent': '不提醒',
++  'settings.runnerMgmt.policySilentHint': '忽略差异',
++  'settings.runnerMgmt.policyAlert': '提醒',
++  'settings.runnerMgmt.policyAlertHint': '显示横幅；手动升级',
++  'settings.runnerMgmt.policyAuto': '自动升级',
++  'settings.runnerMgmt.policyAutoHint': '自动帮我升级',
++  'settings.runnerMgmt.optOutLabel': '想让某个运行器版本高于 Hub？',
++  'settings.runnerMgmt.optOutBody': '自动升级会把运行器拉回与 Hub 一致，因此刻意更新的运行器会被降级。若要让某个运行器保持更高版本，请在上方选择“不提醒”或“提醒”（影响整个集群），或仅在该运行器上设置 HAPI_DISABLE_VERSION_HANDOFF=1 并重启它。在 Hub 上设置 HAPI_UPGRADE_CHANNEL=off 会完全禁用所有升级。',
++  'settings.chat.toolGrouping': '是否聚合',
++  'settings.chat.toolGrouping.grouped': '聚合',
++  'settings.chat.toolGrouping.classified': '细分',
++  'misc.changeModel': '更换模型…',
++  'misc.backToModelList': '← 模型',
++  'misc.percentLeft': '剩余 {percent}%',
++  'button.refresh': '刷新',
++  'sessions.refresh.success.title': '已刷新',
++  'sessions.refresh.success.body': '会话列表已更新。',
++  'share.searchResults': '匹配的会话',
++  'share.noSearchResults': '没有匹配的会话。',
++  'share.searchForMore': '还有 {n} 个活跃会话 — 搜索以查找。',
+ } as const
+-- 
+2.50.1 (Apple Git-155)
+

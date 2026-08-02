@@ -1,0 +1,191 @@
+From 3910a552100f05e8a98ddccbdd0f25eb4a80bae5 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 02:07:09 +0800
+Subject: [PATCH 06/19] carry: upstream PR #1318
+
+---
+ hub/src/config/settings.ts              |  2 ++
+ hub/src/startHub.ts                     |  3 ++-
+ hub/src/web/routes/claudeModels.ts      | 23 ++++++++++++++++
+ hub/src/web/server.ts                   |  5 ++++
+ web/src/api/client.ts                   |  4 +++
+ web/src/components/NewSession/index.tsx | 36 ++++++++++++++++++++++++-
+ 6 files changed, 71 insertions(+), 2 deletions(-)
+ create mode 100644 hub/src/web/routes/claudeModels.ts
+
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index bab24030..38cff944 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -23,6 +23,8 @@ export interface Settings {
+     corsOrigins?: string[]
+     // Operator fleet-upgrade policy (no alert / alert / auto-upgrade)
+     fleetUpgradePolicy?: FleetUpgradePolicy
++    /** Custom model names offered in the Claude model picker (e.g. DeepSeek via ANTHROPIC_BASE_URL). */
++    customClaudeModels?: string[]
+ }
+ 
+ export function getSettingsFile(dataDir: string): string {
+diff --git a/hub/src/startHub.ts b/hub/src/startHub.ts
+index 7831b5f7..ed395a51 100644
+--- a/hub/src/startHub.ts
++++ b/hub/src/startHub.ts
+@@ -299,7 +299,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+         socketEngine: socketServer.engine,
+         corsOrigins,
+         relayMode: relayFlag.enabled,
+-        officialWebUrl
++        officialWebUrl,
++        dataDir: config.dataDir
+     })
+ 
+     // Start the bot if configured
+diff --git a/hub/src/web/routes/claudeModels.ts b/hub/src/web/routes/claudeModels.ts
+new file mode 100644
+index 00000000..147164b7
+--- /dev/null
++++ b/hub/src/web/routes/claudeModels.ts
+@@ -0,0 +1,23 @@
++import { Hono } from 'hono'
++import type { WebAppEnv } from '../middleware/auth'
++import { getSettingsFile, readSettings } from '../../config/settings'
++
++/**
++ * Custom Claude model names configured in settings.json
++ * (`customClaudeModels`). Claude Code has no model catalog API like Codex,
++ * so users routing Claude through a custom ANTHROPIC_BASE_URL list their
++ * endpoint's model names here to surface them in the New Session picker.
++ */
++export function createClaudeModelsRoutes(dataDir: string): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++
++    app.get('/claude/custom-models', async (c) => {
++        const settings = await readSettings(getSettingsFile(dataDir))
++        const models = Array.isArray(settings?.customClaudeModels)
++            ? settings.customClaudeModels
++            : []
++        return c.json({ models })
++    })
++
++    return app
++}
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 43a23e0c..ce99257f 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -28,6 +28,7 @@ import { createCursorImportRoutes } from './routes/cursorImport'
+ import { createPushRoutes } from './routes/push'
+ import { createDevicesRoutes } from './routes/devices'
+ import { createVoiceRoutes } from './routes/voice'
++import { createClaudeModelsRoutes } from './routes/claudeModels'
+ import type { SSEManager } from '../sse/sseManager'
+ import type { VisibilityTracker } from '../visibility/visibilityTracker'
+ import type { Server as BunServer, ServerWebSocket } from 'bun'
+@@ -222,6 +223,7 @@ function createWebApp(options: {
+     embeddedAssetMap: Map<string, EmbeddedWebAsset> | null
+     relayMode?: boolean
+     officialWebUrl?: string
++    dataDir: string
+ }): Hono<WebAppEnv> {
+     const app = new Hono<WebAppEnv>()
+ 
+@@ -264,6 +266,7 @@ function createWebApp(options: {
+     app.route('/api', createClaudeDesktopRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
+     app.route('/api', createCursorImportRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
+     app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
++    app.route('/api', createClaudeModelsRoutes(options.dataDir))
+     app.route('/api', createDevicesRoutes(options.store))
+     app.route('/api', createVoiceRoutes())
+ 
+@@ -401,6 +404,7 @@ export async function startWebServer(options: {
+     corsOrigins?: string[]
+     relayMode?: boolean
+     officialWebUrl?: string
++    dataDir: string
+ }): Promise<BunServer<WebSocketData>> {
+     const isCompiled = isBunCompiled()
+     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null
+@@ -413,6 +417,7 @@ export async function startWebServer(options: {
+         vapidPublicKey: options.vapidPublicKey,
+         corsOrigins: options.corsOrigins,
+         embeddedAssetMap,
++        dataDir: options.dataDir,
+         relayMode: options.relayMode,
+         officialWebUrl: options.officialWebUrl
+     })
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 0a3c1e6e..e28d1417 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -204,6 +204,10 @@ export class ApiClient {
+         return await this.request<PushVapidPublicKeyResponse>('/api/push/vapid-public-key')
+     }
+ 
++    async getClaudeCustomModels(): Promise<{ models: string[] }> {
++        return await this.request<{ models: string[] }>('/api/claude/custom-models')
++    }
++
+     async subscribePushNotifications(payload: PushSubscriptionPayload): Promise<void> {
+         await this.request('/api/push/subscribe', {
+             method: 'POST',
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index fb81c7f1..855763e4 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -35,6 +35,7 @@ import {
+     shouldRestoreNewSessionFormDraft
+ } from './newSessionFormDraft'
+ import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
++import { MODEL_OPTIONS } from './types'
+ import { ActionButtons } from './ActionButtons'
+ import { AgentSelector } from './AgentSelector'
+ import { CollaborationModeSelector } from './CollaborationModeSelector'
+@@ -246,6 +247,37 @@ export function NewSession(props: {
+         machineId,
+         enabled: agent === 'codex' && Boolean(machineId)
+     })
++    const [claudeCustomModels, setClaudeCustomModels] = useState<string[]>([])
++    useEffect(() => {
++        let cancelled = false
++        if (!props.api) {
++            return
++        }
++        try {
++            props.api.getClaudeCustomModels().then((result) => {
++                if (!cancelled) {
++                    setClaudeCustomModels(Array.isArray(result.models) ? result.models : [])
++                }
++            }).catch(() => {
++                // Custom models are optional — fall back to the built-in presets.
++            })
++        } catch {
++            // Partial api clients (tests, older hub versions) without the
++            // method must not break the New Session form.
++        }
++        return () => {
++            cancelled = true
++        }
++    }, [props.api])
++    const claudeModelOptions = useMemo(() => {
++        const options = [...MODEL_OPTIONS.claude]
++        for (const modelName of claudeCustomModels) {
++            if (!options.some((option) => option.value === modelName)) {
++                options.push({ value: modelName, label: modelName })
++            }
++        }
++        return options
++    }, [claudeCustomModels])
+     const runnerSpawnError = useMemo(
+         () => formatRunnerSpawnError(selectedMachine),
+         [selectedMachine]
+@@ -1321,7 +1353,9 @@ export function NewSession(props: {
+                         agent={agent}
+                         model={model}
+                         options={
+-                            agent === 'codex'
++                            agent === 'claude'
++                                ? claudeModelOptions
++                                : agent === 'codex'
+                                 ? codexModelOptions
+                                 : agent === 'grok'
+                                     ? grokModelOptions

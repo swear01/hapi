@@ -1,0 +1,162 @@
+From 9c1be68c7b4ef93dfd1c8a1db0e48d0258294eea Mon Sep 17 00:00:00 2001
+From: Junmo Kim <me@junmo.kim>
+Date: Mon, 3 Aug 2026 02:19:05 +0900
+Subject: [PATCH 14/19] fix(agy): discard stale queued question answers
+
+---
+ cli/src/agy/agyPtyLauncher.test.ts | 83 ++++++++++++++++++++++++++++++
+ cli/src/agy/agyPtyLauncher.ts      | 10 +++-
+ 2 files changed, 92 insertions(+), 1 deletion(-)
+
+diff --git a/cli/src/agy/agyPtyLauncher.test.ts b/cli/src/agy/agyPtyLauncher.test.ts
+index 12b74423..17be441e 100644
+--- a/cli/src/agy/agyPtyLauncher.test.ts
++++ b/cli/src/agy/agyPtyLauncher.test.ts
+@@ -919,6 +919,8 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
+                 client: {
+                     sendAgySessionMessage: vi.fn(),
+                     sendSessionEvent: vi.fn(),
++                    emitSessionReady: vi.fn(),
++                    emitMessagesConsumed: vi.fn(),
+                     resetAgentTerminal: vi.fn(),
+                     setAgentTerminalControls: vi.fn(),
+                     emitAgentTerminalOutput: vi.fn(),
+@@ -1021,4 +1023,85 @@ describe('agyPtyLauncher ask_question safety: invalidate stale pending questions
+         msgPromise.resolve(null)
+         await launcherPromise
+     })
++
++    it('drops an answered question queued behind another interaction when the turn is aborted', async () => {
++        harness.exitReason = null
++        const { session, handler, respondAsWeb } = createRealHandlerSessionStub()
++        const registerSpy = vi.spyOn(handler, 'registerQuestionRequest')
++        const msgPromise = deferred<{ message: string } | null>()
++        vi.mocked(session.queue.waitForMessagesAndGetAsString).mockImplementation(() => msgPromise.promise)
++
++        const launcherPromise = agyPtyLauncher(session as never)
++        await tick(20)
++
++        const modelChange = harness.liveModelHandler!('gemini-3.5-flash-low')
++        await tick(10)
++        expect(harness.sendKeys).toHaveBeenCalledWith('/model\r')
++
++        const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
++        onEntry({
++            type: 'PLANNER_RESPONSE',
++            step_index: 42,
++            content: '',
++            tool_calls: [{ name: 'ask_question', args: { questions: [{ question: 'Pick', options: ['A', 'B'], is_multi_select: false }] } }]
++        })
++        await tick(5)
++        const [toolUseId] = registerSpy.mock.calls[0]
++        await respondAsWeb({ id: toolUseId, approved: true, answers: { '0': ['B'] } })
++        await tick(5)
++
++        await harness.abortHandler!()
++        harness.sendKeys.mockClear()
++        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.5 Flash             (current)')
++        await tick(5)
++        ptyOptsCaptured.onMessage('Model set to Gemini 3.5 Flash (Low)')
++        await modelChange
++        await tick(10)
++
++        expect(harness.sendKeys).not.toHaveBeenCalledWith('2')
++
++        harness.exitReason = 'exit'
++        msgPromise.resolve(null)
++        await launcherPromise
++    })
++
++    it('drops an answered question queued behind another interaction after PTY exit and respawn', async () => {
++        harness.exitReason = null
++        const { session, handler, respondAsWeb } = createRealHandlerSessionStub()
++        const registerSpy = vi.spyOn(handler, 'registerQuestionRequest')
++        const msgPromise = deferred<{ message: string } | null>()
++        vi.mocked(session.queue.waitForMessagesAndGetAsString).mockImplementation(() => msgPromise.promise)
++
++        const launcherPromise = agyPtyLauncher(session as never)
++        await tick(20)
++
++        const modelChange = harness.liveModelHandler!('gemini-3.5-flash-low')
++        await tick(10)
++        const onEntry = harness.scannerOpts!.onEntry as (e: unknown) => void
++        onEntry({
++            type: 'PLANNER_RESPONSE',
++            step_index: 43,
++            content: '',
++            tool_calls: [{ name: 'ask_question', args: { questions: [{ question: 'Pick', options: ['A', 'B'], is_multi_select: false }] } }]
++        })
++        await tick(5)
++        const [toolUseId] = registerSpy.mock.calls[0]
++        await respondAsWeb({ id: toolUseId, approved: true, answers: { '0': ['B'] } })
++        await tick(5)
++
++        ptyOptsCaptured.onExit(1)
++        const respawnedSendKeys = vi.fn()
++        ptyOptsCaptured.registerControls?.({ sendKeys: respawnedSendKeys })
++        ptyOptsCaptured.onMessage('Switch Model\n> Gemini 3.5 Flash             (current)')
++        await tick(5)
++        ptyOptsCaptured.onMessage('Model set to Gemini 3.5 Flash (Low)')
++        await modelChange.catch(() => {})
++        await tick(10)
++
++        expect(respawnedSendKeys).not.toHaveBeenCalled()
++
++        harness.exitReason = 'exit'
++        msgPromise.resolve(null)
++        await launcherPromise
++    })
+ })
+diff --git a/cli/src/agy/agyPtyLauncher.ts b/cli/src/agy/agyPtyLauncher.ts
+index 099b6072..46724c4c 100644
+--- a/cli/src/agy/agyPtyLauncher.ts
++++ b/cli/src/agy/agyPtyLauncher.ts
+@@ -129,6 +129,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
+     private agentRunInProgress = false
+     private agentRunReserved = false
+     private ptyGeneration = 0
++    private questionInteractionEpoch = 0
+     private pendingModelChange: {
+         model: string | null
+         generation: number
+@@ -225,6 +226,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
+ 
+     private async handleAbortRequest(): Promise<void> {
+         logger.debug('[agy-pty]: handleAbortRequest (interrupt)')
++        this.questionInteractionEpoch += 1
+         // Finding F1 (hostile-review): the interrupt kills the in-flight turn
+         // but leaves any pending ask_question request unresolved. Phase 0
+         // measured that agy has no way to recover the answered-selector state
+@@ -271,11 +273,15 @@ class AgyPtyLauncher extends RemoteLauncherBase {
+             : `local:${stepIndex ?? 'unknown'}:ask${callIndex}:${Date.now()}`
+ 
+         const questions: AgyAskQuestionQuestion[] = canonical.questions
++        const interactionEpoch = this.questionInteractionEpoch
+         handler.registerQuestionRequest(toolUseId, canonical)
+             .then((answers) => {
+                 const keys = buildAgyQuestionKeys(questions, answers)
+                 if (keys) {
+-                    void this.enqueuePtyInteraction(async () => { this.ptyControls?.sendKeys(keys) })
++                    void this.enqueuePtyInteraction(async () => {
++                        if (interactionEpoch !== this.questionInteractionEpoch) return
++                        this.ptyControls?.sendKeys(keys)
++                    })
+                 }
+             })
+             .catch((err) => {
+@@ -473,6 +479,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
+                     return { message: msg.message }
+                 },
+                 registerControls: (controls) => {
++                    this.questionInteractionEpoch += 1
+                     this.ptyGeneration += 1
+                     this.ptyControls = controls
+                     this.session.client.resetAgentTerminal()
+@@ -531,6 +538,7 @@ class AgyPtyLauncher extends RemoteLauncherBase {
+                 onAgentRunCompleted: () => this.completeAgentRun(),
+                 onExit: (code: number | null) => {
+                     logger.debug(`[agy-pty]: agy PTY exited with code ${code}`)
++                    this.questionInteractionEpoch += 1
+                     this.ptyControls = null
+                     this.ptyGeneration += 1
+                     this.agentRunInProgress = false
