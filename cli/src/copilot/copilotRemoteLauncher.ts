@@ -126,6 +126,9 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
                 ?? null;
         }
         this.currentBackendModel = effectiveModel;
+        if (runtimeConfig.model && effectiveModel !== runtimeConfig.model) {
+            this.rollbackModel();
+        }
         if (effectiveModel) {
             this.displayModel = effectiveModel;
             messageBuffer.addMessage(`[MODEL:${effectiveModel}]`, 'system');
