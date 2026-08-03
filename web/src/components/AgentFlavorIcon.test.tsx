@@ -35,8 +35,7 @@ describe('AgentFlavorIcon', () => {
         expect(svg).not.toBeNull()
         expect(badge.textContent).toBe('')
         expect(badge.className).not.toContain('rounded-sm')
-        expect(badge.className).toContain('text-gray-950')
-        expect(badge.className).toContain('dark:text-white')
+        expect(badge.className).toContain('text-[var(--app-fg)]')
         expect(svg?.getAttribute('viewBox')).toBe('0 0 800 800')
     })
 

@@ -58,7 +58,7 @@ export function AgentFlavorIcon({ flavor, className }: { flavor?: string | null;
         return (
             <span
                 aria-hidden="true"
-                className={`inline-flex items-center justify-center leading-none text-gray-950 dark:text-white ${sizeClass}`}
+                className={`inline-flex items-center justify-center leading-none text-[var(--app-fg)] ${sizeClass}`}
             >
                 <PiLogo />
             </span>
