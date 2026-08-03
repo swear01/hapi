@@ -27,6 +27,7 @@ import {
     getCodexModelReasoningEfforts,
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
+import { createSerialAsyncQueue } from '@/lib/serialAsyncQueue'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
 import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
@@ -79,7 +80,7 @@ import {
     resolveSessionCursorModelChange,
     resolveSessionCursorVariantSelectValue
 } from '@/lib/sessionChatCursorModel'
-import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
+import { buildCursorEffortPickerOptionsWithDefaultFirst } from '@/lib/cursorModelOptions'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
 import { useGrokModels } from '@/hooks/queries/useGrokModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
@@ -510,6 +511,9 @@ function SessionChatInner(props: SessionChatProps) {
     }, [props.initialOutlineOpen, props.onInitialOutlineConsumed])
 
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
+    // Serialize Cursor setModel RPCs so drill-down default apply cannot finish
+    // after a later explicit variant click and overwrite it.
+    const enqueueCursorModelApply = useMemo(() => createSerialAsyncQueue(), [])
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
     const scratchlist = useHubScratchlist(props.session.id, props.api)
     const { sessions: allSessions } = useSessions(props.api)
@@ -830,10 +834,17 @@ function SessionChatInner(props: SessionChatProps) {
     }, [agentFlavor, props.session.model, cursorPicker])
 
     const cursorSelectedBaseValue = useMemo(() => (
-        agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+        agentFlavor === 'cursor' && cursorPicker
             ? resolveSessionCursorBaseSelectValue(cursorPicker, cursorSelectedBase)
             : undefined
     ), [agentFlavor, cursorPicker, cursorSelectedBase])
+
+    const resolveCursorVariantsForBase = useCallback((baseKey: string) => {
+        if (!cursorPicker) {
+            return []
+        }
+        return buildCursorEffortPickerOptionsWithDefaultFirst(baseKey, cursorPicker.catalog)
+    }, [cursorPicker])
 
     const cursorModelEffortOptions = useMemo(() => {
         if (agentFlavor !== 'cursor' || !cursorPicker) {
@@ -845,7 +856,10 @@ function SessionChatInner(props: SessionChatProps) {
         const baseKey = cursorSelectedBaseValue && cursorSelectedBaseValue !== 'auto'
             ? cursorSelectedBaseValue
             : cursorPicker.baseKey
-        return buildCursorEffortPickerOptions(resolveCursorVariantOptions(baseKey ?? null, cursorPicker.catalog))
+        if (!baseKey || baseKey === 'auto') {
+            return undefined
+        }
+        return buildCursorEffortPickerOptionsWithDefaultFirst(baseKey, cursorPicker.catalog)
     }, [agentFlavor, cursorPicker, cursorSelectedBaseValue])
 
     const cursorVariantSelectValue = useMemo(() => (
@@ -1168,7 +1182,7 @@ function SessionChatInner(props: SessionChatProps) {
 
     const handleCursorBaseModelChange = useCallback(async (baseKey: string | null) => {
         if (!cursorPicker) {
-            await handleModelChange(baseKey)
+            await enqueueCursorModelApply(() => handleModelChange(baseKey))
             return
         }
         const plan = resolveSessionCursorModelChange({
@@ -1183,13 +1197,13 @@ function SessionChatInner(props: SessionChatProps) {
         }
         setCursorSelectedBase(plan.nextSelectedBase)
         if (plan.shouldApply) {
-            await handleModelChange(plan.wireId)
+            await enqueueCursorModelApply(() => handleModelChange(plan.wireId))
         }
-    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+    }, [cursorPicker, cursorSelectedBase, enqueueCursorModelApply, handleModelChange, props.session.model])
 
     const handleCursorEffortChange = useCallback(async (wireId: string | null) => {
         if (!cursorPicker) {
-            await handleModelChange(wireId)
+            await enqueueCursorModelApply(() => handleModelChange(wireId))
             return
         }
         const plan = resolveSessionCursorModelChange({
@@ -1204,8 +1218,8 @@ function SessionChatInner(props: SessionChatProps) {
             return
         }
         setCursorSelectedBase(plan.nextSelectedBase)
-        await handleModelChange(plan.wireId)
-    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+        await enqueueCursorModelApply(() => handleModelChange(plan.wireId))
+    }, [cursorPicker, cursorSelectedBase, enqueueCursorModelApply, handleModelChange, props.session.model])
 
     const handleModelReasoningEffortChange = useCallback(async (modelReasoningEffort: string | null) => {
         try {
@@ -1556,7 +1570,7 @@ function SessionChatInner(props: SessionChatProps) {
                         }
                         onPermissionModeChange={handlePermissionModeChange}
                         selectedModelBase={
-                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+                            agentFlavor === 'cursor' && cursorPicker
                                 ? cursorSelectedBaseValue
                                 : undefined
                         }
@@ -1572,6 +1586,11 @@ function SessionChatInner(props: SessionChatProps) {
                                 && cursorModelEffortOptions
                                 && cursorModelEffortOptions.length > 1
                                 ? cursorModelEffortOptions
+                                : undefined
+                        }
+                        resolveModelVariantsForBase={
+                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+                                ? resolveCursorVariantsForBase
                                 : undefined
                         }
                         onModelChange={
