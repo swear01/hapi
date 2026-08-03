@@ -28,12 +28,19 @@ describe('sessionLastSeen', () => {
         expect(getSessionLastSeenAt('session-b')).toBe(2500)
     })
 
-    it('does not overwrite an established unread baseline', () => {
+    it('preserves existing watermarks while completing a legacy partial baseline', () => {
         markSessionSeen('session-a', 1000)
 
-        initializeSessionLastSeen([{ id: 'session-a', updatedAt: 2500 }])
+        initializeSessionLastSeen([
+            { id: 'session-a', updatedAt: 2500 },
+            { id: 'session-b', updatedAt: 2500 },
+        ])
 
         expect(getSessionLastSeenAt('session-a')).toBe(1000)
+        expect(getSessionLastSeenAt('session-b')).toBe(2500)
+
+        initializeSessionLastSeen([{ id: 'session-c', updatedAt: 3000 }])
+        expect(getSessionLastSeenAt('session-c')).toBe(0)
     })
 
     it('ignores localStorage write failures', () => {
