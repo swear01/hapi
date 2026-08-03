@@ -147,14 +147,14 @@ function SettingsIcon(props: { className?: string }) {
 }
 
 function SessionsPage() {
-    const { api } = useAppContext()
+    const { api, baseUrl } = useAppContext()
     const navigate = useNavigate()
     const pathname = useLocation({ select: location => location.pathname })
     const matchRoute = useMatchRoute()
     const { t } = useTranslation()
     const { addToast } = useToast()
     const { sessions, isLoading, error, refetch } = useSessions(api)
-    const [sessionListInitialized, setSessionListInitialized] = useState(false)
+    const [initializedHub, setInitializedHub] = useState<string | null>(null)
     const { machines } = useMachines(api, true)
     const handleRefresh = useCallback(() => {
         return (async () => {
@@ -195,9 +195,9 @@ function SessionsPage() {
         if (isLoading || error) {
             return
         }
-        initializeSessionLastSeen(sessions)
-        setSessionListInitialized(true)
-    }, [error, isLoading, sessions])
+        initializeSessionLastSeen(baseUrl, sessions)
+        setInitializedHub(baseUrl)
+    }, [baseUrl, error, isLoading, sessions])
     useEffect(() => {
         if (!selectedSessionId || !selectedSession) {
             return
@@ -229,7 +229,7 @@ function SessionsPage() {
                         </div>
                     ) : null}
                     <SessionList
-                        key={sessionListInitialized ? 'last-seen-ready' : 'last-seen-pending'}
+                        key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
                         sessions={sessions}
                         selectedSessionId={selectedSessionId}
                         onSelect={(sessionId) => navigate({

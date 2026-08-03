@@ -19,7 +19,7 @@ describe('sessionLastSeen', () => {
     })
 
     it('uses the first session list as the unread baseline', () => {
-        initializeSessionLastSeen([
+        initializeSessionLastSeen('hub-a', [
             { id: 'session-a', updatedAt: 1000 },
             { id: 'session-b', updatedAt: 2500 },
         ])
@@ -31,7 +31,7 @@ describe('sessionLastSeen', () => {
     it('preserves existing watermarks while completing a legacy partial baseline', () => {
         markSessionSeen('session-a', 1000)
 
-        initializeSessionLastSeen([
+        initializeSessionLastSeen('hub-a', [
             { id: 'session-a', updatedAt: 2500 },
             { id: 'session-b', updatedAt: 2500 },
         ])
@@ -39,8 +39,15 @@ describe('sessionLastSeen', () => {
         expect(getSessionLastSeenAt('session-a')).toBe(1000)
         expect(getSessionLastSeenAt('session-b')).toBe(2500)
 
-        initializeSessionLastSeen([{ id: 'session-c', updatedAt: 3000 }])
+        initializeSessionLastSeen('hub-a', [{ id: 'session-c', updatedAt: 3000 }])
         expect(getSessionLastSeenAt('session-c')).toBe(0)
+    })
+
+    it('initializes each hub independently', () => {
+        initializeSessionLastSeen('hub-a', [{ id: 'session-a', updatedAt: 1000 }])
+        initializeSessionLastSeen('hub-b', [{ id: 'session-b', updatedAt: 2000 }])
+
+        expect(getSessionLastSeenAt('session-b')).toBe(2000)
     })
 
     it('ignores localStorage write failures', () => {

@@ -51,14 +51,15 @@ export function getSessionLastSeenAt(sessionId: string): number {
     return readStore()[sessionId] ?? 0
 }
 
-export function initializeSessionLastSeen(sessions: Iterable<{ id: string; updatedAt: number }>): void {
+export function initializeSessionLastSeen(scope: string, sessions: Iterable<{ id: string; updatedAt: number }>): void {
     const storage = getLocalStorage()
     if (!storage) {
         return
     }
 
     try {
-        if (storage.getItem(BASELINE_KEY) === '1') {
+        const baselineKey = `${BASELINE_KEY}:${scope}`
+        if (storage.getItem(baselineKey) === '1') {
             return
         }
         const store = readStore()
@@ -66,7 +67,7 @@ export function initializeSessionLastSeen(sessions: Iterable<{ id: string; updat
             store[session.id] ??= session.updatedAt
         }
         storage.setItem(STORAGE_KEY, JSON.stringify(store))
-        storage.setItem(BASELINE_KEY, '1')
+        storage.setItem(baselineKey, '1')
     } catch {
         // Ignore storage errors
     }
