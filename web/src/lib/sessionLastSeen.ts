@@ -50,6 +50,26 @@ export function getSessionLastSeenAt(sessionId: string): number {
     return readStore()[sessionId] ?? 0
 }
 
+export function initializeSessionLastSeen(sessions: Iterable<{ id: string; updatedAt: number }>): void {
+    const storage = getLocalStorage()
+    if (!storage) {
+        return
+    }
+
+    try {
+        if (storage.getItem(STORAGE_KEY) !== null) {
+            return
+        }
+        const store: LastSeenStore = {}
+        for (const session of sessions) {
+            store[session.id] = session.updatedAt
+        }
+        storage.setItem(STORAGE_KEY, JSON.stringify(store))
+    } catch {
+        // Ignore storage errors
+    }
+}
+
 export function markSessionSeen(sessionId: string, seenAt: number): void {
     if (!sessionId) {
         return

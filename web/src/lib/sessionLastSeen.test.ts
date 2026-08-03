@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { getSessionLastSeenAt, markSessionSeen } from './sessionLastSeen'
+import { getSessionLastSeenAt, initializeSessionLastSeen, markSessionSeen } from './sessionLastSeen'
 
 describe('sessionLastSeen', () => {
     beforeEach(() => {
@@ -16,6 +16,24 @@ describe('sessionLastSeen', () => {
         markSessionSeen('session-a', 5000)
         markSessionSeen('session-a', 2000)
         expect(getSessionLastSeenAt('session-a')).toBe(5000)
+    })
+
+    it('uses the first session list as the unread baseline', () => {
+        initializeSessionLastSeen([
+            { id: 'session-a', updatedAt: 1000 },
+            { id: 'session-b', updatedAt: 2500 },
+        ])
+
+        expect(getSessionLastSeenAt('session-a')).toBe(1000)
+        expect(getSessionLastSeenAt('session-b')).toBe(2500)
+    })
+
+    it('does not overwrite an established unread baseline', () => {
+        markSessionSeen('session-a', 1000)
+
+        initializeSessionLastSeen([{ id: 'session-a', updatedAt: 2500 }])
+
+        expect(getSessionLastSeenAt('session-a')).toBe(1000)
     })
 
     it('ignores localStorage write failures', () => {

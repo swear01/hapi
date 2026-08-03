@@ -43,7 +43,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { seedMessageWindowFromSession, syncTailMessages } from '@/lib/message-window-store'
 import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
-import { markSessionSeen } from '@/lib/sessionLastSeen'
+import { initializeSessionLastSeen, markSessionSeen } from '@/lib/sessionLastSeen'
 import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
 import { clearCodexImportedSession } from '@/lib/codexImportedSessions'
 import { getSupersedingSessionId, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
@@ -154,6 +154,7 @@ function SessionsPage() {
     const { t } = useTranslation()
     const { addToast } = useToast()
     const { sessions, isLoading, error, refetch } = useSessions(api)
+    const [sessionListInitialized, setSessionListInitialized] = useState(false)
     const { machines } = useMachines(api, true)
     const handleRefresh = useCallback(() => {
         return (async () => {
@@ -191,6 +192,13 @@ function SessionsPage() {
         [selectedSessionId, sessions]
     )
     useEffect(() => {
+        if (isLoading || error) {
+            return
+        }
+        initializeSessionLastSeen(sessions)
+        setSessionListInitialized(true)
+    }, [error, isLoading, sessions])
+    useEffect(() => {
         if (!selectedSessionId || !selectedSession) {
             return
         }
@@ -221,6 +229,7 @@ function SessionsPage() {
                         </div>
                     ) : null}
                     <SessionList
+                        key={sessionListInitialized ? 'last-seen-ready' : 'last-seen-pending'}
                         sessions={sessions}
                         selectedSessionId={selectedSessionId}
                         onSelect={(sessionId) => navigate({
