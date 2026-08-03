@@ -40,6 +40,8 @@ export const RPC_METHODS = {
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ForkConversation: 'fork-conversation',
     RewindConversation: 'rewind-conversation',
+    /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
+    SteerQueuedMessage: 'steer-queued-message'
 } as const
 
 export type RpcMethod = typeof RPC_METHODS[keyof typeof RPC_METHODS]
