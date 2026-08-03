@@ -13,6 +13,10 @@ const harness = vi.hoisted(() => ({
     setModelImpl: null as null | ((sessionId: string, modelId: string) => Promise<void>),
     setConfigOptionImpl: null as null | ((sessionId: string, configId: string, value: string) => Promise<void>),
     thoughtLevelOption: null as null | { id: string; currentValue?: string; options: Array<{ value: string; name?: string }> },
+    stderrHandler: null as null | ((error: { type: string; message: string; raw: string }) => void),
+    hangPrompt: false,
+    resolvePrompt: null as null | (() => void),
+    cancelPrompt: vi.fn(async (_sessionId: string) => {}),
     // Lets a test take full manual control of when a given prompt() call
     // resolves, instead of the fixed-one-tick setImmediate delay below —
     // needed to deterministically test ordering against /compact without
@@ -89,20 +93,30 @@ vi.mock('./utils/opencodeBackend', () => ({
             harness.promptContents.push(content);
             harness.events.push('prompt:start');
             harness.promptCount++;
-            if (harness.promptImpl) {
+            if (harness.hangPrompt) {
+                await new Promise<void>((resolve) => {
+                    harness.resolvePrompt = resolve;
+                });
+            } else if (harness.promptImpl) {
                 await harness.promptImpl();
             } else {
                 await new Promise<void>((resolve) => setImmediate(resolve));
             }
             harness.events.push('prompt:end');
         }),
-        cancelPrompt: vi.fn(async () => {
+        isPromptRequestInFlight: vi.fn(() =>
+            harness.events.lastIndexOf('prompt:start') > harness.events.lastIndexOf('prompt:end')
+        ),
+        cancelPrompt: vi.fn(async (sessionId: string) => {
+            await harness.cancelPrompt(sessionId);
             if (harness.cancelPromptImpl) {
                 await harness.cancelPromptImpl();
             }
         }),
         respondToPermission: vi.fn(async () => {}),
-        onStderrError: vi.fn(),
+        onStderrError: vi.fn((handler: (error: { type: string; message: string; raw: string }) => void) => {
+            harness.stderrHandler = handler;
+        }),
         setSessionInfoUpdateListener: vi.fn(),
         refreshSessionInfo: vi.fn(async (sessionId: string, cwd: string) => {
             harness.refreshSessionInfoCalls.push({ sessionId, cwd });
@@ -289,7 +303,7 @@ function createSessionStub(
         sendUserMessage(_text: string) {}
     };
 
-    return { session, sessionEvents, sentAgentMessages, rpcHandlers, setModelReasoningEffort, pushKeepAlive, emitMessagesConsumedCalls, thinkingChangeCalls };
+    return { session, sessionEvents, sentAgentMessages, agentMessages: sentAgentMessages, rpcHandlers, setModelReasoningEffort, pushKeepAlive, emitMessagesConsumedCalls, thinkingChangeCalls };
 }
 
 function createCompactMode(model?: string): OpencodeMode {
@@ -312,6 +326,10 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         harness.setModelImpl = null;
         harness.setConfigOptionImpl = null;
         harness.thoughtLevelOption = null;
+        harness.stderrHandler = null;
+        harness.hangPrompt = false;
+        harness.resolvePrompt = null;
+        harness.cancelPrompt.mockClear();
         compactHarness.calls = [];
         compactHarness.result = { ok: true };
         compactHarness.summaryCalls = [];
@@ -1679,6 +1697,91 @@ describe('opencodeRemoteLauncher inline model switch', () => {
             success: false,
             error: 'OpenCode reasoning effort options are not available'
         });
+    });
+
+    it('reports a stall stderr error only once per prompt', async () => {
+        harness.hangPrompt = true;
+        const { session, agentMessages } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+
+        const launchPromise = opencodeRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.events).toContain('prompt:start'));
+        expect(session.thinking).toBe(true);
+        expect(harness.stderrHandler).toBeTypeOf('function');
+
+        harness.stderrHandler!({
+            type: 'quota_exceeded',
+            message: 'API quota exceeded. Please check your billing or wait for quota reset.',
+            raw: 'quota exceeded for provider'
+        });
+        harness.stderrHandler!({
+            type: 'quota_exceeded',
+            message: 'Retrying after quota error.',
+            raw: 'retrying in 30 seconds'
+        });
+
+        expect(session.thinking).toBe(false);
+        expect(harness.cancelPrompt).toHaveBeenCalledTimes(1);
+        expect(harness.cancelPrompt).toHaveBeenCalledWith('acp-session-1');
+        expect(agentMessages).toEqual([{
+            type: 'error',
+            message: 'API quota exceeded. Please check your billing or wait for quota reset.'
+        }]);
+
+        harness.resolvePrompt!();
+        await launchPromise;
+    });
+
+    it('routes HTTP/2 cancel stderr through the error agent message pipeline', async () => {
+        harness.hangPrompt = true;
+        const { session, agentMessages } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+
+        const launchPromise = opencodeRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.stderrHandler).toBeTypeOf('function'));
+
+        const message = 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)';
+        harness.stderrHandler!({
+            type: 'unknown',
+            message,
+            raw: message
+        });
+
+        expect(session.thinking).toBe(false);
+        expect(harness.cancelPrompt).toHaveBeenCalledWith('acp-session-1');
+        expect(agentMessages).toContainEqual({ type: 'error', message });
+
+        harness.resolvePrompt!();
+        await launchPromise;
+    });
+
+    it('surfaces non-stall stderr as error without clearing thinking or canceling prompt', async () => {
+        harness.hangPrompt = true;
+        const { session, agentMessages } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+
+        const launchPromise = opencodeRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.events).toContain('prompt:start'));
+        expect(session.thinking).toBe(true);
+
+        harness.stderrHandler!({
+            type: 'authentication',
+            message: 'Authentication failed. Please check your credentials.',
+            raw: 'status 401 unauthenticated'
+        });
+
+        expect(session.thinking).toBe(true);
+        expect(harness.cancelPrompt).not.toHaveBeenCalled();
+        expect(agentMessages).toContainEqual({
+            type: 'error',
+            message: 'Authentication failed. Please check your credentials.'
+        });
+
+        harness.resolvePrompt!();
+        await launchPromise;
     });
 
     it('serializes setModel after the previous prompt resolves', async () => {

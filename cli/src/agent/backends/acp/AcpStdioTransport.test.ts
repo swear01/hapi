@@ -319,6 +319,113 @@ describe('AcpStdioTransport closed stdin writes', () => {
         }]);
     });
 
+    test.each([
+        ['status 401', 'authentication'],
+        ['status 404', 'model_not_found'],
+        ['Cannot use this model: stale-id', 'model_not_found'],
+        ['unexpected error', 'unknown']
+    ])('reports newline-free %s stderr immediately', (chunk, type) => {
+        const transport = new AcpStdioTransport({ command: 'agent' });
+        const seen: Array<{ type: string }> = [];
+        transport.onStderrError((error) => seen.push(error));
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (value: string) => void);
+
+        for (const handler of handlers) handler(chunk);
+
+        expect(seen.map((error) => error.type)).toEqual([type]);
+    });
+
+    test('reports a completed non-HTTP/2 cancellation record', () => {
+        const transport = new AcpStdioTransport({ command: 'agent' });
+        const seen: Array<{ type: string; message: string; raw: string }> = [];
+        transport.onStderrError((error) => seen.push(error));
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (value: string) => void);
+
+        for (const handler of handlers) handler('Error: request canceled by provider\n');
+
+        expect(seen).toEqual([{
+            type: 'unknown',
+            message: 'Error: request canceled by provider',
+            raw: 'Error: request canceled by provider'
+        }]);
+    });
+
+    test('parses stall signatures split across stderr chunks without waiting for close', () => {
+        const transport = new AcpStdioTransport({ command: 'opencode' });
+        const seen: Array<{ type: string; message: string; raw: string }> = [];
+        transport.onStderrError((error) => {
+            seen.push(error);
+        });
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const stderrHandlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (chunk: string) => void);
+
+        for (const handler of stderrHandlers) {
+            handler('provider unavailable, retry');
+            handler('ing in 30 seconds\n');
+            handler('Error: T: [canceled] ht');
+            handler('tp/2 stream closed with error code CANCEL (0x8)');
+        }
+
+        expect(seen).toEqual([
+            {
+                type: 'unknown',
+                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
+                raw: 'provider unavailable, retrying in 30 seconds'
+            },
+            {
+                type: 'unknown',
+                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
+                raw: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
+            }
+        ]);
+
+        for (const handler of spawnState.closeHandlers) {
+            handler(1, null);
+        }
+
+        expect(seen).toEqual([
+            {
+                type: 'unknown',
+                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
+                raw: 'provider unavailable, retrying in 30 seconds'
+            },
+            {
+                type: 'unknown',
+                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
+                raw: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
+            }
+        ]);
+    });
+
+    test('bounds newline-free unclassified stderr tails', () => {
+        const transport = new AcpStdioTransport({ command: 'agent' });
+        const proc = (transport as unknown as { process: {
+            stderr: { on: ReturnType<typeof vi.fn> };
+        } }).process;
+        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
+            .filter((call) => call[0] === 'data')
+            .map((call) => call[1] as (value: string) => void);
+
+        for (const handler of handlers) handler('x'.repeat(20_000));
+
+        const buffer = (transport as unknown as { stderrParseBuffer: string }).stderrParseBuffer;
+        expect(buffer.length).toBeLessThanOrEqual(8_000);
+    });
+
     test('rejects pending requests when stdin.write throws', async () => {
         spawnState.stdinWrite.mockImplementation(() => {
             throw new Error('WritableIterable is closed');
