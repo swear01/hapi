@@ -17,15 +17,20 @@ function notifyChange(): void {
     window.dispatchEvent(new Event(CHANGE_EVENT))
 }
 
-function browserLocalTranscriptionSupported(): boolean {
+async function browserLocalTranscriptionSupported(): Promise<boolean> {
     const constructor = (globalThis as typeof globalThis & {
-        SpeechRecognition?: { prototype: object; available?: unknown }
+        SpeechRecognition?: {
+            prototype: object
+            available?: (options: { langs: string[]; processLocally: true }) => Promise<string>
+        }
     }).SpeechRecognition
-    return Boolean(
-        constructor
-        && typeof constructor.available === 'function'
-        && 'processLocally' in constructor.prototype
-    )
+    if (!constructor || typeof constructor.available !== 'function' || !('processLocally' in constructor.prototype)) return false
+    const language = localStorage.getItem('hapi-voice-lang') || navigator.language
+    try {
+        return await constructor.available({ langs: [language], processLocally: true }) === 'available'
+    } catch {
+        return false
+    }
 }
 
 function readVoiceMode(): VoiceMode {
@@ -58,9 +63,9 @@ export function useVoiceInputPreferences(api: ApiClient | null) {
     useEffect(() => {
         if (!api) return
         let cancelled = false
-        api.fetchTranscriptionProviders().then(({ providers: configured }) => {
+        Promise.all([api.fetchTranscriptionProviders(), browserLocalTranscriptionSupported()]).then(([{ providers: configured }, browserLocal]) => {
             if (cancelled) return
-            const available = browserLocalTranscriptionSupported()
+            const available = browserLocal
                 ? [...configured, BROWSER_LOCAL_TRANSCRIPTION_PROVIDER]
                 : configured
             setProviders(available)

@@ -65,6 +65,53 @@ describe('OpenAI realtime transcription', () => {
         expect(callbacks.onError).not.toHaveBeenCalled()
         expect(stopTrack).toHaveBeenCalled()
     })
+
+    it('releases the microphone when startup is aborted', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: {
+                getUserMedia: vi.fn(async () => ({
+                    getTracks: () => [{ stop: stopTrack }],
+                    getAudioTracks: () => [{ stop: stopTrack }]
+                }))
+            }
+        })
+        class MockDataChannel extends EventTarget {
+            readyState = 'connecting'
+            close() {}
+        }
+        class MockPeerConnection extends EventTarget {
+            connectionState = 'connecting'
+            createDataChannel() { return new MockDataChannel() }
+            addTrack() {}
+            async createOffer() { return { type: 'offer', sdp: 'offer-sdp' } }
+            async setLocalDescription() {}
+            close() {}
+        }
+        vi.stubGlobal('RTCPeerConnection', MockPeerConnection)
+        const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+        }))
+        vi.stubGlobal('fetch', fetchMock)
+        const controller = new AbortController()
+        const starting = startOpenAIRealtimeTranscription({
+            getToken: async () => 'ephemeral-token',
+            signal: controller.signal,
+            callbacks: {
+                onConnected: vi.fn(),
+                onPartial: vi.fn(),
+                onFinal: vi.fn(),
+                onError: vi.fn()
+            }
+        })
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
+
+        controller.abort()
+
+        await expect(starting).rejects.toBeDefined()
+        expect(stopTrack).toHaveBeenCalled()
+    })
 })
 
 describe('Deepgram realtime transcription', () => {

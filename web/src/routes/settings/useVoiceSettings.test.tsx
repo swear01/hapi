@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
+import type { TranscriptionProviderInfo } from '@hapi/protocol/voice'
 import { I18nProvider } from '@/lib/i18n-context'
 import { useVoiceSettings } from './useVoiceSettings'
 
 const { fetchTranscriptionProviders, fetchVoiceBackend, fetchVoices, pause, play } = vi.hoisted(() => ({
-    fetchTranscriptionProviders: vi.fn(() => Promise.resolve({ providers: [] })),
+    fetchTranscriptionProviders: vi.fn((): Promise<{ providers: TranscriptionProviderInfo[] }> => Promise.resolve({ providers: [] })),
     fetchVoiceBackend: vi.fn(),
     fetchVoices: vi.fn(),
     pause: vi.fn(),
@@ -96,5 +97,22 @@ describe('useVoiceSettings', () => {
 
         await waitFor(() => expect(result.current.provider).toBe('browser-local'))
         expect(result.current.transcriptionMode).toBe('realtime')
+    })
+
+    it('does not expose browser dictation without the selected language pack', async () => {
+        fetchTranscriptionProviders.mockResolvedValueOnce({
+            providers: [{ id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] }]
+        })
+        class MockSpeechRecognition {
+            static available() { return Promise.resolve('unavailable') }
+            processLocally = false
+        }
+        Object.defineProperty(MockSpeechRecognition.prototype, 'processLocally', { value: false })
+        vi.stubGlobal('SpeechRecognition', MockSpeechRecognition)
+
+        const { result } = renderHook(() => useVoiceSettings(), { wrapper: Wrapper })
+
+        await waitFor(() => expect(result.current.provider).toBe('openai'))
+        expect(result.current.providers).toHaveLength(1)
     })
 })

@@ -39,6 +39,7 @@ export function useRealtimeDictation(config: {
     const [partialTranscript, setPartialTranscript] = useState('')
     const mountedRef = useRef(true)
     const operationRef = useRef(0)
+    const startAbortRef = useRef<AbortController | null>(null)
     const sessionRef = useRef<RealtimeTranscriptionSession | null>(null)
     const partialRef = useRef('')
     const onFinalTranscriptRef = useRef(config.onFinalTranscript)
@@ -96,10 +97,14 @@ export function useRealtimeDictation(config: {
             }
         }
     })
+    const elevenLabsRef = useRef(elevenLabs)
+    elevenLabsRef.current = elevenLabs
 
     const start = useCallback(async () => {
         if (!supported || !config.api || !config.provider || status === 'connecting' || status === 'connected') return
         const operation = ++operationRef.current
+        const controller = new AbortController()
+        startAbortRef.current = controller
         const provider = config.provider
         const language = localStorage.getItem('hapi-voice-lang') || undefined
         setError(null)
@@ -123,7 +128,7 @@ export function useRealtimeDictation(config: {
 
         try {
             if (provider === 'elevenlabs') {
-                const { token } = await config.api.fetchRealtimeTranscriptionToken('elevenlabs', language)
+                const { token } = await config.api.fetchRealtimeTranscriptionToken('elevenlabs', language, controller.signal)
                 if (operationRef.current !== operation) return
                 elevenLabsActiveRef.current = true
                 elevenLabsFinalizedRef.current = false
@@ -170,20 +175,23 @@ export function useRealtimeDictation(config: {
                 if (operationRef.current !== operation) throw new Error('Realtime transcription cancelled')
                 const result = await config.api!.fetchRealtimeTranscriptionToken(
                     provider as 'openai' | 'deepgram',
-                    language
+                    language,
+                    controller.signal
                 )
                 if (operationRef.current !== operation) throw new Error('Realtime transcription cancelled')
                 return result.token
             }
             const session = provider === 'openai'
-                ? await startOpenAIRealtimeTranscription({ getToken, callbacks })
+                ? await startOpenAIRealtimeTranscription({ getToken, signal: controller.signal, callbacks })
                 : provider === 'deepgram'
-                    ? await startDeepgramRealtimeTranscription({ getToken, language, callbacks })
-                    : await startBrowserLocalTranscription({ language, callbacks })
+                    ? await startDeepgramRealtimeTranscription({ getToken, language, signal: controller.signal, callbacks })
+                    : await startBrowserLocalTranscription({ language, signal: controller.signal, callbacks })
             if (operationRef.current !== operation) session.cancel()
             else sessionRef.current = session
         } catch (startError) {
             if (operationRef.current === operation) fail(startError)
+        } finally {
+            if (startAbortRef.current === controller) startAbortRef.current = null
         }
     }, [config.api, config.provider, elevenLabs, fail, finish, status, supported, updatePartial])
 
@@ -191,6 +199,12 @@ export function useRealtimeDictation(config: {
         const session = sessionRef.current
         if (!session) {
             operationRef.current += 1
+            startAbortRef.current?.abort()
+            startAbortRef.current = null
+            if (elevenLabsActiveRef.current) {
+                elevenLabsActiveRef.current = false
+                elevenLabs.disconnect()
+            }
             setStatus('disconnected')
             return
         }
@@ -202,7 +216,7 @@ export function useRealtimeDictation(config: {
         } finally {
             if (sessionRef.current === session) sessionRef.current = null
         }
-    }, [fail])
+    }, [elevenLabs, fail])
 
     const toggle = useCallback(async () => {
         if (status === 'connected' || status === 'connecting') await stop()
@@ -214,7 +228,10 @@ export function useRealtimeDictation(config: {
         return () => {
             mountedRef.current = false
             operationRef.current += 1
+            startAbortRef.current?.abort()
+            startAbortRef.current = null
             elevenLabsActiveRef.current = false
+            elevenLabsRef.current.disconnect()
             resolveElevenLabsCommitRef.current?.()
             sessionRef.current?.cancel()
             sessionRef.current = null

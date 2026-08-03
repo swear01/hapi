@@ -954,10 +954,12 @@ export class ApiClient {
 
     async fetchRealtimeTranscriptionToken(
         provider: 'openai' | 'elevenlabs' | 'deepgram',
-        language?: string
+        language?: string,
+        signal?: AbortSignal
     ): Promise<{ token: string }> {
         return await this.request('/api/voice/transcription/realtime-token', {
             method: 'POST',
+            signal,
             body: JSON.stringify({ provider, language })
         })
     }

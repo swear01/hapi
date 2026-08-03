@@ -24,11 +24,18 @@ function errorMessage(value: unknown, fallback: string): Error {
 
 export async function startOpenAIRealtimeTranscription(options: {
     getToken: TokenFactory
+    signal?: AbortSignal
     callbacks: RealtimeTranscriptionCallbacks
 }): Promise<RealtimeTranscriptionSession> {
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     })
+    try {
+        options.signal?.throwIfAborted()
+    } catch (error) {
+        stream.getTracks().forEach((track) => track.stop())
+        throw error
+    }
     let peer: RTCPeerConnection
     let channel: RTCDataChannel
     try {
@@ -89,7 +96,7 @@ export async function startOpenAIRealtimeTranscription(options: {
             }
         })
         peer.addEventListener('connectionstatechange', () => {
-            if (!finished && (peer.connectionState === 'failed' || peer.connectionState === 'disconnected')) {
+            if (!finished && (peer.connectionState === 'failed' || peer.connectionState === 'closed')) {
                 fail(new Error('OpenAI realtime transcription disconnected'))
             }
         })
@@ -103,19 +110,29 @@ export async function startOpenAIRealtimeTranscription(options: {
                 Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/sdp'
             },
-            body: offer.sdp
+            body: offer.sdp,
+            signal: options.signal
+                ? AbortSignal.any([options.signal, AbortSignal.timeout(15_000)])
+                : AbortSignal.timeout(15_000)
         })
         if (!response.ok) throw new Error(`OpenAI realtime connection failed (HTTP ${response.status})`)
         await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() })
         await new Promise<void>((resolve, reject) => {
             if (channel.readyState === 'open') return resolve()
             const timeout = setTimeout(() => reject(new Error('OpenAI realtime connection timed out')), 10_000)
+            const onAbort = () => {
+                clearTimeout(timeout)
+                reject(options.signal?.reason)
+            }
+            options.signal?.addEventListener('abort', onAbort, { once: true })
             channel.addEventListener('open', () => {
                 clearTimeout(timeout)
+                options.signal?.removeEventListener('abort', onAbort)
                 resolve()
             }, { once: true })
             channel.addEventListener('error', () => {
                 clearTimeout(timeout)
+                options.signal?.removeEventListener('abort', onAbort)
                 reject(new Error('OpenAI realtime connection failed'))
             }, { once: true })
         })
@@ -156,11 +173,18 @@ export async function startOpenAIRealtimeTranscription(options: {
 export async function startDeepgramRealtimeTranscription(options: {
     getToken: TokenFactory
     language?: string
+    signal?: AbortSignal
     callbacks: RealtimeTranscriptionCallbacks
 }): Promise<RealtimeTranscriptionSession> {
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     })
+    try {
+        options.signal?.throwIfAborted()
+    } catch (error) {
+        stream.getTracks().forEach((track) => track.stop())
+        throw error
+    }
     let token: string
     try {
         token = await options.getToken()
@@ -257,14 +281,21 @@ export async function startDeepgramRealtimeTranscription(options: {
 
     await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('Deepgram realtime connection timed out')), 10_000)
+        const onAbort = () => {
+            clearTimeout(timeout)
+            reject(options.signal?.reason)
+        }
+        options.signal?.addEventListener('abort', onAbort, { once: true })
         socket.addEventListener('open', () => {
             clearTimeout(timeout)
+            options.signal?.removeEventListener('abort', onAbort)
             recorder.start(250)
             options.callbacks.onConnected()
             resolve()
         }, { once: true })
         socket.addEventListener('error', () => {
             clearTimeout(timeout)
+            options.signal?.removeEventListener('abort', onAbort)
             reject(new Error('Deepgram realtime connection failed'))
         }, { once: true })
     }).catch((error) => {
@@ -340,14 +371,17 @@ function localSpeechRecognitionConstructor(): LocalSpeechRecognitionConstructor 
 
 export async function startBrowserLocalTranscription(options: {
     language?: string
+    signal?: AbortSignal
     callbacks: RealtimeTranscriptionCallbacks
 }): Promise<RealtimeTranscriptionSession> {
+    options.signal?.throwIfAborted()
     const constructor = localSpeechRecognitionConstructor()
     if (!constructor) throw new Error('On-device speech recognition is not supported by this browser')
     const language = options.language || navigator.language
     if (await constructor.available({ langs: [language], processLocally: true }) !== 'available') {
         throw new Error(`On-device speech recognition is not installed for ${language}`)
     }
+    options.signal?.throwIfAborted()
 
     const recognition = new constructor()
     recognition.continuous = true
