@@ -2548,7 +2548,22 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 return;
             }
 
-            if (isTerminalEvent && eventTurnId && eventTurnId === lastFinalizedTurnId) {
+            const isStaleSameThreadRecoveryTerminal = msgType === 'task_complete'
+                && turnInFlight
+                && (sameThreadRetryAttempt > 0 || sameThreadCompactAttempt > 0)
+                && Boolean(eventTurnId)
+                && eventTurnId === lastFinalizedTurnId
+                && Boolean(this.currentTurnId)
+                && eventTurnId !== this.currentTurnId
+                && Boolean(eventThreadId)
+                && eventThreadId === this.currentThreadId;
+
+            if (
+                isTerminalEvent
+                && eventTurnId
+                && eventTurnId === lastFinalizedTurnId
+                && !isStaleSameThreadRecoveryTerminal
+            ) {
                 logger.debug(`[Codex] Ignoring duplicate terminal event for turn ${eventTurnId}`);
                 return;
             }
@@ -2734,7 +2749,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     allowAnonymousTerminalEvent,
                     eventThreadId,
                     currentThreadId: this.currentThreadId,
-                    allowMatchingThreadIdTerminalEvent: msg.terminal_source === 'thread_status'
+                    allowMatchingThreadIdTerminalEvent: msg.terminal_source === 'thread_status',
+                    allowMismatchedTurnIdTerminalEvent: isStaleSameThreadRecoveryTerminal
                 })) {
                     logger.debug(
                         `[Codex] Ignoring terminal event ${msgType} without matching turn context; ` +
