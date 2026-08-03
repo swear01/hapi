@@ -155,6 +155,7 @@ const AGENT_SESSION_ID_FIELD_BY_FLAVOR = {
     grok: 'grokSessionId',
     cursor: 'cursorSessionId',
     kimi: 'kimiSessionId',
+    copilot: 'copilotSessionId',
     pi: 'piSessionId'
 } as const satisfies Record<AgentFlavor, keyof Metadata>
 
@@ -176,6 +177,7 @@ function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
         ?? metadata.grokSessionId
         ?? metadata.cursorSessionId
         ?? metadata.kimiSessionId
+        ?? metadata.copilotSessionId
         ?? undefined
 }
 

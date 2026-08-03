@@ -9,7 +9,7 @@
 
 import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession } from '@hapi/protocol'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
-import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
+import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
@@ -38,6 +38,7 @@ import {
     type RpcListCursorModelsResponse,
     type RpcListOpencodeModelsResponse,
     type RpcListGrokModelsResponse,
+    type RpcListCopilotModelsResponse,
     type RpcListGrokReasoningEffortOptionsResponse,
     type RpcListOpencodeReasoningEffortOptionsResponse,
     type RpcCursorModel,
@@ -65,6 +66,7 @@ export type {
     RpcListCursorModelsResponse,
     RpcListOpencodeModelsResponse,
     RpcListGrokModelsResponse,
+    RpcListCopilotModelsResponse,
     RpcListGrokReasoningEffortOptionsResponse,
     RpcListOpencodeReasoningEffortOptionsResponse,
     RpcCursorModel,
@@ -1661,6 +1663,7 @@ async uploadScratchlistAttachment(
             effort?: string | null
             serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
+            copilotAgentMode?: CopilotAgentMode
         }
     ): Promise<void> {
         const session = this.sessionCache.getSession(sessionId)
@@ -1685,6 +1688,7 @@ async uploadScratchlistAttachment(
                 effort?: Session['effort']
                 serviceTier?: Session['serviceTier']
                 collaborationMode?: Session['collaborationMode']
+                copilotAgentMode?: Session['copilotAgentMode']
             }
         }
         if (typeof obj.error === 'string' && obj.error.trim().length > 0) {
@@ -1719,7 +1723,8 @@ async uploadScratchlistAttachment(
         permissionMode?: PermissionMode,
         serviceTier?: string,
         existingSessionId?: string,
-        collaborationMode?: CodexCollaborationMode
+        collaborationMode?: CodexCollaborationMode,
+        copilotAgentMode?: CopilotAgentMode
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -1735,7 +1740,8 @@ async uploadScratchlistAttachment(
             permissionMode,
             serviceTier,
             existingSessionId,
-            collaborationMode
+            collaborationMode,
+            copilotAgentMode
         )
     }
 
@@ -1759,6 +1765,7 @@ async uploadScratchlistAttachment(
         if (flavor === 'grok') return metadata.grokSessionId ?? null
         if (flavor === 'cursor') return metadata.cursorSessionId ?? null
         if (flavor === 'kimi') return metadata.kimiSessionId ?? null
+        if (flavor === 'copilot') return metadata.copilotSessionId ?? null
         if (flavor === 'pi') return metadata.piSessionId ?? null
 
         return metadata.claudeSessionId ?? this.recoverClaudeSessionIdFromMessages(session.id, namespace)
@@ -1805,7 +1812,8 @@ async uploadScratchlistAttachment(
                 effort: session.effort ?? null,
                 modelReasoningEffort: session.modelReasoningEffort ?? null,
                 permissionMode: session.permissionMode,
-                collaborationMode: session.collaborationMode
+                collaborationMode: session.collaborationMode,
+                copilotAgentMode: session.copilotAgentMode
             }
         }
     }
@@ -1831,6 +1839,7 @@ async uploadScratchlistAttachment(
                     modelReasoningEffort: target.modelReasoningEffort,
                     permissionMode: target.permissionMode,
                     collaborationMode: target.collaborationMode,
+                    copilotAgentMode: target.copilotAgentMode,
                     updatedAt: session?.updatedAt ?? 0,
                     name: session?.metadata?.name,
                     summary: session?.metadata?.summary?.text,
@@ -2241,7 +2250,8 @@ async uploadScratchlistAttachment(
                 preferredPermissionMode,
                 session.serviceTier ?? undefined,
                 access.sessionId,
-                session.collaborationMode ?? undefined
+                session.collaborationMode ?? undefined,
+                session.copilotAgentMode ?? undefined
             )
 
             if (spawnResult.type !== 'success') {
@@ -2674,6 +2684,7 @@ async uploadScratchlistAttachment(
             && (prev?.cursorSessionId ?? null) === (next.cursorSessionId ?? null)
             && (prev?.piSessionId ?? null) === (next.piSessionId ?? null)
             && (prev?.kimiSessionId ?? null) === (next.kimiSessionId ?? null)
+            && (prev?.copilotSessionId ?? null) === (next.copilotSessionId ?? null)
     }
 
     private canRunCursorDedup(session: Session): boolean {
@@ -3012,6 +3023,14 @@ async uploadScratchlistAttachment(
 
     async listGrokReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListGrokReasoningEffortOptionsResponse> {
         return await this.rpcGateway.listGrokReasoningEffortOptionsForSession(sessionId)
+    }
+
+    async listCopilotModelsForCwd(machineId: string, cwd: string): Promise<RpcListCopilotModelsResponse> {
+        return await this.rpcGateway.listCopilotModelsForCwd(machineId, cwd)
+    }
+
+    async listCopilotModelsForSession(sessionId: string): Promise<RpcListCopilotModelsResponse> {
+        return await this.rpcGateway.listCopilotModelsForSession(sessionId)
     }
 
     /** Generic Pi RPC — delegates to rpcGateway.callPiRpc. */
