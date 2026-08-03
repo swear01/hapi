@@ -1,0 +1,24 @@
+From 2372e9401df09e5d06d869575b100969322ffbc0 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 09:41:32 +0800
+Subject: [PATCH] fix: preserve fork flag after Copilot integration
+
+---
+ hub/src/sync/syncEngine.ts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 6e81618d..d2a6d7c5 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -1307,6 +1307,7 @@ async uploadScratchlistAttachment(
+                 source.serviceTier ?? undefined,
+                 childId,
+                 source.collaborationMode,
++                undefined,
+                 rpcResult.forkSession === true
+             )
+             if (spawn.type !== 'success') {
+-- 
+2.50.1 (Apple Git-155)
+

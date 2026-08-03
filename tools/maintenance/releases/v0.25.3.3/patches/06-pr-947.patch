@@ -1,0 +1,1633 @@
+From abdb91b9af3cc775778db287a662540f4c3e6869 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 09:29:05 +0800
+Subject: [PATCH] carry: upstream PR #947
+
+---
+ .../common/cursorAcpModelProbe.test.ts        |  19 ++
+ cli/src/modules/common/cursorAcpModelProbe.ts |   8 +-
+ cli/src/modules/common/cursorModels.test.ts   |  43 +++-
+ cli/src/modules/common/cursorModels.ts        |  46 +++-
+ shared/src/cursorCliSku.test.ts               |  54 +++-
+ shared/src/cursorCliSku.ts                    |  45 +++-
+ .../HappyComposer.modelEffort.test.tsx        |  32 ++-
+ .../AssistantChat/HappyComposer.tsx           | 240 +++++++++++++++---
+ .../NewSession/newSessionCursorModels.test.ts |  46 +++-
+ web/src/components/SessionChat.tsx            |  39 ++-
+ web/src/lib/cursorModelOptions.test.ts        |  42 +++
+ web/src/lib/cursorModelOptions.ts             |  87 ++++++-
+ web/src/lib/cursorPickerState.test.ts         |  95 ++++++-
+ web/src/lib/cursorPickerState.ts              |  15 +-
+ web/src/lib/cursorVariantPicker.test.ts       |  26 +-
+ web/src/lib/locales/en.ts                     |   2 +
+ web/src/lib/locales/zh-CN.ts                  |   2 +
+ web/src/lib/serialAsyncQueue.test.ts          |  39 +++
+ web/src/lib/serialAsyncQueue.ts               |  12 +
+ web/src/lib/sessionChatCursorModel.test.ts    |  54 +++-
+ web/src/lib/sessionChatCursorModel.ts         |  11 +
+ 21 files changed, 865 insertions(+), 92 deletions(-)
+ create mode 100644 web/src/lib/serialAsyncQueue.test.ts
+ create mode 100644 web/src/lib/serialAsyncQueue.ts
+
+diff --git a/cli/src/modules/common/cursorAcpModelProbe.test.ts b/cli/src/modules/common/cursorAcpModelProbe.test.ts
+index 5adc9ccf..dd3456d9 100644
+--- a/cli/src/modules/common/cursorAcpModelProbe.test.ts
++++ b/cli/src/modules/common/cursorAcpModelProbe.test.ts
+@@ -55,6 +55,25 @@ describe('runCursorAcpModelProbe', () => {
+         expect(createCursorAcpBackend).toHaveBeenCalledWith({ cwd: '/tmp/project' });
+     });
+ 
++    test('returns bare ACP catalog without bracket wires (#1129)', async () => {
++        harness.snapshot = {
++            availableModels: [
++                { modelId: 'composer-2.5', name: 'composer-2.5' },
++                { modelId: 'claude-opus-4-8', name: 'claude-opus-4-8' }
++            ],
++            currentModelId: 'default'
++        };
++
++        const result = await runCursorAcpModelProbe('/tmp/project');
++
++        expect(result.success).toBe(true);
++        expect(result.availableModels?.map((row) => row.modelId)).toEqual([
++            'composer-2.5',
++            'claude-opus-4-8'
++        ]);
++        expect(cursorProbeResponseHasWireCatalog(result)).toBe(true);
++    });
++
+     test('returns error when ACP initialize fails', async () => {
+         harness.initializeError = new Error('agent acp unavailable');
+ 
+diff --git a/cli/src/modules/common/cursorAcpModelProbe.ts b/cli/src/modules/common/cursorAcpModelProbe.ts
+index 127c6a38..b694cac7 100644
+--- a/cli/src/modules/common/cursorAcpModelProbe.ts
++++ b/cli/src/modules/common/cursorAcpModelProbe.ts
+@@ -1,15 +1,11 @@
++import { isCursorAcpCatalogModelId } from '@hapi/protocol';
+ import { createCursorAcpBackend } from '@/cursor/utils/cursorAcpBackend';
+ import { buildCursorModelsSnapshotFromAcp } from '@/cursor/utils/cursorAcpModelsSnapshot';
+ import type { ListCursorModelsResponse } from './cursorModels';
+ import { getErrorMessage } from './rpcResponses';
+ 
+-function isCursorAcpWireModelId(modelId: string): boolean {
+-    const trimmed = modelId.trim();
+-    return trimmed === 'default[]' || trimmed.includes('[');
+-}
+-
+ function hasAcpWireCatalog(response: ListCursorModelsResponse): boolean {
+-    return (response.availableModels ?? []).some((model) => isCursorAcpWireModelId(model.modelId));
++    return (response.availableModels ?? []).some((model) => isCursorAcpCatalogModelId(model.modelId));
+ }
+ 
+ /**
+diff --git a/cli/src/modules/common/cursorModels.test.ts b/cli/src/modules/common/cursorModels.test.ts
+index 2d87da66..0fe8171e 100644
+--- a/cli/src/modules/common/cursorModels.test.ts
++++ b/cli/src/modules/common/cursorModels.test.ts
+@@ -41,7 +41,12 @@ vi.mock('./cursorAcpModelProbe', () => ({
+     runCursorAcpModelProbe: acpProbeMock.runCursorAcpModelProbe,
+     cursorProbeResponseHasWireCatalog: (response: { success?: boolean; availableModels?: Array<{ modelId: string }> }) =>
+         response.success === true
+-        && (response.availableModels ?? []).some((model) => model.modelId.includes('['))
++        && (response.availableModels ?? []).some((model) => {
++            const id = model.modelId.trim();
++            if (!id || id === 'auto' || id === 'default') return false;
++            if (id === 'default[]' || id.includes('[')) return true;
++            return !/(?:-extra-high-fast|-extra-high|-xhigh-fast|-xhigh|-high-fast|-high|-medium-fast|-medium|-low-fast|-low|-none-fast|-none|-thinking-high-fast|-thinking-high|-thinking|-fast)$/.test(id);
++        })
+ }));
+ 
+ import { isAgentAcpTransportActive } from '@/agent/backends/acp/agentCliGuard';
+@@ -232,6 +237,42 @@ describe('listCursorModels', () => {
+         expect(spawnMock).not.toHaveBeenCalled()
+     })
+ 
++    test('enriches bare ACP snapshot with base cliModelSkus only (#1129)', async () => {
++        vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)
++        setCursorAcpModelsSnapshot({
++            availableModels: [
++                { modelId: 'composer-2.5', name: 'composer-2.5' },
++                { modelId: 'gpt-5.5', name: 'gpt-5.5' }
++            ],
++            currentModelId: 'default'
++        })
++        writeSharedCursorModelsCache({
++            success: true,
++            availableModels: [
++                { modelId: 'composer-2.5', name: 'composer-2.5' },
++                { modelId: 'gpt-5.5', name: 'gpt-5.5' }
++            ],
++            currentModelId: 'default',
++            cliModelSkus: [
++                { modelId: 'composer-2.5', name: 'Composer 2.5' },
++                { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
++                { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' }
++            ]
++        })
++
++        const result = await listCursorModels()
++
++        expect(result.availableModels?.map((row) => row.modelId)).toEqual([
++            'composer-2.5',
++            'gpt-5.5'
++        ])
++        // Bare catalogs cannot apply effort/speed SKUs — keep base rows only.
++        expect(result.cliModelSkus?.map((row) => row.modelId)).toEqual([
++            'composer-2.5'
++        ])
++        expect(spawnMock).not.toHaveBeenCalled()
++    })
++
+     test('enriches live ACP snapshot with fuller shared cliModelSkus while lock is active', async () => {
+         vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)
+         setCursorAcpModelsSnapshot({
+diff --git a/cli/src/modules/common/cursorModels.ts b/cli/src/modules/common/cursorModels.ts
+index 14e72851..8629b624 100644
+--- a/cli/src/modules/common/cursorModels.ts
++++ b/cli/src/modules/common/cursorModels.ts
+@@ -11,6 +11,7 @@ import {
+ import {
+     cursorCliSkuBaseId,
+     cursorModelBaseId,
++    isCursorAcpCatalogModelId,
+     isCursorAcpWireModelId
+ } from '@hapi/protocol';
+ import {
+@@ -66,6 +67,7 @@ function filterCliSkusForWireBases(
+ 
+     return cliSkus.filter((entry) => {
+         const modelId = entry.modelId.trim();
++        // Keep bare base SKUs (composer-2.5); drop parameterized ACP wires only.
+         if (!modelId || modelId === 'auto' || isCursorAcpWireModelId(modelId)) {
+             return false;
+         }
+@@ -77,22 +79,42 @@ function attachCliSkusToResponse(
+     response: ListCursorModelsResponse,
+     cliSkus: readonly CursorModelSummary[]
+ ): ListCursorModelsResponse {
+-    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpWireModelId(entry.modelId));
+-    const filtered = filterCliSkusForWireBases([...cliSkus], wires);
+-    const merged = mergeCliModelSkus(response.cliModelSkus ?? [], filtered);
+-    if (merged.length === 0) {
+-        return response;
++    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpCatalogModelId(entry.modelId));
++    // Suffixed CLI variants (effort/speed) only apply when ACP exposes parameterized
++    // wires for that base. Bare-only catalogs cannot express those variants
++    // (apply path is model + fast at most), so attaching them creates dead picker rows.
++    const parameterizedBases = new Set(
++        wires
++            .filter((entry) => isCursorAcpWireModelId(entry.modelId))
++            .map((entry) => cursorModelBaseId(entry.modelId))
++            .filter((base) => base.length > 0)
++    );
++    const filtered = filterCliSkusForWireBases(
++        mergeCliModelSkus(response.cliModelSkus ?? [], [...cliSkus]),
++        wires
++    ).filter((entry) => {
++        const modelId = entry.modelId.trim();
++        const base = cursorCliSkuBaseId(modelId);
++        return modelId === base || parameterizedBases.has(base);
++    });
++    if (filtered.length === 0) {
++        return response.cliModelSkus?.length
++            ? { ...response, cliModelSkus: undefined }
++            : response;
+     }
+-    if (merged.length === (response.cliModelSkus?.length ?? 0)) {
++    if (
++        filtered.length === (response.cliModelSkus?.length ?? 0)
++        && filtered.every((entry, index) => entry.modelId === response.cliModelSkus?.[index]?.modelId)
++    ) {
+         return response;
+     }
+-    return { ...response, cliModelSkus: merged };
++    return { ...response, cliModelSkus: filtered };
+ }
+ 
+ async function enrichCursorModelsWithCliSkus(
+     response: ListCursorModelsResponse
+ ): Promise<ListCursorModelsResponse> {
+-    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpWireModelId(entry.modelId));
++    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpCatalogModelId(entry.modelId));
+     if (wires.length === 0) {
+         return response;
+     }
+@@ -122,6 +144,11 @@ async function enrichCursorModelsWithCliSkus(
+ 
+ export type ListCursorModelsResponse = CursorModelsResponse;
+ 
++function responseHasParameterizedWireIds(response: ListCursorModelsResponse): boolean {
++    // CLI `--list-models` returns bare/SKU slugs; only treat bracket wires as an ACP catalog.
++    return (response.availableModels ?? []).some((model) => isCursorAcpWireModelId(model.modelId));
++}
++
+ interface CacheEntry {
+     expiresAt: number;
+     response: ListCursorModelsResponse;
+@@ -291,7 +318,8 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
+             let probeResponse: ListCursorModelsResponse | null = null;
+             if (!isAgentAcpTransportActive()) {
+                 probeResponse = await runCursorModelProbe();
+-                if (cursorProbeResponseHasWireCatalog(probeResponse)) {
++                // Never promote CLI `--list-models` slug catalogs into the ACP wire cache.
++                if (responseHasParameterizedWireIds(probeResponse)) {
+                     return applyInMemoryCache(probeResponse);
+                 }
+             }
+diff --git a/shared/src/cursorCliSku.test.ts b/shared/src/cursorCliSku.test.ts
+index 0734a8c7..91c7f344 100644
+--- a/shared/src/cursorCliSku.test.ts
++++ b/shared/src/cursorCliSku.test.ts
+@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
+ import {
+     cursorCliSkuBaseId,
+     findBestCliSkuForAcpWire,
++    isCursorAcpCatalogModelId,
+     isCursorAcpWireModelId,
++    isCursorCliSkuVariantId,
+     matchCliSkuToAcpWireId,
+     parseCursorAvailableModelsFromRejection,
+     remapStaleCursorModelId
+@@ -197,8 +199,58 @@ describe('round-trip (regression for #883: "selected but no response")', () => {
+ });
+ 
+ describe('isCursorAcpWireModelId', () => {
+-    it('detects wire ids', () => {
++    it('detects parameterized wire ids only', () => {
+         expect(isCursorAcpWireModelId('gpt-5.5[fast=false]')).toBe(true);
++        expect(isCursorAcpWireModelId('default[]')).toBe(true);
++        expect(isCursorAcpWireModelId('composer-2.5')).toBe(false);
+         expect(isCursorAcpWireModelId('gpt-5.5-high-fast')).toBe(false);
+     });
+ });
++
++describe('isCursorCliSkuVariantId', () => {
++    it('detects effort/speed CLI SKU slugs', () => {
++        expect(isCursorCliSkuVariantId('gpt-5.5-high-fast')).toBe(true);
++        expect(isCursorCliSkuVariantId('composer-2.5-fast')).toBe(true);
++        expect(isCursorCliSkuVariantId('claude-opus-4-8-thinking-high-fast')).toBe(true);
++        expect(isCursorCliSkuVariantId('composer-2.5')).toBe(false);
++        expect(isCursorCliSkuVariantId('composer-2.5[fast=true]')).toBe(false);
++    });
++});
++
++describe('isCursorAcpCatalogModelId', () => {
++    it('accepts parameterized wires and bare non-default ACP bases', () => {
++        expect(isCursorAcpCatalogModelId('composer-2.5[fast=false]')).toBe(true);
++        expect(isCursorAcpCatalogModelId('default[]')).toBe(true);
++        expect(isCursorAcpCatalogModelId('composer-2.5')).toBe(true);
++        expect(isCursorAcpCatalogModelId('claude-opus-4-8')).toBe(true);
++    });
++
++    it('rejects CLI effort/speed SKUs and default tokens', () => {
++        expect(isCursorAcpCatalogModelId('gpt-5.5-high-fast')).toBe(false);
++        expect(isCursorAcpCatalogModelId('composer-2.5-fast')).toBe(false);
++        expect(isCursorAcpCatalogModelId('default')).toBe(false);
++        expect(isCursorAcpCatalogModelId('auto')).toBe(false);
++        expect(isCursorAcpCatalogModelId('')).toBe(false);
++    });
++});
++
++describe('matchCliSkuToAcpWireId with bare ACP catalog (#1129)', () => {
++    it('maps base SKUs onto bare ACP ids but rejects suffixed variants', () => {
++        const bare = [{ modelId: 'composer-2.5' }, { modelId: 'gpt-5.5' }];
++        expect(matchCliSkuToAcpWireId('composer-2.5', bare)).toBe('composer-2.5');
++        expect(matchCliSkuToAcpWireId('gpt-5.5', bare)).toBe('gpt-5.5');
++        expect(matchCliSkuToAcpWireId('composer-2.5-fast', bare)).toBeNull();
++        expect(matchCliSkuToAcpWireId('gpt-5.5-high-fast', bare)).toBeNull();
++        expect(matchCliSkuToAcpWireId('gpt-5.5-medium', bare)).toBeNull();
++    });
++
++    it('still maps suffixed SKUs when parameterized ACP wires exist', () => {
++        const wires = [
++            { modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]' },
++            { modelId: 'gpt-5.5[context=272k,reasoning=high,fast=true]' }
++        ];
++        expect(matchCliSkuToAcpWireId('gpt-5.5-high-fast', wires)).toBe(
++            'gpt-5.5[context=272k,reasoning=high,fast=true]'
++        );
++    });
++});
+diff --git a/shared/src/cursorCliSku.ts b/shared/src/cursorCliSku.ts
+index 088dc3ae..c199f7fc 100644
+--- a/shared/src/cursorCliSku.ts
++++ b/shared/src/cursorCliSku.ts
+@@ -8,7 +8,7 @@ export function resolveCursorLegacyModelBase(baseId: string): string {
+     return CURSOR_LEGACY_MODEL_BASE_ALIASES[trimmed] ?? trimmed;
+ }
+ 
+-/** ACP wire ids use bracket params; CLI `agent --list-models` slugs do not. */
++/** ACP parameterized wire ids use bracket params; CLI `agent --list-models` slugs do not. */
+ export function isCursorAcpWireModelId(modelId: string): boolean {
+     const trimmed = modelId.trim();
+     return trimmed === 'default[]' || trimmed.includes('[');
+@@ -61,6 +61,41 @@ export function cursorCliSkuBaseId(slug: string): string {
+     return base;
+ }
+ 
++/**
++ * CLI probe SKUs that carry effort/speed suffixes (e.g. `gpt-5.5-high-fast`).
++ * Base-only slugs like `composer-2.5` are not variant SKUs.
++ */
++export function isCursorCliSkuVariantId(modelId: string): boolean {
++    const trimmed = modelId.trim();
++    if (!trimmed || isCursorAcpWireModelId(trimmed)) {
++        return false;
++    }
++    return cursorCliSkuBaseId(trimmed) !== trimmed;
++}
++
++/**
++ * Picker/catalog-eligible ACP model ids.
++ * Accepts parameterized wires and bare non-default ACP bases (current Cursor ACP).
++ * Rejects CLI effort/speed SKU slugs so they stay variant rows, not top-level bases.
++ */
++export function isCursorAcpCatalogModelId(modelId: string): boolean {
++    const trimmed = modelId.trim();
++    if (!trimmed) {
++        return false;
++    }
++    const lower = trimmed.toLowerCase();
++    if (lower === 'auto' || lower === 'default') {
++        return false;
++    }
++    if (isCursorAcpWireModelId(trimmed)) {
++        return true;
++    }
++    if (isCursorCliSkuVariantId(trimmed)) {
++        return false;
++    }
++    return true;
++}
++
+ export function parseCursorWireParams(modelId: string): Record<string, string> {
+     const variant = modelId.includes('[') ? modelId.slice(modelId.indexOf('[') + 1).replace(/\]$/, '') : '';
+     if (!variant) {
+@@ -313,11 +348,17 @@ export function matchCliSkuToAcpWireId(
+ 
+     const skuBase = cursorCliSkuBaseId(trimmed);
+     const wires = available.filter(
+-        (entry) => isCursorAcpWireModelId(entry.modelId) && cursorModelBaseId(entry.modelId) === skuBase
++        (entry) => isCursorAcpCatalogModelId(entry.modelId) && cursorModelBaseId(entry.modelId) === skuBase
+     );
+     if (wires.length === 0) {
+         return null;
+     }
++    // Suffixed SKUs must not collapse onto a bare-only ACP catalog — those rows
++    // cannot express effort/speed (apply is model + fast on parameterized wires).
++    const hasParameterizedWire = wires.some((entry) => isCursorAcpWireModelId(entry.modelId));
++    if (isCursorCliSkuVariantId(trimmed) && !hasParameterizedWire) {
++        return null;
++    }
+     if (wires.length === 1) {
+         return wires[0].modelId;
+     }
+diff --git a/web/src/components/AssistantChat/HappyComposer.modelEffort.test.tsx b/web/src/components/AssistantChat/HappyComposer.modelEffort.test.tsx
+index f9966d60..2aa0bbe0 100644
+--- a/web/src/components/AssistantChat/HappyComposer.modelEffort.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.modelEffort.test.tsx
+@@ -1,6 +1,9 @@
+ import { render, screen } from '@testing-library/react';
+ import { describe, expect, it, vi } from 'vitest';
+-import { ModelEffortSettingsSection } from './HappyComposer';
++import {
++    ModelEffortSettingsSection,
++    resolveVisibleModelEffortSelectedValue
++} from './HappyComposer';
+ 
+ vi.mock('@/lib/use-translation', () => ({
+     useTranslation: () => ({
+@@ -8,6 +11,33 @@ vi.mock('@/lib/use-translation', () => ({
+     })
+ }));
+ 
++describe('resolveVisibleModelEffortSelectedValue', () => {
++    const newBaseOptions = [
++        { value: 'claude-opus-4-8', label: 'Opus' },
++        { value: 'claude-opus-4-8[fast=true]', label: 'Opus Fast' }
++    ];
++
++    it('keeps session variant when it is still among visible options', () => {
++        expect(resolveVisibleModelEffortSelectedValue({
++            options: newBaseOptions,
++            selectedModelVariant: 'claude-opus-4-8[fast=true]',
++            cursorDrillDownDefaultVariant: 'claude-opus-4-8',
++            model: 'claude-opus-4-8'
++        })).toBe('claude-opus-4-8[fast=true]');
++    });
++
++    it('ignores stale session variant after multi-variant base switch', () => {
++        // Previous base left selectedModelVariant=composer-2.5-fast; new drill-down
++        // already applied claude-opus-4-8 as default while parent state lags.
++        expect(resolveVisibleModelEffortSelectedValue({
++            options: newBaseOptions,
++            selectedModelVariant: 'composer-2.5-fast',
++            cursorDrillDownDefaultVariant: 'claude-opus-4-8',
++            model: 'composer-2.5'
++        })).toBe('claude-opus-4-8');
++    });
++});
++
+ describe('ModelEffortSettingsSection', () => {
+     it('renders Cursor variant choices and marks the selected variant', () => {
+         render(
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 186c281f..a4976e65 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -143,20 +143,77 @@ export function useRichComposerBridge(
+ 
+ const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
+ 
++/**
++ * Prefer session `selectedModelVariant` only when it is still among the rows
++ * currently shown. After a multi-variant base switch, session state can lag
++ * while `cursorDrillDownDefaultVariant` already points at the new base's
++ * default — stale variants must not win highlight.
++ */
++export function resolveVisibleModelEffortSelectedValue(args: {
++    options: ReadonlyArray<{ value: string }> | null | undefined
++    selectedModelVariant?: string | null
++    cursorDrillDownDefaultVariant?: string | null
++    model?: string | null
++}): string | null | undefined {
++    const {
++        options,
++        selectedModelVariant,
++        cursorDrillDownDefaultVariant,
++        model
++    } = args
++    const selectedVisibleVariant = options?.some((option) => option.value === selectedModelVariant)
++        ? selectedModelVariant
++        : null
++    return selectedVisibleVariant ?? cursorDrillDownDefaultVariant ?? model
++}
++
+ export function ModelEffortSettingsSection(props: {
+     agentFlavor?: string | null
+     options: Array<{ value: string; label: string }>
+     selectedValue: string | null | undefined
+     controlsDisabled: boolean
+     onChange: (value: string) => void
++    /** Override the section title (e.g. Cursor base id during nested drill-down). */
++    title?: string | null
++    /** When set, show a back control above the title (Cursor nested variant drill-down). */
++    onBack?: () => void
++    backLabel?: string
+ }) {
+     const { t } = useTranslation()
+-    const { agentFlavor, options, selectedValue, controlsDisabled, onChange } = props
++    const {
++        agentFlavor,
++        options,
++        selectedValue,
++        controlsDisabled,
++        onChange,
++        title,
++        onBack,
++        backLabel
++    } = props
++
++    const heading = title
++        ?? (agentFlavor === 'cursor' ? t('misc.variant') : t('misc.effort'))
+ 
+     return (
+         <div className="py-2">
++            {onBack ? (
++                <button
++                    type="button"
++                    disabled={controlsDisabled}
++                    className={`flex w-full items-center px-3 pb-1 text-left text-xs text-[var(--app-hint)] transition-colors ${
++                        controlsDisabled
++                            ? 'cursor-not-allowed opacity-50'
++                            : 'cursor-pointer hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)]'
++                    }`}
++                    onClick={onBack}
++                    onMouseDown={(e) => e.preventDefault()}
++                    aria-label={backLabel ?? t('misc.backToModelList')}
++                >
++                    {backLabel ?? t('misc.backToModelList')}
++                </button>
++            ) : null}
+             <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+-                {agentFlavor === 'cursor' ? t('misc.variant') : t('misc.effort')}
++                {heading}
+             </div>
+             {options.map((option) => {
+                 const isSelected = selectedValue === option.value
+@@ -228,6 +285,8 @@ export function HappyComposer(props: {
+     selectedModelVariant?: string | null
+     /** Cursor: effort/variant wire ids for the selected base model. */
+     modelEffortOptions?: Array<{ value: string; label: string }>
++    /** Cursor: variant rows for a base key (used for in-place drill-down before parent re-renders). */
++    resolveModelVariantsForBase?: (baseKey: string) => readonly { value: string; label: string }[]
+     onCollaborationModeChange?: (mode: CodexCollaborationMode) => void
+     onPermissionModeChange?: (mode: PermissionMode) => void
+     onModelChange?: (model: { provider: string; modelId: string } | string | null) => void
+@@ -297,6 +356,7 @@ export function HappyComposer(props: {
+         selectedModelBase,
+         selectedModelVariant,
+         modelEffortOptions,
++        resolveModelVariantsForBase,
+         onCollaborationModeChange,
+         onPermissionModeChange,
+         onModelChange,
+@@ -763,6 +823,30 @@ export function HappyComposer(props: {
+         () => getModelOptionsForFlavor(agentFlavor, model, availableModelOptions),
+         [agentFlavor, model, availableModelOptions]
+     )
++
++    // Cursor dual picker: after choosing a multi-variant base, drill into variant
++    // rows in-place (picker stays open). Variant pick dismisses; back returns to
++    // the full base list.
++    const [cursorDrillDownBase, setCursorDrillDownBase] = useState<string | null>(null)
++    const [cursorDrillDownDefaultVariant, setCursorDrillDownDefaultVariant] = useState<string | null>(null)
++    useEffect(() => {
++        if (!selectedModelBase || selectedModelBase === 'auto') {
++            setCursorDrillDownBase(null)
++            setCursorDrillDownDefaultVariant(null)
++        }
++    }, [selectedModelBase])
++
++    const cursorDrillDownVariantOptions = useMemo(() => {
++        if (!cursorDrillDownBase || !resolveModelVariantsForBase) {
++            return null
++        }
++        const options = resolveModelVariantsForBase(cursorDrillDownBase)
++        return options.length > 1 ? options : null
++    }, [cursorDrillDownBase, resolveModelVariantsForBase])
++
++    const cursorVariantDrillDownActive = agentFlavor === 'cursor' && cursorDrillDownVariantOptions !== null
++
++    const visibleModelEffortOptions = cursorDrillDownVariantOptions ?? modelEffortOptions
+     const codexReasoningEffortOptions = useMemo(
+         () => agentFlavor === 'codex' || agentFlavor === 'opencode'
+             ? getCodexComposerReasoningEffortOptions(
+@@ -1029,9 +1113,73 @@ export function HappyComposer(props: {
+ 
+     const handleSettingsToggle = useCallback(() => {
+         haptic('light')
+-        setShowSettings(prev => !prev)
++        setShowSettings((prev) => {
++            if (prev) {
++                setCursorDrillDownBase(null)
++                setCursorDrillDownDefaultVariant(null)
++            }
++            return !prev
++        })
+     }, [haptic])
+ 
++    const clearCursorDrillDown = useCallback(() => {
++        setCursorDrillDownBase(null)
++        setCursorDrillDownDefaultVariant(null)
++    }, [])
++
++    const dismissSettings = useCallback(() => {
++        clearCursorDrillDown()
++        setShowSettings(false)
++    }, [clearCursorDrillDown])
++
++    const handleModelChange = useCallback((nextModel: { provider: string; modelId: string } | string | null) => {
++        if (!onModelChange || controlsDisabled) return
++        onModelChange(nextModel)
++        dismissSettings()
++        haptic('light')
++    }, [onModelChange, controlsDisabled, haptic, dismissSettings])
++
++    const handleCursorModelRowClick = useCallback((nextModel: string | null) => {
++        if (!onModelChange || controlsDisabled) return
++
++        const variants = nextModel && nextModel !== 'auto' && resolveModelVariantsForBase
++            ? resolveModelVariantsForBase(nextModel)
++            : []
++
++        const isMultiVariantBasePick = selectedModelBase !== undefined
++            && nextModel !== null
++            && nextModel !== 'auto'
++            && !nextModel.includes('[')
++            && variants.length > 1
++
++        if (isMultiVariantBasePick) {
++            setCursorDrillDownBase(nextModel)
++            setCursorDrillDownDefaultVariant(variants[0]?.value ?? null)
++            onModelChange(nextModel)
++            haptic('light')
++            return
++        }
++
++        onModelChange(nextModel)
++        dismissSettings()
++        haptic('light')
++    }, [
++        onModelChange,
++        controlsDisabled,
++        resolveModelVariantsForBase,
++        selectedModelBase,
++        haptic,
++        dismissSettings
++    ])
++
++    const handleModelEffortChange = useCallback((nextWireId: string | null) => {
++        const handler = onModelEffortChange ?? onModelChange
++        if (!handler || controlsDisabled) return
++        handler(nextWireId)
++        dismissSettings()
++        haptic('light')
++    }, [onModelEffortChange, onModelChange, controlsDisabled, haptic, dismissSettings])
++
+     const handleSubmit = useCallback((event?: ReactFormEvent<HTMLFormElement>) => {
+         event?.preventDefault()
+         if (!attachmentsReady) {
+@@ -1043,52 +1191,37 @@ export function HappyComposer(props: {
+     const handlePermissionChange = useCallback((mode: PermissionMode) => {
+         if (!onPermissionModeChange || controlsDisabled) return
+         onPermissionModeChange(mode)
+-        setShowSettings(false)
++        dismissSettings()
+         haptic('light')
+-    }, [onPermissionModeChange, controlsDisabled, haptic])
++    }, [onPermissionModeChange, controlsDisabled, haptic, dismissSettings])
+ 
+     const handleCollaborationChange = useCallback((mode: CodexCollaborationMode) => {
+         if (!onCollaborationModeChange || controlsDisabled) return
+         onCollaborationModeChange(mode)
+-        setShowSettings(false)
++        dismissSettings()
+         haptic('light')
+-    }, [onCollaborationModeChange, controlsDisabled, haptic])
+-
+-    const handleModelChange = useCallback((nextModel: { provider: string; modelId: string } | string | null) => {
+-        if (!onModelChange || controlsDisabled) return
+-        onModelChange(nextModel)
+-        setShowSettings(false)
+-        haptic('light')
+-    }, [onModelChange, controlsDisabled, haptic])
+-
+-    const handleModelEffortChange = useCallback((nextWireId: string | null) => {
+-        const handler = onModelEffortChange ?? onModelChange
+-        if (!handler || controlsDisabled) return
+-        handler(nextWireId)
+-        setShowSettings(false)
+-        haptic('light')
+-    }, [onModelEffortChange, onModelChange, controlsDisabled, haptic])
++    }, [onCollaborationModeChange, controlsDisabled, haptic, dismissSettings])
+ 
+     const handleModelReasoningEffortChange = useCallback((nextModelReasoningEffort: string | null) => {
+         if (!onModelReasoningEffortChange || controlsDisabled) return
+         onModelReasoningEffortChange(nextModelReasoningEffort)
+-        setShowSettings(false)
++        dismissSettings()
+         haptic('light')
+-    }, [onModelReasoningEffortChange, controlsDisabled, haptic])
++    }, [onModelReasoningEffortChange, controlsDisabled, haptic, dismissSettings])
+ 
+     const handleEffortChange = useCallback((nextEffort: string | null) => {
+         if (!onEffortChange || controlsDisabled) return
+         onEffortChange(nextEffort)
+-        setShowSettings(false)
++        dismissSettings()
+         haptic('light')
+-    }, [onEffortChange, controlsDisabled, haptic])
++    }, [onEffortChange, controlsDisabled, haptic, dismissSettings])
+ 
+     const handleServiceTierChange = useCallback((nextServiceTier: string | null) => {
+         if (!onServiceTierChange || controlsDisabled) return
+         onServiceTierChange(nextServiceTier)
+-        setShowSettings(false)
++        dismissSettings()
+         haptic('light')
+-    }, [onServiceTierChange, controlsDisabled, haptic])
++    }, [onServiceTierChange, controlsDisabled, haptic, dismissSettings])
+ 
+     // 'standard' (not null) is the explicit Fast-off choice so it persists
+     // distinctly from an untouched/account-default session.
+@@ -1100,11 +1233,14 @@ export function HappyComposer(props: {
+     const showCollaborationSettings = Boolean(onCollaborationModeChange && collaborationModeOptions.length > 0)
+     const showPermissionSettings = Boolean(onPermissionModeChange && permissionModeOptions.length > 0)
+     const showModelSettings = Boolean(onModelChange && supportsModelChange(agentFlavor) && (piModels && piModels.length > 0 || modelOptions.length > 0))
+-    const showModelEffortSettings = Boolean(
+-        (onModelEffortChange ?? onModelChange)
+-        && modelEffortOptions
+-        && modelEffortOptions.length > 0
+-    )
++        && !cursorVariantDrillDownActive
++    const showModelEffortSettings = cursorVariantDrillDownActive
++        ? Boolean((onModelEffortChange ?? onModelChange) && visibleModelEffortOptions && visibleModelEffortOptions.length > 0)
++        : Boolean(
++            (onModelEffortChange ?? onModelChange)
++            && modelEffortOptions
++            && modelEffortOptions.length > 1
++        )
+     const showModelReasoningEffortSettings = Boolean(onModelReasoningEffortChange && codexReasoningEffortOptions.length > 0)
+     // For Pi: hide effort when selected model explicitly has reasoning: false
+     const piEffortHidden = piModels && selectedPiModel && selectedPiModel.reasoning === false
+@@ -1154,10 +1290,11 @@ export function HappyComposer(props: {
+     const piHasModels = piModels && piModels.length > 0
+ 
+     const closeAllPanels = useCallback(() => {
++        clearCursorDrillDown()
+         setShowSettings(false)
+         setShowPiModelPanel(false)
+         setShowPiThinkingPanel(false)
+-    }, [])
++    }, [clearCursorDrillDown])
+ 
+     const handlePiModelToggle = useCallback(() => {
+         if (controlsDisabled) return
+@@ -1366,7 +1503,13 @@ export function HappyComposer(props: {
+                                                     ? 'cursor-not-allowed opacity-50'
+                                                     : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                             }`}
+-                                            onClick={() => handleModelChange(option.value)}
++                                            onClick={() => {
++                                                if (resolveModelVariantsForBase) {
++                                                    handleCursorModelRowClick(option.value)
++                                                } else {
++                                                    handleModelChange(option.value)
++                                                }
++                                            }}
+                                             onMouseDown={(e) => e.preventDefault()}
+                                         >
+                                             <div
+@@ -1397,10 +1540,19 @@ export function HappyComposer(props: {
+                         {showModelEffortSettings ? (
+                             <ModelEffortSettingsSection
+                                 agentFlavor={agentFlavor}
+-                                options={modelEffortOptions!}
+-                                selectedValue={selectedModelVariant ?? model}
++                                options={[...(visibleModelEffortOptions ?? [])]}
++                                selectedValue={resolveVisibleModelEffortSelectedValue({
++                                    options: visibleModelEffortOptions,
++                                    selectedModelVariant,
++                                    cursorDrillDownDefaultVariant,
++                                    model
++                                })}
+                                 controlsDisabled={controlsDisabled}
+                                 onChange={handleModelEffortChange}
++                                title={cursorVariantDrillDownActive && cursorDrillDownBase
++                                    ? cursorDrillDownBase
++                                    : undefined}
++                                onBack={cursorVariantDrillDownActive ? clearCursorDrillDown : undefined}
+                             />
+                         ) : null}
+ 
+@@ -1408,10 +1560,6 @@ export function HappyComposer(props: {
+                             <div className="mx-3 h-px bg-[var(--app-divider)]" />
+                         ) : null}
+ 
+-                        {(showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings) && showEffortSettings ? (
+-                            <div className="mx-3 h-px bg-[var(--app-divider)]" />
+-                        ) : null}
+-
+                         {showModelReasoningEffortSettings ? (
+                             <div className="py-2">
+                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+@@ -1562,12 +1710,18 @@ export function HappyComposer(props: {
+         showPermissionSettings,
+         showModelSettings,
+         showModelEffortSettings,
++        visibleModelEffortOptions,
++        cursorVariantDrillDownActive,
++        cursorDrillDownBase,
++        cursorDrillDownDefaultVariant,
+         modelEffortOptions,
++        piModelGroups,
+         selectedModelBase,
+         selectedModelVariant,
+         showModelReasoningEffortSettings,
+         showEffortSettings,
+         showFastModeSettings,
++        agentFlavor,
+         modelOptions,
+         codexReasoningEffortOptions,
+         claudeEffortOptions,
+@@ -1586,9 +1740,13 @@ export function HappyComposer(props: {
+         handleCollaborationChange,
+         handlePermissionChange,
+         handleModelChange,
++        handleCursorModelRowClick,
++        handleModelEffortChange,
+         handleModelReasoningEffortChange,
+         handleEffortChange,
+         handleServiceTierChange,
++        clearCursorDrillDown,
++        resolveModelVariantsForBase,
+         handleSuggestionSelect,
+         overlayPositionClass,
+         t
+diff --git a/web/src/components/NewSession/newSessionCursorModels.test.ts b/web/src/components/NewSession/newSessionCursorModels.test.ts
+index 1c574074..0851325d 100644
+--- a/web/src/components/NewSession/newSessionCursorModels.test.ts
++++ b/web/src/components/NewSession/newSessionCursorModels.test.ts
+@@ -19,7 +19,7 @@ const acpModels = [
+ ] as const
+ 
+ describe('shouldShowCursorModelsUnavailable', () => {
+-    it('shows hint when cursor agent has no ACP wire models and is not loading', () => {
++    it('shows hint when cursor agent has no ACP catalog models and is not loading', () => {
+         expect(shouldShowCursorModelsUnavailable({
+             agent: 'cursor',
+             isLoading: false,
+@@ -30,10 +30,19 @@ describe('shouldShowCursorModelsUnavailable', () => {
+             agent: 'cursor',
+             isLoading: false,
+             error: null,
+-            availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }]
++            availableModels: [{ modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' }]
+         })).toBe(true)
+     })
+ 
++    it('hides hint when bare ACP bases are present (#1129)', () => {
++        expect(shouldShowCursorModelsUnavailable({
++            agent: 'cursor',
++            isLoading: false,
++            error: null,
++            availableModels: [{ modelId: 'composer-2.5', name: 'Composer 2.5' }]
++        })).toBe(false)
++    })
++
+     it('hides hint while loading or on error', () => {
+         expect(shouldShowCursorModelsUnavailable({
+             agent: 'cursor',
+@@ -69,6 +78,17 @@ describe('pickCursorModelsForPicker', () => {
+             { modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' },
+         ])
+     })
++
++    it('keeps bare ACP bases and drops CLI effort/speed SKUs', () => {
++        const mixed = [
++            { modelId: 'composer-2.5', name: 'Composer 2.5' },
++            { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
++            { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
++        ]
++        expect(pickCursorModelsForPicker(mixed)).toEqual([
++            { modelId: 'composer-2.5', name: 'Composer 2.5' },
++        ])
++    })
+ })
+ 
+ describe('shouldShowNewSessionCursorVariantPicker', () => {
+@@ -147,20 +167,38 @@ describe('new session cursor select values', () => {
+ })
+ 
+ describe('probe slug catalog (New Session cold start)', () => {
+-    it('does not inject CLI slug current model when machine list has no wire ids', () => {
++    it('keeps bare ACP/base ids and ignores CLI effort SKUs as top-level rows', () => {
+         const probeOnly = [
+             { modelId: 'composer-2.5', name: 'Composer 2.5' },
+             { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
+         ]
+         const picker = buildNewSessionCursorPickerState(probeOnly, 'composer-2.5')
+         expect(picker.mode).toBe('flat')
+-        expect(picker.modelOptions).toEqual([{ value: 'auto', label: 'Auto' }])
++        expect(picker.modelOptions).toEqual([
++            { value: 'auto', label: 'Auto' },
++            { value: 'composer-2.5', label: 'composer-2.5' },
++        ])
+         expect(picker.effortOptions).toEqual([])
+         expect(shouldShowCursorModelsUnavailable({
+             agent: 'cursor',
+             isLoading: false,
+             error: null,
+             availableModels: [...probeOnly]
++        })).toBe(false)
++    })
++
++    it('shows unavailable when only CLI effort/speed SKUs are present', () => {
++        const skuOnly = [
++            { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
++            { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
++        ]
++        const picker = buildNewSessionCursorPickerState(skuOnly, 'composer-2.5-fast')
++        expect(picker.modelOptions).toEqual([{ value: 'auto', label: 'Auto' }])
++        expect(shouldShowCursorModelsUnavailable({
++            agent: 'cursor',
++            isLoading: false,
++            error: null,
++            availableModels: [...skuOnly]
+         })).toBe(true)
+     })
+ })
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 0b1fe2d4..0a878644 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -27,6 +27,7 @@ import {
+     getCodexModelReasoningEfforts,
+     supportsCodexReasoningEffort
+ } from '@/lib/codexModelCapabilities'
++import { createSerialAsyncQueue } from '@/lib/serialAsyncQueue'
+ import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
+ import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+@@ -79,7 +80,7 @@ import {
+     resolveSessionCursorModelChange,
+     resolveSessionCursorVariantSelectValue
+ } from '@/lib/sessionChatCursorModel'
+-import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
++import { buildCursorEffortPickerOptionsWithDefaultFirst } from '@/lib/cursorModelOptions'
+ import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
+ import { useGrokModels } from '@/hooks/queries/useGrokModels'
+ import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
+@@ -510,6 +511,9 @@ function SessionChatInner(props: SessionChatProps) {
+     }, [props.initialOutlineOpen, props.onInitialOutlineConsumed])
+ 
+     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
++    // Serialize Cursor setModel RPCs so drill-down default apply cannot finish
++    // after a later explicit variant click and overwrite it.
++    const enqueueCursorModelApply = useMemo(() => createSerialAsyncQueue(), [])
+     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
+     const scratchlist = useHubScratchlist(props.session.id, props.api)
+     const { sessions: allSessions } = useSessions(props.api)
+@@ -830,11 +834,18 @@ function SessionChatInner(props: SessionChatProps) {
+     }, [agentFlavor, props.session.model, cursorPicker])
+ 
+     const cursorSelectedBaseValue = useMemo(() => (
+-        agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
++        agentFlavor === 'cursor' && cursorPicker
+             ? resolveSessionCursorBaseSelectValue(cursorPicker, cursorSelectedBase)
+             : undefined
+     ), [agentFlavor, cursorPicker, cursorSelectedBase])
+ 
++    const resolveCursorVariantsForBase = useCallback((baseKey: string) => {
++        if (!cursorPicker) {
++            return []
++        }
++        return buildCursorEffortPickerOptionsWithDefaultFirst(baseKey, cursorPicker.catalog)
++    }, [cursorPicker])
++
+     const cursorModelEffortOptions = useMemo(() => {
+         if (agentFlavor !== 'cursor' || !cursorPicker) {
+             return undefined
+@@ -845,7 +856,10 @@ function SessionChatInner(props: SessionChatProps) {
+         const baseKey = cursorSelectedBaseValue && cursorSelectedBaseValue !== 'auto'
+             ? cursorSelectedBaseValue
+             : cursorPicker.baseKey
+-        return buildCursorEffortPickerOptions(resolveCursorVariantOptions(baseKey ?? null, cursorPicker.catalog))
++        if (!baseKey || baseKey === 'auto') {
++            return undefined
++        }
++        return buildCursorEffortPickerOptionsWithDefaultFirst(baseKey, cursorPicker.catalog)
+     }, [agentFlavor, cursorPicker, cursorSelectedBaseValue])
+ 
+     const cursorVariantSelectValue = useMemo(() => (
+@@ -1168,7 +1182,7 @@ function SessionChatInner(props: SessionChatProps) {
+ 
+     const handleCursorBaseModelChange = useCallback(async (baseKey: string | null) => {
+         if (!cursorPicker) {
+-            await handleModelChange(baseKey)
++            await enqueueCursorModelApply(() => handleModelChange(baseKey))
+             return
+         }
+         const plan = resolveSessionCursorModelChange({
+@@ -1183,13 +1197,13 @@ function SessionChatInner(props: SessionChatProps) {
+         }
+         setCursorSelectedBase(plan.nextSelectedBase)
+         if (plan.shouldApply) {
+-            await handleModelChange(plan.wireId)
++            await enqueueCursorModelApply(() => handleModelChange(plan.wireId))
+         }
+-    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
++    }, [cursorPicker, cursorSelectedBase, enqueueCursorModelApply, handleModelChange, props.session.model])
+ 
+     const handleCursorEffortChange = useCallback(async (wireId: string | null) => {
+         if (!cursorPicker) {
+-            await handleModelChange(wireId)
++            await enqueueCursorModelApply(() => handleModelChange(wireId))
+             return
+         }
+         const plan = resolveSessionCursorModelChange({
+@@ -1204,8 +1218,8 @@ function SessionChatInner(props: SessionChatProps) {
+             return
+         }
+         setCursorSelectedBase(plan.nextSelectedBase)
+-        await handleModelChange(plan.wireId)
+-    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
++        await enqueueCursorModelApply(() => handleModelChange(plan.wireId))
++    }, [cursorPicker, cursorSelectedBase, enqueueCursorModelApply, handleModelChange, props.session.model])
+ 
+     const handleModelReasoningEffortChange = useCallback(async (modelReasoningEffort: string | null) => {
+         try {
+@@ -1556,7 +1570,7 @@ function SessionChatInner(props: SessionChatProps) {
+                         }
+                         onPermissionModeChange={handlePermissionModeChange}
+                         selectedModelBase={
+-                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
++                            agentFlavor === 'cursor' && cursorPicker
+                                 ? cursorSelectedBaseValue
+                                 : undefined
+                         }
+@@ -1574,6 +1588,11 @@ function SessionChatInner(props: SessionChatProps) {
+                                 ? cursorModelEffortOptions
+                                 : undefined
+                         }
++                        resolveModelVariantsForBase={
++                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
++                                ? resolveCursorVariantsForBase
++                                : undefined
++                        }
+                         onModelChange={
+                             agentFlavor === 'codex'
+                                 ? (props.session.active && !controlledByUser && !codexModelsState.error ? handleModelChange : undefined)
+diff --git a/web/src/lib/cursorModelOptions.test.ts b/web/src/lib/cursorModelOptions.test.ts
+index 5690b064..ea6b654d 100644
+--- a/web/src/lib/cursorModelOptions.test.ts
++++ b/web/src/lib/cursorModelOptions.test.ts
+@@ -13,6 +13,7 @@ import {
+     cursorVariantDisambiguationSuffix,
+     cursorVariantLabel,
+     cursorVaryingWireParamKeys,
++    filterCursorModelOptionsForCompactView,
+     formatCursorModelPickerLabel,
+     parseCursorWireParams,
+     resolveCursorBaseKey,
+@@ -156,3 +157,44 @@ describe('picker labels and modes', () => {
+         expect(formatCursorModelPickerLabel('composer-2.5[fast=true]', 'ignored')).toBe('composer-2.5 · fast=true')
+     })
+ })
++
++describe('filterCursorModelOptionsForCompactView (iOS-style nested picker)', () => {
++    const options: { value: string | null; label: string }[] = [
++        { value: 'auto', label: 'Default' },
++        { value: 'claude-fable-5', label: 'claude-fable-5' },
++        { value: 'claude-opus-4-7', label: 'claude-opus-4-7' },
++        { value: 'composer-2.5', label: 'composer-2.5' },
++        { value: 'gpt-5.5', label: 'gpt-5.5' }
++    ]
++
++    it('passes the full list through when nothing or Default is selected', () => {
++        expect(filterCursorModelOptionsForCompactView(options, undefined)).toEqual(options)
++        expect(filterCursorModelOptionsForCompactView(options, null)).toEqual(options)
++        expect(filterCursorModelOptionsForCompactView(options, 'auto')).toEqual(options)
++    })
++
++    it('collapses to Default + the selected base when a non-Default base is picked', () => {
++        expect(filterCursorModelOptionsForCompactView(options, 'claude-fable-5')).toEqual([
++            { value: 'auto', label: 'Default' },
++            { value: 'claude-fable-5', label: 'claude-fable-5' }
++        ])
++    })
++
++    it('treats `null`-valued Default rows as the Default passthrough', () => {
++        const withNullDefault: { value: string | null; label: string }[] = [
++            { value: null, label: 'Default' },
++            { value: 'composer-2.5', label: 'composer-2.5' },
++            { value: 'gpt-5.5', label: 'gpt-5.5' }
++        ]
++        expect(filterCursorModelOptionsForCompactView(withNullDefault, 'gpt-5.5')).toEqual([
++            { value: null, label: 'Default' },
++            { value: 'gpt-5.5', label: 'gpt-5.5' }
++        ])
++    })
++
++    it('returns just Default when the selected base is not in the option set (catalog drift)', () => {
++        expect(filterCursorModelOptionsForCompactView(options, 'phantom-model-9')).toEqual([
++            { value: 'auto', label: 'Default' }
++        ])
++    })
++})
+diff --git a/web/src/lib/cursorModelOptions.ts b/web/src/lib/cursorModelOptions.ts
+index d871a13e..6bf17986 100644
+--- a/web/src/lib/cursorModelOptions.ts
++++ b/web/src/lib/cursorModelOptions.ts
+@@ -1,4 +1,9 @@
+-import { cursorCliSkuBaseId } from '@hapi/protocol'
++import {
++    cursorCliSkuBaseId,
++    findBestCliSkuForAcpWire,
++    isCursorAcpCatalogModelId,
++    isCursorAcpWireModelId as isSharedCursorAcpWireModelId
++} from '@hapi/protocol'
+ import type { CursorModelSummary } from '@/types/api'
+ 
+ export type CursorModelOption = { value: string | null; label: string }
+@@ -130,6 +135,57 @@ export function buildCursorEffortPickerOptions(
+     }))
+ }
+ 
++/**
++ * Default variant for a base: the first ACP wire row in catalog order, mapped to
++ * the best CLI sku when sku rows replace raw ACP wires in the picker.
++ */
++export function resolveDefaultCursorVariantWire(
++    baseKey: string,
++    catalog: CursorModelCatalog
++): string | null {
++    const pickerVariants = resolveCursorVariantOptions(baseKey, catalog)
++    if (pickerVariants.length === 0) {
++        return null
++    }
++    if (pickerVariants.length === 1) {
++        return pickerVariants[0].wireId
++    }
++
++    const catalogVariants = catalog.variantsByBase.get(baseKey) ?? []
++    const defaultAcp = catalogVariants.find((entry) => isCursorAcpWireModelId(entry.wireId))
++        ?? catalogVariants[0]
++    if (pickerVariants.some((entry) => entry.wireId === defaultAcp.wireId)) {
++        return defaultAcp.wireId
++    }
++
++    const bestSku = findBestCliSkuForAcpWire(
++        defaultAcp.wireId,
++        pickerVariants.map((entry) => entry.wireId)
++    )
++    return bestSku ?? pickerVariants[0].wireId
++}
++
++/** Variant rows with the base default first (for drill-down picker step). */
++export function buildCursorEffortPickerOptionsWithDefaultFirst(
++    baseKey: string,
++    catalog: CursorModelCatalog
++): Array<{ value: string; label: string }> {
++    const variants = resolveCursorVariantOptions(baseKey, catalog)
++    const options = buildCursorEffortPickerOptions(variants)
++    const defaultWire = resolveDefaultCursorVariantWire(baseKey, catalog)
++    if (!defaultWire) {
++        return options
++    }
++    const defaultOption = options.find((option) => option.value === defaultWire)
++    if (!defaultOption) {
++        return options
++    }
++    return [
++        defaultOption,
++        ...options.filter((option) => option.value !== defaultWire)
++    ]
++}
++
+ /** Raw suffix for compatibility with older callers/tests. */
+ export function cursorVariantDisambiguationSuffix(modelId: string): string {
+     return cursorVariantLabel(modelId)
+@@ -180,7 +236,7 @@ export function buildCursorModelCatalog(
+     }
+ 
+     const normalizedCurrent = normalizeCurrentModel(options?.currentModel)
+-    if (normalizedCurrent && isCursorAcpWireModelId(normalizedCurrent) && !wireToBase.has(normalizedCurrent)) {
++    if (normalizedCurrent && isCursorAcpCatalogModelId(normalizedCurrent) && !wireToBase.has(normalizedCurrent)) {
+         addWire(normalizedCurrent)
+     }
+ 
+@@ -280,10 +336,9 @@ export function cursorBaseHasMultipleVariants(
+     return (catalog.variantsByBase.get(baseKey)?.length ?? 0) > 1
+ }
+ 
+-/** ACP wire ids use bracket params; CLI probe slugs (e.g. gpt-5.5-high-fast) are not picker rows. */
++/** ACP parameterized wire ids use bracket params; re-export shared predicate. */
+ export function isCursorAcpWireModelId(modelId: string): boolean {
+-    const trimmed = modelId.trim()
+-    return trimmed === 'default[]' || trimmed.includes('[')
++    return isSharedCursorAcpWireModelId(modelId)
+ }
+ 
+ /** Dual pickers only when at least one base has multiple ACP wire ids. */
+@@ -337,3 +392,25 @@ export function formatCursorModelPickerLabel(modelId: string, _name?: string | n
+     const variant = cursorModelVariantId(modelId)
+     return variant ? `${base} · ${variant}` : base
+ }
++
++/**
++ * iOS-style "configure my model" view: when a non-Default base is selected, hide
++ * every other base row so the user sees Default + selected + (optional Variant
++ * section below). Caller appends a "Change model…" toggle to re-expand.
++ *
++ * Default-row passthrough recognizes both `'auto'` (the in-picker token) and
++ * `null` (the underlying base option value) so callers don't need to normalize.
++ */
++export function filterCursorModelOptionsForCompactView(
++    modelOptions: readonly { value: string | null; label: string }[],
++    selectedModelBase: string | null | undefined
++): readonly { value: string | null; label: string }[] {
++    if (!selectedModelBase || selectedModelBase === 'auto') {
++        return modelOptions
++    }
++    return modelOptions.filter(
++        (option) => option.value === null
++            || option.value === 'auto'
++            || option.value === selectedModelBase
++    )
++}
+diff --git a/web/src/lib/cursorPickerState.test.ts b/web/src/lib/cursorPickerState.test.ts
+index 25304827..e5ca4ae3 100644
+--- a/web/src/lib/cursorPickerState.test.ts
++++ b/web/src/lib/cursorPickerState.test.ts
+@@ -30,7 +30,7 @@ describe('mergeCursorModelSummaries', () => {
+         ])
+     })
+ 
+-    it('drops CLI probe slugs without bracket wire params', () => {
++    it('drops CLI effort/speed SKU slugs but keeps bare ACP bases', () => {
+         const merged = mergeCursorModelSummaries(
+             [{ modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]', name: 'gpt-5.5' }],
+             [
+@@ -39,7 +39,8 @@ describe('mergeCursorModelSummaries', () => {
+             ]
+         )
+         expect(merged.map((entry) => entry.modelId)).toEqual([
+-            'gpt-5.5[context=272k,reasoning=medium,fast=false]'
++            'gpt-5.5[context=272k,reasoning=medium,fast=false]',
++            'composer-2.5'
+         ])
+     })
+ })
+@@ -109,6 +110,96 @@ describe('buildCursorPickerState', () => {
+     })
+ })
+ 
++describe('live bare ACP catalog (#1129)', () => {
++    /** Live Cursor ACP shape (2026-07-22): bare bases, no brackets, empty cliModelSkus. */
++    const LIVE_BARE_ACP_IDS = [
++        'composer-2',
++        'composer-2.5',
++        'gpt-5.5',
++        'gpt-5.4',
++        'gpt-5.3-codex',
++        'claude-opus-4-8',
++        'claude-opus-4-7',
++        'claude-sonnet-4-6',
++        'claude-sonnet-4-5',
++        'claude-haiku-4-5',
++        'gemini-3.1-pro',
++        'gemini-3-flash',
++        'grok-4-20',
++        'kimi-k2.5',
++        'o3',
++        'o4-mini',
++        'gpt-4.1',
++        'gpt-4o',
++        'claude-4-sonnet',
++        'claude-4-opus',
++        'claude-3.7-sonnet',
++        'claude-3.5-sonnet',
++        'claude-3.5-haiku',
++        'gemini-2.5-pro',
++        'gemini-2.5-flash',
++        'deepseek-r1',
++        'deepseek-v3.1',
++        'cheetah',
++        'auto',
++        'default',
++        // Accidental CLI SKU leakage into availableModels must not become a top-level row.
++        'composer-2.5-fast'
++    ] as const
++
++    it('builds a non-empty flat picker from live-shaped bare ACP ids', () => {
++        expect(LIVE_BARE_ACP_IDS).toHaveLength(31)
++        const sessionModels = LIVE_BARE_ACP_IDS.map((modelId) => ({ modelId }))
++        const catalog = buildCursorCatalogFromSources({
++            sessionModels,
++            machineModels: [],
++            cliModelSkus: [],
++            currentWireId: 'default',
++            defaultValue: null
++        })
++        const picker = buildCursorPickerState({
++            catalog,
++            currentWireId: 'default',
++            defaultValue: null
++        })
++
++        expect(catalog.variantsByBase.size).toBeGreaterThan(0)
++        expect(picker.modelOptions.length).toBeGreaterThan(1)
++        expect(picker.modelOptions.some((row) => row.value === 'composer-2.5')).toBe(true)
++        expect(picker.modelOptions.some((row) => row.value === 'claude-opus-4-8')).toBe(true)
++        // CLI effort/speed SKUs must not become top-level bases.
++        expect(picker.modelOptions.some((row) => row.value === 'composer-2.5-fast')).toBe(false)
++        // Default tokens stay out of the catalog rows (Default row is synthetic auto).
++        expect(picker.modelOptions.some((row) => row.value === 'default')).toBe(false)
++        expect(picker.modelOptions[0]).toEqual({ value: 'auto', label: 'Auto' })
++    })
++
++    it('attaches CLI SKUs under bare ACP bases for dual/nested variant UX', () => {
++        const catalog = buildCursorCatalogFromSources({
++            sessionModels: [
++                { modelId: 'composer-2.5' },
++                { modelId: 'gpt-5.5' }
++            ],
++            cliModelSkus: [
++                { modelId: 'composer-2.5', name: 'Composer 2.5' },
++                { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
++                { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' },
++                { modelId: 'gpt-5.5-medium', name: 'GPT-5.5 1M' }
++            ],
++            defaultValue: null
++        })
++        const picker = buildCursorPickerState({
++            catalog,
++            currentWireId: 'composer-2.5',
++            defaultValue: null
++        })
++        expect(picker.mode).toBe('dual')
++        expect(picker.modelOptions.some((row) => row.value === 'composer-2.5')).toBe(true)
++        expect(picker.showEffortPicker).toBe(true)
++        expect(picker.effortOptions.some((row) => row.value === 'composer-2.5-fast')).toBe(true)
++    })
++})
++
+ describe('resolveWireIdForBaseChange', () => {
+     it('does not guess when switching to a base with multiple variants', () => {
+         const catalog = buildCursorCatalogFromSources({
+diff --git a/web/src/lib/cursorPickerState.ts b/web/src/lib/cursorPickerState.ts
+index aa8b0b3e..31ec6ed2 100644
+--- a/web/src/lib/cursorPickerState.ts
++++ b/web/src/lib/cursorPickerState.ts
+@@ -1,3 +1,4 @@
++import { isCursorAcpCatalogModelId } from '@hapi/protocol'
+ import type { CursorModelSummary } from '@/types/api'
+ import {
+     appendCliSkusToCatalog,
+@@ -5,7 +6,6 @@ import {
+     buildCursorModelCatalog,
+     buildFlatCursorModelPickerOptions,
+     cursorModelDedupeKey,
+-    isCursorAcpWireModelId,
+     resolveCursorBaseKey,
+     resolveCursorVariantOptions,
+     shouldUseCursorDualPickers,
+@@ -46,11 +46,14 @@ export type CursorPickerState = {
+     showEffortPicker: boolean
+ }
+ 
+-/** Only ACP wire ids (and default[]); never CLI probe slugs without bracket params. */
++/**
++ * ACP catalog rows for the picker: parameterized wires and bare non-default bases.
++ * Never CLI effort/speed SKU slugs (those attach as variants under a base).
++ */
+ export function pickCursorModelsForPicker(
+     availableModels: readonly CursorModelSummary[]
+ ): CursorModelSummary[] {
+-    return availableModels.filter((model) => isCursorAcpWireModelId(model.modelId))
++    return availableModels.filter((model) => isCursorAcpCatalogModelId(model.modelId))
+ }
+ 
+ /**
+@@ -66,7 +69,7 @@ export function mergeCursorModelSummaries(
+ 
+     const add = (model: CursorModelSummary) => {
+         const modelId = model.modelId.trim()
+-        if (!modelId || !isCursorAcpWireModelId(modelId)) {
++        if (!modelId || !isCursorAcpCatalogModelId(modelId)) {
+             return
+         }
+         if (!merged.has(modelId)) {
+@@ -82,7 +85,7 @@ export function mergeCursorModelSummaries(
+     }
+ 
+     const trimmedCurrent = currentWireId?.trim()
+-    if (trimmedCurrent && isCursorAcpWireModelId(trimmedCurrent) && !merged.has(trimmedCurrent)) {
++    if (trimmedCurrent && isCursorAcpCatalogModelId(trimmedCurrent) && !merged.has(trimmedCurrent)) {
+         merged.set(trimmedCurrent, { modelId: trimmedCurrent })
+     }
+ 
+@@ -105,7 +108,7 @@ export function buildCursorCatalogFromSources(args: {
+         args.machineModels ?? [],
+         wireHint
+     )
+-    const injectCurrent = wireHint && isCursorAcpWireModelId(wireHint) ? wireHint : null
++    const injectCurrent = wireHint && isCursorAcpCatalogModelId(wireHint) ? wireHint : null
+     const catalog = buildCursorModelCatalog(pickCursorModelsForPicker(merged), {
+         currentModel: injectCurrent,
+         defaultValue: args.defaultValue
+diff --git a/web/src/lib/cursorVariantPicker.test.ts b/web/src/lib/cursorVariantPicker.test.ts
+index d9065167..3616c0ec 100644
+--- a/web/src/lib/cursorVariantPicker.test.ts
++++ b/web/src/lib/cursorVariantPicker.test.ts
+@@ -1,5 +1,12 @@
+ import { describe, expect, it } from 'vitest'
+-import { appendCliSkusToCatalog, buildCursorEffortPickerOptions, buildCursorModelCatalog, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
++import {
++    appendCliSkusToCatalog,
++    buildCursorEffortPickerOptions,
++    buildCursorEffortPickerOptionsWithDefaultFirst,
++    buildCursorModelCatalog,
++    resolveCursorVariantOptions,
++    resolveDefaultCursorVariantWire
++} from '@/lib/cursorModelOptions'
+ 
+ describe('resolveCursorVariantOptions with CLI skus', () => {
+     it('omits raw ACP wire row when CLI skus exist for the same base', () => {
+@@ -19,6 +26,23 @@ describe('resolveCursorVariantOptions with CLI skus', () => {
+         expect(options.some((row) => row.label.includes('context=272k'))).toBe(false)
+     })
+ 
++    it('puts the default variant first for drill-down picker rows', () => {
++        const catalog = appendCliSkusToCatalog(
++            buildCursorModelCatalog([
++                { modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]', name: 'gpt-5.5' }
++            ]),
++            [
++                { modelId: 'gpt-5.5-medium', name: 'GPT-5.5 1M' },
++                { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' }
++            ]
++        )
++        expect(resolveDefaultCursorVariantWire('gpt-5.5', catalog)).toBe('gpt-5.5-medium')
++        expect(buildCursorEffortPickerOptionsWithDefaultFirst('gpt-5.5', catalog).map((row) => row.value)).toEqual([
++            'gpt-5.5-medium',
++            'gpt-5.5-high-fast'
++        ])
++    })
++
+     it('keeps ACP wire rows when no CLI skus are attached', () => {
+         const catalog = buildCursorModelCatalog([
+             { modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' },
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index dd7d4995..ccc4ca47 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -927,6 +927,8 @@ export default {
+   'misc.fastModeStandard': 'Standard',
+   'misc.fastModeFast': 'Fast',
+   'misc.variant': 'Variant',
++  'misc.changeModel': 'Change model…',
++  'misc.backToModelList': '← Models',
+   'misc.loading': 'Loading…',
+   'misc.newMessage': '{n} new message{s}',
+   'misc.loadingMessages': 'Loading messages…',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 97dd0320..eaef30b4 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -931,6 +931,8 @@ export default {
+   'misc.fastModeStandard': '标准',
+   'misc.fastModeFast': '快速',
+   'misc.variant': '变体',
++  'misc.changeModel': '更换模型…',
++  'misc.backToModelList': '← 模型',
+   'misc.loading': '加载中…',
+   'misc.newMessage': '{n} 条新消息',
+   'misc.loadingMessages': '加载消息中…',
+diff --git a/web/src/lib/serialAsyncQueue.test.ts b/web/src/lib/serialAsyncQueue.test.ts
+new file mode 100644
+index 00000000..94aee972
+--- /dev/null
++++ b/web/src/lib/serialAsyncQueue.test.ts
+@@ -0,0 +1,39 @@
++import { describe, expect, it } from 'vitest'
++import { createSerialAsyncQueue } from './serialAsyncQueue'
++
++describe('createSerialAsyncQueue', () => {
++    it('runs enqueued work in order even when the second starts while the first is pending', async () => {
++        const enqueue = createSerialAsyncQueue()
++        const order: number[] = []
++        let releaseFirst!: () => void
++        const firstGate = new Promise<void>((resolve) => {
++            releaseFirst = resolve
++        })
++
++        const first = enqueue(async () => {
++            await firstGate
++            order.push(1)
++        })
++        const second = enqueue(async () => {
++            order.push(2)
++        })
++
++        expect(order).toEqual([])
++        releaseFirst()
++        await Promise.all([first, second])
++        expect(order).toEqual([1, 2])
++    })
++
++    it('continues after a rejected run', async () => {
++        const enqueue = createSerialAsyncQueue()
++        const order: number[] = []
++        await enqueue(async () => {
++            order.push(1)
++            throw new Error('boom')
++        }).catch(() => undefined)
++        await enqueue(async () => {
++            order.push(2)
++        })
++        expect(order).toEqual([1, 2])
++    })
++})
+diff --git a/web/src/lib/serialAsyncQueue.ts b/web/src/lib/serialAsyncQueue.ts
+new file mode 100644
+index 00000000..352e1232
+--- /dev/null
++++ b/web/src/lib/serialAsyncQueue.ts
+@@ -0,0 +1,12 @@
++/**
++ * FIFO chain for async work that must not overlap (e.g. Cursor setModel RPCs).
++ * Failures in one run do not break later enqueues.
++ */
++export function createSerialAsyncQueue(): (run: () => Promise<void>) => Promise<void> {
++    let chain: Promise<void> = Promise.resolve()
++    return (run) => {
++        const pending = chain.then(run, run)
++        chain = pending.then(() => undefined, () => undefined)
++        return pending
++    }
++}
+diff --git a/web/src/lib/sessionChatCursorModel.test.ts b/web/src/lib/sessionChatCursorModel.test.ts
+index 8f3118cd..66763809 100644
+--- a/web/src/lib/sessionChatCursorModel.test.ts
++++ b/web/src/lib/sessionChatCursorModel.test.ts
+@@ -23,7 +23,7 @@ describe('resolveSessionCursorModelChange', () => {
+         sessionCurrentModelId: 'composer-2.5[fast=true]'
+     })
+ 
+-    it('updates selected base without applying when the base has multiple variants', () => {
++    it('applies the default variant and keeps base selected when the base has multiple variants', () => {
+         const plan = resolveSessionCursorModelChange({
+             picker,
+             sessionModel: 'composer-2.5[fast=true]',
+@@ -33,9 +33,9 @@ describe('resolveSessionCursorModelChange', () => {
+         })
+         expect(plan).toEqual({
+             ok: true,
+-            wireId: null,
++            wireId: 'composer-2.5[fast=true]',
+             nextSelectedBase: 'composer-2.5',
+-            shouldApply: false
++            shouldApply: true
+         })
+     })
+ 
+@@ -106,6 +106,54 @@ describe('resolveSessionCursorModelChange', () => {
+         })
+         expect(resolveSessionCursorBaseSelectValue(defaultPicker, 'auto')).toBe('auto')
+     })
++
++    // Cursor ACP without parameterizedModelPicker returns one wire per base = flat picker.
++    // The picker row for 'Default' is value='auto', so the resolver must yield 'auto' when
++    // session.model is null, otherwise HappyComposer's `selectedModelBase === option.value`
++    // check fails for every row and the dropdown looks empty.
++    it('highlights Default in flat-mode picker when session is on ACP default[]', () => {
++        const flatPicker = buildSessionCursorPickerState({
++            sessionModels: [
++                { modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' },
++                { modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]', name: 'gpt-5.5' }
++            ],
++            machineModels: [],
++            sessionModel: null,
++            sessionCurrentModelId: null
++        })
++        expect(flatPicker.mode).toBe('flat')
++        expect(resolveSessionCursorBaseSelectValue(flatPicker, 'auto')).toBe('auto')
++    })
++
++    it('highlights the active wire id in flat-mode picker when session has an explicit model', () => {
++        const flatPicker = buildSessionCursorPickerState({
++            sessionModels: [
++                { modelId: 'composer-2.5[fast=true]', name: 'composer-2.5' },
++                { modelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]', name: 'gpt-5.5' }
++            ],
++            machineModels: [],
++            sessionModel: 'gpt-5.5[context=272k,reasoning=medium,fast=false]',
++            sessionCurrentModelId: 'gpt-5.5[context=272k,reasoning=medium,fast=false]'
++        })
++        expect(flatPicker.mode).toBe('flat')
++        expect(resolveSessionCursorBaseSelectValue(flatPicker, 'auto'))
++            .toBe('gpt-5.5[context=272k,reasoning=medium,fast=false]')
++    })
++
++    it('highlights bare ACP bases in flat mode (#1129)', () => {
++        const flatPicker = buildSessionCursorPickerState({
++            sessionModels: [
++                { modelId: 'composer-2.5', name: 'composer-2.5' },
++                { modelId: 'gpt-5.5', name: 'gpt-5.5' }
++            ],
++            machineModels: [],
++            sessionModel: 'composer-2.5',
++            sessionCurrentModelId: 'composer-2.5'
++        })
++        expect(flatPicker.mode).toBe('flat')
++        expect(flatPicker.modelOptions.some((row) => row.value === 'composer-2.5')).toBe(true)
++        expect(resolveSessionCursorBaseSelectValue(flatPicker, 'auto')).toBe('composer-2.5')
++    })
+ })
+ 
+ describe('CLI sku variants in session picker', () => {
+diff --git a/web/src/lib/sessionChatCursorModel.ts b/web/src/lib/sessionChatCursorModel.ts
+index cf3a24fd..e9075542 100644
+--- a/web/src/lib/sessionChatCursorModel.ts
++++ b/web/src/lib/sessionChatCursorModel.ts
+@@ -1,5 +1,6 @@
+ import { findBestCliSkuForAcpWire, matchCliSkuToAcpWireId } from '@hapi/protocol'
+ import type { CursorModelCatalog } from '@/lib/cursorModelOptions'
++import { resolveCursorVariantOptions, resolveDefaultCursorVariantWire } from '@/lib/cursorModelOptions'
+ import type { CursorModelSummary } from '@/types/api'
+ import {
+     buildCursorCatalogFromSources,
+@@ -50,6 +51,16 @@ export function resolveSessionCursorModelChange(args: {
+             const base = resolveCursorBaseFromWire(value, picker.catalog)
+             return { ok: true, wireId: value, nextSelectedBase: base, shouldApply: true }
+         }
++        const variants = resolveCursorVariantOptions(value, picker.catalog)
++        if (variants.length > 1) {
++            const defaultWire = resolveDefaultCursorVariantWire(value, picker.catalog)
++            return {
++                ok: true,
++                wireId: defaultWire,
++                nextSelectedBase: value,
++                shouldApply: defaultWire !== null
++            }
++        }
+         const wireId = resolveWireIdForBaseChange(value, picker.catalog, sessionModel)
+         return {
+             ok: true,
+-- 
+2.50.1 (Apple Git-155)
+

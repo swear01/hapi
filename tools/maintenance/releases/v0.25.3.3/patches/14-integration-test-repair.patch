@@ -1,0 +1,37 @@
+From 003857e466dd75c19b7592fa00944ef99b95016d Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 09:50:01 +0800
+Subject: [PATCH] fix(test): align integration fixtures with current runtime
+
+---
+ web/src/components/SessionList.directory-action.test.tsx | 1 -
+ web/src/components/assistant-ui/markdown-a.test.tsx      | 1 -
+ 2 files changed, 2 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index ebd12a81..53a576b5 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -507,7 +507,6 @@ describe('SessionList collapse behavior', () => {
+     it('opens the project group menu on right-click without collapsing the group', () => {
+         const sessions = [makeSession({
+             id: 'session-running',
+-            active: true,
+             updatedAt: 100,
+             metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+         })]
+diff --git a/web/src/components/assistant-ui/markdown-a.test.tsx b/web/src/components/assistant-ui/markdown-a.test.tsx
+index 8ab22168..55ddde7a 100644
+--- a/web/src/components/assistant-ui/markdown-a.test.tsx
++++ b/web/src/components/assistant-ui/markdown-a.test.tsx
+@@ -167,7 +167,6 @@ describe('cross-tab sync via storage event', () => {
+             window.dispatchEvent(new StorageEvent('storage', {
+                 key: STORAGE_KEY,
+                 newValue: JSON.stringify(['obsidian']),
+-                storageArea: localStorage,
+             }))
+         })
+ 
+-- 
+2.50.1 (Apple Git-155)
+

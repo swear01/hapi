@@ -1,0 +1,477 @@
+From ad25c7dde6275716e8337bfb243d40599fb9553f Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 09:32:24 +0800
+Subject: [PATCH] carry: PR #1087 linked worktree runner support
+
+---
+ .../backends/acp/AcpStdioTransport.test.ts    | 107 +++++++++++++++++-
+ .../agent/backends/acp/AcpStdioTransport.ts   |  10 +-
+ cli/src/runner/buildCliArgs.test.ts           |  38 +++++++
+ cli/src/runner/run.ts                         |  23 +++-
+ cli/src/utils/isLinkedGitWorktree.test.ts     |  69 +++++++++++
+ cli/src/utils/isLinkedGitWorktree.ts          |  52 +++++++++
+ docs/guide/cursor.md                          |   2 +
+ 7 files changed, 293 insertions(+), 8 deletions(-)
+ create mode 100644 cli/src/utils/isLinkedGitWorktree.test.ts
+ create mode 100644 cli/src/utils/isLinkedGitWorktree.ts
+
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+index b9d7b938..de59c7e0 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+@@ -8,7 +8,10 @@ const guard = vi.hoisted(() => ({
+ const spawnState = vi.hoisted(() => ({
+     exitHandlers: [] as Array<(code: number | null, signal: NodeJS.Signals | null) => void>,
+     closeHandlers: [] as Array<(code: number | null, signal: NodeJS.Signals | null) => void>,
++    stdoutDataHandlers: [] as Array<(chunk: string) => void>,
++    stdinEnd: vi.fn(),
+     stdinWrite: vi.fn<(chunk: string) => boolean>(() => true),
++    kill: vi.fn(),
+     exitCode: null as number | null
+ }));
+ 
+@@ -17,10 +20,15 @@ vi.mock('./agentCliGuard', () => ({
+     unregisterActiveAcpTransport: guard.unregister
+ }));
+ 
++vi.mock('@/utils/process', () => ({
++    killProcessByChildProcess: vi.fn(async () => undefined)
++}));
++
+ vi.mock('node:child_process', () => ({
+     spawn: vi.fn(() => {
+         spawnState.exitHandlers = [];
+         spawnState.closeHandlers = [];
++        spawnState.stdoutDataHandlers = [];
+         const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+         const proc = {
+             get exitCode() {
+@@ -29,6 +37,9 @@ vi.mock('node:child_process', () => ({
+             stdout: {
+                 setEncoding: vi.fn(),
+                 on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
++                    if (event === 'data') {
++                        spawnState.stdoutDataHandlers.push(handler as (chunk: string) => void);
++                    }
+                     handlers.set(`stdout:${event}`, [...(handlers.get(`stdout:${event}`) ?? []), handler]);
+                 })
+             },
+@@ -39,7 +50,7 @@ vi.mock('node:child_process', () => ({
+                 })
+             },
+             stdin: {
+-                end: vi.fn(),
++                end: (...args: unknown[]) => spawnState.stdinEnd(...args),
+                 write: (chunk: string, callback?: (error?: Error | null) => void) => {
+                     const result = spawnState.stdinWrite(chunk);
+                     callback?.();
+@@ -55,13 +66,20 @@ vi.mock('node:child_process', () => ({
+                 }
+                 handlers.set(`proc:${event}`, [...(handlers.get(`proc:${event}`) ?? []), handler]);
+             }),
+-            kill: vi.fn()
++            kill: (...args: unknown[]) => spawnState.kill(...args)
+         };
+         return proc;
+     })
+ }));
+ 
+ import { AcpStdioTransport } from './AcpStdioTransport';
++import { killProcessByChildProcess } from '@/utils/process';
++
++function emitStdout(chunk: string): void {
++    for (const handler of spawnState.stdoutDataHandlers) {
++        handler(chunk);
++    }
++}
+ 
+ describe('AcpStdioTransport agent CLI guard', () => {
+     afterEach(() => {
+@@ -69,9 +87,13 @@ describe('AcpStdioTransport agent CLI guard', () => {
+         guard.unregister.mockClear();
+         spawnState.stdinWrite.mockReset();
+         spawnState.stdinWrite.mockReturnValue(true);
++        spawnState.stdinEnd.mockClear();
++        spawnState.kill.mockClear();
++        vi.mocked(killProcessByChildProcess).mockClear();
+         spawnState.exitCode = null;
+         spawnState.exitHandlers = [];
+         spawnState.closeHandlers = [];
++        spawnState.stdoutDataHandlers = [];
+     });
+ 
+     test('registers cross-process guard only for Cursor agent command', async () => {
+@@ -92,13 +114,94 @@ describe('AcpStdioTransport agent CLI guard', () => {
+     });
+ });
+ 
++describe('AcpStdioTransport plain-text stdout', () => {
++    afterEach(() => {
++        spawnState.stdinWrite.mockReset();
++        spawnState.stdinWrite.mockReturnValue(true);
++        spawnState.stdinEnd.mockClear();
++        vi.mocked(killProcessByChildProcess).mockClear();
++        spawnState.exitCode = null;
++        spawnState.exitHandlers = [];
++        spawnState.closeHandlers = [];
++        spawnState.stdoutDataHandlers = [];
++    });
++
++    test('ignores Cursor worktree banner and keeps JSON-RPC session alive', async () => {
++        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const notifications: Array<{ method: string; params: unknown }> = [];
++        transport.onNotification((method, params) => {
++            notifications.push({ method, params });
++        });
++
++        const pending = transport.sendRequest('initialize', { protocolVersion: 1 });
++
++        emitStdout('Using worktree: /home/heavygee/.cursor/worktrees/driver/acp\n');
++        emitStdout(`${JSON.stringify({
++            jsonrpc: '2.0',
++            id: 1,
++            result: { protocolVersion: 1 }
++        })}\n`);
++
++        await expect(pending).resolves.toEqual({ protocolVersion: 1 });
++        expect(spawnState.stdinEnd).not.toHaveBeenCalled();
++        expect(killProcessByChildProcess).not.toHaveBeenCalled();
++
++        emitStdout(`${JSON.stringify({
++            jsonrpc: '2.0',
++            method: 'session/update',
++            params: { sessionUpdate: 'agent_message_chunk' }
++        })}\n`);
++        expect(notifications).toEqual([{
++            method: 'session/update',
++            params: { sessionUpdate: 'agent_message_chunk' }
++        }]);
++
++        await transport.close();
++    });
++
++    test('ignores non-object JSON lines without killing the session', async () => {
++        const transport = new AcpStdioTransport({ command: 'gemini' });
++        const pending = transport.sendRequest('initialize');
++
++        emitStdout('42\n');
++        emitStdout('"hello"\n');
++        emitStdout(`${JSON.stringify({
++            jsonrpc: '2.0',
++            id: 1,
++            result: { ok: true }
++        })}\n`);
++
++        await expect(pending).resolves.toEqual({ ok: true });
++        expect(spawnState.stdinEnd).not.toHaveBeenCalled();
++        expect(killProcessByChildProcess).not.toHaveBeenCalled();
++        await transport.close();
++    });
++
++    test('treats unknown non-JSON stdout as a fatal protocol error', async () => {
++        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const pending = transport.sendRequest('initialize');
++
++        expect(spawnState.stdoutDataHandlers.length).toBeGreaterThan(0);
++        emitStdout('not-a-json-rpc-frame\n');
++        expect(spawnState.stdinEnd).toHaveBeenCalled();
++
++        await expect(pending).rejects.toThrow('Failed to parse JSON-RPC from ACP agent');
++        expect(killProcessByChildProcess).toHaveBeenCalled();
++        await expect(transport.sendRequest('session/new')).rejects.toThrow(
++            'Failed to parse JSON-RPC from ACP agent'
++        );
++    });
++});
++
+ describe('AcpStdioTransport closed stdin writes', () => {
+     afterEach(() => {
+         spawnState.stdinWrite.mockReset();
+         spawnState.stdinWrite.mockReturnValue(true);
++        spawnState.stdinEnd.mockClear();
+         spawnState.exitCode = null;
+         spawnState.exitHandlers = [];
+         spawnState.closeHandlers = [];
++        spawnState.stdoutDataHandlers = [];
+     });
+ 
+     test('rejects new requests after process exit before close without writing stdin', async () => {
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.ts b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+index 7d63bf53..5bf0031a 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+@@ -315,10 +315,18 @@ export class AcpStdioTransport {
+             }
+             message = parsed as JsonRpcRequest | JsonRpcResponse | JsonRpcNotification;
+         } catch (error) {
++            // Cursor `--worktree` prints `Using worktree: …` on stdout before ACP
++            // JSON-RPC. Only that known banner is noise; other parse failures stay fatal
++            // so pending requests (incl. session/prompt with infinite timeout) fail fast.
++            if (this.shouldGuardAgentCli && line.startsWith('Using worktree:')) {
++                logger.debug('[ACP] Ignoring Cursor worktree stdout banner', { line });
++                return;
++            }
++
+             const protocolError = new Error('Failed to parse JSON-RPC from ACP agent');
+             this.protocolError = protocolError;
+             logger.debug('[ACP] Failed to parse JSON-RPC line', { line, error });
+-            this.rejectAllPending(protocolError);
++            this.markClosed(protocolError);
+             this.process.stdin.end();
+             void killProcessByChildProcess(this.process);
+             return;
+diff --git a/cli/src/runner/buildCliArgs.test.ts b/cli/src/runner/buildCliArgs.test.ts
+index 8496da01..11eff6e7 100644
+--- a/cli/src/runner/buildCliArgs.test.ts
++++ b/cli/src/runner/buildCliArgs.test.ts
+@@ -1,4 +1,8 @@
+ import { describe, it, expect } from 'vitest'
++import { execFileSync } from 'node:child_process'
++import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
+ import { buildCliArgs } from './run'
+ 
+ describe('buildCliArgs', () => {
+@@ -198,6 +202,40 @@ describe('buildCliArgs', () => {
+         expect(args[args.length - 1]).toBe('--cursor-worktree')
+     })
+ 
++    it('skips --cursor-worktree when directory is already a linked git worktree', () => {
++        const main = mkdtempSync(join(tmpdir(), 'hapi-cliargs-main-'))
++        const linkedParent = mkdtempSync(join(tmpdir(), 'hapi-cliargs-wt-'))
++        const linked = join(linkedParent, 'feature')
++        const gitEnv = {
++            ...process.env,
++            GIT_AUTHOR_NAME: 'test',
++            GIT_AUTHOR_EMAIL: 'test@example.com',
++            GIT_COMMITTER_NAME: 'test',
++            GIT_COMMITTER_EMAIL: 'test@example.com'
++        }
++        const git = (cwd: string, args: string[]) => {
++            execFileSync('git', args, { cwd, stdio: ['ignore', 'ignore', 'pipe'], env: gitEnv })
++        }
++        try {
++            git(main, ['init'])
++            writeFileSync(join(main, 'README'), 'x\n')
++            git(main, ['add', 'README'])
++            git(main, ['commit', '-m', 'init'])
++            git(main, ['worktree', 'add', '-b', 'feature', linked])
++
++            const args = buildCliArgs('cursor', {
++                directory: linked,
++                sessionType: 'worktree',
++                worktreeName: 'should-not-appear',
++            })
++            expect(args).not.toContain('--cursor-worktree')
++            expect(args).not.toContain('should-not-appear')
++        } finally {
++            rmSync(linkedParent, { recursive: true, force: true })
++            rmSync(main, { recursive: true, force: true })
++        }
++    })
++
+     it('does not pass --cursor-worktree for non-cursor worktree sessions', () => {
+         const args = buildCliArgs('claude', {
+             directory: '/tmp/repo',
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index f7c6ffc9..d14ff6cf 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -28,6 +28,7 @@ import { buildMachineMetadata } from '@/agent/sessionFactory';
+ import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
+ import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
+ import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
++import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
+ 
+ export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
+   // We don't have cleanup function at the time of server construction
+@@ -459,9 +460,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+       if (sessionType === 'worktree') {
+         // Cursor Agent has native `--worktree` under ~/.cursor/worktrees/. Prefer that
+         // over HAPI's sibling-directory worktree so Cursor sandbox/skills see the same layout.
++        // Exception: if `directory` is already a linked git worktree (e.g. HAPI feature
++        // worktree or driver/), nesting `--cursor-worktree` hangs ACP initialize (#1085).
+         if (agent === 'cursor') {
+           spawnDirectory = directory;
+-          logger.debug(`[RUNNER RUN] Cursor-native worktree requested (nameHint=${worktreeName ?? '(auto)'})`);
++          if (isLinkedGitWorktree(directory)) {
++            logger.debug(
++              `[RUNNER RUN] Directory is already a linked git worktree; skipping Cursor --worktree (cwd=${directory})`
++            );
++          } else {
++            logger.debug(`[RUNNER RUN] Cursor-native worktree requested (nameHint=${worktreeName ?? '(auto)'})`);
++          }
+         } else {
+           const worktreeResult = await createWorktree({
+             basePath: directory,
+@@ -1382,10 +1391,14 @@ export function buildCliArgs(
+     }
+   }
+   if (agent === 'cursor' && options.sessionType === 'worktree') {
+-    args.push('--cursor-worktree');
+-    const name = options.worktreeName?.trim();
+-    if (name) {
+-      args.push(name);
++    // Nested Cursor --worktree inside an existing linked git worktree hangs ACP
++    // initialize (banner ignored, but never reaches protocolVersion / cursorSessionId).
++    if (!isLinkedGitWorktree(options.directory)) {
++      args.push('--cursor-worktree');
++      const name = options.worktreeName?.trim();
++      if (name) {
++        args.push(name);
++      }
+     }
+   }
+   return args;
+diff --git a/cli/src/utils/isLinkedGitWorktree.test.ts b/cli/src/utils/isLinkedGitWorktree.test.ts
+new file mode 100644
+index 00000000..0f1aa3b0
+--- /dev/null
++++ b/cli/src/utils/isLinkedGitWorktree.test.ts
+@@ -0,0 +1,69 @@
++import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { execFileSync } from 'node:child_process';
++import { afterEach, describe, expect, it } from 'vitest';
++import { isLinkedGitWorktree } from './isLinkedGitWorktree';
++
++describe('isLinkedGitWorktree', () => {
++    const temps: string[] = [];
++
++    afterEach(() => {
++        for (const dir of temps.splice(0)) {
++            try {
++                rmSync(dir, { recursive: true, force: true });
++            } catch {
++                // best-effort cleanup
++            }
++        }
++    });
++
++    function tempDir(prefix: string): string {
++        const dir = mkdtempSync(join(tmpdir(), prefix));
++        temps.push(dir);
++        return dir;
++    }
++
++    function git(cwd: string, args: string[]): void {
++        execFileSync('git', args, {
++            cwd,
++            stdio: ['ignore', 'ignore', 'pipe'],
++            env: {
++                ...process.env,
++                GIT_AUTHOR_NAME: 'test',
++                GIT_AUTHOR_EMAIL: 'test@example.com',
++                GIT_COMMITTER_NAME: 'test',
++                GIT_COMMITTER_EMAIL: 'test@example.com'
++            }
++        });
++    }
++
++    it('returns false for a primary working tree', () => {
++        const repo = tempDir('hapi-primary-');
++        git(repo, ['init']);
++        writeFileSync(join(repo, 'README'), 'x\n');
++        git(repo, ['add', 'README']);
++        git(repo, ['commit', '-m', 'init']);
++
++        expect(isLinkedGitWorktree(repo)).toBe(false);
++    });
++
++    it('returns true for a linked git worktree', () => {
++        const repo = tempDir('hapi-linked-main-');
++        git(repo, ['init']);
++        writeFileSync(join(repo, 'README'), 'x\n');
++        git(repo, ['add', 'README']);
++        git(repo, ['commit', '-m', 'init']);
++
++        const linked = join(tempDir('hapi-linked-wt-'), 'feature');
++        git(repo, ['worktree', 'add', '-b', 'feature', linked]);
++
++        expect(isLinkedGitWorktree(linked)).toBe(true);
++        expect(isLinkedGitWorktree(repo)).toBe(false);
++    });
++
++    it('returns false for a non-git directory', () => {
++        const dir = tempDir('hapi-nongit-');
++        expect(isLinkedGitWorktree(dir)).toBe(false);
++    });
++});
+diff --git a/cli/src/utils/isLinkedGitWorktree.ts b/cli/src/utils/isLinkedGitWorktree.ts
+new file mode 100644
+index 00000000..fef50958
+--- /dev/null
++++ b/cli/src/utils/isLinkedGitWorktree.ts
+@@ -0,0 +1,52 @@
++import { execFileSync } from 'node:child_process';
++import { realpathSync } from 'node:fs';
++import { isAbsolute, resolve } from 'node:path';
++
++/**
++ * True when `directory` is a linked Git worktree (`.git` is a file pointing at
++ * the common object store), not the repository's primary working tree.
++ *
++ * Cursor `agent --worktree` nested inside an existing linked worktree hangs ACP
++ * initialize (see tiann/hapi#1085). HAPI skips `--cursor-worktree` in that case
++ * and runs in the given directory instead.
++ */
++export function isLinkedGitWorktree(directory: string): boolean {
++    try {
++        const isInside = runGit(['rev-parse', '--is-inside-work-tree'], directory);
++        if (isInside !== 'true') {
++            return false;
++        }
++
++        const gitDir = runGit(['rev-parse', '--git-dir'], directory);
++        const gitCommonDir = runGit(['rev-parse', '--git-common-dir'], directory);
++        if (!gitDir || !gitCommonDir) {
++            return false;
++        }
++
++        return normalizePath(gitDir, directory) !== normalizePath(gitCommonDir, directory);
++    } catch {
++        return false;
++    }
++}
++
++function runGit(args: string[], cwd: string): string | null {
++    try {
++        const output = execFileSync('git', args, {
++            cwd,
++            encoding: 'utf8',
++            stdio: ['ignore', 'pipe', 'ignore']
++        }).trim();
++        return output.length > 0 ? output : null;
++    } catch {
++        return null;
++    }
++}
++
++function normalizePath(rawPath: string, cwd: string): string {
++    const resolved = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
++    try {
++        return realpathSync(resolved);
++    } catch {
++        return resolved;
++    }
++}
+diff --git a/docs/guide/cursor.md b/docs/guide/cursor.md
+index 86d1897c..5c0842cc 100644
+--- a/docs/guide/cursor.md
++++ b/docs/guide/cursor.md
+@@ -46,8 +46,10 @@ Set mode via `--mode` / `--permission-mode` / `--auto-review`, or change from th
+ ## Cursor-native worktree & multi-root
+ 
+ - New Session **Worktree** for Cursor uses Cursor's `--worktree` (`~/.cursor/worktrees/<repo>/<name>`), not HAPI's sibling-directory worktree.
++- Exception: if the spawn `directory` is **already** a linked git worktree (HAPI feature worktree, `driver/`, etc.), the runner does **not** pass `--cursor-worktree` — nesting hangs ACP initialize ([#1085](https://github.com/tiann/hapi/issues/1085)). Use the directory as cwd instead.
+ - Mid-session: send `/worktree`, `/apply-worktree`, `/delete-worktree`, or `/add-dir <path>` (isolated pass-through).
+ - CLI: `hapi cursor --cursor-worktree feature-x --cursor-add-dir ../shared`
++- ACP ignores Cursor's plain-text `Using worktree: …` stdout banner so remote `sessionType: worktree` can initialize (fixed in [#1085](https://github.com/tiann/hapi/issues/1085)). Other non-JSON ACP stdout remains a fatal protocol error.
+ 
+ ## Slash pass-through (remote)
+ 
+-- 
+2.50.1 (Apple Git-155)
+

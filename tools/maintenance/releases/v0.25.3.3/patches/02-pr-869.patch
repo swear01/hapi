@@ -1,0 +1,804 @@
+From 8b163dcb5a31a04b83d0d9a3c14e8bf31f497e20 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 09:28:07 +0800
+Subject: [PATCH] carry: upstream PR #869
+
+---
+ cli/src/agent/backends/acp/AcpSdkBackend.ts   |  19 ++-
+ .../backends/acp/AcpStdioTransport.test.ts    | 107 +++++++++++++++++
+ .../agent/backends/acp/AcpStdioTransport.ts   |  98 ++++++++++++----
+ .../backends/acp/acpStderrErrors.test.ts      |  51 ++++++++
+ cli/src/agent/backends/acp/acpStderrErrors.ts |  19 +++
+ cli/src/agent/messageConverter.test.ts        |  12 ++
+ .../opencode/opencodeRemoteLauncher.test.ts   | 111 +++++++++++++++++-
+ cli/src/opencode/opencodeRemoteLauncher.ts    |  52 ++++++--
+ web/src/chat/normalizeAgent.error.test.ts     |  32 +++++
+ web/src/chat/presentation.test.ts             |  12 ++
+ 10 files changed, 477 insertions(+), 36 deletions(-)
+ create mode 100644 cli/src/agent/backends/acp/acpStderrErrors.test.ts
+ create mode 100644 cli/src/agent/backends/acp/acpStderrErrors.ts
+ create mode 100644 web/src/chat/normalizeAgent.error.test.ts
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index 4d21f39b..652902b3 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -74,6 +74,7 @@ export class AcpSdkBackend implements AgentBackend {
+     private initializeResult: AcpInitializeResult | null = null;
+     private setModeSupported: boolean | undefined = undefined;
+     private isProcessingMessage = false;
++    private promptRequestInFlight = false;
+     private responseCompleteResolvers: Array<() => void> = [];
+     private lastSessionUpdateAt = 0;
+     private latestUsageUpdate: AcpUsageUpdate | null = null;
+@@ -520,10 +521,16 @@ export class AcpSdkBackend implements AgentBackend {
+         try {
+             // No timeout for prompt requests - they can run for extended periods
+             // during complex tasks, tool-heavy operations, or slow model responses
+-            const response = await this.transport.sendRequest('session/prompt', {
+-                sessionId,
+-                prompt: content
+-            }, { timeoutMs: Infinity });
++            this.promptRequestInFlight = true;
++            let response: unknown;
++            try {
++                response = await this.transport.sendRequest('session/prompt', {
++                    sessionId,
++                    prompt: content
++                }, { timeoutMs: Infinity });
++            } finally {
++                this.promptRequestInFlight = false;
++            }
+ 
+             stopReason = isObject(response) ? asString(response.stopReason) : null;
+             promptUsage = this.extractPromptUsage(response);
+@@ -691,6 +698,10 @@ export class AcpSdkBackend implements AgentBackend {
+         return this.isProcessingMessage;
+     }
+ 
++    isPromptRequestInFlight(): boolean {
++        return this.promptRequestInFlight;
++    }
++
+     getLastSessionUpdateAt(): number {
+         return this.lastSessionUpdateAt;
+     }
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+index 57506b48..5c27565d 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+@@ -319,6 +319,113 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         }]);
+     });
+ 
++    test.each([
++        ['status 401', 'authentication'],
++        ['status 404', 'model_not_found'],
++        ['Cannot use this model: stale-id', 'model_not_found'],
++        ['unexpected error', 'unknown']
++    ])('reports newline-free %s stderr immediately', (chunk, type) => {
++        const transport = new AcpStdioTransport({ command: 'agent' });
++        const seen: Array<{ type: string }> = [];
++        transport.onStderrError((error) => seen.push(error));
++        const proc = (transport as unknown as { process: {
++            stderr: { on: ReturnType<typeof vi.fn> };
++        } }).process;
++        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
++            .filter((call) => call[0] === 'data')
++            .map((call) => call[1] as (value: string) => void);
++
++        for (const handler of handlers) handler(chunk);
++
++        expect(seen.map((error) => error.type)).toEqual([type]);
++    });
++
++    test('reports a completed non-HTTP/2 cancellation record', () => {
++        const transport = new AcpStdioTransport({ command: 'agent' });
++        const seen: Array<{ type: string; message: string; raw: string }> = [];
++        transport.onStderrError((error) => seen.push(error));
++        const proc = (transport as unknown as { process: {
++            stderr: { on: ReturnType<typeof vi.fn> };
++        } }).process;
++        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
++            .filter((call) => call[0] === 'data')
++            .map((call) => call[1] as (value: string) => void);
++
++        for (const handler of handlers) handler('Error: request canceled by provider\n');
++
++        expect(seen).toEqual([{
++            type: 'unknown',
++            message: 'Error: request canceled by provider',
++            raw: 'Error: request canceled by provider'
++        }]);
++    });
++
++    test('parses stall signatures split across stderr chunks without waiting for close', () => {
++        const transport = new AcpStdioTransport({ command: 'opencode' });
++        const seen: Array<{ type: string; message: string; raw: string }> = [];
++        transport.onStderrError((error) => {
++            seen.push(error);
++        });
++        const proc = (transport as unknown as { process: {
++            stderr: { on: ReturnType<typeof vi.fn> };
++        } }).process;
++        const stderrHandlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
++            .filter((call) => call[0] === 'data')
++            .map((call) => call[1] as (chunk: string) => void);
++
++        for (const handler of stderrHandlers) {
++            handler('provider unavailable, retry');
++            handler('ing in 30 seconds\n');
++            handler('Error: T: [canceled] ht');
++            handler('tp/2 stream closed with error code CANCEL (0x8)');
++        }
++
++        expect(seen).toEqual([
++            {
++                type: 'unknown',
++                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
++                raw: 'provider unavailable, retrying in 30 seconds'
++            },
++            {
++                type: 'unknown',
++                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
++                raw: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
++            }
++        ]);
++
++        for (const handler of spawnState.closeHandlers) {
++            handler(1, null);
++        }
++
++        expect(seen).toEqual([
++            {
++                type: 'unknown',
++                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
++                raw: 'provider unavailable, retrying in 30 seconds'
++            },
++            {
++                type: 'unknown',
++                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
++                raw: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
++            }
++        ]);
++    });
++
++    test('bounds newline-free unclassified stderr tails', () => {
++        const transport = new AcpStdioTransport({ command: 'agent' });
++        const proc = (transport as unknown as { process: {
++            stderr: { on: ReturnType<typeof vi.fn> };
++        } }).process;
++        const handlers = (proc.stderr.on as ReturnType<typeof vi.fn>).mock.calls
++            .filter((call) => call[0] === 'data')
++            .map((call) => call[1] as (value: string) => void);
++
++        for (const handler of handlers) handler('x'.repeat(20_000));
++
++        const buffer = (transport as unknown as { stderrParseBuffer: string }).stderrParseBuffer;
++        expect(buffer.length).toBeLessThanOrEqual(8_000);
++    });
++
+     test('rejects pending requests when stdin.write throws', async () => {
+         spawnState.stdinWrite.mockImplementation(() => {
+             throw new Error('WritableIterable is closed');
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.ts b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+index 42020632..e57c1bd9 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+@@ -3,6 +3,7 @@ import { logger } from '@/ui/logger';
+ import { killProcessByChildProcess } from '@/utils/process';
+ import { GEMINI_MODEL_PRESETS } from '@hapi/protocol';
+ import { registerActiveAcpTransport, unregisterActiveAcpTransport } from './agentCliGuard';
++import { matchesAcpHttp2Cancel, matchesAcpRetryBackoff } from './acpStderrErrors';
+ 
+ interface JsonRpcRequest {
+     jsonrpc: '2.0';
+@@ -61,6 +62,8 @@ export class AcpStdioTransport {
+     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
+     private buffer = '';
+     private recentStderr = '';
++    private stderrParseBuffer = '';
++    private stderrPartialErrorReported = false;
+     private emittedModelRejection = false;
+     private nextId = 1;
+     private protocolError: Error | null = null;
+@@ -118,15 +121,9 @@ export class AcpStdioTransport {
+             }
+             const text = raw.trim();
+             logger.debug(`[ACP][stderr] ${text}`);
+-            this.parseStderrError(text);
+-            // If this chunk alone missed a split keyword/id, retry against the window.
+-            if (
+-                text
+-                && !/Cannot use this model:\s*\S/i.test(text)
+-                && /Cannot use this model:\s*\S/i.test(this.recentStderr)
+-            ) {
+-                this.parseStderrError(this.stderrForCloseError() ?? this.recentStderr);
+-            }
++            this.parseStderrRecords(raw);
++            this.flushActionableStderrTail();
++            this.stderrParseBuffer = this.stderrParseBuffer.slice(-AcpStdioTransport.RECENT_STDERR_WINDOW);
+         });
+ 
+         // Block new stdin writes as soon as the process exits, but defer markClosed
+@@ -143,6 +140,7 @@ export class AcpStdioTransport {
+         // classify the failure — Node may fire 'exit' before the last stderr 'data'.
+         this.process.on('close', (code, signal) => {
+             this.releaseAgentCliGuard();
++            this.flushStderrParseBuffer();
+             const stderr = this.stderrForCloseError();
+             let message = `ACP process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
+             if (stderr) {
+@@ -421,9 +419,41 @@ export class AcpStdioTransport {
+             : source;
+     }
+ 
+-    private parseStderrError(text: string): void {
++    private parseStderrRecords(raw: string): void {
++        const lines = (this.stderrParseBuffer + raw).split(/\r\n|[\r\n]/);
++        this.stderrParseBuffer = lines.pop() ?? '';
++        for (const line of lines) {
++            const text = line.trim();
++            if (text) {
++                this.parseStderrError(text, true);
++                this.stderrPartialErrorReported = false;
++            }
++        }
++    }
++
++    private flushActionableStderrTail(): void {
++        const pending = this.stderrParseBuffer.trim();
++        if (pending && this.parseStderrError(pending) === 'reported-complete') {
++            this.stderrParseBuffer = '';
++            this.stderrPartialErrorReported = false;
++        }
++    }
++
++    private flushStderrParseBuffer(): void {
++        const text = this.stderrParseBuffer.trim();
++        this.stderrParseBuffer = '';
++        if (text) {
++            this.parseStderrError(text, true);
++        }
++        this.stderrPartialErrorReported = false;
++    }
++
++    private parseStderrError(
++        text: string,
++        completeRecord = false
++    ): 'none' | 'reported-partial' | 'reported-complete' {
+         if (!this.stderrErrorHandler) {
+-            return;
++            return 'none';
+         }
+ 
+         const lowerText = text.toLowerCase();
+@@ -436,7 +466,7 @@ export class AcpStdioTransport {
+         const modelRejection = text.match(/Cannot use this model:\s*\S[\s\S]*/i);
+         if (modelRejection) {
+             if (this.emittedModelRejection) {
+-                return;
++                return 'reported-complete';
+             }
+             const message = modelRejection[0].trim();
+             this.emittedModelRejection = true;
+@@ -445,7 +475,7 @@ export class AcpStdioTransport {
+                 message,
+                 raw: message
+             });
+-            return;
++            return 'reported-complete';
+         }
+ 
+         // Rate limit errors (429)
+@@ -455,7 +485,7 @@ export class AcpStdioTransport {
+                 message: 'Rate limit exceeded. Please wait before sending more requests.',
+                 raw: text
+             });
+-            return;
++            return 'reported-complete';
+         }
+ 
+         // Model not found errors (404)
+@@ -465,7 +495,7 @@ export class AcpStdioTransport {
+                 message: `Model not found. Available models: ${GEMINI_MODEL_PRESETS.join(', ')}`,
+                 raw: text
+             });
+-            return;
++            return 'reported-complete';
+         }
+ 
+         // Authentication errors (401/403)
+@@ -477,7 +507,7 @@ export class AcpStdioTransport {
+                 message: 'Authentication failed. Please check your credentials or run "gemini auth login".',
+                 raw: text
+             });
+-            return;
++            return 'reported-complete';
+         }
+ 
+         // Quota exceeded
+@@ -487,16 +517,44 @@ export class AcpStdioTransport {
+                 message: 'API quota exceeded. Please check your billing or wait for quota reset.',
+                 raw: text
+             });
+-            return;
++            return 'reported-complete';
+         }
+ 
+-        // Only report as unknown if it looks like an actual error
+-        if (lowerText.includes('error') || lowerText.includes('failed') || lowerText.includes('exception')) {
++        if (matchesAcpRetryBackoff(text)) {
++            this.stderrErrorHandler({
++                type: 'unknown',
++                message: 'The ACP agent is retrying after an upstream failure. The turn may be stalled.',
++                raw: text
++            });
++            return 'reported-complete';
++        }
++
++        if (matchesAcpHttp2Cancel(text)) {
+             this.stderrErrorHandler({
+                 type: 'unknown',
+-                message: text,
++                message: 'Upstream request was cancelled. The agent may be retrying or stalled.',
+                 raw: text
+             });
++            return 'reported-complete';
++        }
++
++        // Keep cancellation errors buffered until a later chunk can classify them.
++        if (lowerText.includes('canceled') && !completeRecord) {
++            return 'none';
++        }
++
++        // Only report as unknown if it looks like an actual error
++        if (lowerText.includes('error') || lowerText.includes('failed') || lowerText.includes('exception')) {
++            if (!this.stderrPartialErrorReported) {
++                this.stderrPartialErrorReported = true;
++                this.stderrErrorHandler({
++                    type: 'unknown',
++                    message: text,
++                    raw: text
++                });
++            }
++            return 'reported-partial';
+         }
++        return 'none';
+     }
+ }
+diff --git a/cli/src/agent/backends/acp/acpStderrErrors.test.ts b/cli/src/agent/backends/acp/acpStderrErrors.test.ts
+new file mode 100644
+index 00000000..dc272ce9
+--- /dev/null
++++ b/cli/src/agent/backends/acp/acpStderrErrors.test.ts
+@@ -0,0 +1,51 @@
++import { describe, expect, it } from 'vitest';
++import {
++    isAcpStallStderrError,
++    matchesAcpHttp2Cancel,
++    matchesAcpRetryBackoff
++} from './acpStderrErrors';
++import type { AcpStderrError } from './AcpStdioTransport';
++
++function makeError(partial: Partial<AcpStderrError> & Pick<AcpStderrError, 'type' | 'message'>): AcpStderrError {
++    return {
++        raw: partial.raw ?? partial.message,
++        ...partial
++    };
++}
++
++describe('acpStderrErrors', () => {
++    it('detects quota and rate-limit stderr classes as stall errors', () => {
++        expect(isAcpStallStderrError(makeError({
++            type: 'quota_exceeded',
++            message: 'API quota exceeded.'
++        }))).toBe(true);
++        expect(isAcpStallStderrError(makeError({
++            type: 'rate_limit',
++            message: 'Rate limit exceeded.'
++        }))).toBe(true);
++    });
++
++    it('detects OpenCode retry backoff text as a stall error', () => {
++        expect(matchesAcpRetryBackoff('provider unavailable, retrying in 30s')).toBe(true);
++        expect(isAcpStallStderrError(makeError({
++            type: 'unknown',
++            message: 'provider unavailable, retrying in 30s'
++        }))).toBe(true);
++    });
++
++    it('detects HTTP/2 cancel errors as stall errors', () => {
++        const message = 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)';
++        expect(matchesAcpHttp2Cancel(message)).toBe(true);
++        expect(isAcpStallStderrError(makeError({
++            type: 'unknown',
++            message
++        }))).toBe(true);
++    });
++
++    it('does not treat unrelated stderr as stall errors', () => {
++        expect(isAcpStallStderrError(makeError({
++            type: 'authentication',
++            message: 'Authentication failed.'
++        }))).toBe(false);
++    });
++});
+diff --git a/cli/src/agent/backends/acp/acpStderrErrors.ts b/cli/src/agent/backends/acp/acpStderrErrors.ts
+new file mode 100644
+index 00000000..b9f8c45b
+--- /dev/null
++++ b/cli/src/agent/backends/acp/acpStderrErrors.ts
+@@ -0,0 +1,19 @@
++import type { AcpStderrError } from './AcpStdioTransport';
++
++export function matchesAcpRetryBackoff(text: string): boolean {
++    return text.toLowerCase().includes('retrying in');
++}
++
++export function matchesAcpHttp2Cancel(text: string): boolean {
++    const lower = text.toLowerCase();
++    return lower.includes('http/2') && (lower.includes('cancel') || lower.includes('0x8'));
++}
++
++export function isAcpStallStderrError(error: AcpStderrError): boolean {
++    if (error.type === 'rate_limit' || error.type === 'quota_exceeded') {
++        return true;
++    }
++
++    const text = `${error.message}\n${error.raw}`;
++    return matchesAcpRetryBackoff(text) || matchesAcpHttp2Cancel(text);
++}
+diff --git a/cli/src/agent/messageConverter.test.ts b/cli/src/agent/messageConverter.test.ts
+index d32fa523..82f16c8b 100644
+--- a/cli/src/agent/messageConverter.test.ts
++++ b/cli/src/agent/messageConverter.test.ts
+@@ -67,6 +67,18 @@ describe('convertAgentMessage', () => {
+         });
+     });
+ 
++    it('converts error messages into codex error payloads', () => {
++        const converted = convertAgentMessage({
++            type: 'error',
++            message: 'API quota exceeded.'
++        });
++
++        expect(converted).toEqual({
++            type: 'error',
++            message: 'API quota exceeded.'
++        });
++    });
++
+     it('converts agent errors into error wire payloads', () => {
+         const converted = convertAgentMessage({
+             type: 'error',
+diff --git a/cli/src/opencode/opencodeRemoteLauncher.test.ts b/cli/src/opencode/opencodeRemoteLauncher.test.ts
+index 03284b18..4cda3cf2 100644
+--- a/cli/src/opencode/opencodeRemoteLauncher.test.ts
++++ b/cli/src/opencode/opencodeRemoteLauncher.test.ts
+@@ -13,6 +13,10 @@ const harness = vi.hoisted(() => ({
+     setModelImpl: null as null | ((sessionId: string, modelId: string) => Promise<void>),
+     setConfigOptionImpl: null as null | ((sessionId: string, configId: string, value: string) => Promise<void>),
+     thoughtLevelOption: null as null | { id: string; currentValue?: string; options: Array<{ value: string; name?: string }> },
++    stderrHandler: null as null | ((error: { type: string; message: string; raw: string }) => void),
++    hangPrompt: false,
++    resolvePrompt: null as null | (() => void),
++    cancelPrompt: vi.fn(async (_sessionId: string) => {}),
+     // Lets a test take full manual control of when a given prompt() call
+     // resolves, instead of the fixed-one-tick setImmediate delay below —
+     // needed to deterministically test ordering against /compact without
+@@ -89,20 +93,30 @@ vi.mock('./utils/opencodeBackend', () => ({
+             harness.promptContents.push(content);
+             harness.events.push('prompt:start');
+             harness.promptCount++;
+-            if (harness.promptImpl) {
++            if (harness.hangPrompt) {
++                await new Promise<void>((resolve) => {
++                    harness.resolvePrompt = resolve;
++                });
++            } else if (harness.promptImpl) {
+                 await harness.promptImpl();
+             } else {
+                 await new Promise<void>((resolve) => setImmediate(resolve));
+             }
+             harness.events.push('prompt:end');
+         }),
+-        cancelPrompt: vi.fn(async () => {
++        isPromptRequestInFlight: vi.fn(() =>
++            harness.events.lastIndexOf('prompt:start') > harness.events.lastIndexOf('prompt:end')
++        ),
++        cancelPrompt: vi.fn(async (sessionId: string) => {
++            await harness.cancelPrompt(sessionId);
+             if (harness.cancelPromptImpl) {
+                 await harness.cancelPromptImpl();
+             }
+         }),
+         respondToPermission: vi.fn(async () => {}),
+-        onStderrError: vi.fn(),
++        onStderrError: vi.fn((handler: (error: { type: string; message: string; raw: string }) => void) => {
++            harness.stderrHandler = handler;
++        }),
+         setSessionInfoUpdateListener: vi.fn(),
+         refreshSessionInfo: vi.fn(async (sessionId: string, cwd: string) => {
+             harness.refreshSessionInfoCalls.push({ sessionId, cwd });
+@@ -289,7 +303,7 @@ function createSessionStub(
+         sendUserMessage(_text: string) {}
+     };
+ 
+-    return { session, sessionEvents, sentAgentMessages, rpcHandlers, setModelReasoningEffort, pushKeepAlive, emitMessagesConsumedCalls, thinkingChangeCalls };
++    return { session, sessionEvents, sentAgentMessages, agentMessages: sentAgentMessages, rpcHandlers, setModelReasoningEffort, pushKeepAlive, emitMessagesConsumedCalls, thinkingChangeCalls };
+ }
+ 
+ function createCompactMode(model?: string): OpencodeMode {
+@@ -312,6 +326,10 @@ describe('opencodeRemoteLauncher inline model switch', () => {
+         harness.setModelImpl = null;
+         harness.setConfigOptionImpl = null;
+         harness.thoughtLevelOption = null;
++        harness.stderrHandler = null;
++        harness.hangPrompt = false;
++        harness.resolvePrompt = null;
++        harness.cancelPrompt.mockClear();
+         compactHarness.calls = [];
+         compactHarness.result = { ok: true };
+         compactHarness.summaryCalls = [];
+@@ -1681,6 +1699,91 @@ describe('opencodeRemoteLauncher inline model switch', () => {
+         });
+     });
+ 
++    it('reports a stall stderr error only once per prompt', async () => {
++        harness.hangPrompt = true;
++        const { session, agentMessages } = createSessionStub([
++            { message: 'first', mode: createMode() }
++        ]);
++
++        const launchPromise = opencodeRemoteLauncher(session as never);
++        await vi.waitFor(() => expect(harness.events).toContain('prompt:start'));
++        expect(session.thinking).toBe(true);
++        expect(harness.stderrHandler).toBeTypeOf('function');
++
++        harness.stderrHandler!({
++            type: 'quota_exceeded',
++            message: 'API quota exceeded. Please check your billing or wait for quota reset.',
++            raw: 'quota exceeded for provider'
++        });
++        harness.stderrHandler!({
++            type: 'quota_exceeded',
++            message: 'Retrying after quota error.',
++            raw: 'retrying in 30 seconds'
++        });
++
++        expect(session.thinking).toBe(false);
++        expect(harness.cancelPrompt).toHaveBeenCalledTimes(1);
++        expect(harness.cancelPrompt).toHaveBeenCalledWith('acp-session-1');
++        expect(agentMessages).toEqual([{
++            type: 'error',
++            message: 'API quota exceeded. Please check your billing or wait for quota reset.'
++        }]);
++
++        harness.resolvePrompt!();
++        await launchPromise;
++    });
++
++    it('routes HTTP/2 cancel stderr through the error agent message pipeline', async () => {
++        harness.hangPrompt = true;
++        const { session, agentMessages } = createSessionStub([
++            { message: 'first', mode: createMode() }
++        ]);
++
++        const launchPromise = opencodeRemoteLauncher(session as never);
++        await vi.waitFor(() => expect(harness.stderrHandler).toBeTypeOf('function'));
++
++        const message = 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)';
++        harness.stderrHandler!({
++            type: 'unknown',
++            message,
++            raw: message
++        });
++
++        expect(session.thinking).toBe(false);
++        expect(harness.cancelPrompt).toHaveBeenCalledWith('acp-session-1');
++        expect(agentMessages).toContainEqual({ type: 'error', message });
++
++        harness.resolvePrompt!();
++        await launchPromise;
++    });
++
++    it('surfaces non-stall stderr as error without clearing thinking or canceling prompt', async () => {
++        harness.hangPrompt = true;
++        const { session, agentMessages } = createSessionStub([
++            { message: 'first', mode: createMode() }
++        ]);
++
++        const launchPromise = opencodeRemoteLauncher(session as never);
++        await vi.waitFor(() => expect(harness.events).toContain('prompt:start'));
++        expect(session.thinking).toBe(true);
++
++        harness.stderrHandler!({
++            type: 'authentication',
++            message: 'Authentication failed. Please check your credentials.',
++            raw: 'status 401 unauthenticated'
++        });
++
++        expect(session.thinking).toBe(true);
++        expect(harness.cancelPrompt).not.toHaveBeenCalled();
++        expect(agentMessages).toContainEqual({
++            type: 'error',
++            message: 'Authentication failed. Please check your credentials.'
++        });
++
++        harness.resolvePrompt!();
++        await launchPromise;
++    });
++
+     it('serializes setModel after the previous prompt resolves', async () => {
+         const { session } = createSessionStub([
+             { message: 'first', mode: createMode('ollama/a') },
+diff --git a/cli/src/opencode/opencodeRemoteLauncher.ts b/cli/src/opencode/opencodeRemoteLauncher.ts
+index 3dea38e0..c0056f8e 100644
+--- a/cli/src/opencode/opencodeRemoteLauncher.ts
++++ b/cli/src/opencode/opencodeRemoteLauncher.ts
+@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
+ import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
+ import { logger } from '@/ui/logger';
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
++import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
++import { isAcpStallStderrError } from '@/agent/backends/acp/acpStderrErrors';
+ import { convertAgentMessage } from '@/agent/messageConverter';
+ import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types';
+ import { RemoteLauncherBase, type RemoteLauncherDisplayContext, type RemoteLauncherExitReason } from '@/modules/common/remote/RemoteLauncherBase';
+@@ -125,6 +127,8 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+     private defaultBackendEffort: string | null = null;
+     private setModelSupported: boolean | undefined = undefined;
+     private setEffortSupported: boolean | undefined = undefined;
++    private activeAcpSessionId: string | null = null;
++    private stallErrorReportedForPrompt = false;
+ 
+     constructor(
+         session: OpencodeSession,
+@@ -174,9 +178,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         registerAcpSessionTitleSync(backend, session.client);
+ 
+         backend.onStderrError((error) => {
+-            logger.debug('[opencode-remote] stderr error', error);
+-            session.sendSessionEvent({ type: 'message', message: error.message });
+-            messageBuffer.addMessage(error.message, 'status');
++            this.handleAcpStderrError(error);
+         });
+ 
+         await backend.initialize();
+@@ -209,6 +211,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+             });
+         }
+         session.onSessionFound(acpSessionId);
++        this.activeAcpSessionId = acpSessionId;
+ 
+         // Seed currentBackendModel from the ACP session metadata so the first
+         // batch — whose model the hub mirrors from the just-discovered session —
+@@ -557,6 +560,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+                 text: messageText
+             }];
+ 
++            this.stallErrorReportedForPrompt = false;
+             session.onThinkingChange(true);
+ 
+             try {
+@@ -566,11 +570,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+                 void backend.refreshSessionInfo(acpSessionId, session.path);
+             } catch (error) {
+                 logger.warn('[opencode-remote] prompt failed', error);
+-                session.sendSessionEvent({
+-                    type: 'message',
+-                    message: 'OpenCode prompt failed. Check logs for details.'
+-                });
+-                messageBuffer.addMessage('OpenCode prompt failed', 'status');
++                this.surfaceAgentError('OpenCode prompt failed. Check logs for details.');
+             } finally {
+                 session.onThinkingChange(false);
+                 await this.permissionHandler?.cancelAll('Prompt finished');
+@@ -618,6 +618,42 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
+         }
+     }
+ 
++    private handleAcpStderrError(error: AcpStderrError): void {
++        logger.debug('[opencode-remote] stderr error', error);
++        const isStall = isAcpStallStderrError(error)
++            && this.backend?.isPromptRequestInFlight() === true;
++        if (isStall && this.stallErrorReportedForPrompt) {
++            return;
++        }
++        if (isStall) {
++            this.stallErrorReportedForPrompt = true;
++        }
++        this.surfaceAgentError(error.message);
++        if (isStall) {
++            void this.clearStalledPrompt();
++        }
++    }
++
++    private surfaceAgentError(message: string): void {
++        this.session.sendAgentMessage({ type: 'error', message });
++        this.messageBuffer.addMessage(message, 'status');
++    }
++
++    private async clearStalledPrompt(): Promise<void> {
++        const backend = this.backend;
++        const sessionId = this.activeAcpSessionId;
++        if (!backend || !sessionId) {
++            return;
++        }
++
++        this.session.onThinkingChange(false);
++        try {
++            await backend.cancelPrompt(sessionId);
++        } catch (error) {
++            logger.debug('[opencode-remote] cancelPrompt after stderr failed', error);
++        }
++    }
++
+     private rollbackReasoningEffort(batch: { mode: OpencodeMode }, effort: string | null): void {
+         batch.mode.modelReasoningEffort = effort;
+         this.session.setModelReasoningEffort(effort);
+diff --git a/web/src/chat/normalizeAgent.error.test.ts b/web/src/chat/normalizeAgent.error.test.ts
+new file mode 100644
+index 00000000..2bd2ab2e
+--- /dev/null
++++ b/web/src/chat/normalizeAgent.error.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, it } from 'vitest'
++import { normalizeAgentRecord } from './normalizeAgent'
++import { AGENT_MESSAGE_PAYLOAD_TYPE } from '@hapi/protocol'
++
++describe('normalizeAgentRecord — agent error payloads', () => {
++    it('normalizes codex error payloads into error-styled agent events', () => {
++        const normalized = normalizeAgentRecord(
++            'msg-1',
++            null,
++            1_700_000_000_000,
++            {
++                type: AGENT_MESSAGE_PAYLOAD_TYPE,
++                data: {
++                    type: 'error',
++                    message: 'API quota exceeded.'
++                }
++            }
++        )
++
++        expect(normalized).toEqual({
++            id: 'msg-1',
++            localId: null,
++            createdAt: 1_700_000_000_000,
++            role: 'event',
++            isSidechain: false,
++            content: {
++                type: 'error',
++                message: 'API quota exceeded.'
++            }
++        })
++    })
++})
+diff --git a/web/src/chat/presentation.test.ts b/web/src/chat/presentation.test.ts
+index 7bb55335..da177426 100644
+--- a/web/src/chat/presentation.test.ts
++++ b/web/src/chat/presentation.test.ts
+@@ -147,6 +147,18 @@ describe('getEventPresentation — token-count', () => {
+     })
+ })
+ 
++describe('getEventPresentation — agent error', () => {
++    it('formats agent error events with a warning icon', () => {
++        const result = getEventPresentation({
++            type: 'error',
++            message: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
++        })
++
++        expect(result.icon).toBe('⚠️')
++        expect(result.text).toContain('http/2 stream closed')
++    })
++})
++
+ describe('getEventPresentation — thread goals', () => {
+     it('formats goal status updates', () => {
+         const result = getEventPresentation({
+-- 
+2.50.1 (Apple Git-155)
+

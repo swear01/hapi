@@ -1,0 +1,1718 @@
+From 69d21ec20f793b84d956ea688780ace5104d2630 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 3 Aug 2026 09:28:07 +0800
+Subject: [PATCH] carry: upstream PR #897
+
+---
+ .../handlers/cli/sessionHandlers.test.ts      | 154 ++++++++++++
+ .../socket/handlers/cli/sessionHandlers.ts    |  56 ++++-
+ .../sessionCache.applySessionPatch.test.ts    | 220 ++++++++++++++++++
+ hub/src/sync/sessionCache.ts                  |  84 ++++++-
+ hub/src/sync/syncEngine.ts                    |  45 +++-
+ .../syncEngineHandleRealtimeEvent.test.ts     | 141 +++++++++++
+ shared/src/schemas.sessionPatch.test.ts       | 104 +++++++++
+ shared/src/schemas.ts                         |  45 ++++
+ shared/src/sessionSummary.test.ts             |  55 ++++-
+ shared/src/sessionSummary.ts                  | 119 ++++++----
+ .../SessionAttentionIndicator.test.tsx        |   3 +
+ .../SessionList.directory-action.test.tsx     |   3 +
+ .../SessionList.machine-filter.test.tsx       |   3 +
+ web/src/components/SessionList.test.ts        |   3 +
+ web/src/hooks/useSSE.test.ts                  | 102 +++++++-
+ web/src/hooks/useSSE.ts                       | 169 +++++++++++++-
+ web/src/lib/sessionAttention.test.ts          |   3 +
+ web/src/lib/sessionReference.test.ts          |   3 +
+ 18 files changed, 1253 insertions(+), 59 deletions(-)
+ create mode 100644 hub/src/sync/sessionCache.applySessionPatch.test.ts
+ create mode 100644 hub/src/sync/syncEngineHandleRealtimeEvent.test.ts
+ create mode 100644 shared/src/schemas.sessionPatch.test.ts
+
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index 428299ce..292eb0a6 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -65,6 +65,160 @@ describe('cli session handlers', () => {
+         expect(webEvents).toHaveLength(0)
+     })
+ 
++    it('emits a structured todos patch when a TodoWrite message lands (closes second half of #884)', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession('todos-session', { path: '/tmp', host: 'h' }, null, 'default')
++        const socket = new FakeSocket()
++        const webEvents: SyncEvent[] = []
++
++        registerSessionHandlers(socket as unknown as CliSocketWithData, {
++            store,
++            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
++            emitAccessError: () => {
++                throw new Error('unexpected access error')
++            },
++            onWebappEvent: (event) => {
++                webEvents.push(event)
++            }
++        })
++
++        socket.trigger('message', {
++            sid: session.id,
++            message: {
++                role: 'agent',
++                content: {
++                    type: 'output',
++                    data: {
++                        type: 'assistant',
++                        message: {
++                            content: [
++                                {
++                                    type: 'tool_use',
++                                    name: 'TodoWrite',
++                                    input: {
++                                        todos: [
++                                            { content: 'pending thing', status: 'pending' },
++                                            { content: 'done thing', status: 'completed' }
++                                        ]
++                                    }
++                                }
++                            ]
++                        }
++                    }
++                }
++            }
++        })
++
++        const sessionUpdated = webEvents.find((e) => e.type === 'session-updated')
++        expect(sessionUpdated).toBeDefined()
++        if (!sessionUpdated || sessionUpdated.type !== 'session-updated') return
++        expect(sessionUpdated.data).toMatchObject({
++            todos: {
++                version: expect.any(Number),
++                value: [
++                    { content: 'pending thing', status: 'pending' },
++                    { content: 'done thing', status: 'completed' }
++                ]
++            }
++        })
++        expect(typeof (sessionUpdated.data as { updatedAt?: number }).updatedAt).toBe('number')
++        expect((sessionUpdated.data as { updatedAt?: number }).updatedAt).toBeGreaterThan(0)
++    })
++
++    it('emits a structured metadata patch on update-metadata RPC (closes second half of #884)', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'metadata-patch-session',
++            { path: '/tmp/project', host: 'example' },
++            null,
++            'default'
++        )
++        const socket = new FakeSocket()
++        const webEvents: SyncEvent[] = []
++
++        registerSessionHandlers(socket as unknown as CliSocketWithData, {
++            store,
++            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
++            emitAccessError: () => {
++                throw new Error('unexpected access error')
++            },
++            onWebappEvent: (event) => {
++                webEvents.push(event)
++            }
++        })
++
++        socket.trigger(
++            'update-metadata',
++            {
++                sid: session.id,
++                expectedVersion: session.metadataVersion,
++                metadata: { lifecycleState: 'archived' }
++            },
++            () => {}
++        )
++
++        const sessionUpdated = webEvents.find((e) => e.type === 'session-updated')
++        expect(sessionUpdated).toBeDefined()
++        if (!sessionUpdated || sessionUpdated.type !== 'session-updated') return
++        const data = sessionUpdated.data as { metadata?: { version: number; value: Record<string, unknown> }; updatedAt?: number } | undefined
++        expect(data?.metadata?.version).toBe(session.metadataVersion + 1)
++        // Merged value: original path/host preserved + new lifecycleState applied.
++        expect(data?.metadata?.value).toMatchObject({
++            path: '/tmp/project',
++            host: 'example',
++            lifecycleState: 'archived'
++        })
++        expect(typeof data?.updatedAt).toBe('number')
++        // Same-ms create+update is common in unit tests; store still touches updated_at.
++        expect(data?.updatedAt).toBeGreaterThanOrEqual(session.updatedAt)
++    })
++
++    it('emits a structured agentState patch on update-state RPC (closes second half of #884)', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'agent-state-patch-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++        const socket = new FakeSocket()
++        const webEvents: SyncEvent[] = []
++
++        registerSessionHandlers(socket as unknown as CliSocketWithData, {
++            store,
++            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
++            emitAccessError: () => {
++                throw new Error('unexpected access error')
++            },
++            onWebappEvent: (event) => {
++                webEvents.push(event)
++            }
++        })
++
++        socket.trigger(
++            'update-state',
++            {
++                sid: session.id,
++                expectedVersion: session.agentStateVersion,
++                agentState: { controlledByUser: true }
++            },
++            () => {}
++        )
++
++        const sessionUpdated = webEvents.find((e) => e.type === 'session-updated')
++        expect(sessionUpdated).toBeDefined()
++        if (!sessionUpdated || sessionUpdated.type !== 'session-updated') return
++        const data = sessionUpdated.data as {
++            agentState?: { version: number; value: { controlledByUser?: boolean } }
++            updatedAt?: number
++        } | undefined
++        expect(data?.agentState?.version).toBe(session.agentStateVersion + 1)
++        expect(data?.agentState?.value).toMatchObject({ controlledByUser: true })
++        expect(typeof data?.updatedAt).toBe('number')
++        // Same-ms create+update is common in unit tests; store still touches updated_at.
++        expect(data?.updatedAt).toBeGreaterThanOrEqual(session.updatedAt)
++    })
++
+     it('update-metadata broadcasts the merged value, not the pre-merge payload', () => {
+         const store = new Store(':memory:')
+         const session = store.sessions.getOrCreateSession(
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index 16769888..46987fd3 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -1,7 +1,7 @@
+ import type { ClientToServerEvents } from '@hapi/protocol'
+ import { z } from 'zod'
+ import { randomUUID } from 'node:crypto'
+-import type { CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
++import type { AgentState, CodexCollaborationMode, Metadata, PermissionMode } from '@hapi/protocol/types'
+ import { isRedundantGoalStatusEventContent } from '@hapi/protocol/messages'
+ import type { Store, StoredSession } from '../../../store'
+ import type { SyncEvent } from '../../../sync/syncEngine'
+@@ -121,7 +121,18 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         if (todos) {
+             const updated = store.sessions.setSessionTodos(sid, todos, msg.createdAt, session.namespace)
+             if (updated) {
+-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++                const stored = store.sessions.getSession(sid)
++                onWebappEvent?.({
++                    type: 'session-updated',
++                    sessionId: sid,
++                    data: {
++                        todos: {
++                            version: stored?.todosUpdatedAt ?? msg.createdAt,
++                            value: todos
++                        },
++                        updatedAt: stored?.updatedAt ?? msg.createdAt
++                    }
++                })
+             }
+         }
+ 
+@@ -132,7 +143,21 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+             const newTeamState = applyTeamStateDelta(existingTeamState ?? null, teamDelta)
+             const updated = store.sessions.setSessionTeamState(sid, newTeamState, msg.createdAt, session.namespace)
+             if (updated) {
+-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++                const stored = store.sessions.getSession(sid)
++                // Versioned clear: value null = TeamDelete. Consumers gate on
++                // version (store team_state_updated_at) so dual SSE cannot
++                // resurrect a deleted team from a lagged older event.
++                onWebappEvent?.({
++                    type: 'session-updated',
++                    sessionId: sid,
++                    data: {
++                        teamState: {
++                            version: stored?.teamStateUpdatedAt ?? msg.createdAt,
++                            value: newTeamState
++                        },
++                        updatedAt: stored?.updatedAt ?? msg.createdAt
++                    }
++                })
+             }
+         }
+ 
+@@ -202,6 +227,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         }
+ 
+         if (result.result === 'success') {
++            const stored = store.sessions.getSession(sid)
+             const update = {
+                 id: randomUUID(),
+                 seq: Date.now(),
+@@ -220,7 +246,19 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+                 }
+             }
+             socket.to(`session:${sid}`).emit('update', update)
+-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++            onWebappEvent?.({
++                type: 'session-updated',
++                sessionId: sid,
++                // The unknown-cast here mirrors the schema's MetadataSchema.nullable()
++                // shape: the store returns raw JSON, the wire schema parses it on
++                // both ends. Keeping the broadcast shape identical to the socket.io
++                // `update-session` body (line ~213) lets the same patch travel
++                // through both fan-out channels without divergence.
++                data: {
++                    metadata: { version: result.version, value: result.value as Metadata | null },
++                    updatedAt: stored?.updatedAt ?? Date.now()
++                }
++            })
+         }
+     }
+ 
+@@ -255,6 +293,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         }
+ 
+         if (result.result === 'success') {
++            const stored = store.sessions.getSession(sid)
+             const update = {
+                 id: randomUUID(),
+                 seq: Date.now(),
+@@ -267,7 +306,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+                 }
+             }
+             socket.to(`session:${sid}`).emit('update', update)
+-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
++            onWebappEvent?.({
++                type: 'session-updated',
++                sessionId: sid,
++                data: {
++                    agentState: { version: result.version, value: agentState as AgentState | null },
++                    updatedAt: stored?.updatedAt ?? Date.now()
++                }
++            })
+         }
+     }
+ 
+diff --git a/hub/src/sync/sessionCache.applySessionPatch.test.ts b/hub/src/sync/sessionCache.applySessionPatch.test.ts
+new file mode 100644
+index 00000000..a2a36421
+--- /dev/null
++++ b/hub/src/sync/sessionCache.applySessionPatch.test.ts
+@@ -0,0 +1,220 @@
++import { describe, expect, it } from 'bun:test'
++import type { SyncEvent } from '@hapi/protocol/types'
++import { Store } from '../store'
++import type { EventPublisher } from './eventPublisher'
++import { SessionCache } from './sessionCache'
++
++function createPublisher(events: SyncEvent[]): EventPublisher {
++    return {
++        emit: (event: SyncEvent) => {
++            events.push(event)
++        }
++    } as unknown as EventPublisher
++}
++
++// Companion guard for syncEngine.handleRealtimeEvent's new "forward structured
++// patches without DB refresh" branch (closes the second half of #884). The
++// hub-side fast-path is only safe if applySessionPatch keeps the in-memory
++// cache consistent with what just landed in the DB — otherwise subsequent
++// callers like NotificationHub.getSession would see stale data and the
++// cache-vs-DB divergence would manifest as ghost notifications, stale
++// pendingRequestsCount, or wrong todos progress in the session list.
++describe('SessionCache.applySessionPatch', () => {
++    it('applies a todos patch in place when the session is cached', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'todos-patch-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++
++        const todos = [
++            { content: 'one', status: 'pending' as const, priority: 'medium' as const, id: '1' }
++        ]
++        const applied = cache.applySessionPatch(created.id, {
++            todos: { version: 100, value: todos }
++        })
++
++        expect(applied).toBe(true)
++        expect(cache.getSession(created.id)?.todos).toEqual(todos)
++        expect(cache.getSession(created.id)?.todosUpdatedAt).toBe(100)
++    })
++
++    it('applies a versioned metadata patch by unwrapping value + version', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'meta-patch-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++
++        const nextVersion = created.metadataVersion + 1
++        const applied = cache.applySessionPatch(created.id, {
++            metadata: {
++                version: nextVersion,
++                value: { path: '/tmp', host: 'h', lifecycleState: 'archived' }
++            }
++        })
++
++        expect(applied).toBe(true)
++        const after = cache.getSession(created.id)
++        expect(after?.metadata?.lifecycleState).toBe('archived')
++        expect(after?.metadataVersion).toBe(nextVersion)
++    })
++
++    it('applies a versioned agentState patch with null value', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'agent-patch-session',
++            { path: '/tmp', host: 'h' },
++            { controlledByUser: true },
++            'default'
++        )
++        expect(created.agentState).not.toBeNull()
++
++        const nextVersion = created.agentStateVersion + 1
++        const applied = cache.applySessionPatch(created.id, {
++            agentState: { version: nextVersion, value: null }
++        })
++
++        expect(applied).toBe(true)
++        const after = cache.getSession(created.id)
++        expect(after?.agentState).toBeNull()
++        expect(after?.agentStateVersion).toBe(nextVersion)
++    })
++
++    it('returns false (caller falls back to refresh) when the session is not cached', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const applied = cache.applySessionPatch('does-not-exist', { todos: { version: 1, value: [] } })
++        expect(applied).toBe(false)
++    })
++
++    it('returns false when patch data fails SessionPatchSchema', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'bad-patch-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++
++        // Bogus shape: { metadata: { value: ... } } is missing the required version.
++        const applied = cache.applySessionPatch(created.id, {
++            metadata: { value: { path: '/x', host: 'y' } }
++        })
++        expect(applied).toBe(false)
++    })
++
++    it('refuses an empty patch ({}) so the caller falls back to refreshSession', () => {
++        // Web-side getSessionPatch rejects empty payloads (Object.keys length 0)
++        // and would fall through to REST invalidation — exactly the storm we
++        // are closing. The empty-patch guard keeps the syncEngine on the safe
++        // legacy refresh path for these no-op events.
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'empty-patch-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++
++        expect(cache.applySessionPatch(created.id, {})).toBe(false)
++    })
++
++    it('clears cached teamState when a null teamState patch lands (TeamDelete)', () => {
++        // PR #897 review (HAPI Bot, 2026-06-13 Major): TeamDelete events
++        // drive applyTeamStateDelta to return null; the emit-site sends
++        // { teamState: null } as the explicit clear signal. Without
++        // hasOwnProperty-discrimination, `if (patch.teamState !== undefined)`
++        // skipped the clear path and left the hub cache holding stale
++        // pre-delete TeamState — sidebar / NotificationHub / dedup all
++        // would serve stale data until the next full refresh.
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'teamstate-clear-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++        // Seed cached teamState (the pre-delete state).
++        const seedApplied = cache.applySessionPatch(created.id, {
++            teamState: { version: 10, value: { teamName: 'crew', members: [{ name: 'a' }] } }
++        })
++        expect(seedApplied).toBe(true)
++        expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
++
++        // TeamDelete: null teamState value must clear the cache.
++        const cleared = cache.applySessionPatch(created.id, { teamState: { version: 11, value: null } })
++        expect(cleared).toBe(true)
++        expect(cache.getSession(created.id)?.teamState).toBeUndefined()
++    })
++
++    it('leaves teamState untouched when the patch does not carry the key', () => {
++        // Guard the hasOwnProperty discriminator against a refactor back to
++        // `if (patch.teamState !== undefined)` — a todos-only patch must
++        // NOT clear teamState, which a naive `?? undefined` assignment on
++        // the unconditional branch would do.
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'teamstate-untouched-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'default'
++        )
++        cache.applySessionPatch(created.id, {
++            teamState: { version: 10, value: { teamName: 'crew', members: [{ name: 'a' }] } }
++        })
++        expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
++
++        const todosOnly = cache.applySessionPatch(created.id, {
++            todos: {
++                version: 20,
++                value: [{ content: 'one', status: 'pending' as const, priority: 'medium' as const, id: '1' }]
++            }
++        })
++        expect(todosOnly).toBe(true)
++        expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
++    })
++
++    it('refuses cross-namespace patches even if the session exists', () => {
++        const store = new Store(':memory:')
++        const events: SyncEvent[] = []
++        const cache = new SessionCache(store, createPublisher(events))
++
++        const created = cache.getOrCreateSession(
++            'ns-guard-session',
++            { path: '/tmp', host: 'h' },
++            null,
++            'tenant-a'
++        )
++
++        const applied = cache.applySessionPatch(created.id, { todos: { version: 1, value: [] } }, 'tenant-b')
++        expect(applied).toBe(false)
++    })
++})
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index 23e3c2b5..52c21316 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -1,4 +1,4 @@
+-import { AgentStateSchema, MetadataSchema, TeamStateSchema } from '@hapi/protocol/schemas'
++import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
+ import type { CodexCollaborationMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
+ import type { Store } from '../store'
+ import { clampAliveTime } from './aliveTime'
+@@ -197,6 +197,8 @@ export class SessionCache {
+             backgroundTaskCount: existing?.backgroundTaskCount ?? 0,
+             todos,
+             teamState,
++            todosUpdatedAt: stored.todosUpdatedAt ?? 0,
++            teamStateUpdatedAt: stored.teamStateUpdatedAt ?? 0,
+             model: stored.model,
+             modelReasoningEffort: stored.modelReasoningEffort,
+             effort: stored.effort,
+@@ -243,6 +245,86 @@ export class SessionCache {
+         }
+     }
+ 
++    /**
++     * Apply a structured patch to the cached Session in place.
++     *
++     * Returns `true` if the patch parsed, carried at least one field, and a
++     * Session was present to update. Returns `false` when:
++     *   - the patch data fails SessionPatchSchema (caller falls back to
++     *     refreshSession),
++     *   - the patch is the empty object `{}` — the web client's
++     *     `getSessionPatch` rejects empty payloads and would fall through to
++     *     REST invalidation, so we route empty events through the legacy
++     *     refresh path instead (caller falls back to refreshSession),
++     *   - the session is not in the cache (caller falls back to refreshSession
++     *     so the DB read can hydrate it),
++     *   - the patch's namespace hint disagrees with the cached session
++     *     namespace (cross-namespace event, caller skips).
++     *
++     * Companion to syncEngine.handleRealtimeEvent. Closes the second half of
++     * #884 by giving the four no-data emit-sites in cli/sessionHandlers.ts a
++     * way to propagate their delta straight through to SSE without a DB
++     * re-read or full-Session broadcast.
++     */
++    applySessionPatch(sessionId: string, data: unknown, namespace?: string): boolean {
++        const parsed = SessionPatchSchema.safeParse(data)
++        if (!parsed.success) {
++            return false
++        }
++
++        // Empty patch ({}): forward would hit the web-side fallback that
++        // triggers a REST refetch. Let the caller fall back to refreshSession
++        // so the existing full-Session broadcast path keeps the cache
++        // coherent.
++        if (Object.keys(parsed.data).length === 0) {
++            return false
++        }
++
++        const session = this.sessions.get(sessionId)
++        if (!session) {
++            return false
++        }
++
++        if (namespace && session.namespace !== namespace) {
++            return false
++        }
++
++        const patch = parsed.data
++
++        if (patch.active !== undefined) session.active = patch.active
++        if (patch.thinking !== undefined) session.thinking = patch.thinking
++        if (patch.activeAt !== undefined) session.activeAt = patch.activeAt
++        if (patch.updatedAt !== undefined) session.updatedAt = Math.max(session.updatedAt, patch.updatedAt)
++        if (patch.model !== undefined) session.model = patch.model
++        if (patch.modelReasoningEffort !== undefined) session.modelReasoningEffort = patch.modelReasoningEffort
++        if (patch.effort !== undefined) session.effort = patch.effort
++        if (Object.prototype.hasOwnProperty.call(patch, 'serviceTier')) {
++            session.serviceTier = patch.serviceTier ?? null
++        }
++        if (patch.permissionMode !== undefined) session.permissionMode = patch.permissionMode
++        if (patch.collaborationMode !== undefined) session.collaborationMode = patch.collaborationMode
++        if (patch.backgroundTaskCount !== undefined) session.backgroundTaskCount = patch.backgroundTaskCount
++        if (patch.todos !== undefined) {
++            session.todos = patch.todos.value
++            session.todosUpdatedAt = patch.todos.version
++        }
++        // Versioned teamState: key present + value null = TeamDelete clear.
++        if (patch.teamState !== undefined) {
++            session.teamState = patch.teamState.value ?? undefined
++            session.teamStateUpdatedAt = patch.teamState.version
++        }
++        if (patch.metadata !== undefined) {
++            session.metadata = patch.metadata.value
++            session.metadataVersion = patch.metadata.version
++        }
++        if (patch.agentState !== undefined) {
++            session.agentState = patch.agentState.value
++            session.agentStateVersion = patch.agentState.version
++        }
++
++        return true
++    }
++
+     handleSessionAlive(payload: {
+         sid: string
+         time: number
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 5ec9e1ab..cef628e9 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -366,12 +366,51 @@ export class SyncEngine {
+ 
+     handleRealtimeEvent(event: SyncEvent): void {
+         if (event.type === 'session-updated' && event.sessionId) {
+-            // Snapshot agent session IDs before refresh — safe because JS is single-threaded
+-            // and refreshSession replaces the Map entry with a new object.
++            // Closes the second half of #884: when a CLI handler emits a
++            // structured patch (todos / teamState / metadata / agentState),
++            // apply it in place and forward the patch as-is. This skips both
++            // the DB re-read AND the full-Session SSE broadcast that the
++            // legacy no-data path went through. Web clients hit
++            // getSessionPatch's truthy path and patch the cache instead of
++            // falling through to the per-session REST invalidation that drove
++            // the refetch storm.
++            //
++            // `applySessionPatch` MUTATES the cached Session in place (it
++            // reassigns `session.metadata = patch.metadata.value`), so we
++            // MUST snapshot the metadata reference BEFORE calling it.
++            // Reading `before?.metadata` after the mutation would see the
++            // new value and `hasSameAgentSessionIds` would always return
++            // true — breaking the dedup-on-metadata-id-change trigger that
++            // the legacy `refreshSession` path got for free (refresh
++            // REPLACES the cache entry, leaving the old object reference
++            // intact for the caller). Use the snapshot for BOTH branches
++            // so the comparison contract is identical.
+             const before = this.sessionCache.getSession(event.sessionId)
++            const beforeMetadata = before?.metadata ?? null
++            const patchApplied = event.data
++                ? this.sessionCache.applySessionPatch(event.sessionId, event.data, event.namespace)
++                : false
++
++            if (patchApplied) {
++                this.eventPublisher.emit(event)
++                const after = this.sessionCache.getSession(event.sessionId)
++                if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
++                    if (!this.canRunCursorDedup(after)) {
++                        return
++                    }
++                    void this.sessionCache.deduplicateByAgentSessionId(event.sessionId).catch(() => {
++                        // best-effort: dedup failure is harmless, web-side safety net hides remaining duplicates
++                    })
++                }
++                return
++            }
++
++            // No-data event (or data we can't apply directly, e.g. full
++            // Session payload from a different emitter): fall back to the
++            // legacy refresh-from-DB-and-broadcast path.
+             this.sessionCache.refreshSession(event.sessionId)
+             const after = this.sessionCache.getSession(event.sessionId)
+-            if (after?.metadata && !this.hasSameAgentSessionIds(before?.metadata ?? null, after.metadata)) {
++            if (after?.metadata && !this.hasSameAgentSessionIds(beforeMetadata, after.metadata)) {
+                 if (!this.canRunCursorDedup(after)) {
+                     return
+                 }
+diff --git a/hub/src/sync/syncEngineHandleRealtimeEvent.test.ts b/hub/src/sync/syncEngineHandleRealtimeEvent.test.ts
+new file mode 100644
+index 00000000..6378807f
+--- /dev/null
++++ b/hub/src/sync/syncEngineHandleRealtimeEvent.test.ts
+@@ -0,0 +1,141 @@
++import { describe, expect, it } from 'bun:test'
++import type { SessionPatch, SyncEvent } from '@hapi/protocol/types'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import { Store } from '../store'
++import { SessionCache } from './sessionCache'
++import { SyncEngine } from './syncEngine'
++
++/**
++ * Regression guard for the in-place-mutation interaction between
++ * `SessionCache.applySessionPatch` and `SyncEngine.handleRealtimeEvent`'s
++ * dedup trigger.
++ *
++ * `applySessionPatch` MUTATES the cached Session in place (it reassigns
++ * `session.metadata = patch.metadata.value`). The dedup-on-metadata-change
++ * branch in `handleRealtimeEvent` needs to compare BEFORE and AFTER agent
++ * session IDs to decide whether to trigger `deduplicateByAgentSessionId`.
++ * Without snapshotting the metadata reference before the mutation, `before`
++ * and `after` resolve to the SAME object reference, `hasSameAgentSessionIds`
++ * is always true, and dedup silently never fires on the fast path. The
++ * legacy `refreshSession` path got dedup for free because it REPLACED the
++ * cache entry with a new Session object, leaving the pre-refresh reference
++ * intact for the comparator.
++ *
++ * This was a real regression introduced by the refetch-storm fix
++ * (#884 second half) — the fast-path replaced the refresh-then-broadcast
++ * path for the four CLI emit-sites including the `update-metadata` RPC
++ * handler, which is exactly where a Cursor session id change would land
++ * (CLI resume re-stamps `metadata.cursorSessionId`).
++ */
++describe('SyncEngine.handleRealtimeEvent dedup-on-metadata-change', () => {
++    function makeEngine(): { engine: SyncEngine; cache: SessionCache; dedupCalls: string[] } {
++        const store = new Store(':memory:')
++        const engine = new SyncEngine(
++            store,
++            {} as never,
++            new RpcRegistry(),
++            { broadcast() {} } as never
++        )
++        const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
++        const dedupCalls: string[] = []
++        const originalDedup = cache.deduplicateByAgentSessionId.bind(cache)
++        cache.deduplicateByAgentSessionId = async (sessionId: string) => {
++            dedupCalls.push(sessionId)
++            // Do not actually run dedup; we only need to assert the trigger
++            // fired. Running the real merge logic would require additional
++            // store fixtures and is covered by sessionCache tests.
++            void originalDedup
++        }
++        return { engine, cache, dedupCalls }
++    }
++
++    it('triggers dedup when a structured metadata patch changes the agent session id', () => {
++        const { engine, cache, dedupCalls } = makeEngine()
++
++        const created = cache.getOrCreateSession(
++            'cursor-session-fast-path',
++            { path: '/tmp', host: 'h', flavor: 'cursor', cursorSessionId: 'cursor-old' },
++            null,
++            'default'
++        )
++
++        const patch: SessionPatch = {
++            metadata: {
++                version: created.metadataVersion + 1,
++                value: {
++                    path: '/tmp',
++                    host: 'h',
++                    flavor: 'cursor',
++                    cursorSessionId: 'cursor-new'
++                }
++            }
++        }
++
++        const event: SyncEvent = {
++            type: 'session-updated',
++            sessionId: created.id,
++            data: patch
++        }
++        engine.handleRealtimeEvent(event)
++
++        expect(dedupCalls).toEqual([created.id])
++        expect(cache.getSession(created.id)?.metadata?.cursorSessionId).toBe('cursor-new')
++    })
++
++    it('does not trigger dedup when the patch leaves agent session ids unchanged', () => {
++        const { engine, cache, dedupCalls } = makeEngine()
++
++        const created = cache.getOrCreateSession(
++            'cursor-session-fast-path-noop',
++            { path: '/tmp', host: 'h', flavor: 'cursor', cursorSessionId: 'cursor-stable' },
++            null,
++            'default'
++        )
++
++        // A todos patch carries no metadata and must NOT trigger dedup.
++        const event: SyncEvent = {
++            type: 'session-updated',
++            sessionId: created.id,
++            data: { todos: { version: 1, value: [] } } satisfies SessionPatch
++        }
++        engine.handleRealtimeEvent(event)
++
++        expect(dedupCalls).toEqual([])
++    })
++
++    it('triggers dedup on the legacy refresh fallback path (no patch data)', () => {
++        // Tighten the contract for the legacy refresh-from-DB branch:
++        // a no-`data` session-updated event still needs to fire dedup
++        // when the DB read surfaces a new agent session id. The shared
++        // `beforeMetadata` snapshot covers both branches, this guards
++        // against a refactor breaking the legacy path.
++        const { engine, cache, dedupCalls } = makeEngine()
++
++        const created = cache.getOrCreateSession(
++            'cursor-session-legacy-path',
++            { path: '/tmp', host: 'h', flavor: 'cursor', cursorSessionId: 'cursor-legacy-old' },
++            null,
++            'default'
++        )
++
++        // Persist a metadata change to the DB without going through the
++        // cache mutation path, so refreshSession's DB read picks up the
++        // new value when handleRealtimeEvent fires.
++        const updateResult = (engine as unknown as { store: Store }).store.sessions.updateSessionMetadata(
++            created.id,
++            { path: '/tmp', host: 'h', flavor: 'cursor', cursorSessionId: 'cursor-legacy-new' },
++            created.metadataVersion,
++            'default',
++            { touchUpdatedAt: false }
++        )
++        expect(updateResult.result).toBe('success')
++
++        const event: SyncEvent = {
++            type: 'session-updated',
++            sessionId: created.id
++        }
++        engine.handleRealtimeEvent(event)
++
++        expect(dedupCalls).toEqual([created.id])
++    })
++})
+diff --git a/shared/src/schemas.sessionPatch.test.ts b/shared/src/schemas.sessionPatch.test.ts
+new file mode 100644
+index 00000000..36afa290
+--- /dev/null
++++ b/shared/src/schemas.sessionPatch.test.ts
+@@ -0,0 +1,104 @@
++import { describe, expect, it } from 'vitest';
++import { SessionPatchSchema } from './schemas';
++
++// Guard the contract for the second-half-of-#884 fix. The web client routes
++// `session-updated` events to the structured-patch path only when the event's
++// `data` parses as a SessionPatch — these tests pin the schema shape so a
++// future refactor that drops `.strict()`, the versioned (version, value)
++// wrappers, or any of the new optional fields breaks the build instead of
++// silently re-introducing the refetch storm.
++describe('SessionPatchSchema structured patches (closes #884 follow-up)', () => {
++    it('parses a versioned todos patch', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            todos: {
++                version: 10,
++                value: [{ content: 'thing', status: 'pending' }]
++            }
++        });
++        expect(parsed.success).toBe(true);
++    });
++
++    it('rejects bare todos without a version (dual-SSE watermark required)', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            todos: [{ content: 'thing', status: 'pending' }]
++        });
++        expect(parsed.success).toBe(false);
++    });
++
++    it('parses a versioned teamState patch', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            teamState: {
++                version: 11,
++                value: {
++                    teamName: 'crew',
++                    members: [{ name: 'one' }]
++                }
++            }
++        });
++        expect(parsed.success).toBe(true);
++    });
++
++    it('parses a teamState clear patch (null value = TeamDelete)', () => {
++        // PR #897 review (HAPI Bot, 2026-06-13 Major + 2026-07-30 Major):
++        // teamState travels as { version, value }; value null clears the
++        // cached row. Version gates dual-SSE reordering.
++        const parsed = SessionPatchSchema.safeParse({
++            teamState: { version: 12, value: null }
++        });
++        expect(parsed.success).toBe(true);
++        if (parsed.success) {
++            expect(parsed.data.teamState?.value).toBeNull();
++        }
++    });
++
++    it('parses a versioned metadata patch', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            metadata: {
++                version: 7,
++                value: { path: '/tmp', host: 'h' }
++            }
++        });
++        expect(parsed.success).toBe(true);
++    });
++
++    it('parses a versioned agentState patch with null value', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            agentState: { version: 3, value: null }
++        });
++        expect(parsed.success).toBe(true);
++    });
++
++    it('rejects metadata without a version (must stay versioned for cache safety)', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            metadata: { value: { path: '/tmp', host: 'h' } }
++        });
++        expect(parsed.success).toBe(false);
++    });
++
++    it('stays strict and rejects unknown keys (catches silent .strict() removal)', () => {
++        const parsed = SessionPatchSchema.safeParse({
++            todos: { version: 1, value: [] },
++            notARealField: true
++        });
++        expect(parsed.success).toBe(false);
++    });
++
++    it('rejects a full Session payload (full-session SSE goes through isSessionRecord instead)', () => {
++        const fullSession = {
++            id: 's1',
++            namespace: 'default',
++            seq: 1,
++            createdAt: 1,
++            updatedAt: 1,
++            active: true,
++            activeAt: 1,
++            metadata: null,
++            metadataVersion: 0,
++            agentState: null,
++            agentStateVersion: 0,
++            thinking: false,
++            thinkingAt: 0
++        };
++        expect(SessionPatchSchema.safeParse(fullSession).success).toBe(false);
++    });
++});
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 1483c4cf..aa74403c 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -259,6 +259,12 @@ export const SessionSchema = z.object({
+     backgroundTaskCount: z.number().optional(),
+     todos: TodosSchema.optional(),
+     teamState: TeamStateSchema.optional(),
++    // Watermarks for structured SSE patches (PR #897). Dual EventSource
++    // connections can deliver todos/teamState out of order; caches reject
++    // stale patches with version <= these fields. Optional so older
++    // full-session payloads and hand-built Session literals stay valid.
++    todosUpdatedAt: z.number().optional(),
++    teamStateUpdatedAt: z.number().optional(),
+     model: z.string().nullable().optional().default(null),
+     modelReasoningEffort: z.string().nullable().optional().default(null),
+     effort: z.string().nullable().optional().default(null),
+@@ -269,11 +275,50 @@ export const SessionSchema = z.object({
+ 
+ export type Session = z.infer<typeof SessionSchema>
+ 
++// Versioned wrappers mirror the socket.io `update-session` broadcast shape so
++// metadata/agentState always travel as an atomic (version, value) pair — the
++// version is the only safe way for downstream caches to reject stale patches.
++const VersionedMetadataPatchSchema = z.object({
++    version: z.number(),
++    value: MetadataSchema.nullable()
++})
++
++const VersionedAgentStatePatchSchema = z.object({
++    version: z.number(),
++    value: AgentStateSchema.nullable()
++})
++
++// Same dual-SSE race as metadata/agentState: global + session EventSources
++// have no shared order. Version = store `todos_updated_at` /
++// `team_state_updated_at` (message createdAt on write).
++const VersionedTodosPatchSchema = z.object({
++    version: z.number(),
++    value: TodosSchema
++})
++
++const VersionedTeamStatePatchSchema = z.object({
++    version: z.number(),
++    // `null` value = TeamDelete clear. Discriminator remains "key present".
++    value: TeamStateSchema.nullable()
++})
++
+ export const SessionPatchSchema = z.object({
+     active: z.boolean().optional(),
+     thinking: z.boolean().optional(),
+     activeAt: z.number().optional(),
+     updatedAt: z.number().optional(),
++    // Structured-patch fields for the second half of #884. Letting the four
++    // hub-side emit-sites in cli/sessionHandlers.ts (todos, teamState,
++    // metadata, agentState writes) carry their delta means the web client's
++    // SSE handler can patch the cache in place instead of falling through to
++    // the invalidation fallback that triggers per-session REST refetches.
++    // Versioned wrappers for metadata/agentState mirror the socket.io
++    // `update-session` broadcast shape — the version field is the only safe
++    // way for downstream caches to reject stale patches.
++    metadata: VersionedMetadataPatchSchema.optional(),
++    agentState: VersionedAgentStatePatchSchema.optional(),
++    todos: VersionedTodosPatchSchema.optional(),
++    teamState: VersionedTeamStatePatchSchema.optional(),
+     model: z.string().nullable().optional(),
+     modelReasoningEffort: z.string().nullable().optional(),
+     effort: z.string().nullable().optional(),
+diff --git a/shared/src/sessionSummary.test.ts b/shared/src/sessionSummary.test.ts
+index ac9c0abf..a87544a4 100644
+--- a/shared/src/sessionSummary.test.ts
++++ b/shared/src/sessionSummary.test.ts
+@@ -2,9 +2,13 @@ import { describe, expect, it } from 'bun:test'
+ import type { Session } from './schemas'
+ import {
+     PENDING_REQUEST_SUMMARY_CAP,
++    computePendingRequestKinds,
++    computePendingRequestsCount,
++    computeTodoProgress,
+     getPendingRequestKinds,
+     getPendingRequests,
+-    toSessionSummary
++    toSessionSummary,
++    toSessionSummaryMetadata
+ } from './sessionSummary'
+ 
+ function makeSession(overrides: Partial<Session> = {}): Session {
+@@ -259,3 +263,52 @@ describe('getPendingRequestKinds', () => {
+         expect(kinds).toEqual(['permission', 'input'])
+     })
+ })
++
++// The SSE patch path (useSSE.ts patchSessionSummary) calls these directly
++// against the patch payload — no full Session needed — to keep the session
++// list summary consistent with structured todos/teamState/metadata/agentState
++// patches landing for the second half of #884.
++describe('summary derivation helpers', () => {
++    it('computeTodoProgress returns null for empty / undefined todos', () => {
++        expect(computeTodoProgress(undefined)).toBeNull()
++        expect(computeTodoProgress([])).toBeNull()
++    })
++
++    it('computeTodoProgress counts completed vs total', () => {
++        const progress = computeTodoProgress([
++            { content: 'a', status: 'pending', priority: 'medium', id: '1' },
++            { content: 'b', status: 'completed', priority: 'medium', id: '2' },
++            { content: 'c', status: 'completed', priority: 'medium', id: '3' }
++        ])
++        expect(progress).toEqual({ completed: 2, total: 3 })
++    })
++
++    it('computePendingRequestKinds works on a bare AgentState without a Session', () => {
++        const kinds = computePendingRequestKinds({
++            requests: {
++                req1: { tool: 'Bash', arguments: {} },
++                req2: { tool: 'AskUserQuestion', arguments: {} }
++            }
++        })
++        expect(kinds).toEqual(['permission', 'input'])
++    })
++
++    it('computePendingRequestsCount handles null agentState', () => {
++        expect(computePendingRequestsCount(null)).toBe(0)
++        expect(computePendingRequestsCount(undefined)).toBe(0)
++    })
++
++    it('toSessionSummaryMetadata returns null for null metadata', () => {
++        expect(toSessionSummaryMetadata(null)).toBeNull()
++        expect(toSessionSummaryMetadata(undefined)).toBeNull()
++    })
++
++    it('toSessionSummaryMetadata derives agentSessionId from the first non-null source id', () => {
++        const summary = toSessionSummaryMetadata({
++            path: '/p',
++            host: 'h',
++            cursorSessionId: 'cursor-xyz'
++        })
++        expect(summary?.agentSessionId).toBe('cursor-xyz')
++    })
++})
+diff --git a/shared/src/sessionSummary.ts b/shared/src/sessionSummary.ts
+index ba010cb7..07baf33e 100644
+--- a/shared/src/sessionSummary.ts
++++ b/shared/src/sessionSummary.ts
+@@ -1,4 +1,4 @@
+-import type { Metadata, Session, WorktreeMetadata } from './schemas'
++import type { AgentState, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
+ import { isKnownFlavor } from './flavors'
+ import type { AgentFlavor } from './modes'
+ 
+@@ -22,8 +22,9 @@ export type PendingRequest = {
+     id: string
+     kind: PendingRequestKind
+     tool: string
+-    /** Epoch ms when the request was raised; falls back to `session.updatedAt`
+-     *  for older requests that were stored without `createdAt`. */
++    /** Epoch ms when the request was raised; falls back to the caller-supplied
++     *  `fallbackSince` (typically `session.updatedAt`) for older requests
++     *  stored without `createdAt`. */
+     since: number
+ }
+ 
+@@ -49,6 +50,12 @@ export type SessionSummary = {
+     activeAt: number
+     updatedAt: number
+     metadata: SessionSummaryMetadata | null
++    /** Watermarks for structured SSE patches (PR #897). List cache must gate
++     *  without requiring a detail query — otherwise global SSE forces O(N)
++     *  /sessions invalidation for every versioned write. */
++    metadataVersion: number
++    agentStateVersion: number
++    todosUpdatedAt: number
+     todoProgress: { completed: number; total: number } | null
+     pendingRequestsCount: number
+     pendingRequestKinds: PendingRequestKind[]
+@@ -65,11 +72,31 @@ export type SessionSummary = {
+     effort: string | null
+ }
+ 
+-export function getPendingRequests(
+-    session: Session,
++// Re-exported as a standalone derivation so SSE patch handlers can recompute
++// summary fields from a structured `agentState` patch without needing the
++// full Session in hand.
++export function computePendingRequestKinds(agentState: AgentState | null | undefined): PendingRequestKind[] {
++    const requests = agentState?.requests
++    if (!requests) {
++        return []
++    }
++
++    const kinds = new Set<PendingRequestKind>()
++    for (const request of Object.values(requests)) {
++        kinds.add(classifyKind(request.tool))
++    }
++
++    return kinds.has('permission') && kinds.has('input')
++        ? ['permission', 'input']
++        : Array.from(kinds)
++}
++
++export function computePendingRequests(
++    agentState: AgentState | null | undefined,
++    fallbackSince: number,
+     cap: number = PENDING_REQUEST_SUMMARY_CAP
+ ): PendingRequest[] {
+-    const requests = session.agentState?.requests
++    const requests = agentState?.requests
+     if (!requests) {
+         return []
+     }
+@@ -80,7 +107,7 @@ export function getPendingRequests(
+             id,
+             kind: classifyKind(request.tool),
+             tool: request.tool,
+-            since: typeof request.createdAt === 'number' ? request.createdAt : session.updatedAt
++            since: typeof request.createdAt === 'number' ? request.createdAt : fallbackSince
+         })
+     }
+ 
+@@ -93,19 +120,28 @@ export function getPendingRequests(
+ }
+ 
+ export function getPendingRequestKinds(session: Session): PendingRequestKind[] {
+-    const requests = session.agentState?.requests
+-    if (!requests) {
+-        return []
+-    }
++    return computePendingRequestKinds(session.agentState)
++}
+ 
+-    const kinds = new Set<PendingRequestKind>()
+-    for (const request of Object.values(requests)) {
+-        kinds.add(classifyKind(request.tool))
+-    }
++export function getPendingRequests(
++    session: Session,
++    cap: number = PENDING_REQUEST_SUMMARY_CAP
++): PendingRequest[] {
++    return computePendingRequests(session.agentState, session.updatedAt, cap)
++}
+ 
+-    return kinds.has('permission') && kinds.has('input')
+-        ? ['permission', 'input']
+-        : Array.from(kinds)
++export function computePendingRequestsCount(agentState: AgentState | null | undefined): number {
++    return agentState?.requests ? Object.keys(agentState.requests).length : 0
++}
++
++export function computeTodoProgress(todos: TodoItem[] | undefined): SessionSummary['todoProgress'] {
++    if (!todos?.length) {
++        return null
++    }
++    return {
++        completed: todos.filter((todo) => todo.status === 'completed').length,
++        total: todos.length
++    }
+ }
+ 
+ const AGENT_SESSION_ID_FIELD_BY_FLAVOR = {
+@@ -140,36 +176,37 @@ function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
+         ?? undefined
+ }
+ 
+-export function toSessionSummary(session: Session): SessionSummary {
+-    const pendingRequestsCount = session.agentState?.requests ? Object.keys(session.agentState.requests).length : 0
+-
+-    const metadata: SessionSummaryMetadata | null = session.metadata ? {
+-        name: session.metadata.name,
+-        path: session.metadata.path,
+-        machineId: session.metadata.machineId ?? undefined,
+-        summary: session.metadata.summary ? { text: session.metadata.summary.text } : undefined,
+-        flavor: session.metadata.flavor ?? null,
+-        worktree: session.metadata.worktree,
+-        agentSessionId: getSummaryAgentSessionId(session.metadata),
+-        lifecycleState: session.metadata.lifecycleState
+-    } : null
+-
+-    const todoProgress = session.todos?.length ? {
+-        completed: session.todos.filter(t => t.status === 'completed').length,
+-        total: session.todos.length
+-    } : null
++export function toSessionSummaryMetadata(metadata: Metadata | null | undefined): SessionSummaryMetadata | null {
++    if (!metadata) {
++        return null
++    }
++    return {
++        name: metadata.name,
++        path: metadata.path,
++        machineId: metadata.machineId ?? undefined,
++        summary: metadata.summary ? { text: metadata.summary.text } : undefined,
++        flavor: metadata.flavor ?? null,
++        worktree: metadata.worktree,
++        agentSessionId: getSummaryAgentSessionId(metadata),
++        lifecycleState: metadata.lifecycleState
++    }
++}
+ 
++export function toSessionSummary(session: Session): SessionSummary {
+     return {
+         id: session.id,
+         active: session.active,
+         thinking: session.thinking,
+         activeAt: session.activeAt,
+         updatedAt: session.updatedAt,
+-        metadata,
+-        todoProgress,
+-        pendingRequestsCount,
+-        pendingRequestKinds: getPendingRequestKinds(session),
+-        pendingRequests: getPendingRequests(session),
++        metadata: toSessionSummaryMetadata(session.metadata),
++        metadataVersion: session.metadataVersion,
++        agentStateVersion: session.agentStateVersion,
++        todosUpdatedAt: session.todosUpdatedAt ?? 0,
++        todoProgress: computeTodoProgress(session.todos),
++        pendingRequestsCount: computePendingRequestsCount(session.agentState),
++        pendingRequestKinds: computePendingRequestKinds(session.agentState),
++        pendingRequests: computePendingRequests(session.agentState, session.updatedAt),
+         backgroundTaskCount: session.backgroundTaskCount ?? 0,
+         futureScheduledMessageCount: 0,
+         nextScheduledAt: null,
+diff --git a/web/src/components/SessionAttentionIndicator.test.tsx b/web/src/components/SessionAttentionIndicator.test.tsx
+index 20002208..d69f2938 100644
+--- a/web/src/components/SessionAttentionIndicator.test.tsx
++++ b/web/src/components/SessionAttentionIndicator.test.tsx
+@@ -19,6 +19,9 @@ function makeSummary(overrides: Partial<SessionSummary> & { id: string }): Sessi
+         activeAt: 0,
+         updatedAt: 0,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index bcedec27..3316a098 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -19,6 +19,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
+         activeAt: 0,
+         updatedAt: 0,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+diff --git a/web/src/components/SessionList.machine-filter.test.tsx b/web/src/components/SessionList.machine-filter.test.tsx
+index 615a388a..894692dd 100644
+--- a/web/src/components/SessionList.machine-filter.test.tsx
++++ b/web/src/components/SessionList.machine-filter.test.tsx
+@@ -16,6 +16,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
+         activeAt: 0,
+         updatedAt: 0,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+diff --git a/web/src/components/SessionList.test.ts b/web/src/components/SessionList.test.ts
+index 02c49f09..f1eada20 100644
+--- a/web/src/components/SessionList.test.ts
++++ b/web/src/components/SessionList.test.ts
+@@ -27,6 +27,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
+         activeAt: 0,
+         updatedAt: 0,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+diff --git a/web/src/hooks/useSSE.test.ts b/web/src/hooks/useSSE.test.ts
+index f2cf4fcb..2fcc9e1b 100644
+--- a/web/src/hooks/useSSE.test.ts
++++ b/web/src/hooks/useSSE.test.ts
+@@ -1,7 +1,13 @@
+ import { describe, expect, it } from 'vitest'
+ import type { SessionSummary } from '@/types/api'
+ import type { Session } from '@/types/api'
+-import { isGlobalScopedMessageStreamEvent, isRenderIrrelevantPatch, isRenderIrrelevantSessionPatch } from './useSSE'
++import {
++    canApplyVersionedSummaryPatch,
++    isGlobalScopedMessageStreamEvent,
++    isNewerVersionedPatch,
++    isRenderIrrelevantPatch,
++    isRenderIrrelevantSessionPatch
++} from './useSSE'
+ 
+ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+     return {
+@@ -11,6 +17,9 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+         activeAt: 1_000,
+         updatedAt: 2_000,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+@@ -24,6 +33,81 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+     } as SessionSummary
+ }
+ 
++describe('canApplyVersionedSummaryPatch (PR #897 review, HAPI Bot 2026-07-23 Major)', () => {
++    it('allows non-versioned patches without a detail cache', () => {
++        expect(canApplyVersionedSummaryPatch({}, false)).toBe(true)
++        expect(canApplyVersionedSummaryPatch({ metadata: undefined, agentState: undefined }, false)).toBe(true)
++    })
++
++    it('refuses metadata/agentState/todos summary patches when detail version source is missing', () => {
++        expect(
++            canApplyVersionedSummaryPatch(
++                { metadata: { version: 1, value: null } },
++                false
++            )
++        ).toBe(false)
++        expect(
++            canApplyVersionedSummaryPatch(
++                { agentState: { version: 1, value: null } },
++                false
++            )
++        ).toBe(false)
++        expect(
++            canApplyVersionedSummaryPatch(
++                { todos: { version: 1, value: [] } },
++                false
++            )
++        ).toBe(false)
++    })
++
++    it('allows teamState-only patches without detail (summary no-op)', () => {
++        expect(
++            canApplyVersionedSummaryPatch(
++                { teamState: { version: 1, value: null } },
++                false
++            )
++        ).toBe(true)
++    })
++
++    it('allows versioned summary patches when detail is present', () => {
++        expect(
++            canApplyVersionedSummaryPatch(
++                { metadata: { version: 2, value: null } },
++                true
++            )
++        ).toBe(true)
++        expect(
++            canApplyVersionedSummaryPatch(
++                { todos: { version: 2, value: [] } },
++                true
++            )
++        ).toBe(true)
++    })
++})
++
++describe('isNewerVersionedPatch (PR #897 review, HAPI Bot 2026-06-16 Major)', () => {
++    // Pin the version-monotonicity contract for structured metadata /
++    // agentState patches. Without this gate, an SSE reconnect that replays
++    // a buffered older patch after a fresh REST refetch would regress the
++    // cache (e.g. drop a newer resume id / pending request). Mirrors the
++    // hub's CLI room handler check (`incoming.version > currentVersion`).
++    it('accepts a strictly newer patch', () => {
++        expect(isNewerVersionedPatch(5, 4)).toBe(true)
++    })
++
++    it('rejects an older patch (the bug case: stale buffered patch on reconnect)', () => {
++        expect(isNewerVersionedPatch(4, 5)).toBe(false)
++    })
++
++    it('rejects a same-version patch (idempotent / duplicate replay)', () => {
++        expect(isNewerVersionedPatch(5, 5)).toBe(false)
++    })
++
++    it('accepts the first write into a freshly-cached session (currentVersion=0)', () => {
++        expect(isNewerVersionedPatch(1, 0)).toBe(true)
++    })
++})
++
+ describe('useSSE scope handling', () => {
+     it('treats message stream events as global-scoped skips', () => {
+         expect(isGlobalScopedMessageStreamEvent('global', 'message-received')).toBe(true)
+@@ -63,7 +147,21 @@ describe('isRenderIrrelevantPatch', () => {
+         ['model', { model: 'opus' }],
+         ['modelReasoningEffort', { modelReasoningEffort: 'high' }],
+         ['effort', { effort: 'medium' }],
+-        ['pendingRequestsCount', { pendingRequestsCount: 2 }]
++        ['pendingRequestsCount', { pendingRequestsCount: 2 }],
++        ['metadata.path', { metadata: { path: '/other', name: undefined } }],
++        ['metadata.flavor', { metadata: { path: '/tmp', flavor: 'claude' as const } }],
++        ['metadata.machineId', { metadata: { path: '/tmp', machineId: 'Teemo' } }],
++        ['metadata.worktree.branch', {
++            metadata: {
++                path: '/tmp',
++                worktree: {
++                    basePath: '/tmp',
++                    branch: 'feat/x',
++                    name: 'x',
++                    worktreePath: '/tmp/x'
++                }
++            }
++        }]
+     ] as Array<[string, Partial<SessionSummary>]>)('reports %s changes as relevant', (_field, change) => {
+         const current = makeSummary()
+         const next = makeSummary({ ...change, activeAt: 11_000 })
+diff --git a/web/src/hooks/useSSE.ts b/web/src/hooks/useSSE.ts
+index 82e662ae..ab71f255 100644
+--- a/web/src/hooks/useSSE.ts
++++ b/web/src/hooks/useSSE.ts
+@@ -1,6 +1,14 @@
+ import { useEffect, useMemo, useRef, useState } from 'react'
+ import { useQueryClient } from '@tanstack/react-query'
+-import { isObject, toSessionSummary } from '@hapi/protocol'
++import {
++    computePendingRequestKinds,
++    computePendingRequests,
++    computePendingRequestsCount,
++    computeTodoProgress,
++    isObject,
++    toSessionSummary,
++    toSessionSummaryMetadata
++} from '@hapi/protocol'
+ import { MachinePatchSchema, MachineSchema, SessionPatchSchema, SessionSchema } from '@hapi/protocol/schemas'
+ import type {
+     Machine,
+@@ -34,6 +42,36 @@ export function isGlobalScopedMessageStreamEvent(scope: SSEScope, eventType: Syn
+     return scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(eventType)
+ }
+ 
++// Version-monotonicity gate for structured patches carrying metadata or
++// agentState. SSE reconnects + per-query invalidation can leave the cache
++// holding state that's NEWER than a buffered older patch about to replay;
++// applying that older patch would regress resume / session-id / pending-
++// requests state. Mirrors the CLI room handler contract: strictly newer
++// only. Exported so the rule is unit-testable in isolation from the hook.
++export function isNewerVersionedPatch(patchVersion: number, currentVersion: number): boolean {
++    return patchVersion > currentVersion
++}
++
++/**
++ * @deprecated Prefer gating against SessionSummary watermarks. Kept for unit
++ * tests of the old "detail required" rule; summary path no longer uses this
++ * for metadata/agentState/todos (teamState is a summary no-op).
++ */
++export function canApplyVersionedSummaryPatch(
++    patch: Pick<SessionPatch, 'metadata' | 'agentState' | 'todos' | 'teamState'>,
++    detailPresent: boolean
++): boolean {
++    // teamState is not rendered on SessionSummary — never block list patches.
++    if (
++        patch.metadata === undefined
++        && patch.agentState === undefined
++        && patch.todos === undefined
++    ) {
++        return true
++    }
++    return detailPresent
++}
++
+ type VisibilityState = 'visible' | 'hidden'
+ 
+ type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
+@@ -98,6 +136,30 @@ function isSessionRecord(value: unknown): value is Session {
+  * `updatedAt` and sorts on active/pendingRequestsCount/updatedAt - so storing
+  * it costs a new object identity and a full list re-render for nothing.
+  */
++export function sameSessionSummaryMetadata(
++    current: SessionSummary['metadata'],
++    next: SessionSummary['metadata']
++): boolean {
++    if (current === next) {
++        return true
++    }
++    if (current == null || next == null) {
++        return current == null && next == null
++    }
++    return current.name === next.name
++        && current.path === next.path
++        && current.machineId === next.machineId
++        && current.summary?.text === next.summary?.text
++        && current.flavor === next.flavor
++        && current.agentSessionId === next.agentSessionId
++        && current.lifecycleState === next.lifecycleState
++        && current.worktree?.basePath === next.worktree?.basePath
++        && current.worktree?.branch === next.worktree?.branch
++        && current.worktree?.name === next.worktree?.name
++        && current.worktree?.worktreePath === next.worktree?.worktreePath
++        && current.worktree?.createdAt === next.worktree?.createdAt
++}
++
+ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSummary): boolean {
+     return current.active === next.active
+         && current.thinking === next.thinking
+@@ -107,6 +169,25 @@ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSu
+         && current.modelReasoningEffort === next.modelReasoningEffort
+         && current.effort === next.effort
+         && current.pendingRequestsCount === next.pendingRequestsCount
++        // Structured SSE patches (#897) can move these without touching the
++        // keep-alive fields above; omit them and a todos/metadata/agentState
++        // patch would be dropped as "activeAt-only" churn.
++        && current.todoProgress?.completed === next.todoProgress?.completed
++        && current.todoProgress?.total === next.todoProgress?.total
++        && (current.todoProgress == null) === (next.todoProgress == null)
++        && current.pendingRequestKinds.length === next.pendingRequestKinds.length
++        && current.pendingRequestKinds.every((kind, i) => kind === next.pendingRequestKinds[i])
++        && current.pendingRequests.length === next.pendingRequests.length
++        && current.pendingRequests.every((req, i) => {
++            const nextReq = next.pendingRequests[i]
++            return req.id === nextReq?.id
++                && req.kind === nextReq.kind
++                && req.tool === nextReq.tool
++        })
++        && sameSessionSummaryMetadata(current.metadata, next.metadata)
++        && current.metadataVersion === next.metadataVersion
++        && current.agentStateVersion === next.agentStateVersion
++        && current.todosUpdatedAt === next.todosUpdatedAt
+ }
+ 
+ function getSessionPatch(value: unknown): SessionPatch | null {
+@@ -408,7 +489,11 @@ export function useSSE(options: {
+                     active: patch.active ?? current.active,
+                     thinking: patch.thinking ?? current.thinking,
+                     activeAt: patch.activeAt ?? current.activeAt,
+-                    updatedAt: patch.updatedAt ?? current.updatedAt,
++                    // Monotonic: stale versioned-patch replays can carry an
++                    // older updatedAt; never move the list clock backward.
++                    updatedAt: patch.updatedAt !== undefined
++                        ? Math.max(current.updatedAt, patch.updatedAt)
++                        : current.updatedAt,
+                     backgroundTaskCount: Object.prototype.hasOwnProperty.call(patch, 'backgroundTaskCount')
+                         ? patch.backgroundTaskCount ?? 0
+                         : current.backgroundTaskCount,
+@@ -419,6 +504,25 @@ export function useSSE(options: {
+                     effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
+                 }
+ 
++                // Gate versioned fields against THIS summary's watermarks —
++                // not the detail query. Global SSE covers every session;
++                // requiring detail would force O(N) /sessions invalidation.
++                // teamState is a summary no-op (not rendered on the list).
++                if (patch.todos !== undefined && patch.todos.version >= current.todosUpdatedAt) {
++                    nextSummary.todoProgress = computeTodoProgress(patch.todos.value)
++                    nextSummary.todosUpdatedAt = patch.todos.version
++                }
++                if (patch.agentState !== undefined && patch.agentState.version >= current.agentStateVersion) {
++                    nextSummary.pendingRequestsCount = computePendingRequestsCount(patch.agentState.value)
++                    nextSummary.pendingRequestKinds = computePendingRequestKinds(patch.agentState.value)
++                    nextSummary.pendingRequests = computePendingRequests(patch.agentState.value, nextSummary.updatedAt)
++                    nextSummary.agentStateVersion = patch.agentState.version
++                }
++                if (patch.metadata !== undefined && patch.metadata.version >= current.metadataVersion) {
++                    nextSummary.metadata = toSessionSummaryMetadata(patch.metadata.value)
++                    nextSummary.metadataVersion = patch.metadata.version
++                }
++
+                 patched = true
+                 // The keep-alive patch repeats every field every ~10s per active
+                 // session, and `activeAt` is the only one that actually moves.
+@@ -441,15 +545,68 @@ export function useSSE(options: {
+                     return previous
+                 }
+                 patched = true
++                // Keep-alive patches repeat every field every ~10s; if nothing
++                // render-relevant moved (ignore activeAt), keep the existing
++                // object identity. Still field-by-field below for structured
++                // patches — never wholesale-spread { version, value } wrappers.
+                 if (isRenderIrrelevantSessionPatch(previous.session, patch)) {
+                     return previous
+                 }
++                let changed = false
++                const nextSession: Session = { ...previous.session }
++                const assign = <K extends keyof Session>(key: K, value: Session[K]) => {
++                    if (nextSession[key] !== value) {
++                        nextSession[key] = value
++                        changed = true
++                    }
++                }
++                if (patch.active !== undefined) assign('active', patch.active)
++                if (patch.thinking !== undefined) assign('thinking', patch.thinking)
++                if (patch.activeAt !== undefined) assign('activeAt', patch.activeAt)
++                // Monotonic with hub applySessionPatch: a rejected stale
++                // metadata/agentState replay must not rewind updatedAt.
++                if (patch.updatedAt !== undefined) {
++                    const nextUpdatedAt = Math.max(nextSession.updatedAt, patch.updatedAt)
++                    assign('updatedAt', nextUpdatedAt)
++                }
++                if (patch.model !== undefined) assign('model', patch.model)
++                if (patch.modelReasoningEffort !== undefined) assign('modelReasoningEffort', patch.modelReasoningEffort)
++                if (patch.effort !== undefined) assign('effort', patch.effort)
++                if (Object.prototype.hasOwnProperty.call(patch, 'serviceTier')) {
++                    assign('serviceTier', patch.serviceTier ?? null)
++                }
++                if (patch.permissionMode !== undefined) assign('permissionMode', patch.permissionMode)
++                if (patch.collaborationMode !== undefined) assign('collaborationMode', patch.collaborationMode)
++                if (patch.backgroundTaskCount !== undefined) assign('backgroundTaskCount', patch.backgroundTaskCount)
++                // Version gates: dual SSE can deliver duplicates out of order.
++                // Only mark changed when a strictly newer version lands —
++                // otherwise keep previous object identity (no redundant render).
++                if (patch.todos !== undefined && isNewerVersionedPatch(patch.todos.version, nextSession.todosUpdatedAt ?? 0)) {
++                    nextSession.todos = patch.todos.value
++                    nextSession.todosUpdatedAt = patch.todos.version
++                    changed = true
++                }
++                if (patch.teamState !== undefined && isNewerVersionedPatch(patch.teamState.version, nextSession.teamStateUpdatedAt ?? 0)) {
++                    nextSession.teamState = patch.teamState.value ?? undefined
++                    nextSession.teamStateUpdatedAt = patch.teamState.version
++                    changed = true
++                }
++                if (patch.metadata !== undefined && isNewerVersionedPatch(patch.metadata.version, nextSession.metadataVersion)) {
++                    nextSession.metadata = patch.metadata.value
++                    nextSession.metadataVersion = patch.metadata.version
++                    changed = true
++                }
++                if (patch.agentState !== undefined && isNewerVersionedPatch(patch.agentState.version, nextSession.agentStateVersion)) {
++                    nextSession.agentState = patch.agentState.value
++                    nextSession.agentStateVersion = patch.agentState.version
++                    changed = true
++                }
++                if (!changed) {
++                    return previous
++                }
+                 return {
+                     ...previous,
+-                    session: {
+-                        ...previous.session,
+-                        ...patch
+-                    }
++                    session: nextSession
+                 }
+             })
+             return patched
+diff --git a/web/src/lib/sessionAttention.test.ts b/web/src/lib/sessionAttention.test.ts
+index 1db6a91b..17db1ae7 100644
+--- a/web/src/lib/sessionAttention.test.ts
++++ b/web/src/lib/sessionAttention.test.ts
+@@ -9,6 +9,9 @@ function makeSummary(overrides: Partial<SessionSummary> & { id: string }): Sessi
+         activeAt: 0,
+         updatedAt: 1000,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+diff --git a/web/src/lib/sessionReference.test.ts b/web/src/lib/sessionReference.test.ts
+index 524ad99e..cab5f1b7 100644
+--- a/web/src/lib/sessionReference.test.ts
++++ b/web/src/lib/sessionReference.test.ts
+@@ -16,6 +16,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
+         activeAt: 0,
+         updatedAt: 0,
+         metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
+         todoProgress: null,
+         pendingRequestsCount: 0,
+         pendingRequestKinds: [],
+-- 
+2.50.1 (Apple Git-155)
+
