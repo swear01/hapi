@@ -92,9 +92,15 @@ export function useRealtimeDictation(config: {
             if (elevenLabsActiveRef.current) fail(scribeError)
         },
         onDisconnect: () => {
-            if (mountedRef.current) {
-                setStatus((current) => current === 'error' ? current : 'disconnected')
-            }
+            if (!mountedRef.current || !elevenLabsActiveRef.current) return
+            const partial = partialRef.current
+            elevenLabsActiveRef.current = false
+            resolveElevenLabsCommitRef.current?.()
+            resolveElevenLabsCommitRef.current = null
+            sessionRef.current = null
+            finish(partial)
+            setError('ElevenLabs realtime transcription disconnected')
+            setStatus('error')
         }
     })
     const elevenLabsRef = useRef(elevenLabs)
