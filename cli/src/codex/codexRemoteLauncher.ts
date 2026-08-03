@@ -692,6 +692,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         let scheduleReadyAfterTurn: (() => void) | null = null;
         let clearReadyAfterTurnTimer: (() => void) | null = null;
         let turnInFlight = false;
+        const setTurnInFlight = (value: boolean) => {
+            turnInFlight = value;
+            session.client.updateAgentState((state) => ({ ...state, steeringActive: value }));
+        };
         let usageModel: string | null = null;
         let allowAnonymousTerminalEvent = false;
         let invalidThreadId: string | null = null;
@@ -1978,20 +1982,18 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Steer cancelled' };
                 }
                 const steered = await trySteerActiveTurn(batch);
+                if (steered) {
+                    session.queue.commitReservation(taken);
+                    session.client.emitMessagesConsumed([localId], { steered: true });
+                    return { steered: true };
+                }
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
-                if (!steered) {
-                    if (!session.queue.restoreReservation(taken)) {
-                        return { steered: false, error: 'Steer cancelled' };
-                    }
-                    return { steered: false, error: 'Active turn is not steerable' };
-                }
-                if (!session.queue.commitReservation(taken)) {
+                if (!session.queue.restoreReservation(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
-                session.client.emitMessagesConsumed([localId], { steered: true });
-                return { steered: true };
+                return { steered: false, error: 'Active turn is not steerable' };
             }
         );
 
@@ -2300,7 +2302,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 });
 
                 lastFinalizedTurnId = request.turnId;
-                turnInFlight = false;
+                setTurnInFlight(false);
                 allowAnonymousTerminalEvent = false;
                 this.currentTurnId = null;
                 sameThreadRetryAttempt = 0;
@@ -2323,7 +2325,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             } catch (error) {
                 if (interrupted) {
                     lastFinalizedTurnId = request.turnId;
-                    turnInFlight = false;
+                    setTurnInFlight(false);
                     allowAnonymousTerminalEvent = false;
                     this.currentTurnId = null;
                     activeMessage = null;
@@ -2832,7 +2834,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
             if (msgType === 'task_started') {
                 clearReadyAfterTurnTimer?.();
-                turnInFlight = true;
+                setTurnInFlight(true);
                 if (!eventTurnId && !this.currentTurnId) {
                     allowAnonymousTerminalEvent = true;
                 }
@@ -2842,7 +2844,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             }
             if (isTerminalEvent) {
-                turnInFlight = false;
+                setTurnInFlight(false);
                 this.conversationHistory.setBusy(false);
                 allowAnonymousTerminalEvent = false;
                 if (session.thinking) {
@@ -3421,7 +3423,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         const resetCurrentTurnState = () => {
             clearDeferredThreadStatusFailure();
             cancelSafetyBufferingRequest('Session reset');
-            turnInFlight = false;
+            setTurnInFlight(false);
             allowAnonymousTerminalEvent = false;
             this.currentTurnId = null;
             permissionHandler.reset();
@@ -3871,7 +3873,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     }
                 }
 
-                turnInFlight = true;
+                setTurnInFlight(true);
                 this.conversationHistory.setBusy(true);
                 allowAnonymousTerminalEvent = false;
                 const mode = {
@@ -3957,7 +3959,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             } catch (error) {
                 logger.warn('Error in codex session:', error);
                 const isAbortError = error instanceof Error && error.name === 'AbortError';
-                turnInFlight = false;
+                setTurnInFlight(false);
                 this.conversationHistory.setBusy(false);
                 allowAnonymousTerminalEvent = false;
                 this.currentTurnId = null;

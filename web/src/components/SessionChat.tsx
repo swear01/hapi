@@ -1582,7 +1582,7 @@ function SessionChatInner(props: SessionChatProps) {
                                 sessionId={props.session.id}
                                 api={props.api}
                                 sessionMetadata={props.session.metadata}
-                                isThinking={props.session.thinking}
+                                steeringActive={props.session.agentState?.steeringActive === true}
                                 pendingSchedule={pendingSchedule}
                                 pendingScheduleRevision={pendingScheduleRevision}
                                 onEdit={({ pendingSchedule: restored }) => {

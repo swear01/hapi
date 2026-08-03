@@ -206,6 +206,7 @@ function makeClient() {
             })
         },
         updateMetadata: vi.fn(),
+        updateAgentState: vi.fn(),
         flushMetadata: vi.fn(async () => true),
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
@@ -323,6 +324,38 @@ describe('cursorAcpRemoteLauncher', () => {
         releaseDispatch();
         await expect(steerResult).resolves.toEqual({ steered: true });
         expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('acknowledges a steer dispatched before an overlapping abort', async () => {
+        let releasePrompt!: () => void;
+        let releaseDispatch!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
+        await Promise.resolve();
+        await handlers.get(RPC_METHODS.Abort)!();
+        releaseDispatch();
+
+        await expect(steerResult).resolves.toEqual({ steered: true });
+        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
+        expect(vi.mocked(session.client.emitMessagesConsumed).mock.calls
+            .filter(([ids]) => ids.includes('steer'))).toHaveLength(1);
 
         harness.deferPrompt = null;
         releasePrompt();

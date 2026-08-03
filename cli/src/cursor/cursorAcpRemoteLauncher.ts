@@ -362,9 +362,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
 
-                if (!session.queue.commitReservation(taken)) {
-                    return { steered: false, error: 'Steer cancelled' };
-                }
+                session.queue.commitReservation(taken);
                 messageBuffer.addMessage(taken.item.message, 'user');
                 session.client.emitMessagesConsumed([localId], { steered: true });
 
@@ -433,6 +431,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
             session.onThinkingChange(true);
             this.promptInFlight = true;
+            session.client.updateAgentState?.((state) => ({ ...state, steeringActive: true }));
             this.activePromptModeHash = batch.hash;
 
             try {
@@ -451,6 +450,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 messageBuffer.addMessage(message, 'status');
             } finally {
                 this.promptInFlight = false;
+                session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
                 // Soft-steers share the ACP session; wait for them before ready /
                 // the next prompt so message handlers are not swapped mid-inject.
                 if (this.softSteerWaiters.length > 0) {
@@ -481,6 +481,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             error: 'Session ending'
         }));
         this.promptInFlight = false;
+        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         this.softSteerWaiters = [];
         this.unregisterModelApplyHandler?.();
         this.unregisterModelApplyHandler = null;
@@ -780,6 +781,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         await this.extensionAdapter?.cancelAll('User aborted');
         this.session.queue.reset();
         this.promptInFlight = false;
+        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         this.session.onThinkingChange(false);
         this.abortController.abort();
         this.abortController = new AbortController();

@@ -211,7 +211,7 @@ export function QueuedMessagesBar({
     sessionId,
     api,
     sessionMetadata,
-    isThinking,
+    steeringActive,
     pendingSchedule,
     pendingScheduleRevision,
     onEdit,
@@ -224,8 +224,8 @@ export function QueuedMessagesBar({
         cursorSessionId?: string | null
         cursorSessionProtocol?: 'acp' | 'stream-json' | null
     } | null
-    /** True while an agent turn is in flight. */
-    isThinking?: boolean
+    /** True only while the launcher has an active steerable turn. */
+    steeringActive?: boolean
     /** Current composer schedule, used only to guard an asynchronous edit restore. */
     pendingSchedule: PendingSchedule | null
     /** Monotonic per-session revision; schedule selections win over an async edit restore. */
@@ -374,7 +374,7 @@ export function QueuedMessagesBar({
                         const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending })
                         const isFutureScheduled = msg.scheduledAt != null && msg.scheduledAt > Date.now()
                         const canSteer = steeringSupported
-                            && Boolean(isThinking)
+                            && Boolean(steeringActive)
                             && !isFutureScheduled
                             && canCancel
 

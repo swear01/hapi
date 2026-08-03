@@ -160,6 +160,7 @@ export type AgentStateCompletedRequest = z.infer<typeof AgentStateCompletedReque
 
 export const AgentStateSchema = z.object({
     controlledByUser: z.boolean().nullish(),
+    steeringActive: z.boolean().nullish(),
     requests: z.record(z.string(), AgentStateRequestSchema).nullish(),
     completedRequests: z.record(z.string(), AgentStateCompletedRequestSchema).nullish()
 })
