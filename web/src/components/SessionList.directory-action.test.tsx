@@ -507,7 +507,6 @@ describe('SessionList collapse behavior', () => {
     it('opens the project group menu on right-click without collapsing the group', () => {
         const sessions = [makeSession({
             id: 'session-running',
-            active: true,
             updatedAt: 100,
             metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
         })]
