@@ -284,8 +284,16 @@ export class SyncEngine {
         return this.store.messages.countFutureScheduledBySessionIds(sessionIds, now)
     }
 
+    getUninvokedScheduledMessageCounts(sessionIds: string[]): Map<string, number> {
+        return this.store.messages.countUninvokedScheduledBySessionIds(sessionIds)
+    }
+
     getNextScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
         return this.store.messages.minFutureScheduledAtBySessionIds(sessionIds, now)
+    }
+
+    getScratchlistUpdatedAtBySessionIds(sessionIds: string[]): Map<string, number> {
+        return this.store.scratchlist.maxUpdatedAtBySessionIds(sessionIds)
     }
 
     getSession(sessionId: string): Session | undefined {
@@ -659,7 +667,9 @@ export class SyncEngine {
                     deleteScratchlistAttachmentFiles(getHapiHomeDir(), orphaned)
                 )
             }
-            this.sessionCache.emitScratchlistChanged(sessionId, Date.now())
+            const changedAt = Date.now()
+            this.sessionCache.recordSessionActivity(sessionId, changedAt)
+            this.sessionCache.emitScratchlistChanged(sessionId, changedAt)
         }
         return removed
     }
