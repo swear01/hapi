@@ -115,4 +115,28 @@ describe('useVoiceSettings', () => {
         await waitFor(() => expect(result.current.provider).toBe('openai'))
         expect(result.current.providers).toHaveLength(1)
     })
+
+    it('rechecks the on-device language pack when the language changes', async () => {
+        fetchTranscriptionProviders.mockResolvedValue({
+            providers: [{ id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] }]
+        })
+        class MockSpeechRecognition {
+            static available({ langs }: { langs: string[] }) {
+                return Promise.resolve(langs[0] === 'en-US' ? 'available' : 'unavailable')
+            }
+            processLocally = false
+        }
+        Object.defineProperty(MockSpeechRecognition.prototype, 'processLocally', { value: false })
+        vi.stubGlobal('SpeechRecognition', MockSpeechRecognition)
+        localStorage.setItem('hapi-voice-lang', 'en-US')
+        localStorage.setItem('hapi-transcription-provider', 'browser-local')
+        const { result } = renderHook(() => useVoiceSettings(), { wrapper: Wrapper })
+        await waitFor(() => expect(result.current.provider).toBe('browser-local'))
+
+        act(() => result.current.setVoiceLanguage({ code: 'zh-CN', name: 'Chinese', nativeName: '中文' }))
+        await waitFor(() => expect(result.current.provider).toBe('openai'))
+
+        act(() => result.current.setVoiceLanguage({ code: 'en-US', name: 'English', nativeName: 'English' }))
+        await waitFor(() => expect(result.current.provider).toBe('browser-local'))
+    })
 })

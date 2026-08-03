@@ -12,6 +12,7 @@ const VOICE_MODE_KEY = 'hapi-voice-mode'
 const TRANSCRIPTION_PROVIDER_KEY = 'hapi-transcription-provider'
 const TRANSCRIPTION_MODE_KEY = 'hapi-transcription-mode'
 const CHANGE_EVENT = 'hapi-voice-input-change'
+export const VOICE_LANGUAGE_CHANGE_EVENT = 'hapi-voice-language-change'
 
 function notifyChange(): void {
     window.dispatchEvent(new Event(CHANGE_EVENT))
@@ -63,19 +64,28 @@ export function useVoiceInputPreferences(api: ApiClient | null) {
     useEffect(() => {
         if (!api) return
         let cancelled = false
-        Promise.all([api.fetchTranscriptionProviders(), browserLocalTranscriptionSupported()]).then(([{ providers: configured }, browserLocal]) => {
-            if (cancelled) return
-            const available = browserLocal
-                ? [...configured, BROWSER_LOCAL_TRANSCRIPTION_PROVIDER]
-                : configured
-            setProviders(available)
-            const selectedProvider = resolveProvider(available, localStorage.getItem(TRANSCRIPTION_PROVIDER_KEY))
-            setProviderState(selectedProvider)
-            setTranscriptionModeState(resolveMode(available, selectedProvider, localStorage.getItem(TRANSCRIPTION_MODE_KEY)))
-        }).catch(() => {
-            if (!cancelled) setProviders([])
-        })
-        return () => { cancelled = true }
+        let request = 0
+        const refreshProviders = () => {
+            const current = ++request
+            Promise.all([api.fetchTranscriptionProviders(), browserLocalTranscriptionSupported()]).then(([{ providers: configured }, browserLocal]) => {
+                if (cancelled || current !== request) return
+                const available = browserLocal
+                    ? [...configured, BROWSER_LOCAL_TRANSCRIPTION_PROVIDER]
+                    : configured
+                setProviders(available)
+                const selectedProvider = resolveProvider(available, localStorage.getItem(TRANSCRIPTION_PROVIDER_KEY))
+                setProviderState(selectedProvider)
+                setTranscriptionModeState(resolveMode(available, selectedProvider, localStorage.getItem(TRANSCRIPTION_MODE_KEY)))
+            }).catch(() => {
+                if (!cancelled && current === request) setProviders([])
+            })
+        }
+        refreshProviders()
+        window.addEventListener(VOICE_LANGUAGE_CHANGE_EVENT, refreshProviders)
+        return () => {
+            cancelled = true
+            window.removeEventListener(VOICE_LANGUAGE_CHANGE_EVENT, refreshProviders)
+        }
     }, [api])
 
     useEffect(() => {
