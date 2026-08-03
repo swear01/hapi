@@ -356,26 +356,31 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         type: 'text',
                         text: taken.item.message
                     }]);
-                    await steer.dispatched;
                 } catch (error) {
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
-
-                const steerDone = steer.completed.then(() => {
+                const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
                     session.queue.commitReservation(taken);
                     messageBuffer.addMessage(taken.item.message, 'user');
                     session.client.emitMessagesConsumed([localId], { steered: true });
                 }, (error) => {
                     session.queue.restoreReservation(taken);
-                    logger.debug('[cursor-acp] soft-steer failed after dispatch', error);
+                    logger.debug('[cursor-acp] soft-steer failed', error);
                 });
                 this.softSteerWaiters.push(steerDone);
                 const removeWaiter = () => {
                     this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
                 };
                 void steerDone.then(removeWaiter);
+                try {
+                    await steer.dispatched;
+                } catch (error) {
+                    logger.debug('[cursor-acp] soft-steer failed to start', error);
+                    await steerDone;
+                    return { steered: false, error: 'Failed to soft-steer into active turn' };
+                }
                 return { steered: true };
             }
         );
