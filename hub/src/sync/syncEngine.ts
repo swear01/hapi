@@ -1307,6 +1307,7 @@ async uploadScratchlistAttachment(
                 source.serviceTier ?? undefined,
                 childId,
                 source.collaborationMode,
+                undefined,
                 rpcResult.forkSession === true
             )
             if (spawn.type !== 'success') {
