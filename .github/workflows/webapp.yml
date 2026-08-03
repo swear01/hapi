@@ -32,15 +32,19 @@ jobs:
                   VITE_REQUIRE_HUB_URL: '1'
               run: bun run --cwd web build
             - name: Add CNAME for custom domain
+              if: github.repository == 'tiann/hapi'
               run: echo "app.hapi.run" > web/dist/CNAME
             - name: Setup Pages
+              if: github.repository == 'tiann/hapi'
               uses: actions/configure-pages@v5
             - name: Upload artifact
+              if: github.repository == 'tiann/hapi'
               uses: actions/upload-pages-artifact@v3
               with:
                   path: web/dist
 
     deploy:
+        if: github.repository == 'tiann/hapi'
         needs: build
         runs-on: ubuntu-latest
         environment:
