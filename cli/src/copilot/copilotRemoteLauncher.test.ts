@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CopilotSession } from './session';
 import { CopilotRemoteLauncher } from './copilotRemoteLauncher';
+import type { AgentMessage } from '@/agent/types';
 
 type LauncherInternals = {
     backend: {
@@ -18,6 +19,7 @@ type LauncherInternals = {
     applyInitialAgentMode: () => Promise<void>;
     currentBackendModel: string | null;
     applyQueuedModel: (model: string) => Promise<string | null>;
+    handleAgentMessage: (message: AgentMessage) => void;
 };
 
 function createLauncher(
@@ -26,6 +28,7 @@ function createLauncher(
 ) {
     const session = {
         sendSessionEvent: vi.fn(),
+        sendAgentMessage: vi.fn(),
         setModel: vi.fn(),
         pushKeepAlive: vi.fn()
     } as unknown as CopilotSession;
@@ -37,6 +40,23 @@ function createLauncher(
 }
 
 describe('CopilotRemoteLauncher.applyAgentMode', () => {
+    it('attributes usage to the active Copilot model', () => {
+        const { internals, session } = createLauncher(vi.fn().mockResolvedValue(undefined));
+        internals.currentBackendModel = 'gpt-5.6';
+
+        internals.handleAgentMessage({
+            type: 'usage',
+            inputTokens: 10,
+            outputTokens: 2,
+            totalTokens: 12
+        });
+
+        expect(session.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'token_count',
+            model: 'gpt-5.6'
+        }));
+    });
+
     it('does not update the acknowledged or displayed mode when setMode fails', async () => {
         const setMode = vi.fn().mockRejectedValue(new Error('transport unavailable'));
         const { launcher, internals, session } = createLauncher(setMode);
