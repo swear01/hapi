@@ -39,7 +39,9 @@ export const RPC_METHODS = {
     ListGrokReasoningEffortOptions: 'listGrokReasoningEffortOptions',
     ListCopilotModelsForCwd: 'listCopilotModelsForCwd',
     ListCopilotModels: 'listCopilotModels',
-    ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions'
+    ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+    ForkConversation: 'fork-conversation',
+    RewindConversation: 'rewind-conversation',
 } as const
 
 export type RpcMethod = typeof RPC_METHODS[keyof typeof RPC_METHODS]
