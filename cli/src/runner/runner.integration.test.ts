@@ -78,9 +78,7 @@ async function isServerHealthy(): Promise<boolean> {
   }
 }
 
-const runIntegrationTests = process.env.HAPI_RUN_INTEGRATION_TESTS === 'true' && await isServerHealthy()
-
-describe.skipIf(!runIntegrationTests)('Runner Integration Tests', { timeout: 20_000 }, () => {
+describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout: 20_000 }, () => {
   let runnerPid: number;
 
   beforeEach(async () => {
