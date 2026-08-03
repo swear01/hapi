@@ -696,6 +696,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             turnInFlight = value;
             session.client.updateAgentState((state) => ({ ...state, steeringActive: value }));
         };
+        setTurnInFlight(false);
         let usageModel: string | null = null;
         let allowAnonymousTerminalEvent = false;
         let invalidThreadId: string | null = null;

@@ -79,6 +79,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     protected async runMainLoop(): Promise<void> {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
+        session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
             enableChangeTitle: false,
@@ -362,19 +363,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
 
-                session.queue.commitReservation(taken);
-                messageBuffer.addMessage(taken.item.message, 'user');
-                session.client.emitMessagesConsumed([localId], { steered: true });
-
-                const steerDone = steer.completed;
+                const steerDone = steer.completed.then(() => {
+                    session.queue.commitReservation(taken);
+                    messageBuffer.addMessage(taken.item.message, 'user');
+                    session.client.emitMessagesConsumed([localId], { steered: true });
+                }, (error) => {
+                    session.queue.restoreReservation(taken);
+                    logger.debug('[cursor-acp] soft-steer failed after dispatch', error);
+                });
                 this.softSteerWaiters.push(steerDone);
                 const removeWaiter = () => {
                     this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
                 };
-                void steerDone.then(removeWaiter, (error) => {
-                    removeWaiter();
-                    logger.debug('[cursor-acp] soft-steer failed after dispatch', error);
-                });
+                void steerDone.then(removeWaiter);
                 return { steered: true };
             }
         );
