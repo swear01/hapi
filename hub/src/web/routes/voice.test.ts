@@ -147,6 +147,11 @@ describe('voice transcription routes', () => {
         expect((upstreamInit?.body as FormData).get('model')).toBe('gpt-transcribe')
         expect((upstreamInit?.body as FormData).get('languages[]')).toBe('zh-cn')
 
+        form.set('language', 'en-US')
+        const englishRes = await app.request('/api/voice/transcription', { method: 'POST', headers, body: form })
+        expect(englishRes.status).toBe(200)
+        expect((upstreamInit?.body as FormData).get('languages[]')).toBe('en')
+
         global.fetch = originalFetch
         if (previousKey === undefined) delete process.env.OPENAI_API_KEY
         else process.env.OPENAI_API_KEY = previousKey
@@ -215,11 +220,18 @@ describe('voice transcription routes', () => {
             expect(res.status).toBe(200)
             expect(await res.json()).toEqual({ token: `${provider}-client-token` })
         }
+        const englishOpenAI = await app.request('/api/voice/transcription/realtime-token', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ provider: 'openai', language: 'en-US' })
+        })
+        expect(englishOpenAI.status).toBe(200)
 
         expect(requests.map((request) => request.url)).toEqual([
             'https://api.openai.com/v1/realtime/client_secrets',
             'https://api.elevenlabs.io/v1/single-use-token/realtime_scribe',
-            'https://api.deepgram.com/v1/auth/grant'
+            'https://api.deepgram.com/v1/auth/grant',
+            'https://api.openai.com/v1/realtime/client_secrets'
         ])
         expect(new Headers(requests[0]?.init?.headers).get('authorization')).toBe('Bearer openai-server-key')
         expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
@@ -227,6 +239,9 @@ describe('voice transcription routes', () => {
                 type: 'transcription',
                 audio: { input: { transcription: { model: 'gpt-live-transcribe', languages: ['zh-tw'] } } }
             }
+        })
+        expect(JSON.parse(String(requests[3]?.init?.body))).toMatchObject({
+            session: { audio: { input: { transcription: { languages: ['en'] } } } }
         })
         expect(new Headers(requests[1]?.init?.headers).get('xi-api-key')).toBe('elevenlabs-server-key')
         expect(new Headers(requests[2]?.init?.headers).get('authorization')).toBe('Token deepgram-server-key')

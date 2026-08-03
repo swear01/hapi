@@ -66,6 +66,12 @@ function trimTrailingSlash(value: string): string {
     return value.replace(/\/+$/, '')
 }
 
+function normalizeOpenAILanguage(language?: string): string | undefined {
+    const value = language?.toLowerCase()
+    if (!value) return undefined
+    return ['zh-cn', 'zh-tw', 'zh-hk'].includes(value) ? value : value.split('-')[0]
+}
+
 function getTranscriptionConfig(provider: TranscriptionProvider): {
     apiKey?: string
     baseUrl: string
@@ -121,7 +127,7 @@ async function transcribeStandard(
         form.set(provider === 'elevenlabs' ? 'model_id' : 'model', config.model)
         if (baseLanguage) {
             if (provider === 'elevenlabs') form.set('language_code', baseLanguage)
-            else if (provider === 'openai') form.set('languages[]', language!.toLowerCase())
+            else if (provider === 'openai') form.set('languages[]', normalizeOpenAILanguage(language) ?? baseLanguage)
             else form.set('language', baseLanguage)
         }
         url = provider === 'elevenlabs'
@@ -176,7 +182,8 @@ async function createRealtimeTranscriptionToken(
 
     switch (provider) {
         case 'openai': {
-            const languages = language ? [language.toLowerCase()] : undefined
+            const openAILanguage = normalizeOpenAILanguage(language)
+            const languages = openAILanguage ? [openAILanguage] : undefined
             url = 'https://api.openai.com/v1/realtime/client_secrets'
             headers = { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }
             body = JSON.stringify({
