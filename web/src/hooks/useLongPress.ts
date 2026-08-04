@@ -135,7 +135,10 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         startTimer(e.clientX, e.clientY)
     }, [startTimer, isGhostMouseEvent])
 
-    const onMouseUp = useCallback<React.MouseEventHandler>(() => {
+    const onMouseUp = useCallback<React.MouseEventHandler>((e) => {
+        // Match onMouseDown: ignore right/middle buttons so context-menu
+        // presses do not collapse project groups via the click path (#955).
+        if (e.button !== 0) return
         if (isGhostMouseEvent()) return
         handleEnd(!isLongPressRef.current)
     }, [handleEnd, isGhostMouseEvent])
