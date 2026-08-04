@@ -1043,7 +1043,7 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
     }
 }));
 
-import { codexRemoteLauncher } from './codexRemoteLauncher';
+import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
 
 type FakeAgentState = {
     requests: Record<string, unknown>;
@@ -1186,6 +1186,12 @@ function createSessionStub(
 }
 
 describe('codexRemoteLauncher', () => {
+    it('invalidates queued steer handlers after abort or cleanup', () => {
+        expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
+        expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
+        expect(isCurrentSteerHandler(3, 3, true)).toBe(false);
+    });
+
     afterEach(() => {
         harness.notifications = [];
         harness.dispatchNotification = null;
