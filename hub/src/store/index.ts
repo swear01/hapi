@@ -322,6 +322,9 @@ export class Store {
                 step()
             }
             this.setUserVersion(SCHEMA_VERSION)
+            // Same fork-pollution repair as the already-at-SCHEMA_VERSION path:
+            // a DB that jumped 15→16 with empty V16 DDL may still lack attachments.
+            this.ensureScratchlistAttachmentsColumn()
             return
         }
 
@@ -330,6 +333,10 @@ export class Store {
         }
 
         this.assertRequiredTablesPresent()
+        // Maintained-fork repair: swear01/hapi v0.25.1.1 spent V15 on
+        // sessions.personality, so hubs that later reached schema 16+ never ran
+        // the official V14→V15 attachments step. Re-check on every open.
+        this.ensureScratchlistAttachmentsColumn()
     }
 
     private createSchema(): void {
@@ -735,20 +742,36 @@ export class Store {
      * unsupported on older SQLite; rebuild DB or leave column unused.
      */
     private migrateFromV14ToV15(): void {
+        this.ensureScratchlistAttachmentsColumn()
+    }
+
+    /**
+     * V16 has no upstream DDL change: messages.content may now hold
+     * zstd-compressed BLOBs alongside legacy plaintext JSON TEXT (see
+     * contentCodec.ts). The version bump exists so an older hub build refuses
+     * to open the DB with a schema-mismatch error instead of silently
+     * rendering every compressed message as null.
+     *
+     * Maintained fork also re-runs the attachments ensure here: DBs that
+     * reached user_version 15 via swear01 v0.25.1.1 (personality) skip the
+     * official V14→V15 attachments step when advancing later.
+     */
+    private migrateFromV15ToV16(): void {
+        this.ensureScratchlistAttachmentsColumn()
+    }
+
+    /**
+     * Idempotent ADD COLUMN for session_scratchlist.attachments.
+     * Safe on fresh official V15+, and required to heal fork-polluted hubs
+     * already at schema 15+ without the column.
+     */
+    private ensureScratchlistAttachmentsColumn(): void {
         const columns = this.db.prepare('PRAGMA table_info(session_scratchlist)').all() as Array<{ name: string }>
+        if (columns.length === 0) return
         if (!columns.some((col) => col.name === 'attachments')) {
             this.db.exec(`ALTER TABLE session_scratchlist ADD COLUMN attachments TEXT DEFAULT NULL`)
         }
     }
-
-    /**
-     * V16 has no DDL change: messages.content may now hold zstd-compressed
-     * BLOBs alongside legacy plaintext JSON TEXT (see contentCodec.ts). The
-     * version bump exists so an older hub build refuses to open the DB with a
-     * schema-mismatch error instead of silently rendering every compressed
-     * message as null.
-     */
-    private migrateFromV15ToV16(): void {}
 
     private migrateFromV16ToV17(): void {
         this.db.exec(`
