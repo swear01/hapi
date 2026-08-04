@@ -1,0 +1,48 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1361	Himehane	34f20d7473bedd43211bd2aa008816869b7a62a9	defer	merge-unstable	clear	missing	-	proportional	not-accepted	defer: merge-unstable; normal carries require ready merge/CI state
+pr-1360	wu736139669	209a013c39a871e84c0ae3718823147aaea208a1	defer	ready	clear	findings	209a013c39a871e84c0ae3718823147aaea208a1	review-large	not-accepted	defer: ready but 2125/37 and latest-head bot still reports Major findings
+pr-1359	wu736139669	64beb62c7d458667c4e02b00d93ef32c7f8dc081	carry	ready	clear	clean	64beb62c7d458667c4e02b00d93ef32c7f8dc081	proportional	preserve	ready+MERGEABLE; latest-head HAPI Bot clean on 64beb62c; small bugfix for legacy usage model fallback
+pr-1358	teekalpha	587aba434ad5625a202994da16c6cba79e963f6e	defer	merge-unstable	clear	missing	-	proportional	not-accepted	defer: merge-unstable; normal carries require ready merge/CI state
+pr-1354	wu736139669	95efa58a35c2d0fa87e86c04cbc4f3ecefae4638	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1351	yin1245	feb70174798df546512ebd9096768c94ddead945	defer	merge-unknown	clear	missing	-	review-large	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1318	wu736139669	4ee27b57013a6b4d107beac0e2020d1d8b2b956f	defer	merge-dirty	clear	missing	-	proportional	not-accepted	defer: merge-dirty; normal carries require ready merge/CI state
+pr-1309	techotaku39	01a98c4efd4ddcfb0b8278c936ddd346f7e30936	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1257	hqhq1025	6957978424f74209dca9295699137179282e80ad	defer	ready	clear	findings	6957978424f74209dca9295699137179282e80ad	proportional	not-accepted	defer: latest-head HAPI Bot still reports Major findings on 69579784
+pr-1242	hqhq1025	2c7a46f98f49a23e638f5188a6960ddc937cade3	defer	merge-dirty	clear	missing	-	proportional	not-accepted	defer: merge-dirty; normal carries require ready merge/CI state
+pr-1212	hqhq1025	93d8678da8535c3a812e166f43961c1c4ff50f92	defer	merge-dirty	clear	missing	-	review-large	not-accepted	defer: merge-dirty; normal carries require ready merge/CI state
+pr-1193	mrrnb	cd4044f8889f5ac28bea037c157c89ff32ececd8	defer	draft	clear	missing	-	proportional	not-accepted	defer: draft; latest head is not release-ready
+pr-1189	tiann	5f949783ad2123d865d758a921681245683f899d	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1188	tiann	1f23f857e4173a25f969879ef139487ec1c9955e	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1163	heavygee	63eb1d7cd51db767973cfe3df347d0d3a4033054	defer	draft	clear	missing	-	review-huge	not-accepted	defer: draft; latest head is not release-ready
+pr-1158	techotaku39	8148ce403c935571e1fca55ab787886fac8b60cf	defer	merge-unstable	clear	missing	-	proportional	not-accepted	defer: merge-unstable; normal carries require ready merge/CI state
+pr-1157	techotaku39	a92cff49b39f2091d2c4a588ea94aef4855056ec	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1126	GoldenZqqq	31ce48080df1a62150e9fe7e0a86fde511ef3cc2	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1115	techotaku39	fdfa4e7f0a5d6b4bc4e5adc287af316a66068fe0	defer	merge-unstable	clear	missing	-	review-large	not-accepted	defer: merge-unstable; normal carries require ready merge/CI state
+pr-1108	heavygee	f0180a8abc97b4b646081512cb91e7352bbb91a9	defer	ready	clear	missing	-	review-huge	not-accepted	defer: ready but 9468/95 huge scope; needs maintainer acceptance
+pr-1099	NPUlrk	91116cd9089107625d95ae2bc99fa615ef87d6a6	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1093	techotaku39	e0a3924f22b66a0dc10a314fb6c5e0ea95414e67	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1092	zulinliu	4427e6e08b2fed4429c793af2841f7f47fb70bac	defer	merge-unknown	clear	missing	-	review-huge	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1091	zulinliu	0cf0d70310e9c58c5a41509793260a003822a9b4	defer	merge-unknown	clear	missing	-	review-huge	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1059	Arnie97	37deeeba5263ceb402429c069e911eac96eb406e	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-1054	DullJZ	9cbe9b1fa24edec152bb610e0b1049930c723432	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-987	heavygee	bbfb6f784eeffe868e006184e21ba931edbb93d9	defer	ready	clear	missing	-	review-huge	not-accepted	defer: ready but 3787/42 huge scope
+pr-986	heavygee	b8bb352008004ee1c4bb3fab26966a46c7b30622	carry	ready	clear	clean	b8bb352008004ee1c4bb3fab26966a46c7b30622	proportional	accepted-change	ready+MERGEABLE; latest-head HAPI Bot clean on b8bb3520; Android share searchable picker previously carried and still open
+pr-975	KorenKrita	344c6009b53e20829978e44367fa50b5870986fe	defer	merge-dirty	clear	missing	-	review-huge	not-accepted	defer: merge-dirty; normal carries require ready merge/CI state
+pr-958	heavygee	71ac698f24d12eddda5045b503c1067e4298793f	defer	ready	clear	missing	-	review-huge	not-accepted	defer: ready but 2871/61 huge scope
+pr-955	swear01	cd37fc60386cd61f342af8f603cbfb534c478883	carry	merge-unknown	clear	clean	cd37fc60386cd61f342af8f603cbfb534c478883	exception	accepted-change	personal-author auto-carry; CONFLICTING vs upstream/main; 1228/27 needs scope exception; latest-head bot clean
+pr-945	heavygee	f11dc6ed14a74880d0a9c96917121bfce7ddadf5	defer	ready	clear	missing	-	review-huge	not-accepted	defer: ready but 10831/47 huge scope
+pr-942	dzshzx	f1f93474f042381818f0d605b1d64b3fb42cb02b	defer	merge-unknown	clear	missing	-	review-huge	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-906	swear01	d652eafdb885d5b2e09ff76461564f3f316b78e1	carry	merge-unknown	clear	findings	ea4f87e62feff57702474566b8b24aed1e1a7024	exception	accepted-change	personal-author auto-carry; CONFLICTING; 1594/44 needs scope exception; latest bot review is stale vs head d652eafd and still reported Major on older sha
+pr-847	heavygee	d62bd082eb9d78e800d1e01ad3d6e6f42453f2ac	defer	ready	clear	missing	-	review-huge	not-accepted	defer: ready but 3980/42 huge scope
+pr-769	junxin367	60c11607ce3bba734f38b6fcf87be07b32298683	defer	merge-unknown	clear	missing	-	review-huge	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-663	SpartaGeorge	5dbf6d406a6bb8507dc07598ba2aecc8cd98ee0f	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-658	yrom	f7d8ca3ea0f8ae47245443ce2c0cfec612263e62	defer	ready	clear	findings	f7d8ca3ea0f8ae47245443ce2c0cfec612263e62	proportional	not-accepted	defer: latest-head HAPI Bot still reports Major findings on f7d8ca3e
+pr-553	wzxjohn	5fb81622479e028557dccb8f9649312dcf490274	drop	ready	blocked	findings	5fb81622479e028557dccb8f9649312dcf490274	review-large	unjustified-change	drop: maintainer tiann rejected WeCom channel; Server酱 already covered via #515
+pr-536	dsus4wang	1de72788e93c6aae6511a5af8bb05bda631093c0	defer	merge-dirty	clear	missing	-	review-large	not-accepted	defer: merge-dirty; normal carries require ready merge/CI state
+pr-535	dsus4wang	abcf3a4bff8b685a70ceeb77008f4f217b43b67c	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-518	duxiaoxiong	72cceea333addd3a8b39948b722750056433d39b	defer	draft	clear	missing	-	review-huge	not-accepted	defer: draft; latest head is not release-ready
+pr-490	tehao999	745acf545461ad7f8c615ebd178f3a15df869fb2	defer	draft	clear	missing	-	review-huge	not-accepted	defer: draft; latest head is not release-ready
+pr-484	YiwenZhu77	641a01266de65d4944ec5c609a40c717cd41662a	defer	merge-unknown	clear	missing	-	review-large	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-394	koenzhao	fb5f201ec230e0b7abdc15dcf26483d67a56a1be	defer	merge-unknown	clear	missing	-	proportional	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-325	MrHeB	c12df55ff52d2544ff40f313b702b24dc0732cf8	defer	merge-unknown	clear	missing	-	review-large	not-accepted	defer: merge-unknown; normal carries require ready merge/CI state
+pr-312	just4zeroq	572d489bbd359fe1ca9b4eb96a852804e42e69ac	defer	merge-dirty	clear	missing	-	review-large	not-accepted	defer: merge-dirty; normal carries require ready merge/CI state

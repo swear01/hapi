@@ -1,0 +1,211 @@
+From 5d00a967713c9036b2719f3047e169c0d5bf0acd Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 4 Aug 2026 17:59:40 +0800
+Subject: [PATCH 02/10] carry: PR #1359 preserve fallback models for legacy
+ usage events
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ hub/src/store/usage.ts            | 10 ++++
+ hub/src/sync/usageService.test.ts | 81 +++++++++++++++++++++++++++++--
+ hub/src/sync/usageService.ts      | 27 ++++++++++-
+ web/src/router.tsx                |  1 +
+ 4 files changed, 115 insertions(+), 4 deletions(-)
+
+diff --git a/hub/src/store/usage.ts b/hub/src/store/usage.ts
+index 8c49ca33..3c3644fe 100644
+--- a/hub/src/store/usage.ts
++++ b/hub/src/store/usage.ts
+@@ -128,6 +128,13 @@ export function recordUsageScan(
+                     last_cache_creation_tokens = excluded.last_cache_creation_tokens
+                 WHERE usage_events.kind = 'delta'
+             `)
++            const updateCumulativeModel = db.prepare(`
++                UPDATE usage_events
++                SET model = ?
++                WHERE session_id = ?
++                    AND source_key = ?
++                    AND kind = 'cumulative'
++            `)
+ 
+             for (const event of events) {
+                 statement.run({
+@@ -147,6 +154,9 @@ export function recordUsageScan(
+                     last_cache_read_tokens: event.lastCacheReadTokens,
+                     last_cache_creation_tokens: event.lastCacheCreationTokens
+                 })
++                if (event.kind === 'cumulative' && event.model !== null) {
++                    updateCumulativeModel.run(event.model, event.sessionId, event.sourceKey)
++                }
+             }
+         }
+ 
+diff --git a/hub/src/sync/usageService.test.ts b/hub/src/sync/usageService.test.ts
+index 83bd79dc..c41dd1c6 100644
+--- a/hub/src/sync/usageService.test.ts
++++ b/hub/src/sync/usageService.test.ts
+@@ -188,14 +188,14 @@ describe('usage service', () => {
+         store.close()
+     })
+ 
+-    it('accepts Codex events that only contain last_token_usage', () => {
++    it('falls back to the session model for Codex events without a model', () => {
+         const store = new Store(':memory:')
+         const session = store.sessions.getOrCreateSession(
+             'codex-last-usage-test',
+             { path: '/tmp', host: 'test', flavor: 'codex' },
+             null,
+             'default',
+-            'test-model'
++            'deepseek-v4-flash[1m]'
+         )
+ 
+         addAgentMessage(store, session.id, {
+@@ -214,7 +214,82 @@ describe('usage service', () => {
+         expect(result.totals.requests).toBe(1)
+         expect(result.totals.totalTokens).toBe(110)
+         expect(result.totals.uncachedTokens).toBe(30)
+-        expect(result.byModel).toEqual([expect.objectContaining({ key: 'unknown' })])
++        expect(result.byModel).toEqual([
++            expect.objectContaining({ key: 'deepseek-v4-flash[1m]', totalTokens: 110 })
++        ])
++        store.close()
++    })
++
++    it('preserves an indexed fallback model across session model changes', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'codex-model-fallback-rebuild-test',
++            { path: '/tmp', host: 'test', flavor: 'codex' },
++            null,
++            'default',
++            'deepseek-v4-flash'
++        )
++
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                thread_id: 'thread-1',
++                turn_id: 'turn-1',
++                info: {
++                    total_token_usage: { input_tokens: 100, output_tokens: 10 },
++                    last_token_usage: { input_tokens: 100, output_tokens: 10 }
++                }
++            }
++        })
++
++        expect(getUsageSummary(store, 'default', 'all').byModel).toEqual([
++            expect.objectContaining({ key: 'deepseek-v4-flash', totalTokens: 110 })
++        ])
++
++        store.sessions.setSessionModel(session.id, 'gpt-5.6-sol', 'default')
++        store.messages.bumpMessageEpoch(session.id)
++
++        expect(getUsageSummary(store, 'default', 'all').byModel).toEqual([
++            expect.objectContaining({ key: 'deepseek-v4-flash', totalTokens: 110 })
++        ])
++        store.close()
++    })
++
++    it('replaces a cumulative fallback model when a replay adds an explicit model', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'codex-explicit-model-replay-test',
++            { path: '/tmp', host: 'test', flavor: 'codex' },
++            null,
++            'default',
++            'deepseek-v4-flash'
++        )
++        const tokenCount = (model?: string) => ({
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                model,
++                thread_id: 'thread-1',
++                turn_id: 'turn-1',
++                info: {
++                    total_token_usage: { input_tokens: 100, output_tokens: 10 },
++                    last_token_usage: { input_tokens: 100, output_tokens: 10 }
++                }
++            }
++        })
++
++        addAgentMessage(store, session.id, tokenCount())
++        expect(getUsageSummary(store, 'default', 'all').byModel).toEqual([
++            expect.objectContaining({ key: 'deepseek-v4-flash', totalTokens: 110, requests: 1 })
++        ])
++
++        addAgentMessage(store, session.id, tokenCount('gpt-5.6-sol'))
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.totals).toEqual(expect.objectContaining({ totalTokens: 110, requests: 1 }))
++        expect(result.byModel).toEqual([
++            expect.objectContaining({ key: 'gpt-5.6-sol', totalTokens: 110, requests: 1 })
++        ])
+         store.close()
+     })
+ 
+diff --git a/hub/src/sync/usageService.ts b/hub/src/sync/usageService.ts
+index 3700753d..6979667c 100644
+--- a/hub/src/sync/usageService.ts
++++ b/hub/src/sync/usageService.ts
+@@ -31,6 +31,10 @@ function sessionAgent(session: StoredSession): string {
+     return typeof flavor === 'string' && flavor.trim() ? flavor.trim() : 'unknown'
+ }
+ 
++function sessionModel(session: StoredSession): string | null {
++    return typeof session.model === 'string' && session.model.trim() ? session.model.trim() : null
++}
++
+ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageEvent | null {
+     const envelope = asRecord(message.content)
+     if (envelope?.role !== 'agent') return null
+@@ -169,11 +173,32 @@ function collectUsageEvents(store: Store, sessions: StoredSession[]): void {
+         const afterSeq = replaceEvents ? 0 : scanState.lastSeq
+         const messages = store.messages.getMessagesAfterSeq(session.id, afterSeq)
+         const events = new Map<string, UsageEvent>()
++        let indexedModels: Map<string, string> | null = null
++        const getIndexedModel = (sourceKey: string): string | null => {
++            if (indexedModels === null) {
++                indexedModels = new Map(
++                    store.usage.getEvents([session.id])
++                        .filter((event): event is UsageEvent & { model: string } => event.model !== null)
++                        .map((event) => [event.sourceKey, event.model])
++                )
++            }
++            return indexedModels.get(sourceKey) ?? null
++        }
++        const fallbackModel = sessionModel(session)
+         for (const message of messages) {
+             const event = parseUsageEvent(session, message)
+             if (!event) continue
+-            if (event.kind === 'delta' || !events.has(event.sourceKey)) {
++            const existingEvent = events.get(event.sourceKey)
++            const explicitModel = event.model
++            event.model = explicitModel
++                ?? existingEvent?.model
++                ?? getIndexedModel(event.sourceKey)
++                ?? fallbackModel
++            if (event.kind === 'delta' || !existingEvent) {
+                 events.set(event.sourceKey, event)
++            } else if (explicitModel !== null) {
++                // A replay may add model metadata missing from the original snapshot.
++                existingEvent.model = explicitModel
+             }
+         }
+         const lastSeq = messages.at(-1)?.seq ?? afterSeq
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 01fd373b..56a04eaf 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -778,6 +778,7 @@ function SessionPage() {
+                         message: t('chat.sendError.aborted'),
+                         code: 'abort',
+                         scheduledAt: null,
++                        deliveryMode: 'queue',
+                         mutationStarted: true,
+                         restoreSuppressed: false
+                     }
+-- 
+2.50.1 (Apple Git-155)
+

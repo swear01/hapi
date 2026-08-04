@@ -1,0 +1,56 @@
+From 162066d09fa414117efd7b6f417ac4685768b595 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 4 Aug 2026 18:18:39 +0800
+Subject: [PATCH 10/10] fix(web): ignore non-left mouseup in useLongPress;
+ harden StorageEvent test
+
+Restore #955's right-click guard that conflict resolution dropped against
+upstream useLongPress, and omit jsdom-incompatible storageArea in the
+markdown cross-tab test under Bun.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ web/src/components/assistant-ui/markdown-a.test.tsx | 5 +++--
+ web/src/hooks/useLongPress.ts                       | 5 ++++-
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/web/src/components/assistant-ui/markdown-a.test.tsx b/web/src/components/assistant-ui/markdown-a.test.tsx
+index 8ab22168..c62eb761 100644
+--- a/web/src/components/assistant-ui/markdown-a.test.tsx
++++ b/web/src/components/assistant-ui/markdown-a.test.tsx
+@@ -161,13 +161,14 @@ describe('cross-tab sync via storage event', () => {
+         renderA({ href: 'obsidian://open', children: 'note' })
+         expect(document.querySelector('a')!.getAttribute('href')).toBe('#')
+ 
+-        // Simulate another tab writing the allowed schemes
++        // Simulate another tab writing the allowed schemes.
++        // Omit storageArea: under Bun/jsdom, localStorage is not always a
++        // real Storage instance and StorageEventInit rejects it.
+         act(() => {
+             localStorage.setItem(STORAGE_KEY, JSON.stringify(['obsidian']))
+             window.dispatchEvent(new StorageEvent('storage', {
+                 key: STORAGE_KEY,
+                 newValue: JSON.stringify(['obsidian']),
+-                storageArea: localStorage,
+             }))
+         })
+ 
+diff --git a/web/src/hooks/useLongPress.ts b/web/src/hooks/useLongPress.ts
+index 3f8aa3c2..65fe1328 100644
+--- a/web/src/hooks/useLongPress.ts
++++ b/web/src/hooks/useLongPress.ts
+@@ -135,7 +135,10 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         startTimer(e.clientX, e.clientY)
+     }, [startTimer, isGhostMouseEvent])
+ 
+-    const onMouseUp = useCallback<React.MouseEventHandler>(() => {
++    const onMouseUp = useCallback<React.MouseEventHandler>((e) => {
++        // Match onMouseDown: ignore right/middle buttons so context-menu
++        // presses do not collapse project groups via the click path (#955).
++        if (e.button !== 0) return
+         if (isGhostMouseEvent()) return
+         handleEnd(!isLongPressRef.current)
+     }, [handleEnd, isGhostMouseEvent])
+-- 
+2.50.1 (Apple Git-155)
+

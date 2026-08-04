@@ -1,0 +1,54 @@
+From cadfbab2280e6575b6b269524a08621e85e991a7 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 4 Aug 2026 18:03:09 +0800
+Subject: [PATCH 07/10] chore(release): prepare v0.26.0.1
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ .github/release-notes/v0.26.0.1.md | 13 +++++++++++++
+ cli/package.json                   |  2 +-
+ shared/src/buildInfo.ts            |  2 +-
+ 3 files changed, 15 insertions(+), 2 deletions(-)
+ create mode 100644 .github/release-notes/v0.26.0.1.md
+
+diff --git a/.github/release-notes/v0.26.0.1.md b/.github/release-notes/v0.26.0.1.md
+new file mode 100644
+index 00000000..95281726
+--- /dev/null
++++ b/.github/release-notes/v0.26.0.1.md
+@@ -0,0 +1,13 @@
++## HAPI v0.26.0.1
++
++### Compared with the previous maintained release
++
++Rebuilt from current `upstream/main` (`807fa72a`) after official `v0.26.0`. Inherits upstream Antigravity (`#1320`) by operator decision because it is already on the official tip. Carries open PRs `#1359`, `#986`, `#955`, and `#906`, and keeps the fork schema repair that idempotently adds `session_scratchlist.attachments` for hubs polluted by `v0.25.1.1`.
++
++### Compared with the official release
++
++Adds searchable Android share-target session picking (`#986`), project-group context actions (`#955`), mid-turn Steer for Codex/Cursor (`#906`), legacy usage-model fallback preservation (`#1359`), the maintained distribution overlay (four-part tags, release-from-main, macOS `xyz.hapi.cli` signing, app-shell no-store headers), and the polluted-schema attachments repair.
++
++### Maintained-fork guarantees
++
++Release tags are published only from commits contained in `main`; macOS artifacts retain the `xyz.hapi.cli` signing identity; app-shell cache headers remain no-store. PR `#1320` is present because official `upstream/main` already merged it and the operator authorized inheriting that base.
+diff --git a/cli/package.json b/cli/package.json
+index 6c41904a..0030582f 100644
+--- a/cli/package.json
++++ b/cli/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@twsxtd/hapi",
+-  "version": "0.26.0",
++  "version": "0.26.0.1",
+   "description": "App for agentic coding - access coding agent anywhere",
+   "author": "Kirill Dubovitskiy & weishu",
+   "license": "AGPL-3.0-only",
+diff --git a/shared/src/buildInfo.ts b/shared/src/buildInfo.ts
+index e6a03306..ec28b509 100644
+--- a/shared/src/buildInfo.ts
++++ b/shared/src/buildInfo.ts
+@@ -1 +1 @@
+-export const APP_VERSION = '0.26.0'
++export const APP_VERSION = '0.26.0.1'
+-- 
+2.50.1 (Apple Git-155)
+

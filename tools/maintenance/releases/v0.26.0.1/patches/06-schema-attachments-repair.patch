@@ -1,0 +1,157 @@
+From f7218fff55d718f91ba6f6100d3caa3e80381cba Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 4 Aug 2026 18:03:09 +0800
+Subject: [PATCH 06/10] fix(hub): repair missing scratchlist.attachments on
+ polluted schema 15+
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ hub/src/store/index.ts              | 41 ++++++++++++++++-----
+ hub/src/store/migration-v15.test.ts | 55 +++++++++++++++++++++++++++++
+ 2 files changed, 87 insertions(+), 9 deletions(-)
+
+diff --git a/hub/src/store/index.ts b/hub/src/store/index.ts
+index 51064abe..a75393f6 100644
+--- a/hub/src/store/index.ts
++++ b/hub/src/store/index.ts
+@@ -322,6 +322,9 @@ export class Store {
+                 step()
+             }
+             this.setUserVersion(SCHEMA_VERSION)
++            // Same fork-pollution repair as the already-at-SCHEMA_VERSION path:
++            // a DB that jumped 15→16 with empty V16 DDL may still lack attachments.
++            this.ensureScratchlistAttachmentsColumn()
+             return
+         }
+ 
+@@ -330,6 +333,10 @@ export class Store {
+         }
+ 
+         this.assertRequiredTablesPresent()
++        // Maintained-fork repair: swear01/hapi v0.25.1.1 spent V15 on
++        // sessions.personality, so hubs that later reached schema 16+ never ran
++        // the official V14→V15 attachments step. Re-check on every open.
++        this.ensureScratchlistAttachmentsColumn()
+     }
+ 
+     private createSchema(): void {
+@@ -735,21 +742,37 @@ export class Store {
+      * unsupported on older SQLite; rebuild DB or leave column unused.
+      */
+     private migrateFromV14ToV15(): void {
++        this.ensureScratchlistAttachmentsColumn()
++    }
++
++    /**
++     * V16 has no upstream DDL change: messages.content may now hold
++     * zstd-compressed BLOBs alongside legacy plaintext JSON TEXT (see
++     * contentCodec.ts). The version bump exists so an older hub build refuses
++     * to open the DB with a schema-mismatch error instead of silently
++     * rendering every compressed message as null.
++     *
++     * Maintained fork also re-runs the attachments ensure here: DBs that
++     * reached user_version 15 via swear01 v0.25.1.1 (personality) skip the
++     * official V14→V15 attachments step when advancing later.
++     */
++    private migrateFromV15ToV16(): void {
++        this.ensureScratchlistAttachmentsColumn()
++    }
++
++    /**
++     * Idempotent ADD COLUMN for session_scratchlist.attachments.
++     * Safe on fresh official V15+, and required to heal fork-polluted hubs
++     * already at schema 15+ without the column.
++     */
++    private ensureScratchlistAttachmentsColumn(): void {
+         const columns = this.db.prepare('PRAGMA table_info(session_scratchlist)').all() as Array<{ name: string }>
++        if (columns.length === 0) return
+         if (!columns.some((col) => col.name === 'attachments')) {
+             this.db.exec(`ALTER TABLE session_scratchlist ADD COLUMN attachments TEXT DEFAULT NULL`)
+         }
+     }
+ 
+-    /**
+-     * V16 has no DDL change: messages.content may now hold zstd-compressed
+-     * BLOBs alongside legacy plaintext JSON TEXT (see contentCodec.ts). The
+-     * version bump exists so an older hub build refuses to open the DB with a
+-     * schema-mismatch error instead of silently rendering every compressed
+-     * message as null.
+-     */
+-    private migrateFromV15ToV16(): void {}
+-
+     private migrateFromV16ToV17(): void {
+         this.db.exec(`
+             CREATE TABLE IF NOT EXISTS usage_events (
+diff --git a/hub/src/store/migration-v15.test.ts b/hub/src/store/migration-v15.test.ts
+index de05ed27..e169125b 100644
+--- a/hub/src/store/migration-v15.test.ts
++++ b/hub/src/store/migration-v15.test.ts
+@@ -67,6 +67,51 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             rmSync(dir, { recursive: true, force: true })
+         }
+     })
++
++    it('fork-polluted schema 15 (personality, no attachments) gains attachments on open', () => {
++        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-fork-v15-pollution-'))
++        const dbPath = join(dir, 'test.db')
++        let store: Store | undefined
++        try {
++            const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
++            db.exec('PRAGMA journal_mode = WAL')
++            db.exec('PRAGMA foreign_keys = ON')
++            createForkPollutedSchema(db)
++            db.exec('PRAGMA user_version = 15')
++            db.close()
++
++            store = new Store(dbPath)
++            const cols = getColumns(store, 'session_scratchlist')
++            expect(cols).toContain('attachments')
++            expect(getColumns(store, 'sessions')).toContain('personality')
++            expect(getUserVersion(store)).toBe(19)
++        } finally {
++            store?.close()
++            rmSync(dir, { recursive: true, force: true })
++        }
++    })
++
++    it('fork-polluted schema 19 (already current, still no attachments) repairs on reopen', () => {
++        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-fork-v19-pollution-'))
++        const dbPath = join(dir, 'test.db')
++        let store: Store | undefined
++        try {
++            const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
++            db.exec('PRAGMA journal_mode = WAL')
++            db.exec('PRAGMA foreign_keys = ON')
++            createForkPollutedSchema(db)
++            db.exec('PRAGMA user_version = 19')
++            db.close()
++
++            store = new Store(dbPath)
++            const cols = getColumns(store, 'session_scratchlist')
++            expect(cols).toContain('attachments')
++            expect(getUserVersion(store)).toBe(19)
++        } finally {
++            store?.close()
++            rmSync(dir, { recursive: true, force: true })
++        }
++    })
+ })
+ 
+ function getColumns(store: Store, table: string): string[] {
+@@ -182,3 +227,13 @@ function createV14Schema(db: Database): void {
+             ON session_scratchlist(session_id, created_at DESC);
+     `)
+ }
++
++/**
++ * swear01/hapi v0.25.1.1 shape: V15 spent on sessions.personality, so
++ * session_scratchlist never received the official attachments column. Later
++ * builds may bump user_version without repairing DDL.
++ */
++function createForkPollutedSchema(db: Database): void {
++    createV14Schema(db)
++    db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
++}
+-- 
+2.50.1 (Apple Git-155)
+
