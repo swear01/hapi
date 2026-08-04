@@ -150,6 +150,8 @@ export type NormalizedMessage = ({
      * flavors) — consumers should fall back to `createdAt` in that case.
      */
     agentTimestamp?: number | null
+    /** True when a user message was steered into an active turn (mid-turn). */
+    steered?: boolean
 }
 
 export type ToolPermission = {
@@ -203,6 +205,8 @@ export type UserTextBlock = {
     status?: MessageStatus
     originalText?: string
     meta?: unknown
+    /** True when this message was steered into an active turn (mid-turn). */
+    steered?: boolean
 }
 
 export type AgentTextBlock = {

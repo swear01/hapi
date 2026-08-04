@@ -51,7 +51,11 @@ vi.mock('node:child_process', () => ({
             },
             stdin: {
                 end: (...args: unknown[]) => spawnState.stdinEnd(...args),
-                write: (chunk: string) => spawnState.stdinWrite(chunk)
+                write: (chunk: string, callback?: (error?: Error | null) => void) => {
+                    const result = spawnState.stdinWrite(chunk);
+                    callback?.();
+                    return result;
+                }
             },
             on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
                 if (event === 'exit') {
@@ -535,7 +539,11 @@ describe('AcpStdioTransport closed stdin writes', () => {
         });
 
         const transport = new AcpStdioTransport({ command: 'gemini' });
-        await expect(transport.sendRequest('initialize')).rejects.toThrow('WritableIterable is closed');
+        const request = transport.sendRequestWithDispatch('initialize');
+        await Promise.all([
+            expect(request.dispatched).rejects.toThrow('WritableIterable is closed'),
+            expect(request.completed).rejects.toThrow('WritableIterable is closed')
+        ]);
         await expect(transport.sendRequest('session/new')).rejects.toThrow('WritableIterable is closed');
     });
 });
