@@ -161,13 +161,14 @@ describe('cross-tab sync via storage event', () => {
         renderA({ href: 'obsidian://open', children: 'note' })
         expect(document.querySelector('a')!.getAttribute('href')).toBe('#')
 
-        // Simulate another tab writing the allowed schemes
+        // Simulate another tab writing the allowed schemes.
+        // Omit storageArea: under Bun/jsdom, localStorage is not always a
+        // real Storage instance and StorageEventInit rejects it.
         act(() => {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(['obsidian']))
             window.dispatchEvent(new StorageEvent('storage', {
                 key: STORAGE_KEY,
                 newValue: JSON.stringify(['obsidian']),
-                storageArea: localStorage,
             }))
         })
 
