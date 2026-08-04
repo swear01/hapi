@@ -67,6 +67,51 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
             rmSync(dir, { recursive: true, force: true })
         }
     })
+
+    it('fork-polluted schema 15 (personality, no attachments) gains attachments on open', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-fork-v15-pollution-'))
+        const dbPath = join(dir, 'test.db')
+        let store: Store | undefined
+        try {
+            const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
+            db.exec('PRAGMA journal_mode = WAL')
+            db.exec('PRAGMA foreign_keys = ON')
+            createForkPollutedSchema(db)
+            db.exec('PRAGMA user_version = 15')
+            db.close()
+
+            store = new Store(dbPath)
+            const cols = getColumns(store, 'session_scratchlist')
+            expect(cols).toContain('attachments')
+            expect(getColumns(store, 'sessions')).toContain('personality')
+            expect(getUserVersion(store)).toBe(19)
+        } finally {
+            store?.close()
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    it('fork-polluted schema 19 (already current, still no attachments) repairs on reopen', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-fork-v19-pollution-'))
+        const dbPath = join(dir, 'test.db')
+        let store: Store | undefined
+        try {
+            const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
+            db.exec('PRAGMA journal_mode = WAL')
+            db.exec('PRAGMA foreign_keys = ON')
+            createForkPollutedSchema(db)
+            db.exec('PRAGMA user_version = 19')
+            db.close()
+
+            store = new Store(dbPath)
+            const cols = getColumns(store, 'session_scratchlist')
+            expect(cols).toContain('attachments')
+            expect(getUserVersion(store)).toBe(19)
+        } finally {
+            store?.close()
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
 })
 
 function getColumns(store: Store, table: string): string[] {
@@ -181,4 +226,14 @@ function createV14Schema(db: Database): void {
         CREATE INDEX IF NOT EXISTS idx_session_scratchlist_session_created
             ON session_scratchlist(session_id, created_at DESC);
     `)
+}
+
+/**
+ * swear01/hapi v0.25.1.1 shape: V15 spent on sessions.personality, so
+ * session_scratchlist never received the official attachments column. Later
+ * builds may bump user_version without repairing DDL.
+ */
+function createForkPollutedSchema(db: Database): void {
+    createV14Schema(db)
+    db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
 }
