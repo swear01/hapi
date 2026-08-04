@@ -96,16 +96,24 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
         const dbPath = join(dir, 'test.db')
         let store: Store | undefined
         try {
+            // Build a realistic current-version hub DB, then simulate fork pollution:
+            // user_version already at SCHEMA_VERSION but attachments was never added
+            // (and the old personality column may still exist).
+            store = new Store(dbPath)
+            expect(getColumns(store, 'session_scratchlist')).toContain('attachments')
+            store.close()
+            store = undefined
+
             const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
-            db.exec('PRAGMA journal_mode = WAL')
-            db.exec('PRAGMA foreign_keys = ON')
-            createForkPollutedSchema(db)
-            db.exec('PRAGMA user_version = 19')
+            db.exec('ALTER TABLE session_scratchlist DROP COLUMN attachments')
+            db.exec('ALTER TABLE sessions ADD COLUMN personality TEXT')
+            expect(getUserVersionFromDb(db)).toBe(19)
             db.close()
 
             store = new Store(dbPath)
             const cols = getColumns(store, 'session_scratchlist')
             expect(cols).toContain('attachments')
+            expect(getColumns(store, 'sessions')).toContain('personality')
             expect(getUserVersion(store)).toBe(19)
         } finally {
             store?.close()
@@ -122,6 +130,10 @@ function getColumns(store: Store, table: string): string[] {
 
 function getUserVersion(store: Store): number {
     const db: Database = (store as unknown as { db: Database }).db
+    return getUserVersionFromDb(db)
+}
+
+function getUserVersionFromDb(db: Database): number {
     const row = db.prepare('PRAGMA user_version').get() as { user_version: number }
     return row.user_version
 }
