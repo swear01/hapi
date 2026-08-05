@@ -1,0 +1,167 @@
+From e5679480bb82e7a6e65a3373def7c43a5568a46e Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Wed, 5 Aug 2026 14:29:33 +0800
+Subject: [PATCH] fix(web): avoid React #185 from MessageActions useAuiState
+ object snapshot
+
+#1306 returned a fresh object from useAuiState on every call. useSyncExternalStore
+compares snapshots with Object.is, so that looped re-renders and crashed every
+session chat with minified React error #185. Split into primitive selectors and
+add regression coverage. Fixes #1380.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ .../messages/MessageActions.test.tsx          | 64 +++++++++++++++++--
+ .../AssistantChat/messages/MessageActions.tsx | 39 ++++++++---
+ 2 files changed, 90 insertions(+), 13 deletions(-)
+
+diff --git a/web/src/components/AssistantChat/messages/MessageActions.test.tsx b/web/src/components/AssistantChat/messages/MessageActions.test.tsx
+index f4767e45..940ae6fc 100644
+--- a/web/src/components/AssistantChat/messages/MessageActions.test.tsx
++++ b/web/src/components/AssistantChat/messages/MessageActions.test.tsx
+@@ -2,15 +2,25 @@ import { fireEvent, render, screen } from '@testing-library/react'
+ import type { ComponentProps, PropsWithChildren } from 'react'
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import { I18nProvider } from '@/lib/i18n-context'
+-import { MessageActions } from './MessageActions'
++import {
++    MessageActions,
++    selectHideShareButton,
++    selectThreadIsRunning,
++} from './MessageActions'
+ 
+ const copy = vi.fn()
++const auiState = {
++    message: { id: 'msg-1', createdAt: new Date(2026, 6, 12, 10, 30) },
++    thread: {
++        isRunning: false,
++        extras: {
++            shareHiddenByMessageId: new Set<string>(),
++        },
++    },
++}
+ 
+ vi.mock('@assistant-ui/react', () => ({
+-    useAuiState: (selector: (state: { message: { createdAt: Date }; thread: { isRunning: boolean } }) => unknown) => selector({
+-        message: { createdAt: new Date(2026, 6, 12, 10, 30) },
+-        thread: { isRunning: false }
+-    })
++    useAuiState: (selector: (state: typeof auiState) => unknown) => selector(auiState)
+ }))
+ 
+ vi.mock('@/components/ui/ConfirmDialog', () => ({
+@@ -48,10 +58,54 @@ function renderActions(props: ComponentProps<typeof MessageActions>) {
+     )
+ }
+ 
++describe('MessageActions useAuiState selectors (#1380)', () => {
++    const base = {
++        message: { id: 'msg-1' },
++        thread: {
++            isRunning: false,
++            extras: { shareHiddenByMessageId: new Set<string>(['msg-hidden']) },
++        },
++    }
++
++    it('returns Object.is-stable primitives so useSyncExternalStore cannot loop', () => {
++        const hideA = selectHideShareButton(base)
++        const hideB = selectHideShareButton(base)
++        const runningA = selectThreadIsRunning(base)
++        const runningB = selectThreadIsRunning(base)
++
++        expect(Object.is(hideA, hideB)).toBe(true)
++        expect(Object.is(runningA, runningB)).toBe(true)
++        expect(hideA).toBe(false)
++        expect(runningA).toBe(false)
++    })
++
++    it('hides share for ids in shareHiddenByMessageId; falls back to isRunning when extras are absent', () => {
++        expect(selectHideShareButton({
++            message: { id: 'msg-hidden' },
++            thread: base.thread,
++        })).toBe(true)
++        // When extras exist, `.has()` false is kept (?? does not fall through to isRunning).
++        expect(selectHideShareButton({
++            message: { id: 'msg-1' },
++            thread: { ...base.thread, isRunning: true },
++        })).toBe(false)
++        expect(selectHideShareButton({
++            message: { id: 'msg-1' },
++            thread: { isRunning: true },
++        })).toBe(true)
++        expect(selectThreadIsRunning({
++            message: { id: 'msg-1' },
++            thread: { ...base.thread, isRunning: true },
++        })).toBe(true)
++    })
++})
++
+ describe('MessageActions', () => {
+     beforeEach(() => {
+         copy.mockReset()
+         localStorage.clear()
++        auiState.thread.isRunning = false
++        auiState.thread.extras.shareHiddenByMessageId = new Set()
+     })
+ 
+     it('copies the supplied message text', () => {
+diff --git a/web/src/components/AssistantChat/messages/MessageActions.tsx b/web/src/components/AssistantChat/messages/MessageActions.tsx
+index 1e5e5f10..eb6c7492 100644
+--- a/web/src/components/AssistantChat/messages/MessageActions.tsx
++++ b/web/src/components/AssistantChat/messages/MessageActions.tsx
+@@ -28,6 +28,32 @@ type MessageActionsProps = {
+     onRewind?: () => Promise<void>
+ }
+ 
++type MessageActionsAuiState = {
++    message: { id: string }
++    thread?: {
++        isRunning?: boolean
++        extras?: unknown
++    } | null
++}
++
++/**
++ * Primitive selectors for `useAuiState` / `useSyncExternalStore`.
++ * Must return booleans (or other Object.is-stable values) — never a fresh
++ * object — or React hits max update depth (#185). See issue #1380 / #1306.
++ *
++ * @internal Exported for unit testing.
++ */
++export function selectHideShareButton(state: MessageActionsAuiState): boolean {
++    const extras = state.thread?.extras as HappyRuntimeExtras | undefined
++    const isRunning = state.thread?.isRunning ?? false
++    return extras?.shareHiddenByMessageId.has(state.message.id) ?? isRunning
++}
++
++/** @internal Exported for unit testing. */
++export function selectThreadIsRunning(state: MessageActionsAuiState): boolean {
++    return state.thread?.isRunning ?? false
++}
++
+ export function MessageActions({
+     align,
+     copyText,
+@@ -41,14 +67,11 @@ export function MessageActions({
+ }: MessageActionsProps) {
+     const { copied, copy } = useCopyToClipboard()
+     const { t } = useTranslation()
+-    const { hideShareButton, threadIsRunning } = useAuiState(({ message, thread }) => {
+-        const extras = thread?.extras as HappyRuntimeExtras | undefined
+-        const isRunning = thread?.isRunning ?? false
+-        return {
+-            hideShareButton: extras?.shareHiddenByMessageId.has(message.id) ?? isRunning,
+-            threadIsRunning: isRunning
+-        }
+-    })
++    // Split into two primitive selectors. A single object-returning selector
++    // allocates a new snapshot every call and trips React #185 via
++    // useSyncExternalStore (issue #1380, regression from #1306).
++    const hideShareButton = useAuiState((state) => selectHideShareButton(state))
++    const threadIsRunning = useAuiState((state) => selectThreadIsRunning(state))
+     const canCopy = Boolean(copyText)
+     const hasMetadata = metadata ? buildMessageMetadataLabels(metadata).length > 0 : false
+     const [forkOpen, setForkOpen] = useState(false)
+-- 
+2.50.1 (Apple Git-155)
+

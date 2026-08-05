@@ -1,0 +1,1147 @@
+From 257afea7af24d966ad37a534f4cbe6355d768a16 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 4 Aug 2026 17:59:43 +0800
+Subject: [PATCH] carry: PR #986 searchable session picker on Android share
+ target
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ web/src/components/SessionChat.tsx            |  95 +-----------
+ web/src/components/SessionHeader.tsx          |   2 +
+ web/src/components/SessionList.tsx            |   4 +-
+ web/src/components/ShareSeedConsumer.test.tsx | 122 +++++++++++++++
+ web/src/components/ShareSeedConsumer.tsx      |  85 ++++++++++
+ web/src/lib/locales/en.ts                     |   3 +
+ web/src/lib/locales/zh-CN.ts                  |   3 +
+ web/src/lib/sharePendingState.test.ts         |  43 ++++--
+ web/src/lib/sharePendingState.ts              |  84 ++++++++--
+ web/src/lib/sharePickerSessions.test.ts       | 108 +++++++++++++
+ web/src/lib/sharePickerSessions.ts            |  54 +++++++
+ web/src/router.tsx                            |   9 +-
+ .../sessions/followSupersedingSession.test.ts |  34 +++-
+ .../sessions/followSupersedingSession.ts      |  14 ++
+ web/src/routes/share/index.test.tsx           |   8 +
+ web/src/routes/share/index.tsx                | 146 +++++++++++++-----
+ 16 files changed, 654 insertions(+), 160 deletions(-)
+ create mode 100644 web/src/components/ShareSeedConsumer.test.tsx
+ create mode 100644 web/src/components/ShareSeedConsumer.tsx
+ create mode 100644 web/src/lib/sharePickerSessions.test.ts
+ create mode 100644 web/src/lib/sharePickerSessions.ts
+
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 6885616b..17db844b 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -54,6 +54,7 @@ import {
+ import type { MessageDeliveryMode } from '@hapi/protocol'
+ import type { OlderLoadOutcome } from '@/lib/message-window-store'
+ import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
++import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
+ import {
+     createScratchlistAttachmentAdapter,
+     type ScratchlistAttachmentAdapter,
+@@ -69,9 +70,6 @@ import {
+ } from '@/lib/scratchlistAttachmentFlow'
+ import type { ScratchlistEntry } from '@/lib/scratchlist'
+ import { isHubScratchlistAttachmentPath } from '@hapi/protocol'
+-import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
+-import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
+-import { getDraft } from '@/lib/composer-drafts'
+ import { useTranslation } from '@/lib/use-translation'
+ import { SessionHeader } from '@/components/SessionHeader'
+ import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
+@@ -246,97 +244,6 @@ function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
+     return message.invokedAt == null && message.scheduledAt != null
+ }
+ 
+-/**
+- * Consumes a pending Web Share Target transfer once the assistant runtime
+- * is mounted and the session is active enough to accept attachments.
+- *
+- * Lifecycle:
+- *  - A mount effect reads the transfer id out of sessionStorage *once*
+- *    via consumeSharePendingTransfer() (not during render — StrictMode
+- *    would consume on the discarded pass). The id is stashed in a ref.
+- *  - The actual seed (composer.setText + composer.addAttachment per file)
+- *    runs once `props.sessionActive` is true. Inactive sessions disable
+- *    the attachmentAdapter, so writing attachments while inactive would
+- *    no-op and leak Blobs in IDB. The seed waits in a re-renderable
+- *    effect for the active flip.
+- *  - `consumedRef` gates the effect to a single seed per component
+- *    instance — refs survive a StrictMode mount/cleanup/remount pair, so
+- *    the second invoke early-returns and the first invoke's async chain
+- *    completes naturally (we deliberately don't cancel on cleanup; the
+- *    upload is idempotent and the only side effects on the composer are
+- *    no-ops once the runtime is unmounted).
+- *  - The IDB row is deleted after the seed completes so a back-button
+- *    refresh of /sessions/:id doesn't re-attach the same payload.
+- */
+-function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
+-    const assistantApi = useAui()
+-    const composerText = useAuiState((s) => s.composer.text)
+-    const composerTextRef = useRef(composerText)
+-    const initRef = useRef(false)
+-    const transferIdRef = useRef<string | null>(null)
+-    const consumedRef = useRef(false)
+-    const [transferReady, setTransferReady] = useState(false)
+-
+-    useEffect(() => {
+-        composerTextRef.current = composerText
+-    }, [composerText])
+-
+-    // Consume in an effect, not during render — React.StrictMode double-
+-    // invokes render functions in dev; a render-time consume deletes the
+-    // sessionStorage key on the discarded pass and the committed render
+-    // then sees no transfer.
+-    useEffect(() => {
+-        if (initRef.current) return
+-        initRef.current = true
+-        transferIdRef.current = consumeSharePendingTransfer()
+-        setTransferReady(true)
+-    }, [])
+-
+-    useEffect(() => {
+-        if (!transferReady) return
+-        if (consumedRef.current) return
+-        const transferId = transferIdRef.current
+-        if (!transferId) return
+-        if (!props.sessionActive) return
+-        consumedRef.current = true
+-
+-        void (async () => {
+-            try {
+-                const payload = await getShareTransfer(transferId)
+-                if (!payload) return
+-                const seedText = [payload.title, payload.text, payload.url]
+-                    .filter((part) => typeof part === 'string' && part.length > 0)
+-                    .join('\n')
+-                    .trim()
+-                if (seedText.length > 0) {
+-                    const existingText = composerTextRef.current.trim().length > 0
+-                        ? composerTextRef.current
+-                        : getDraft(props.sessionId)
+-                    const nextText = [existingText.trim(), seedText]
+-                        .filter((part) => part.length > 0)
+-                        .join('\n\n')
+-                    if (nextText.length > 0) {
+-                        assistantApi.composer().setText(nextText)
+-                    }
+-                }
+-                for (const file of payload.files) {
+-                    const reconstructed = new File([file.blob], file.name, { type: file.type })
+-                    try {
+-                        await assistantApi.composer().addAttachment(reconstructed)
+-                    } catch (err) {
+-                        console.error('share-seed addAttachment failed', err)
+-                    }
+-                }
+-                await deleteShareTransfer(transferId).catch(() => {})
+-            } catch (err) {
+-                console.error('share-seed pull failed', err)
+-            }
+-        })()
+-    }, [transferReady, props.sessionActive, props.sessionId, assistantApi])
+-
+-    return null
+-}
+-
+ /**
+  * Watches for incoming `abort-restore` events (emitted by the PTY launcher
+  * when the user aborts a running turn) and surfaces the aborted prompt text —
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index cf7256d6..9131f038 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -11,6 +11,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+ import { useScratchlistCount } from '@/lib/use-scratchlist-count'
+ import { formatReopenError } from '@/lib/reopenError'
+ import { formatReasoningLabel, getReasoningEffortForFlavor } from '@/lib/codexStatusLabels'
++import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
+ import { getSessionModelLabel } from '@/lib/sessionModelLabel'
+ import { useTranslation } from '@/lib/use-translation'
+ import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+@@ -238,6 +239,7 @@ export function SessionHeader(props: {
+         try {
+             const result = await reopenSession()
+             if (result.sessionId && result.sessionId !== session.id) {
++                retargetSharePendingTransfer(session.id, result.sessionId)
+                 onSessionReopened?.(result.sessionId)
+             }
+         } catch (error) {
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index b93ed8e7..d41fa361 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -22,6 +22,7 @@ import { subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
+ import { formatReopenError } from '@/lib/reopenError'
+ import { getSessionTitle } from '@/lib/sessionTitle'
+ import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
++import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
+ import type { Machine } from '@/types/api'
+ import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
+ import { MachineFilterBar, MachineFilterMenu } from '@/components/MachineFilterBar'
+@@ -655,7 +656,7 @@ function SessionDateRangePicker(props: {
+     )
+ }
+ 
+-function SessionListSearch(props: {
++export function SessionListSearch(props: {
+     value: string
+     onChange: (value: string) => void
+     customStart: string
+@@ -824,6 +825,7 @@ function SessionItem(props: {
+             // resumeSession may merge the row into a freshly-spawned sessionId.
+             // Follow it so the operator lands on the live session.
+             if (result.sessionId && result.sessionId !== s.id) {
++                retargetSharePendingTransfer(s.id, result.sessionId)
+                 onSelect(result.sessionId)
+             }
+         } catch (error) {
+diff --git a/web/src/components/ShareSeedConsumer.test.tsx b/web/src/components/ShareSeedConsumer.test.tsx
+new file mode 100644
+index 00000000..82b45aaa
+--- /dev/null
++++ b/web/src/components/ShareSeedConsumer.test.tsx
+@@ -0,0 +1,122 @@
++import { StrictMode } from 'react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { cleanup, render, waitFor } from '@testing-library/react'
++import {
++    SHARE_PENDING_TRANSFER_KEY,
++    peekSharePendingTransfer,
++    retargetSharePendingTransfer,
++    setSharePendingTransfer,
++} from '@/lib/sharePendingState'
++
++const { setText, addAttachment, getShareTransfer, deleteShareTransfer } = vi.hoisted(() => ({
++    setText: vi.fn(),
++    addAttachment: vi.fn(async () => undefined),
++    getShareTransfer: vi.fn(),
++    deleteShareTransfer: vi.fn(async () => undefined),
++}))
++
++vi.mock('@assistant-ui/react', () => ({
++    useAui: () => ({
++        composer: () => ({ setText, addAttachment }),
++    }),
++    useAuiState: (selector: (state: { composer: { text: string } }) => unknown) =>
++        selector({ composer: { text: '' } }),
++}))
++
++vi.mock('@/lib/shareTransfer', () => ({
++    getShareTransfer,
++    deleteShareTransfer,
++}))
++
++vi.mock('@/lib/composer-drafts', () => ({
++    getDraft: () => '',
++}))
++
++import { ShareSeedConsumer } from './ShareSeedConsumer'
++
++afterEach(() => {
++    cleanup()
++    setText.mockReset()
++    addAttachment.mockReset()
++    getShareTransfer.mockReset()
++    deleteShareTransfer.mockReset()
++    try { window.sessionStorage.clear() } catch { /* noop */ }
++})
++
++beforeEach(() => {
++    getShareTransfer.mockResolvedValue({
++        title: '',
++        text: 'shared payload',
++        url: '',
++        files: [],
++        createdAt: Date.now(),
++    })
++})
++
++describe('ShareSeedConsumer', () => {
++    it('leaves the pending key untouched while inactive, then seeds after retarget to a new active id', async () => {
++        setSharePendingTransfer('xfer-handoff', 'session-a')
++
++        const inactive = render(
++            <ShareSeedConsumer sessionId="session-a" sessionActive={false} />,
++        )
++        expect(peekSharePendingTransfer()).toEqual({ transferId: 'xfer-handoff', sessionId: 'session-a' })
++        expect(getShareTransfer).not.toHaveBeenCalled()
++
++        inactive.unmount()
++        expect(peekSharePendingTransfer()).toEqual({ transferId: 'xfer-handoff', sessionId: 'session-a' })
++
++        // Unrelated active chat must not steal the pending share.
++        const other = render(
++            <ShareSeedConsumer sessionId="session-other" sessionActive={true} />,
++        )
++        await Promise.resolve()
++        expect(getShareTransfer).not.toHaveBeenCalled()
++        expect(peekSharePendingTransfer()).toEqual({ transferId: 'xfer-handoff', sessionId: 'session-a' })
++        other.unmount()
++
++        retargetSharePendingTransfer('session-a', 'session-b')
++        render(<ShareSeedConsumer sessionId="session-b" sessionActive={true} />)
++
++        await waitFor(() => {
++            expect(getShareTransfer).toHaveBeenCalledWith('xfer-handoff')
++            expect(setText).toHaveBeenCalledWith('shared payload')
++        })
++        expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).toBeNull()
++    })
++
++    it('consumes and seeds when the same session flips from inactive to active', async () => {
++        setSharePendingTransfer('xfer-same-id', 'session-a')
++
++        const { rerender } = render(
++            <ShareSeedConsumer sessionId="session-a" sessionActive={false} />,
++        )
++        expect(peekSharePendingTransfer()?.transferId).toBe('xfer-same-id')
++        expect(getShareTransfer).not.toHaveBeenCalled()
++
++        rerender(<ShareSeedConsumer sessionId="session-a" sessionActive={true} />)
++
++        await waitFor(() => {
++            expect(getShareTransfer).toHaveBeenCalledWith('xfer-same-id')
++            expect(setText).toHaveBeenCalledWith('shared payload')
++        })
++        expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).toBeNull()
++    })
++
++    it('seeds only once under StrictMode double-invoke', async () => {
++        setSharePendingTransfer('xfer-strict', 'session-a')
++
++        render(
++            <StrictMode>
++                <ShareSeedConsumer sessionId="session-a" sessionActive={true} />
++            </StrictMode>,
++        )
++
++        await waitFor(() => {
++            expect(setText).toHaveBeenCalledWith('shared payload')
++        })
++        expect(getShareTransfer).toHaveBeenCalledTimes(1)
++        expect(setText).toHaveBeenCalledTimes(1)
++        expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).toBeNull()
++    })
++})
+diff --git a/web/src/components/ShareSeedConsumer.tsx b/web/src/components/ShareSeedConsumer.tsx
+new file mode 100644
+index 00000000..a2f824bb
+--- /dev/null
++++ b/web/src/components/ShareSeedConsumer.tsx
+@@ -0,0 +1,85 @@
++import { useEffect, useRef } from 'react'
++import { useAui, useAuiState } from '@assistant-ui/react'
++import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
++import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
++import { getDraft } from '@/lib/composer-drafts'
++
++/**
++ * Consumes a pending Web Share Target transfer once the assistant runtime
++ * is mounted and the session is active enough to accept attachments.
++ *
++ * Lifecycle:
++ *  - The sessionStorage pending key is left untouched while
++ *    `sessionActive` is false. Inactive mounts (e.g. sharing into a
++ *    stopped session that then reopens under a new HAPI session id) must
++ *    not steal the hand-off — otherwise the remounted chat never sees
++ *    the transfer. Consume + seed happen in the same effect once active.
++ *  - The pending slot is bound to a target session id, so a different
++ *    active chat cannot claim a share armed for an inactive pick.
++ *    Reopen paths that swap A → B must call
++ *    `retargetSharePendingTransfer(A, B)` before navigating.
++ *  - Consume runs in an effect, not during render — React.StrictMode
++ *    double-invokes render functions in dev; a render-time consume
++ *    would delete the key on the discarded pass.
++ *  - `consumedRef` gates a single seed per component instance — refs
++ *    survive a StrictMode mount/cleanup/remount pair, so the second
++ *    effect invoke early-returns and the first invoke's async chain
++ *    completes naturally (we deliberately don't cancel on cleanup; the
++ *    upload is idempotent and composer side effects no-op once the
++ *    runtime is unmounted).
++ *  - The IDB row is deleted after the seed completes so a back-button
++ *    refresh of /sessions/:id doesn't re-attach the same payload.
++ */
++export function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
++    const assistantApi = useAui()
++    const composerText = useAuiState((s) => s.composer.text)
++    const composerTextRef = useRef(composerText)
++    const consumedRef = useRef(false)
++
++    useEffect(() => {
++        composerTextRef.current = composerText
++    }, [composerText])
++
++    useEffect(() => {
++        if (!props.sessionActive) return
++        if (consumedRef.current) return
++        const transferId = consumeSharePendingTransfer(props.sessionId)
++        if (!transferId) return
++        consumedRef.current = true
++
++        void (async () => {
++            try {
++                const payload = await getShareTransfer(transferId)
++                if (!payload) return
++                const seedText = [payload.title, payload.text, payload.url]
++                    .filter((part) => typeof part === 'string' && part.length > 0)
++                    .join('\n')
++                    .trim()
++                if (seedText.length > 0) {
++                    const existingText = composerTextRef.current.trim().length > 0
++                        ? composerTextRef.current
++                        : getDraft(props.sessionId)
++                    const nextText = [existingText.trim(), seedText]
++                        .filter((part) => part.length > 0)
++                        .join('\n\n')
++                    if (nextText.length > 0) {
++                        assistantApi.composer().setText(nextText)
++                    }
++                }
++                for (const file of payload.files) {
++                    const reconstructed = new File([file.blob], file.name, { type: file.type })
++                    try {
++                        await assistantApi.composer().addAttachment(reconstructed)
++                    } catch (err) {
++                        console.error('share-seed addAttachment failed', err)
++                    }
++                }
++                await deleteShareTransfer(transferId).catch(() => {})
++            } catch (err) {
++                console.error('share-seed pull failed', err)
++            }
++        })()
++    }, [props.sessionActive, props.sessionId, assistantApi])
++
++    return null
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 25b84185..cbaf30f4 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -1022,4 +1022,7 @@ export default {
+   'session.status.subagent.running': 'Running',
+   'session.status.subagent.waiting': 'Waiting',
+   'session.status.subagent.error': 'Error',
++  'share.searchResults': 'Matching sessions',
++  'share.noSearchResults': 'No sessions match your search.',
++  'share.searchForMore': '{n} more active sessions — search to find them.',
+ } as const
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 7aa27bd6..df8d22a0 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -1021,4 +1021,7 @@ export default {
+   'session.status.subagent.running': '运行中',
+   'session.status.subagent.waiting': '等待中',
+   'session.status.subagent.error': '错误',
++  'share.searchResults': '匹配的会话',
++  'share.noSearchResults': '没有匹配的会话。',
++  'share.searchForMore': '还有 {n} 个活跃会话 — 搜索以查找。',
+ } as const
+diff --git a/web/src/lib/sharePendingState.test.ts b/web/src/lib/sharePendingState.test.ts
+index 0dd4420d..001718ab 100644
+--- a/web/src/lib/sharePendingState.test.ts
++++ b/web/src/lib/sharePendingState.test.ts
+@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest'
+ import {
+     SHARE_PENDING_TRANSFER_KEY,
+     consumeSharePendingTransfer,
++    peekSharePendingTransfer,
++    retargetSharePendingTransfer,
+     setSharePendingTransfer,
+ } from './sharePendingState'
+ 
+@@ -10,25 +12,46 @@ afterEach(() => {
+ })
+ 
+ describe('sharePendingState', () => {
+-    it('round-trips a transfer id and clears the slot on consume', () => {
+-        setSharePendingTransfer('xfer-1')
+-        expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).toBe('xfer-1')
++    it('round-trips a transfer id bound to a session and clears on consume', () => {
++        setSharePendingTransfer('xfer-1', 'session-a')
++        expect(peekSharePendingTransfer()).toEqual({ transferId: 'xfer-1', sessionId: 'session-a' })
+ 
+-        const first = consumeSharePendingTransfer()
++        const first = consumeSharePendingTransfer('session-a')
+         expect(first).toBe('xfer-1')
+ 
+-        const second = consumeSharePendingTransfer()
++        const second = consumeSharePendingTransfer('session-a')
+         expect(second).toBeNull()
+     })
+ 
++    it('does not let a different session steal a bound pending transfer', () => {
++        setSharePendingTransfer('xfer-bound', 'session-a')
++        expect(consumeSharePendingTransfer('session-b')).toBeNull()
++        expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).not.toBeNull()
++        expect(consumeSharePendingTransfer('session-a')).toBe('xfer-bound')
++    })
++
++    it('retargets the pending session id across reopen id-swap', () => {
++        setSharePendingTransfer('xfer-1', 'session-a')
++        retargetSharePendingTransfer('session-a', 'session-b')
++        expect(peekSharePendingTransfer()).toEqual({ transferId: 'xfer-1', sessionId: 'session-b' })
++        expect(consumeSharePendingTransfer('session-a')).toBeNull()
++        expect(consumeSharePendingTransfer('session-b')).toBe('xfer-1')
++    })
++
+     it('returns null when no transfer is pending', () => {
+-        expect(consumeSharePendingTransfer()).toBeNull()
++        expect(consumeSharePendingTransfer('any')).toBeNull()
+     })
+ 
+     it('overwrites a stale id rather than appending', () => {
+-        setSharePendingTransfer('a')
+-        setSharePendingTransfer('b')
+-        expect(consumeSharePendingTransfer()).toBe('b')
+-        expect(consumeSharePendingTransfer()).toBeNull()
++        setSharePendingTransfer('a', 'session-a')
++        setSharePendingTransfer('b', 'session-a')
++        expect(consumeSharePendingTransfer('session-a')).toBe('b')
++        expect(consumeSharePendingTransfer('session-a')).toBeNull()
++    })
++
++    it('claims a legacy unbound bare transfer id string', () => {
++        window.sessionStorage.setItem(SHARE_PENDING_TRANSFER_KEY, 'legacy-xfer')
++        expect(consumeSharePendingTransfer('session-any')).toBe('legacy-xfer')
++        expect(consumeSharePendingTransfer('session-any')).toBeNull()
+     })
+ })
+diff --git a/web/src/lib/sharePendingState.ts b/web/src/lib/sharePendingState.ts
+index 3673b54d..9000053f 100644
+--- a/web/src/lib/sharePendingState.ts
++++ b/web/src/lib/sharePendingState.ts
+@@ -4,7 +4,8 @@
+  *
+  * The picker stores the IDB transfer id under this key, navigates to
+  * `/sessions/:id` (or `/sessions/new`), and the session mounter reads + clears
+- * the key on first render. sessionStorage rather than router state because:
++ * the key once that session is active. sessionStorage rather than router
++ * state because:
+  *
+  *   - it survives the `/sessions/new` -> `/sessions/:id` navigation that
+  *     `NewSessionPage` performs internally with `replace: true`, which
+@@ -13,29 +14,90 @@
+  *     target in the installed PWA's own window, so collisions with other
+  *     tabs are not a concern.
+  *
+- * The key is read **once** per mount; consume() returns the id and clears
+- * the slot atomically so a refresh of /sessions/:id doesn't replay the
+- * upload.
++ * The payload is bound to a **target session id**:
++ *   - Consume only succeeds when the mounting SessionChat's id matches.
++ *   - That prevents an unrelated active chat from stealing a pending
++ *     share that was armed for an inactive target.
++ *   - When reopen/spawn swaps A → B, call `retargetSharePendingTransfer(A, B)`
++ *     before navigating so B can still seed.
+  */
+ 
+ export const SHARE_PENDING_TRANSFER_KEY = 'hapi.share.pendingTransferId'
+ 
+-export function setSharePendingTransfer(transferId: string): void {
++type SharePendingRecord = {
++    transferId: string
++    sessionId: string
++}
++
++function readRecord(): SharePendingRecord | null {
++    try {
++        const raw = window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)
++        if (!raw) return null
++        // Legacy: bare transfer id string (pre-session-binding). Treat as
++        // unbound — any active consumer may claim it (restore old behavior
++        // for in-flight shares during deploy). Prefer writing the object form.
++        if (raw[0] !== '{') {
++            return { transferId: raw, sessionId: '' }
++        }
++        const parsed = JSON.parse(raw) as Partial<SharePendingRecord>
++        if (typeof parsed.transferId !== 'string' || typeof parsed.sessionId !== 'string') {
++            return null
++        }
++        return { transferId: parsed.transferId, sessionId: parsed.sessionId }
++    } catch {
++        return null
++    }
++}
++
++function writeRecord(record: SharePendingRecord): void {
++    window.sessionStorage.setItem(SHARE_PENDING_TRANSFER_KEY, JSON.stringify(record))
++}
++
++export function setSharePendingTransfer(transferId: string, sessionId: string): void {
+     try {
+-        window.sessionStorage.setItem(SHARE_PENDING_TRANSFER_KEY, transferId)
++        writeRecord({ transferId, sessionId })
+     } catch {
+         // Quota errors / disabled storage — caller proceeds without seed.
+     }
+ }
+ 
+-export function consumeSharePendingTransfer(): string | null {
++/**
++ * Claim the pending transfer for `sessionId`. Returns null (and leaves the
++ * slot alone) when the pending target is a different session — so another
++ * active chat cannot steal a share armed for an inactive pick.
++ *
++ * Legacy unbound records (`sessionId === ''`) are claimed by the first caller.
++ */
++export function consumeSharePendingTransfer(sessionId: string): string | null {
+     try {
+-        const value = window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)
+-        if (value) {
+-            window.sessionStorage.removeItem(SHARE_PENDING_TRANSFER_KEY)
++        const record = readRecord()
++        if (!record) return null
++        if (record.sessionId !== '' && record.sessionId !== sessionId) {
++            return null
+         }
+-        return value
++        window.sessionStorage.removeItem(SHARE_PENDING_TRANSFER_KEY)
++        return record.transferId
+     } catch {
+         return null
+     }
+ }
++
++/**
++ * When resume/reopen merges session `fromSessionId` into a new live id
++ * `toSessionId`, rewrite the pending target so the remounted chat can seed.
++ */
++export function retargetSharePendingTransfer(fromSessionId: string, toSessionId: string): void {
++    if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return
++    try {
++        const record = readRecord()
++        if (!record) return
++        if (record.sessionId !== fromSessionId) return
++        writeRecord({ transferId: record.transferId, sessionId: toSessionId })
++    } catch {
++        // Ignore storage failures — seed is best-effort.
++    }
++}
++
++export function peekSharePendingTransfer(): SharePendingRecord | null {
++    return readRecord()
++}
+diff --git a/web/src/lib/sharePickerSessions.test.ts b/web/src/lib/sharePickerSessions.test.ts
+new file mode 100644
+index 00000000..77aa0812
+--- /dev/null
++++ b/web/src/lib/sharePickerSessions.test.ts
+@@ -0,0 +1,108 @@
++import { describe, expect, it } from 'vitest'
++import type { SessionSummary } from '@/types/api'
++import { DEFAULT_SESSION_PREVIEW_LIMIT } from '@/hooks/useSessionPreviewLimit'
++import {
++    countHiddenActiveSharePickerSessions,
++    filterSharePickerSessions,
++} from './sharePickerSessions'
++
++function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
++    return {
++        active: false,
++        thinking: false,
++        activeAt: 0,
++        updatedAt: 0,
++        metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
++        todoProgress: null,
++        pendingRequestsCount: 0,
++        pendingRequestKinds: [],
++        pendingRequests: [],
++        backgroundTaskCount: 0,
++        futureScheduledMessageCount: 0,
++        nextScheduledAt: null,
++        model: null,
++        effort: null,
++        ...overrides,
++    }
++}
++
++const machineLabel = () => 'desktop'
++
++describe('filterSharePickerSessions', () => {
++    it('returns active sessions sorted by updatedAt when query is empty', () => {
++        const sessions = [
++            makeSession({ id: 'old-active', active: true, updatedAt: 100 }),
++            makeSession({ id: 'inactive-recent', active: false, updatedAt: 300 }),
++            makeSession({ id: 'new-active', active: true, updatedAt: 200 }),
++        ]
++        const result = filterSharePickerSessions(sessions, '', machineLabel)
++        expect(result.map((s) => s.id)).toEqual(['new-active', 'old-active'])
++    })
++
++    it('caps active sessions when query is empty', () => {
++        const previewLimit = DEFAULT_SESSION_PREVIEW_LIMIT
++        const sessions = Array.from({ length: previewLimit + 3 }, (_, index) =>
++            makeSession({ id: `s-${index}`, active: true, updatedAt: index }))
++        const result = filterSharePickerSessions(sessions, '', machineLabel, null, previewLimit)
++        expect(result).toHaveLength(previewLimit)
++        expect(result[0].id).toBe(`s-${previewLimit + 2}`)
++    })
++
++    it('searches all sessions including inactive when query is non-empty', () => {
++        const sessions = [
++            makeSession({
++                id: 'inactive-match',
++                active: false,
++                updatedAt: 50,
++                metadata: { path: '/proj/archive', summary: { text: 'Old bugfix' } },
++            }),
++            makeSession({ id: 'active-no-match', active: true, updatedAt: 200, metadata: { path: '/other' } }),
++        ]
++        const result = filterSharePickerSessions(sessions, 'archive', machineLabel)
++        expect(result.map((s) => s.id)).toEqual(['inactive-match'])
++    })
++
++    it('matches machine label in search mode', () => {
++        const sessions = [
++            makeSession({
++                id: 'remote',
++                active: false,
++                updatedAt: 100,
++                metadata: { path: '/proj', machineId: 'machine-abc' },
++            }),
++        ]
++        const result = filterSharePickerSessions(
++            sessions,
++            'laptop',
++            (machineId) => (machineId === 'machine-abc' ? 'dev-laptop' : 'unknown'),
++        )
++        expect(result.map((s) => s.id)).toEqual(['remote'])
++    })
++})
++
++describe('countHiddenActiveSharePickerSessions', () => {
++    it('returns zero when active count is within cap', () => {
++        const sessions = [
++            makeSession({ id: 'a', active: true }),
++            makeSession({ id: 'b', active: false }),
++        ]
++        expect(countHiddenActiveSharePickerSessions(sessions)).toBe(0)
++    })
++
++    it('counts active sessions beyond the cap', () => {
++        const previewLimit = DEFAULT_SESSION_PREVIEW_LIMIT
++        const sessions = Array.from({ length: previewLimit + 2 }, (_, index) =>
++            makeSession({ id: `s-${index}`, active: true }))
++        expect(countHiddenActiveSharePickerSessions(sessions, previewLimit)).toBe(2)
++    })
++
++    it('honors a custom preview limit', () => {
++        const sessions = Array.from({ length: 5 }, (_, index) =>
++            makeSession({ id: `s-${index}`, active: true, updatedAt: index }))
++        expect(filterSharePickerSessions(sessions, '', machineLabel, null, 3)).toHaveLength(3)
++        expect(countHiddenActiveSharePickerSessions(sessions, 3)).toBe(2)
++    })
++})
+diff --git a/web/src/lib/sharePickerSessions.ts b/web/src/lib/sharePickerSessions.ts
+new file mode 100644
+index 00000000..75400dda
+--- /dev/null
++++ b/web/src/lib/sharePickerSessions.ts
+@@ -0,0 +1,54 @@
++import type { SessionSummary } from '@/types/api'
++import { DEFAULT_SESSION_PREVIEW_LIMIT } from '@/hooks/useSessionPreviewLimit'
++import {
++    normalizeSearch,
++    sessionMatchesQuery,
++    sessionMatchesTimeRange,
++    type SessionTimeRange,
++} from '@/components/SessionList'
++
++export type SharePickerMachineLabelResolver = (machineId: string | null) => string
++
++function sortByUpdatedAtDesc(sessions: SessionSummary[]): SessionSummary[] {
++    return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
++}
++
++/**
++ * Share-target session picker filter.
++ * Empty query (and no date range): recent active sessions (capped).
++ * Non-empty query and/or date range: all sessions matching those filters.
++ */
++export function filterSharePickerSessions(
++    sessions: SessionSummary[],
++    query: string,
++    resolveMachineLabel: SharePickerMachineLabelResolver,
++    timeRange: SessionTimeRange | null = null,
++    previewLimit: number = DEFAULT_SESSION_PREVIEW_LIMIT,
++): SessionSummary[] {
++    const normalizedQuery = normalizeSearch(query)
++    const sorted = sortByUpdatedAtDesc(sessions)
++    const inRange = (session: SessionSummary) => sessionMatchesTimeRange(session, timeRange)
++
++    if (normalizedQuery || timeRange) {
++        return sorted.filter((session) => {
++            if (!inRange(session)) return false
++            if (!normalizedQuery) return true
++            return sessionMatchesQuery(
++                session,
++                normalizedQuery,
++                resolveMachineLabel(session.metadata?.machineId ?? null),
++            )
++        })
++    }
++
++    return sorted.filter((session) => session.active).slice(0, previewLimit)
++}
++
++/** Active sessions hidden by the empty-query cap (for "search for more" hint). */
++export function countHiddenActiveSharePickerSessions(
++    sessions: SessionSummary[],
++    previewLimit: number = DEFAULT_SESSION_PREVIEW_LIMIT,
++): number {
++    const activeCount = sessions.filter((session) => session.active).length
++    return Math.max(0, activeCount - previewLimit)
++}
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 9fe90d1a..f3f4a3fb 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -47,7 +47,7 @@ import { inactiveSessionCanResume } from '@/lib/sessionResume'
+ import { initializeSessionLastSeen, markSessionSeen } from '@/lib/sessionLastSeen'
+ import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
+ import { clearCodexImportedSession } from '@/lib/codexImportedSessions'
+-import { getSupersedingSessionId, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
++import { getSupersedingSessionId, prepareFollowSupersedingSession, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
+ import { migrateSuppressedSendError } from '@/lib/suppressed-send-error'
+ import FilesPage from '@/routes/sessions/files'
+ import FilePage from '@/routes/sessions/file'
+@@ -65,7 +65,7 @@ import SettingsAboutPage from '@/routes/settings/about'
+ import SettingsStoragePage from '@/routes/settings/storage'
+ import SettingsUsagePage from '@/routes/settings/usage'
+ import SharePage from '@/routes/share'
+-import { setSharePendingTransfer } from '@/lib/sharePendingState'
++import { retargetSharePendingTransfer, setSharePendingTransfer } from '@/lib/sharePendingState'
+ import { deleteShareTransfer } from '@/lib/shareTransfer'
+ 
+ 
+@@ -433,6 +433,7 @@ function SessionPage() {
+                 await queryClient.invalidateQueries({ queryKey: queryKeys.session(result.sessionId) })
+                 await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+                 if (result.sessionId && result.sessionId !== errorSessionId) {
++                    retargetSharePendingTransfer(errorSessionId, result.sessionId)
+                     navigate({
+                         to: '/sessions/$sessionId',
+                         params: { sessionId: result.sessionId },
+@@ -567,6 +568,7 @@ function SessionPage() {
+                 if (api) {
+                     if (session) {
+                         if (resolvedSessionId !== session.id) {
++                            retargetSharePendingTransfer(session.id, resolvedSessionId)
+                             seedMessageWindowFromSession(session.id, resolvedSessionId)
+                         }
+                         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+@@ -814,6 +816,7 @@ function SessionDetailRoute() {
+         )
+         observedSessionRef.current = { sessionId, supersedingSessionId }
+         if (!shouldFollow || !supersedingSessionId) return
++        prepareFollowSupersedingSession(sessionId, supersedingSessionId)
+         navigate({
+             to: '/sessions/$sessionId',
+             params: { sessionId: supersedingSessionId },
+@@ -857,7 +860,7 @@ function NewSessionPage() {
+ 
+     const handleSuccess = useCallback((sessionId: string) => {
+         if (shareTransferId) {
+-            setSharePendingTransfer(shareTransferId)
++            setSharePendingTransfer(shareTransferId, sessionId)
+         }
+         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+         // Replace current page with /sessions to clear spawn flow from history
+diff --git a/web/src/routes/sessions/followSupersedingSession.test.ts b/web/src/routes/sessions/followSupersedingSession.test.ts
+index 3d4845ac..03fb7830 100644
+--- a/web/src/routes/sessions/followSupersedingSession.test.ts
++++ b/web/src/routes/sessions/followSupersedingSession.test.ts
+@@ -1,5 +1,17 @@
+-import { describe, expect, it } from 'vitest'
+-import { getSupersedingSessionId, shouldFollowSupersedingSession } from './followSupersedingSession'
++import { describe, expect, it, afterEach } from 'vitest'
++import {
++    getSupersedingSessionId,
++    prepareFollowSupersedingSession,
++    shouldFollowSupersedingSession,
++} from './followSupersedingSession'
++import {
++    consumeSharePendingTransfer,
++    setSharePendingTransfer,
++} from '@/lib/sharePendingState'
++
++afterEach(() => {
++    try { window.sessionStorage.clear() } catch { /* noop */ }
++})
+ 
+ describe('getSupersedingSessionId', () => {
+     it('follows a different persisted replacement identity', () => {
+@@ -41,3 +53,21 @@ describe('shouldFollowSupersedingSession', () => {
+         })).toBe(false)
+     })
+ })
++
++describe('prepareFollowSupersedingSession', () => {
++    it('retargets a pending share transfer before the automatic A→B navigation', () => {
++        setSharePendingTransfer('xfer-share', 'source')
++        const shouldFollow = shouldFollowSupersedingSession({
++            sessionId: 'source',
++            supersedingSessionId: null,
++        }, 'source', {
++            supersededBySessionId: 'fresh',
++        })
++        expect(shouldFollow).toBe(true)
++
++        prepareFollowSupersedingSession('source', 'fresh')
++
++        expect(consumeSharePendingTransfer('source')).toBeNull()
++        expect(consumeSharePendingTransfer('fresh')).toBe('xfer-share')
++    })
++})
+diff --git a/web/src/routes/sessions/followSupersedingSession.ts b/web/src/routes/sessions/followSupersedingSession.ts
+index ee0365d5..b0c96c5d 100644
+--- a/web/src/routes/sessions/followSupersedingSession.ts
++++ b/web/src/routes/sessions/followSupersedingSession.ts
+@@ -1,3 +1,5 @@
++import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
++
+ export function getSupersedingSessionId(
+     currentSessionId: string,
+     metadata: { supersededBySessionId?: string } | null | undefined
+@@ -18,3 +20,15 @@ export function shouldFollowSupersedingSession(
+         && previous.supersedingSessionId === null
+         && getSupersedingSessionId(currentSessionId, metadata) !== null
+ }
++
++/**
++ * Side effects that must run before navigating A → B on automatic
++ * supersession. Keeps a share-target pending transfer bound to the live
++ * session id so ShareSeedConsumer on B can still claim it.
++ */
++export function prepareFollowSupersedingSession(
++    fromSessionId: string,
++    toSessionId: string,
++): void {
++    retargetSharePendingTransfer(fromSessionId, toSessionId)
++}
+diff --git a/web/src/routes/share/index.test.tsx b/web/src/routes/share/index.test.tsx
+index d2692195..f699f988 100644
+--- a/web/src/routes/share/index.test.tsx
++++ b/web/src/routes/share/index.test.tsx
+@@ -15,6 +15,14 @@ vi.mock('@/hooks/queries/useSessions', () => ({
+     useSessions: () => ({ sessions: [], isLoading: false }),
+ }))
+ 
++vi.mock('@/hooks/queries/useMachines', () => ({
++    useMachines: () => ({ machines: [] }),
++}))
++
++vi.mock('@/hooks/useMachineLabels', () => ({
++    useMachineLabels: () => ({}),
++}))
++
+ vi.mock('@/lib/use-translation', () => ({
+     useTranslation: () => ({ t: (key: string) => key }),
+ }))
+diff --git a/web/src/routes/share/index.tsx b/web/src/routes/share/index.tsx
+index 637c7a90..8ac98030 100644
+--- a/web/src/routes/share/index.tsx
++++ b/web/src/routes/share/index.tsx
+@@ -2,8 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
+ import { useNavigate, useSearch } from '@tanstack/react-router'
+ import { useAppContext } from '@/lib/app-context'
+ import { useSessions } from '@/hooks/queries/useSessions'
++import { useMachines } from '@/hooks/queries/useMachines'
++import { useMachineLabels } from '@/hooks/useMachineLabels'
+ import { useTranslation } from '@/lib/use-translation'
+ import { LoadingState } from '@/components/LoadingState'
++import { SessionListSearch, getSessionTimeRange, prepareSidebarSessions } from '@/components/SessionList'
++import {
++    countHiddenActiveSharePickerSessions,
++    filterSharePickerSessions,
++} from '@/lib/sharePickerSessions'
++import { useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
+ import {
+     deleteShareTransfer,
+     getShareTransfer,
+@@ -103,6 +111,27 @@ export default function SharePage() {
+     const navigate = useNavigate()
+     const [load, setLoad] = useState<LoadState>({ state: 'loading' })
+     const { sessions, isLoading: sessionsLoading } = useSessions(api)
++    const { machines } = useMachines(api, true)
++    const machineLabelsById = useMachineLabels(machines)
++    const { sessionPreviewLimit } = useSessionPreviewLimit()
++    const [searchQuery, setSearchQuery] = useState('')
++    const [searchExpanded, setSearchExpanded] = useState(true)
++    const [customStart, setCustomStart] = useState('')
++    const [customEnd, setCustomEnd] = useState('')
++    const timeRange = useMemo(
++        () => getSessionTimeRange(customStart, customEnd),
++        [customStart, customEnd],
++    )
++
++    const resolveMachineLabel = useCallback((machineId: string | null): string => {
++        if (machineId && machineLabelsById[machineId]) {
++            return machineLabelsById[machineId]
++        }
++        if (machineId) {
++            return machineId.slice(0, 8)
++        }
++        return t('machine.unknown')
++    }, [machineLabelsById, t])
+ 
+     // Pulled via the typed validateSearch in router.tsx; reading
+     // `window.location.search` directly would diverge from the rest of the
+@@ -135,31 +164,50 @@ export default function SharePage() {
+         return () => { cancelled = true }
+     }, [transferId, ingestError])
+ 
+-    // Snapshot the active session list once when sessions finish loading so
+-    // the picker doesn't re-shuffle under the operator's finger as SSE
+-    // updates roll in (activeAt heartbeats nudge the order every few
+-    // seconds; even updatedAt-keyed sorts visually flicker on every
+-    // metadata patch). The picker is a one-shot interaction — closing the
+-    // share sheet and re-sharing produces a fresh snapshot. Sorted by
+-    // updatedAt desc to match SessionList's canonical "most recent
+-    // interaction first" order.
+-    const [pickerSessions, setPickerSessions] = useState<SessionSummary[] | null>(null)
++    // Snapshot the session list once when sessions finish loading so the
++    // picker doesn't re-shuffle under the operator's finger as SSE updates
++    // roll in. The picker is a one-shot interaction — closing the share
++    // sheet and re-sharing produces a fresh snapshot.
++    const [sessionsSnapshot, setSessionsSnapshot] = useState<SessionSummary[] | null>(null)
+     useEffect(() => {
+-        if (pickerSessions !== null) return
++        if (sessionsSnapshot !== null) return
+         if (sessionsLoading) return
+-        setPickerSessions(
+-            [...sessions]
+-                .filter((s) => s.active)
+-                .sort((a, b) => b.updatedAt - a.updatedAt)
++        setSessionsSnapshot(prepareSidebarSessions(sessions))
++    }, [sessionsSnapshot, sessions, sessionsLoading])
++
++    const isSearching = searchQuery.trim().length > 0 || timeRange !== null
++    const sessionActivityDates = useMemo(() => {
++        if (!sessionsSnapshot) return new Set<string>()
++        return new Set(sessionsSnapshot.map((session) => {
++            const date = new Date(session.updatedAt)
++            const year = date.getFullYear()
++            const month = String(date.getMonth() + 1).padStart(2, '0')
++            const day = String(date.getDate()).padStart(2, '0')
++            return `${year}-${month}-${day}`
++        }))
++    }, [sessionsSnapshot])
++    const pickerSessions = useMemo(() => {
++        if (!sessionsSnapshot) return null
++        return filterSharePickerSessions(
++            sessionsSnapshot,
++            searchQuery,
++            resolveMachineLabel,
++            timeRange,
++            sessionPreviewLimit,
+         )
+-    }, [pickerSessions, sessions, sessionsLoading])
++    }, [sessionsSnapshot, searchQuery, resolveMachineLabel, timeRange, sessionPreviewLimit])
++
++    const hiddenActiveCount = useMemo(() => {
++        if (!sessionsSnapshot || isSearching) return 0
++        return countHiddenActiveSharePickerSessions(sessionsSnapshot, sessionPreviewLimit)
++    }, [sessionsSnapshot, isSearching, sessionPreviewLimit])
+ 
+     const handlePickSession = useCallback((sessionId: string) => {
+         if (!transferId) return
+         // Don't await deleteShareTransfer here — SessionChat consumes the
+         // payload then deletes the IDB row (it owns the lifecycle once we
+         // hand off). If we delete here, SessionChat won't find it.
+-        setSharePendingTransfer(transferId)
++        setSharePendingTransfer(transferId, sessionId)
+         navigate({ to: '/sessions/$sessionId', params: { sessionId } })
+     }, [navigate, transferId])
+ 
+@@ -239,37 +287,57 @@ export default function SharePage() {
+ 
+                     <div>
+                         <div className="px-1 pb-1 text-xs font-semibold uppercase tracking-wide text-[var(--app-hint)]">
+-                            {t('share.recentSessions')}
++                            {isSearching ? t('share.searchResults') : t('share.recentSessions')}
+                         </div>
++                        <SessionListSearch
++                            value={searchQuery}
++                            onChange={setSearchQuery}
++                            customStart={customStart}
++                            customEnd={customEnd}
++                            sessionActivityDates={sessionActivityDates}
++                            onDateRangeChange={(start, end) => {
++                                setCustomStart(start)
++                                setCustomEnd(end)
++                            }}
++                            expanded={searchExpanded}
++                            onExpandedChange={setSearchExpanded}
++                        />
+                         {pickerSessions === null ? (
+                             <LoadingState label={t('share.loading')} className="text-sm py-4" />
+                         ) : pickerSessions.length === 0 ? (
+                             <div className="rounded-md bg-[var(--app-secondary-bg)] p-3 text-xs text-[var(--app-hint)]">
+-                                {t('share.noActiveSessions')}
++                                {isSearching ? t('share.noSearchResults') : t('share.noActiveSessions')}
+                             </div>
+                         ) : (
+-                            <ul className="overflow-hidden rounded-md bg-[var(--app-secondary-bg)]">
+-                                {pickerSessions.map((session) => (
+-                                    <li key={session.id}>
+-                                        <button
+-                                            type="button"
+-                                            onClick={() => handlePickSession(session.id)}
+-                                            className="flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
+-                                        >
+-                                            <div className="min-w-0 flex-1">
+-                                                <div className="truncate text-sm font-medium text-[var(--app-fg)]">
+-                                                    {getSessionTitle(session)}
+-                                                </div>
+-                                                {session.metadata?.path ? (
+-                                                    <div className="truncate text-xs text-[var(--app-hint)]">
+-                                                        {session.metadata.path}
++                            <>
++                                <ul className="overflow-hidden rounded-md bg-[var(--app-secondary-bg)]">
++                                    {pickerSessions.map((session) => (
++                                        <li key={session.id}>
++                                            <button
++                                                type="button"
++                                                onClick={() => handlePickSession(session.id)}
++                                                className="flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
++                                            >
++                                                <div className="min-w-0 flex-1">
++                                                    <div className="truncate text-sm font-medium text-[var(--app-fg)]">
++                                                        {getSessionTitle(session)}
+                                                     </div>
+-                                                ) : null}
+-                                            </div>
+-                                        </button>
+-                                    </li>
+-                                ))}
+-                            </ul>
++                                                    {session.metadata?.path ? (
++                                                        <div className="truncate text-xs text-[var(--app-hint)]">
++                                                            {session.metadata.path}
++                                                        </div>
++                                                    ) : null}
++                                                </div>
++                                            </button>
++                                        </li>
++                                    ))}
++                                </ul>
++                                {hiddenActiveCount > 0 ? (
++                                    <div className="mt-2 px-1 text-xs text-[var(--app-hint)]">
++                                        {t('share.searchForMore', { n: hiddenActiveCount })}
++                                    </div>
++                                ) : null}
++                            </>
+                         )}
+                     </div>
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,1720 @@
+From a19a3322ddd94631917870cd741f510a41f58ae2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Tue, 4 Aug 2026 18:00:19 +0800
+Subject: [PATCH] carry: PR #955 project group context menu
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ hub/src/store/messageStore.ts                 |   5 +
+ hub/src/store/messages.ts                     |  17 ++
+ hub/src/store/scratchlist.ts                  |  17 ++
+ hub/src/store/scratchlistStore.ts             |   5 +
+ hub/src/sync/syncEngine.ts                    |  12 +-
+ hub/src/web/routes/sessions.ts                |  20 +-
+ shared/src/sessionSummary.ts                  |   3 +
+ web/src/api/client.ts                         |   8 +-
+ .../ProjectGroupActionMenu.test.tsx           | 107 ++++++++++
+ web/src/components/ProjectGroupActionMenu.tsx | 182 ++++++++++++++++
+ web/src/components/SessionActionMenu.tsx      | 103 +--------
+ .../SessionList.directory-action.test.tsx     |  53 ++++-
+ web/src/components/SessionList.tsx            | 202 +++++++++++++++---
+ .../mutations/useProjectGroupActions.test.tsx | 140 ++++++++++++
+ .../hooks/mutations/useProjectGroupActions.ts |  91 ++++++++
+ web/src/hooks/useAnchoredMenu.ts              | 124 +++++++++++
+ web/src/hooks/useSSE.ts                       |   8 +-
+ web/src/lib/locales/en.ts                     |  19 ++
+ web/src/lib/locales/zh-CN.ts                  |  19 ++
+ web/src/lib/projectGroupActions.test.ts       | 135 ++++++++++++
+ web/src/lib/projectGroupActions.ts            |  58 +++++
+ 21 files changed, 1191 insertions(+), 137 deletions(-)
+ create mode 100644 web/src/components/ProjectGroupActionMenu.test.tsx
+ create mode 100644 web/src/components/ProjectGroupActionMenu.tsx
+ create mode 100644 web/src/hooks/mutations/useProjectGroupActions.test.tsx
+ create mode 100644 web/src/hooks/mutations/useProjectGroupActions.ts
+ create mode 100644 web/src/hooks/useAnchoredMenu.ts
+ create mode 100644 web/src/lib/projectGroupActions.test.ts
+ create mode 100644 web/src/lib/projectGroupActions.ts
+
+diff --git a/hub/src/store/messageStore.ts b/hub/src/store/messageStore.ts
+index 0e82454f..6bf60e21 100644
+--- a/hub/src/store/messageStore.ts
++++ b/hub/src/store/messageStore.ts
+@@ -19,6 +19,7 @@ import {
+     getMatureScheduledMessages,
+     getImmediateQueuedLocalMessages,
+     countFutureScheduledBySessionIds,
++    countUninvokedScheduledBySessionIds,
+     countFutureScheduledLocalMessages,
+     minFutureScheduledAtBySessionIds,
+     countMessages,
+@@ -133,6 +134,10 @@ export class MessageStore {
+         return countFutureScheduledBySessionIds(this.db, sessionIds, now)
+     }
+ 
++    countUninvokedScheduledBySessionIds(sessionIds: string[]): Map<string, number> {
++        return countUninvokedScheduledBySessionIds(this.db, sessionIds)
++    }
++
+     minFutureScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
+         return minFutureScheduledAtBySessionIds(this.db, sessionIds, now)
+     }
+diff --git a/hub/src/store/messages.ts b/hub/src/store/messages.ts
+index 7ae1daa7..81a9bef8 100644
+--- a/hub/src/store/messages.ts
++++ b/hub/src/store/messages.ts
+@@ -549,6 +549,23 @@ export function countFutureScheduledBySessionIds(
+     return counts
+ }
+ 
++export function countUninvokedScheduledBySessionIds(
++    db: Database,
++    sessionIds: string[]
++): Map<string, number> {
++    const counts = new Map<string, number>()
++    if (sessionIds.length === 0) return counts
++    const placeholders = sessionIds.map(() => '?').join(',')
++    const rows = db.prepare(`
++        SELECT session_id, COUNT(*) AS count FROM messages
++        WHERE session_id IN (${placeholders})
++          AND invoked_at IS NULL AND local_id IS NOT NULL AND scheduled_at IS NOT NULL
++        GROUP BY session_id
++    `).all(...sessionIds) as { session_id: string; count: number }[]
++    for (const row of rows) counts.set(row.session_id, row.count)
++    return counts
++}
++
+ /** Earliest future scheduled_at per session (session-list clock tooltip). */
+ export function minFutureScheduledAtBySessionIds(
+     db: Database,
+diff --git a/hub/src/store/scratchlist.ts b/hub/src/store/scratchlist.ts
+index ae3b1b61..6db3ff31 100644
+--- a/hub/src/store/scratchlist.ts
++++ b/hub/src/store/scratchlist.ts
+@@ -76,6 +76,23 @@ export function countScratchlistEntries(db: Database, sessionId: string): number
+     return row?.n ?? 0
+ }
+ 
++export function maxScratchlistUpdatedAtBySessionIds(
++    db: Database,
++    sessionIds: string[]
++): Map<string, number> {
++    if (sessionIds.length === 0) return new Map()
++
++    const placeholders = sessionIds.map(() => '?').join(',')
++    const rows = db.prepare(
++        `SELECT session_id, MAX(updated_at) AS updated_at
++         FROM session_scratchlist
++         WHERE session_id IN (${placeholders})
++         GROUP BY session_id`
++    ).all(...sessionIds) as Array<{ session_id: string; updated_at: number }>
++
++    return new Map(rows.map(row => [row.session_id, row.updated_at]))
++}
++
+ export function getScratchlistEntry(
+     db: Database,
+     sessionId: string,
+diff --git a/hub/src/store/scratchlistStore.ts b/hub/src/store/scratchlistStore.ts
+index d8c67aff..12a646a9 100644
+--- a/hub/src/store/scratchlistStore.ts
++++ b/hub/src/store/scratchlistStore.ts
+@@ -7,6 +7,7 @@ import {
+     deleteScratchlistEntry,
+     getScratchlistEntry,
+     listScratchlistEntries,
++    maxScratchlistUpdatedAtBySessionIds,
+     sumScratchlistAttachmentBytesForSession,
+     transferScratchlistEntries,
+     updateScratchlistEntry,
+@@ -28,6 +29,10 @@ export class ScratchlistStore {
+         return countScratchlistEntries(this.db, sessionId)
+     }
+ 
++    maxUpdatedAtBySessionIds(sessionIds: string[]): Map<string, number> {
++        return maxScratchlistUpdatedAtBySessionIds(this.db, sessionIds)
++    }
++
+     get(sessionId: string, entryId: string): StoredScratchlistEntry | null {
+         return getScratchlistEntry(this.db, sessionId, entryId)
+     }
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index baa526ac..ad9010b9 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -303,10 +303,18 @@ export class SyncEngine {
+         return this.store.messages.countFutureScheduledBySessionIds(sessionIds, now)
+     }
+ 
++    getUninvokedScheduledMessageCounts(sessionIds: string[]): Map<string, number> {
++        return this.store.messages.countUninvokedScheduledBySessionIds(sessionIds)
++    }
++
+     getNextScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
+         return this.store.messages.minFutureScheduledAtBySessionIds(sessionIds, now)
+     }
+ 
++    getScratchlistUpdatedAtBySessionIds(sessionIds: string[]): Map<string, number> {
++        return this.store.scratchlist.maxUpdatedAtBySessionIds(sessionIds)
++    }
++
+     getSession(sessionId: string): Session | undefined {
+         return this.sessionCache.getSession(sessionId) ?? this.sessionCache.refreshSession(sessionId) ?? undefined
+     }
+@@ -700,7 +708,9 @@ export class SyncEngine {
+                     deleteScratchlistAttachmentFiles(getHapiHomeDir(), orphaned)
+                 )
+             }
+-            this.sessionCache.emitScratchlistChanged(sessionId, Date.now())
++            const changedAt = Date.now()
++            this.sessionCache.recordSessionActivity(sessionId, changedAt)
++            this.sessionCache.emitScratchlistChanged(sessionId, changedAt)
+         }
+         return removed
+     }
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index 11b24761..e6888fd9 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -32,6 +32,7 @@ import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeFo
+ import { requireSessionFromParam, requireSyncEngine } from './guards'
+ 
+ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
++const OLD_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000
+ 
+ function commandsFromMetadataSlashCommands(names: readonly string[] | undefined): SlashCommand[] {
+     if (!names?.length) {
+@@ -92,13 +93,17 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+                 return b.updatedAt - a.updatedAt
+             })
+         const scheduledCounts = engine.getFutureScheduledMessageCounts(sessionRecords.map((session) => session.id))
++        const uninvokedScheduledCounts = engine.getUninvokedScheduledMessageCounts(sessionRecords.map((session) => session.id))
+         const nextScheduledAt = engine.getNextScheduledAtBySessionIds(sessionRecords.map((session) => session.id))
++        const scratchlistUpdatedAt = engine.getScratchlistUpdatedAtBySessionIds(sessionRecords.map((session) => session.id))
+         const sessions = sessionRecords.map((session) => {
+             const summary = toSessionSummary(session)
+             return {
+                 ...summary,
+                 futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
+-                nextScheduledAt: nextScheduledAt.get(session.id) ?? null
++                uninvokedScheduledMessageCount: uninvokedScheduledCounts.get(session.id) ?? 0,
++                nextScheduledAt: nextScheduledAt.get(session.id) ?? null,
++                scratchlistUpdatedAt: scratchlistUpdatedAt.get(session.id)
+             }
+         })
+ 
+@@ -791,6 +796,19 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
+         }
+ 
++        if (c.req.query('requireArchived') === '1'
++            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
++            return c.json({ error: 'Session is no longer archived' }, 409)
++        }
++
++        if (c.req.query('cleanOld') === '1') {
++            const pending = engine.getUninvokedScheduledMessageCounts([sessionResult.sessionId]).get(sessionResult.sessionId) ?? 0
++            const scratchAt = engine.getScratchlistUpdatedAtBySessionIds([sessionResult.sessionId]).get(sessionResult.sessionId) ?? 0
++            if (pending > 0 || Math.max(sessionResult.session.updatedAt, scratchAt) > Date.now() - OLD_SESSION_AGE_MS) {
++                return c.json({ error: 'Session is no longer eligible for cleanup' }, 409)
++            }
++        }
++
+         try {
+             await engine.deleteSession(sessionResult.sessionId)
+             return c.json({ ok: true })
+diff --git a/shared/src/sessionSummary.ts b/shared/src/sessionSummary.ts
+index 63ade7d5..f1a4908c 100644
+--- a/shared/src/sessionSummary.ts
++++ b/shared/src/sessionSummary.ts
+@@ -65,8 +65,11 @@ export type SessionSummary = {
+     pendingRequests: PendingRequest[]
+     backgroundTaskCount: number
+     futureScheduledMessageCount: number
++    uninvokedScheduledMessageCount?: number
+     /** Epoch ms of the soonest uninvoked future scheduled message, or null. */
+     nextScheduledAt: number | null
++    /** Epoch ms of the latest scratchlist entry mutation, when present. */
++    scratchlistUpdatedAt?: number
+     model: string | null
+     modelReasoningEffort?: string | null
+     effort: string | null
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index ec3e5706..e13b5d73 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -839,8 +839,12 @@ export class ApiClient {
+         })
+     }
+ 
+-    async deleteSession(sessionId: string): Promise<void> {
+-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
++    async deleteSession(sessionId: string, options?: { cleanOld?: boolean; requireArchived?: boolean }): Promise<void> {
++        const params = new URLSearchParams()
++        if (options?.cleanOld) params.set('cleanOld', '1')
++        if (options?.requireArchived) params.set('requireArchived', '1')
++        const suffix = params.size > 0 ? `?${params}` : ''
++        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
+             method: 'DELETE'
+         })
+     }
+diff --git a/web/src/components/ProjectGroupActionMenu.test.tsx b/web/src/components/ProjectGroupActionMenu.test.tsx
+new file mode 100644
+index 00000000..18ee15d3
+--- /dev/null
++++ b/web/src/components/ProjectGroupActionMenu.test.tsx
+@@ -0,0 +1,107 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { cleanup, fireEvent, render, screen } from '@testing-library/react'
++import { I18nProvider } from '@/lib/i18n-context'
++import { ProjectGroupActionMenu } from '@/components/ProjectGroupActionMenu'
++
++afterEach(() => cleanup())
++
++function renderMenu(overrides: Partial<React.ComponentProps<typeof ProjectGroupActionMenu>> = {}) {
++    const defaults: React.ComponentProps<typeof ProjectGroupActionMenu> = {
++        isOpen: true,
++        onClose: vi.fn(),
++        onCopyPath: vi.fn(),
++        onArchiveAll: vi.fn(),
++        canArchiveAll: true,
++        onCleanOldSessions: vi.fn(),
++        oldSessionCount: 0,
++        onDelete: vi.fn(),
++        canDelete: false,
++        anchorPoint: { x: 0, y: 0 },
++    }
++    const merged = { ...defaults, ...overrides }
++    return {
++        ...render(
++            <I18nProvider>
++                <ProjectGroupActionMenu {...merged} />
++            </I18nProvider>
++        ),
++        props: merged
++    }
++}
++
++beforeEach(() => vi.clearAllMocks())
++
++describe('ProjectGroupActionMenu', () => {
++    it('renders all four actions', () => {
++        renderMenu()
++        expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Clean Old Sessions/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeInTheDocument()
++    })
++
++    it('disables Clean Old Sessions when no matching sessions exist', () => {
++        renderMenu({ oldSessionCount: 0 })
++        expect(screen.getByRole('menuitem', { name: /Clean Old Sessions/ })).toBeDisabled()
++    })
++
++    it('runs Clean Old Sessions when matching sessions exist', () => {
++        const onCleanOldSessions = vi.fn()
++        const onClose = vi.fn()
++        renderMenu({ oldSessionCount: 2, onCleanOldSessions, onClose })
++        fireEvent.click(screen.getByRole('menuitem', { name: /Clean Old Sessions/ }))
++        expect(onCleanOldSessions).toHaveBeenCalledTimes(1)
++        expect(onClose).toHaveBeenCalledTimes(1)
++    })
++
++    it('fires onCopyPath and closes on Copy Path click', () => {
++        const onCopyPath = vi.fn()
++        const onClose = vi.fn()
++        renderMenu({ onCopyPath, onClose })
++
++        fireEvent.click(screen.getByRole('menuitem', { name: /Copy Path/ }))
++
++        expect(onCopyPath).toHaveBeenCalledTimes(1)
++        expect(onClose).toHaveBeenCalledTimes(1)
++    })
++
++    it('disables Archive All when nothing is archivable', () => {
++        const onArchiveAll = vi.fn()
++        renderMenu({ canArchiveAll: false, onArchiveAll })
++
++        const item = screen.getByRole('menuitem', { name: /Archive All Sessions/ })
++        expect(item).toBeDisabled()
++
++        fireEvent.click(item)
++        expect(onArchiveAll).not.toHaveBeenCalled()
++    })
++
++    it('disables Delete Group while any session is active', () => {
++        const onDelete = vi.fn()
++        renderMenu({ canDelete: false, onDelete })
++
++        const item = screen.getByRole('menuitem', { name: /Delete Group/ })
++        expect(item).toBeDisabled()
++
++        fireEvent.click(item)
++        expect(onDelete).not.toHaveBeenCalled()
++    })
++
++    it('enables Delete Group and fires onDelete when canDelete is true', () => {
++        const onDelete = vi.fn()
++        const onClose = vi.fn()
++        renderMenu({ canDelete: true, onDelete, onClose })
++
++        const item = screen.getByRole('menuitem', { name: /Delete Group/ })
++        expect(item).not.toBeDisabled()
++
++        fireEvent.click(item)
++        expect(onDelete).toHaveBeenCalledTimes(1)
++        expect(onClose).toHaveBeenCalledTimes(1)
++    })
++
++    it('renders nothing when closed', () => {
++        renderMenu({ isOpen: false })
++        expect(screen.queryByRole('menu')).toBeNull()
++    })
++})
+diff --git a/web/src/components/ProjectGroupActionMenu.tsx b/web/src/components/ProjectGroupActionMenu.tsx
+new file mode 100644
+index 00000000..11a3206c
+--- /dev/null
++++ b/web/src/components/ProjectGroupActionMenu.tsx
+@@ -0,0 +1,182 @@
++import { useId } from 'react'
++import { useTranslation } from '@/lib/use-translation'
++import { useAnchoredMenu } from '@/hooks/useAnchoredMenu'
++import { CopyIcon } from '@/components/icons'
++
++type ProjectGroupActionMenuProps = {
++    isOpen: boolean
++    onClose: () => void
++    onCopyPath: () => void
++    onArchiveAll: () => void
++    canArchiveAll: boolean
++    onCleanOldSessions: () => void
++    oldSessionCount: number
++    onDelete: () => void
++    canDelete: boolean
++    anchorPoint: { x: number; y: number }
++    menuId?: string
++}
++
++function ArchiveIcon(props: { className?: string }) {
++    return (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            width="18"
++            height="18"
++            viewBox="0 0 24 24"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++            className={props.className}
++        >
++            <rect width="20" height="5" x="2" y="3" rx="1" />
++            <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
++            <path d="M10 12h4" />
++        </svg>
++    )
++}
++
++function TrashIcon(props: { className?: string }) {
++    return (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            width="18"
++            height="18"
++            viewBox="0 0 24 24"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++            className={props.className}
++        >
++            <path d="M3 6h18" />
++            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
++            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
++            <line x1="10" x2="10" y1="11" y2="17" />
++            <line x1="14" x2="14" y1="11" y2="17" />
++        </svg>
++    )
++}
++
++export function ProjectGroupActionMenu(props: ProjectGroupActionMenuProps) {
++    const { t } = useTranslation()
++    const {
++        isOpen,
++        onClose,
++        onCopyPath,
++        onArchiveAll,
++        canArchiveAll,
++        onCleanOldSessions,
++        oldSessionCount,
++        onDelete,
++        canDelete,
++        anchorPoint,
++        menuId
++    } = props
++    const { menuRef, menuStyle } = useAnchoredMenu({ isOpen, onClose, anchorPoint })
++    const internalId = useId()
++    const resolvedMenuId = menuId ?? `project-group-action-menu-${internalId}`
++    const headingId = `${resolvedMenuId}-heading`
++
++    const handleCopyPath = () => {
++        onClose()
++        onCopyPath()
++    }
++
++    const handleArchiveAll = () => {
++        onClose()
++        onArchiveAll()
++    }
++
++    const handleDelete = () => {
++        onClose()
++        onDelete()
++    }
++
++    const handleCleanOldSessions = () => {
++        onClose()
++        onCleanOldSessions()
++    }
++
++    if (!isOpen) return null
++
++    const baseItemClassName =
++        'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
++
++    return (
++        <div
++            ref={menuRef}
++            className="fixed z-50 min-w-[220px] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-lg animate-menu-pop"
++            style={menuStyle}
++        >
++            <div
++                id={headingId}
++                className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--app-hint)]"
++            >
++                {t('sessions.group.actions')}
++            </div>
++            <div
++                id={resolvedMenuId}
++                role="menu"
++                aria-labelledby={headingId}
++                className="flex flex-col gap-1"
++            >
++                <button
++                    type="button"
++                    role="menuitem"
++                    className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
++                    onClick={handleCopyPath}
++                >
++                    <CopyIcon className="h-[18px] w-[18px] text-[var(--app-hint)]" />
++                    {t('sessions.group.copyPath')}
++                </button>
++
++                <button
++                    type="button"
++                    role="menuitem"
++                    disabled={!canArchiveAll}
++                    className={`${baseItemClassName} ${canArchiveAll
++                        ? 'text-red-500 hover:bg-red-500/10'
++                        : 'cursor-not-allowed text-[var(--app-hint)] opacity-50'}`}
++                    onClick={handleArchiveAll}
++                >
++                    <ArchiveIcon className={canArchiveAll ? 'text-red-500' : 'text-[var(--app-hint)]'} />
++                    {t('sessions.group.archiveAll')}
++                </button>
++
++                <button
++                    type="button"
++                    role="menuitem"
++                    disabled={oldSessionCount === 0}
++                    title={oldSessionCount === 0 ? t('sessions.group.cleanOldHint') : undefined}
++                    className={`${baseItemClassName} ${oldSessionCount > 0
++                        ? 'hover:bg-[var(--app-subtle-bg)]'
++                        : 'cursor-not-allowed text-[var(--app-hint)] opacity-50'}`}
++                    onClick={handleCleanOldSessions}
++                >
++                    <TrashIcon className="text-[var(--app-hint)]" />
++                    {t('sessions.group.cleanOld', { count: oldSessionCount })}
++                </button>
++
++                <div className="my-1 h-px bg-[var(--app-border)]" role="separator" />
++
++                <button
++                    type="button"
++                    role="menuitem"
++                    disabled={!canDelete}
++                    title={canDelete ? undefined : t('sessions.group.deleteHint')}
++                    className={`${baseItemClassName} ${canDelete
++                        ? 'text-red-500 hover:bg-red-500/10'
++                        : 'cursor-not-allowed text-[var(--app-hint)] opacity-50'}`}
++                    onClick={handleDelete}
++                >
++                    <TrashIcon className={canDelete ? 'text-red-500' : 'text-[var(--app-hint)]'} />
++                    {t('sessions.group.delete')}
++                </button>
++            </div>
++        </div>
++    )
++}
+diff --git a/web/src/components/SessionActionMenu.tsx b/web/src/components/SessionActionMenu.tsx
+index 8e438c70..8b64e59a 100644
+--- a/web/src/components/SessionActionMenu.tsx
++++ b/web/src/components/SessionActionMenu.tsx
+@@ -1,18 +1,11 @@
+-import {
+-    useCallback,
+-    useEffect,
+-    useId,
+-    useLayoutEffect,
+-    useRef,
+-    useState,
+-    type CSSProperties
+-} from 'react'
++import { useId } from 'react'
+ import { useTranslation } from '@/lib/use-translation'
+ import { HoverTooltip } from '@/components/HoverTooltip'
+ import { safeCopyToClipboard } from '@/lib/clipboard'
+ import { buildSessionReferenceText } from '@/lib/sessionReference'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { CopyIcon } from '@/components/icons'
++import { useAnchoredMenu } from '@/hooks/useAnchoredMenu'
+ 
+ type SessionActionMenuProps = {
+     isOpen: boolean
+@@ -158,12 +151,6 @@ function TrashIcon(props: { className?: string }) {
+     )
+ }
+ 
+-type MenuPosition = {
+-    top: number
+-    left: number
+-    transformOrigin: string
+-}
+-
+ export function SessionActionMenu(props: SessionActionMenuProps) {
+     const { t } = useTranslation()
+     const { haptic } = usePlatform()
+@@ -183,8 +170,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
+         anchorPoint,
+         menuId
+     } = props
+-    const menuRef = useRef<HTMLDivElement | null>(null)
+-    const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
++    const { menuRef, menuStyle } = useAnchoredMenu({ isOpen, onClose, anchorPoint })
+     const internalId = useId()
+     const resolvedMenuId = menuId ?? `session-action-menu-${internalId}`
+     const headingId = `${resolvedMenuId}-heading`
+@@ -229,91 +215,8 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
+         onDelete()
+     }
+ 
+-    const updatePosition = useCallback(() => {
+-        const menuEl = menuRef.current
+-        if (!menuEl) return
+-
+-        const menuRect = menuEl.getBoundingClientRect()
+-        const viewportWidth = window.innerWidth
+-        const viewportHeight = window.innerHeight
+-        const padding = 8
+-        const gap = 8
+-
+-        const spaceBelow = viewportHeight - anchorPoint.y
+-        const spaceAbove = anchorPoint.y
+-        const openAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow
+-
+-        let top = openAbove ? anchorPoint.y - menuRect.height - gap : anchorPoint.y + gap
+-        let left = anchorPoint.x - menuRect.width / 2
+-        const transformOrigin = openAbove ? 'bottom center' : 'top center'
+-
+-        top = Math.min(Math.max(top, padding), viewportHeight - menuRect.height - padding)
+-        left = Math.min(Math.max(left, padding), viewportWidth - menuRect.width - padding)
+-
+-        setMenuPosition({ top, left, transformOrigin })
+-    }, [anchorPoint])
+-
+-    useLayoutEffect(() => {
+-        if (!isOpen) return
+-        updatePosition()
+-    }, [isOpen, updatePosition])
+-
+-    useEffect(() => {
+-        if (!isOpen) {
+-            setMenuPosition(null)
+-            return
+-        }
+-
+-        const handlePointerDown = (event: PointerEvent) => {
+-            const target = event.target as Node
+-            if (menuRef.current?.contains(target)) return
+-            onClose()
+-        }
+-
+-        const handleKeyDown = (event: KeyboardEvent) => {
+-            if (event.key === 'Escape') {
+-                onClose()
+-            }
+-        }
+-
+-        const handleReflow = () => {
+-            updatePosition()
+-        }
+-
+-        document.addEventListener('pointerdown', handlePointerDown)
+-        document.addEventListener('keydown', handleKeyDown)
+-        window.addEventListener('resize', handleReflow)
+-        window.addEventListener('scroll', handleReflow, true)
+-
+-        return () => {
+-            document.removeEventListener('pointerdown', handlePointerDown)
+-            document.removeEventListener('keydown', handleKeyDown)
+-            window.removeEventListener('resize', handleReflow)
+-            window.removeEventListener('scroll', handleReflow, true)
+-        }
+-    }, [isOpen, onClose, updatePosition])
+-
+-    useEffect(() => {
+-        if (!isOpen) return
+-
+-        const frame = window.requestAnimationFrame(() => {
+-            const firstItem = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')
+-            firstItem?.focus()
+-        })
+-
+-        return () => window.cancelAnimationFrame(frame)
+-    }, [isOpen])
+-
+     if (!isOpen) return null
+ 
+-    const menuStyle: CSSProperties | undefined = menuPosition
+-        ? {
+-            top: `max(${menuPosition.top}px, calc(env(safe-area-inset-top) + 8px))`,
+-            left: menuPosition.left,
+-            transformOrigin: menuPosition.transformOrigin
+-        }
+-        : undefined
+-
+     const baseItemClassName =
+         'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
+ 
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 7d21d8c2..73c0eb7c 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -367,7 +367,7 @@ describe('SessionList collapse behavior', () => {
+ 
+     function getProjectPanel(): Element {
+         const header = screen.getByTitle('/work/hapi')
+-        const panel = header.nextElementSibling
++        const panel = header.parentElement?.querySelector('.collapsible-panel')
+         if (!panel) {
+             throw new Error('Expected project collapse panel')
+         }
+@@ -547,6 +547,26 @@ describe('SessionList collapse behavior', () => {
+         })
+     })
+ 
++    it('opens the project group menu on right-click without collapsing the group', () => {
++        const sessions = [makeSession({
++            id: 'session-running',
++            updatedAt: 100,
++            metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
++        })]
++        render(renderSessionList(sessions, 'session-running'))
++        const header = getProjectPanel().previousElementSibling
++        if (!(header instanceof HTMLElement)) throw new Error('expected project group header')
++
++        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
++        fireEvent.mouseDown(header, { button: 2 })
++        fireEvent.mouseUp(header, { button: 2 })
++        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
++        fireEvent.contextMenu(header, { clientX: 10, clientY: 10 })
++
++        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
++        expect(screen.getByRole('menu', { name: 'Group actions' })).toBeInTheDocument()
++    })
++
+     it('keeps the running section open while searching even when collapsed', () => {
+         localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+         const sessions = [
+@@ -633,6 +653,37 @@ describe('SessionList collapse behavior', () => {
+         })
+     })
+ 
++    it('blocks group deletion when a deduplicated session was not archived', () => {
++        const sessions = [
++            makeSession({
++                id: 'archived-visible',
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    name: 'Archived session',
++                    flavor: 'codex',
++                    agentSessionId: 'shared-agent-id',
++                    lifecycleState: 'archived'
++                }
++            }),
++            makeSession({
++                id: 'completed-hidden',
++                updatedAt: 200,
++                metadata: {
++                    path: '/work/hapi',
++                    flavor: 'codex',
++                    agentSessionId: 'shared-agent-id'
++                }
++            })
++        ]
++
++        render(renderSessionList(sessions, 'archived-visible'))
++
++        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
++
++        expect(screen.getByRole('menuitem', { name: 'Delete Group' })).toBeDisabled()
++    })
++
+     it('keeps the configured session preview fold while searching', () => {
+         localStorage.setItem('hapi-session-preview-limit', '2')
+         const sessions = Array.from({ length: 4 }, (_, index) => makeSession({
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index d41fa361..0c22f6c3 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -4,12 +4,16 @@ import type { ApiClient } from '@/api/client'
+ import { useLongPress } from '@/hooks/useLongPress'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { useSessionActions } from '@/hooks/mutations/useSessionActions'
++import { useProjectGroupActions } from '@/hooks/mutations/useProjectGroupActions'
++import { getProjectGroupActionAvailability, isOldInactiveSession } from '@/lib/projectGroupActions'
+ import { SessionActionMenu } from '@/components/SessionActionMenu'
++import { ProjectGroupActionMenu } from '@/components/ProjectGroupActionMenu'
+ import { SessionExportDialog } from '@/components/SessionExportDialog'
+ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
+ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+ import { CopyIcon, CheckIcon } from '@/components/icons'
+ import { cn } from '@/lib/utils'
++import { safeCopyToClipboard } from '@/lib/clipboard'
+ import { useTranslation } from '@/lib/use-translation'
+ import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
+ import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
+@@ -344,6 +348,13 @@ function groupByMachine(
+     })
+ }
+ 
++const stopRowPressPropagation = {
++    onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
++    onMouseUp: (e: React.MouseEvent) => e.stopPropagation(),
++    onTouchStart: (e: React.TouchEvent) => e.stopPropagation(),
++    onTouchEnd: (e: React.TouchEvent) => e.stopPropagation(),
++}
++
+ function CopyPathButton({ path, className }: { path: string; className?: string }) {
+     const [copied, setCopied] = useState(false)
+     const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+@@ -364,6 +375,7 @@ function CopyPathButton({ path, className }: { path: string; className?: string
+             className={`shrink-0 p-0.5 rounded transition-colors ${copied ? 'text-[var(--app-badge-success-text)]' : 'text-[var(--app-hint)] hover:text-[var(--app-fg)]'} ${className ?? ''}`}
+             title={copied ? 'Copied!' : `Copy: ${path}`}
+             onClick={handleClick}
++            {...stopRowPressPropagation}
+         >
+             {copied
+                 ? <CheckIcon className="h-3.5 w-3.5" />
+@@ -373,6 +385,149 @@ function CopyPathButton({ path, className }: { path: string; className?: string
+     )
+ }
+ 
++function ProjectGroupHeader(props: {
++    group: SessionGroup
++    actionSessions: SessionSummary[]
++    groupTitle: string
++    isCollapsed: boolean
++    onToggle: () => void
++    onNewSessionInDirectory?: (args: { machineId: string | null; directory: string }) => void
++    api: ApiClient | null
++}) {
++    const { t } = useTranslation()
++    const { haptic } = usePlatform()
++    const { group, actionSessions, groupTitle, isCollapsed, onToggle, onNewSessionInDirectory, api } = props
++    const [menuOpen, setMenuOpen] = useState(false)
++    const [menuAnchorPoint, setMenuAnchorPoint] = useState({ x: 0, y: 0 })
++    const [archiveAllOpen, setArchiveAllOpen] = useState(false)
++    const [cleanOldOpen, setCleanOldOpen] = useState(false)
++    const [deleteOpen, setDeleteOpen] = useState(false)
++    const { archiveAll, deleteAll, cleanOldSessions, isPending } = useProjectGroupActions(api, actionSessions)
++    const { canArchiveAll, canDelete } = getProjectGroupActionAvailability(actionSessions)
++    const oldSessionCount = actionSessions.filter(session => isOldInactiveSession(session)).length
++    const canStartInGroupDirectory = group.directory !== 'Other'
++    const longPressHandlers = useLongPress({
++        onLongPress: (point) => {
++            haptic.impact('medium')
++            setMenuAnchorPoint(point)
++            setMenuOpen(true)
++        },
++        onClick: () => {
++            if (!menuOpen) onToggle()
++        },
++        threshold: 500
++    })
++
++    const handleCopyPath = async () => {
++        try {
++            await safeCopyToClipboard(group.directory)
++            haptic.notification('success')
++        } catch {
++            haptic.notification('error')
++        }
++    }
++
++    return (
++        <>
++            <div
++                {...longPressHandlers}
++                tabIndex={0}
++                aria-haspopup="menu"
++                aria-expanded={menuOpen}
++                onKeyDown={(event) => {
++                    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
++                        event.preventDefault()
++                        const rect = event.currentTarget.getBoundingClientRect()
++                        setMenuAnchorPoint({ x: rect.left + rect.width / 2, y: rect.bottom })
++                        setMenuOpen(true)
++                        return
++                    }
++                    longPressHandlers.onKeyDown(event)
++                }}
++                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
++                style={{ WebkitTouchCallout: 'none' }}
++                title={group.directory}
++            >
++                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
++                <span className="font-medium text-sm truncate flex-1">
++                    {groupTitle}
++                </span>
++                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
++                {onNewSessionInDirectory && canStartInGroupDirectory ? (
++                    <button
++                        type="button"
++                        onClick={(event) => {
++                            event.stopPropagation()
++                            onNewSessionInDirectory({
++                                machineId: group.machineId,
++                                directory: group.directory
++                            })
++                        }}
++                        {...stopRowPressPropagation}
++                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
++                        title={t('sessions.group.new')}
++                        aria-label={t('sessions.group.new')}
++                    >
++                        <PlusIcon className="h-3.5 w-3.5" />
++                    </button>
++                ) : null}
++                <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
++                    ({group.sessions.length})
++                </span>
++            </div>
++
++            <ProjectGroupActionMenu
++                isOpen={menuOpen}
++                onClose={() => setMenuOpen(false)}
++                onCopyPath={handleCopyPath}
++                onArchiveAll={() => setArchiveAllOpen(true)}
++                canArchiveAll={canArchiveAll}
++                onCleanOldSessions={() => setCleanOldOpen(true)}
++                oldSessionCount={oldSessionCount}
++                onDelete={() => setDeleteOpen(true)}
++                canDelete={canDelete}
++                anchorPoint={menuAnchorPoint}
++            />
++
++            <ConfirmDialog
++                isOpen={cleanOldOpen}
++                onClose={() => setCleanOldOpen(false)}
++                title={t('dialog.cleanOldSessions.title')}
++                description={t('dialog.cleanOldSessions.description', { name: group.displayName, count: oldSessionCount })}
++                confirmLabel={t('dialog.cleanOldSessions.confirm')}
++                confirmingLabel={t('dialog.cleanOldSessions.confirming')}
++                onConfirm={cleanOldSessions}
++                isPending={isPending}
++                destructive
++            />
++
++            <ConfirmDialog
++                isOpen={archiveAllOpen}
++                onClose={() => setArchiveAllOpen(false)}
++                title={t('dialog.archiveAll.title')}
++                description={t('dialog.archiveAll.description', { name: group.displayName })}
++                confirmLabel={t('dialog.archiveAll.confirm')}
++                confirmingLabel={t('dialog.archiveAll.confirming')}
++                onConfirm={archiveAll}
++                isPending={isPending}
++                destructive
++            />
++
++            <ConfirmDialog
++                isOpen={deleteOpen}
++                onClose={() => setDeleteOpen(false)}
++                title={t('dialog.deleteGroup.title')}
++                description={t('dialog.deleteGroup.description', { name: group.displayName, count: actionSessions.length })}
++                confirmLabel={t('dialog.deleteGroup.confirm')}
++                confirmingLabel={t('dialog.deleteGroup.confirming')}
++                onConfirm={deleteAll}
++                isPending={isPending}
++                destructive
++            />
++        </>
++    )
++}
++
+ 
+ function SearchIcon(props: { className?: string }) {
+     return (
+@@ -1077,6 +1232,13 @@ export function SessionList(props: {
+         () => groupSessionsByDirectory(allSessions),
+         [allSessions]
+     )
++    const actionGroupsByKey = useMemo(
++        () => new Map(
++            groupSessionsByDirectory(props.sessions)
++                .map(group => [group.key, group.sessions] as const)
++        ),
++        [props.sessions]
++    )
+     const machineFilters = useMemo(
+         () => groupByMachine(allGroups, resolveMachineLabel),
+         [allGroups, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
+@@ -1574,37 +1736,15 @@ export function SessionList(props: {
+                         : group.displayName
+                     return (
+                         <div key={group.key}>
+-                            <div
+-                                className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] cursor-pointer min-w-0 w-full select-none"
+-                                onClick={() => toggleGroup(group.key, isCollapsed)}
+-                                title={group.directory}
+-                            >
+-                                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+-                                <span className="font-medium text-sm truncate flex-1">
+-                                    {groupTitle}
+-                                </span>
+-                                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+-                                {onNewSessionInDirectory && canStartInGroupDirectory ? (
+-                                    <button
+-                                        type="button"
+-                                        onClick={(event) => {
+-                                            event.stopPropagation()
+-                                            onNewSessionInDirectory({
+-                                                machineId: group.machineId,
+-                                                directory: group.directory
+-                                            })
+-                                        }}
+-                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+-                                        title={t('sessions.group.new')}
+-                                        aria-label={t('sessions.group.new')}
+-                                    >
+-                                        <PlusIcon className="h-3.5 w-3.5" />
+-                                    </button>
+-                                ) : null}
+-                                <span className="text-[11px] tabular-nums text-[var(--app-hint)] shrink-0">
+-                                    ({group.sessions.length})
+-                                </span>
+-                            </div>
++                            <ProjectGroupHeader
++                                group={group}
++                                actionSessions={actionGroupsByKey.get(group.key) ?? group.sessions}
++                                groupTitle={groupTitle}
++                                isCollapsed={isCollapsed}
++                                onToggle={() => toggleGroup(group.key, isCollapsed)}
++                                onNewSessionInDirectory={onNewSessionInDirectory}
++                                api={api}
++                            />
+ 
+                             {/* Sessions */}
+                             <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
+diff --git a/web/src/hooks/mutations/useProjectGroupActions.test.tsx b/web/src/hooks/mutations/useProjectGroupActions.test.tsx
+new file mode 100644
+index 00000000..90ecd6dd
+--- /dev/null
++++ b/web/src/hooks/mutations/useProjectGroupActions.test.tsx
+@@ -0,0 +1,140 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { act, renderHook } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import type { ReactNode } from 'react'
++import type { SessionSummary } from '@/types/api'
++import type { ApiClient } from '@/api/client'
++import { useProjectGroupActions } from './useProjectGroupActions'
++
++function createWrapper() {
++    const queryClient = new QueryClient({
++        defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
++    })
++    return function Wrapper({ children }: { children: ReactNode }) {
++        return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
++    }
++}
++
++function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
++    return {
++        active: false,
++        thinking: false,
++        activeAt: 0,
++        updatedAt: 0,
++        metadata: null,
++        todoProgress: null,
++        pendingRequestsCount: 0,
++        pendingRequestKinds: [],
++        pendingRequests: [],
++        backgroundTaskCount: 0,
++        futureScheduledMessageCount: 0,
++        nextScheduledAt: null,
++        model: null,
++        effort: null,
++        ...overrides
++    }
++}
++
++beforeEach(() => vi.clearAllMocks())
++afterEach(() => vi.restoreAllMocks())
++
++describe('useProjectGroupActions - archiveAll', () => {
++    it('archives only archivable sessions, leaving already-archived ones untouched', async () => {
++        const archiveSession = vi.fn(async (_id: string) => {})
++        const api = { archiveSession } as unknown as ApiClient
++        const sessions = [
++            makeSession({ id: 'live', active: true, metadata: { path: '/p', lifecycleState: 'running' } }),
++            makeSession({ id: 'done', metadata: { path: '/p', lifecycleState: 'archived' } }),
++            makeSession({ id: 'split', metadata: { path: '/p', lifecycleState: 'running' } }),
++        ]
++
++        const { result } = renderHook(() => useProjectGroupActions(api, sessions), { wrapper: createWrapper() })
++
++        await act(async () => {
++            await result.current.archiveAll()
++        })
++
++        expect(archiveSession).toHaveBeenCalledTimes(2)
++        expect(archiveSession).toHaveBeenCalledWith('live')
++        expect(archiveSession).toHaveBeenCalledWith('split')
++        expect(archiveSession).not.toHaveBeenCalledWith('done')
++    })
++
++    it('throws when api is missing', async () => {
++        const { result } = renderHook(() => useProjectGroupActions(null, []), { wrapper: createWrapper() })
++        await expect(result.current.archiveAll()).rejects.toThrow('Session unavailable')
++    })
++})
++
++describe('useProjectGroupActions - deleteAll', () => {
++    it('deletes every session in the group sequentially', async () => {
++        const deleteSession = vi.fn(async (_id: string) => {})
++        const api = { deleteSession } as unknown as ApiClient
++        const sessions = [
++            makeSession({ id: 'a', metadata: { path: '/p', lifecycleState: 'archived' } }),
++            makeSession({ id: 'b', metadata: { path: '/p', lifecycleState: 'archived' } }),
++        ]
++
++        const { result } = renderHook(() => useProjectGroupActions(api, sessions), { wrapper: createWrapper() })
++
++        await act(async () => {
++            await result.current.deleteAll()
++        })
++
++        expect(deleteSession).toHaveBeenCalledTimes(2)
++        expect(deleteSession).toHaveBeenNthCalledWith(1, 'a', { requireArchived: true })
++        expect(deleteSession).toHaveBeenNthCalledWith(2, 'b', { requireArchived: true })
++    })
++
++    it('aborts the run when a delete rejects mid-loop', async () => {
++        const deleteSession = vi.fn()
++            .mockResolvedValueOnce(undefined)
++            .mockRejectedValueOnce(new Error('409 active'))
++        const api = { deleteSession } as unknown as ApiClient
++        const sessions = [
++            makeSession({ id: 'a', metadata: { path: '/p', lifecycleState: 'archived' } }),
++            makeSession({ id: 'b', metadata: { path: '/p', lifecycleState: 'archived' } }),
++            makeSession({ id: 'c', metadata: { path: '/p', lifecycleState: 'archived' } }),
++        ]
++
++        const { result } = renderHook(() => useProjectGroupActions(api, sessions), { wrapper: createWrapper() })
++
++        await act(async () => {
++            await expect(result.current.deleteAll()).rejects.toThrow('409 active')
++        })
++
++        // Third session never reached after the second rejected.
++        expect(deleteSession).toHaveBeenCalledTimes(2)
++    })
++})
++
++describe('useProjectGroupActions - cleanOldSessions', () => {
++    it('deletes only inactive sessions at least seven days old', async () => {
++        const now = Date.now()
++        const day = 24 * 60 * 60 * 1000
++        const deleteSession = vi.fn(async (_id: string) => {})
++        const api = { deleteSession } as unknown as ApiClient
++        const sessions = [
++            makeSession({ id: 'old', updatedAt: now - 8 * day }),
++            makeSession({ id: 'boundary', updatedAt: now - 7 * day - 1000 }),
++            makeSession({ id: 'recent', updatedAt: now - 6 * day }),
++            makeSession({ id: 'active-old', active: true, updatedAt: now - 20 * day }),
++            makeSession({
++                id: 'scheduled-old',
++                updatedAt: now - 20 * day,
++                futureScheduledMessageCount: 1,
++                nextScheduledAt: now + day
++            }),
++        ]
++
++        const { result } = renderHook(() => useProjectGroupActions(api, sessions), { wrapper: createWrapper() })
++
++        await act(async () => {
++            await result.current.cleanOldSessions()
++        })
++
++        expect(deleteSession).toHaveBeenCalledTimes(2)
++        expect(deleteSession).toHaveBeenNthCalledWith(1, 'old', { cleanOld: true })
++        expect(deleteSession).toHaveBeenNthCalledWith(2, 'boundary', { cleanOld: true })
++    })
++})
+diff --git a/web/src/hooks/mutations/useProjectGroupActions.ts b/web/src/hooks/mutations/useProjectGroupActions.ts
+new file mode 100644
+index 00000000..d47c8484
+--- /dev/null
++++ b/web/src/hooks/mutations/useProjectGroupActions.ts
+@@ -0,0 +1,91 @@
++import { useMutation, useQueryClient } from '@tanstack/react-query'
++import type { ApiClient } from '@/api/client'
++import type { SessionSummary } from '@/types/api'
++import { queryKeys } from '@/lib/query-keys'
++import { clearMessageWindow } from '@/lib/message-window-store'
++import { isOldInactiveSession, isSessionArchivable } from '@/lib/projectGroupActions'
++
++/**
++ * Bulk actions over every session in a sidebar project group (tiann/hapi#881).
++ *
++ * There is no atomic bulk route, so the operations fan out to the existing
++ * per-session endpoints sequentially. A mid-loop rejection (e.g. a 409 from a
++ * session that became active) aborts the run, mirroring single-session
++ * behaviour; React Query surfaces it to the caller.
++ */
++export function useProjectGroupActions(
++    api: ApiClient | null,
++    sessions: SessionSummary[]
++): {
++    archiveAll: () => Promise<void>
++    deleteAll: () => Promise<void>
++    cleanOldSessions: () => Promise<void>
++    isPending: boolean
++} {
++    const queryClient = useQueryClient()
++
++    const archiveMutation = useMutation({
++        mutationFn: async () => {
++            if (!api) {
++                throw new Error('Session unavailable')
++            }
++            for (const session of sessions) {
++                if (isSessionArchivable(session)) {
++                    await api.archiveSession(session.id)
++                }
++            }
++        },
++        onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sessions }),
++    })
++
++    const deleteMutation = useMutation({
++        mutationFn: async () => {
++            if (!api) {
++                throw new Error('Session unavailable')
++            }
++            for (const session of sessions) {
++                await api.deleteSession(session.id, { requireArchived: true })
++            }
++        },
++        onSuccess: async () => {
++            for (const session of sessions) {
++                queryClient.removeQueries({ queryKey: queryKeys.session(session.id) })
++                clearMessageWindow(session.id)
++            }
++            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
++        },
++    })
++
++    const cleanOldMutation = useMutation({
++        mutationFn: async () => {
++            if (!api) {
++                throw new Error('Session unavailable')
++            }
++            const now = Date.now()
++            const deletedSessions: SessionSummary[] = []
++            for (const session of sessions) {
++                if (isOldInactiveSession(session, now)) {
++                    await api.deleteSession(session.id, { cleanOld: true })
++                    deletedSessions.push(session)
++                }
++            }
++            return deletedSessions
++        },
++        onSuccess: async (deletedSessions) => {
++            for (const session of deletedSessions) {
++                queryClient.removeQueries({ queryKey: queryKeys.session(session.id) })
++                clearMessageWindow(session.id)
++            }
++            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
++        },
++    })
++
++    return {
++        archiveAll: archiveMutation.mutateAsync,
++        deleteAll: deleteMutation.mutateAsync,
++        cleanOldSessions: async () => {
++            await cleanOldMutation.mutateAsync()
++        },
++        isPending: archiveMutation.isPending || deleteMutation.isPending || cleanOldMutation.isPending,
++    }
++}
+diff --git a/web/src/hooks/useAnchoredMenu.ts b/web/src/hooks/useAnchoredMenu.ts
+new file mode 100644
+index 00000000..dd722e6b
+--- /dev/null
++++ b/web/src/hooks/useAnchoredMenu.ts
+@@ -0,0 +1,124 @@
++import {
++    useCallback,
++    useEffect,
++    useLayoutEffect,
++    useRef,
++    useState,
++    type CSSProperties,
++    type RefObject
++} from 'react'
++
++type AnchorPoint = { x: number; y: number }
++
++type MenuPosition = {
++    top: number
++    left: number
++    transformOrigin: string
++}
++
++/**
++ * Positioning + dismissal controller shared by anchored popup menus
++ * (SessionActionMenu, ProjectGroupActionMenu).
++ *
++ * Given a viewport anchor point it flips the menu above/below based on
++ * available space, clamps it inside the viewport, dismisses on outside
++ * pointerdown / Escape, reflows on resize+scroll, and focuses the first
++ * menuitem on open. Callers render a `<div ref={menuRef} style={menuStyle}>`.
++ */
++export function useAnchoredMenu(opts: {
++    isOpen: boolean
++    onClose: () => void
++    anchorPoint: AnchorPoint
++}): {
++    menuRef: RefObject<HTMLDivElement | null>
++    menuStyle: CSSProperties | undefined
++} {
++    const { isOpen, onClose, anchorPoint } = opts
++    const menuRef = useRef<HTMLDivElement | null>(null)
++    const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
++
++    const updatePosition = useCallback(() => {
++        const menuEl = menuRef.current
++        if (!menuEl) return
++
++        const menuRect = menuEl.getBoundingClientRect()
++        const viewportWidth = window.innerWidth
++        const viewportHeight = window.innerHeight
++        const padding = 8
++        const gap = 8
++
++        const spaceBelow = viewportHeight - anchorPoint.y
++        const spaceAbove = anchorPoint.y
++        const openAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow
++
++        let top = openAbove ? anchorPoint.y - menuRect.height - gap : anchorPoint.y + gap
++        let left = anchorPoint.x - menuRect.width / 2
++        const transformOrigin = openAbove ? 'bottom center' : 'top center'
++
++        top = Math.min(Math.max(top, padding), viewportHeight - menuRect.height - padding)
++        left = Math.min(Math.max(left, padding), viewportWidth - menuRect.width - padding)
++
++        setMenuPosition({ top, left, transformOrigin })
++    }, [anchorPoint])
++
++    useLayoutEffect(() => {
++        if (!isOpen) return
++        updatePosition()
++    }, [isOpen, updatePosition])
++
++    useEffect(() => {
++        if (!isOpen) {
++            setMenuPosition(null)
++            return
++        }
++
++        const handlePointerDown = (event: PointerEvent) => {
++            const target = event.target as Node
++            if (menuRef.current?.contains(target)) return
++            onClose()
++        }
++
++        const handleKeyDown = (event: KeyboardEvent) => {
++            if (event.key === 'Escape') {
++                onClose()
++            }
++        }
++
++        const handleReflow = () => {
++            updatePosition()
++        }
++
++        document.addEventListener('pointerdown', handlePointerDown)
++        document.addEventListener('keydown', handleKeyDown)
++        window.addEventListener('resize', handleReflow)
++        window.addEventListener('scroll', handleReflow, true)
++
++        return () => {
++            document.removeEventListener('pointerdown', handlePointerDown)
++            document.removeEventListener('keydown', handleKeyDown)
++            window.removeEventListener('resize', handleReflow)
++            window.removeEventListener('scroll', handleReflow, true)
++        }
++    }, [isOpen, onClose, updatePosition])
++
++    useEffect(() => {
++        if (!isOpen) return
++
++        const frame = window.requestAnimationFrame(() => {
++            const firstItem = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
++            firstItem?.focus()
++        })
++
++        return () => window.cancelAnimationFrame(frame)
++    }, [isOpen])
++
++    const menuStyle: CSSProperties | undefined = menuPosition
++        ? {
++            top: `max(${menuPosition.top}px, calc(env(safe-area-inset-top) + 8px))`,
++            left: menuPosition.left,
++            transformOrigin: menuPosition.transformOrigin
++        }
++        : undefined
++
++    return { menuRef, menuStyle }
++}
+diff --git a/web/src/hooks/useSSE.ts b/web/src/hooks/useSSE.ts
+index 009cdb44..2786aae4 100644
+--- a/web/src/hooks/useSSE.ts
++++ b/web/src/hooks/useSSE.ts
+@@ -235,6 +235,7 @@ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSu
+         && current.model === next.model
+         && current.modelReasoningEffort === next.modelReasoningEffort
+         && current.effort === next.effort
++        && current.scratchlistUpdatedAt === next.scratchlistUpdatedAt
+         && current.pendingRequestsCount === next.pendingRequestsCount
+         // Structured SSE patches (#897) can move these without touching the
+         // keep-alive fields above; omit them and a todos/metadata/agentState
+@@ -520,7 +521,9 @@ export function useSSE(options: {
+                 const summary = {
+                     ...toSessionSummary(session),
+                     futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0,
+-                    nextScheduledAt: existing?.nextScheduledAt ?? null
++                    uninvokedScheduledMessageCount: existing?.uninvokedScheduledMessageCount ?? 0,
++                    nextScheduledAt: existing?.nextScheduledAt ?? null,
++                    scratchlistUpdatedAt: existing?.scratchlistUpdatedAt
+                 }
+                 const nextSessions = previous.sessions.slice()
+                 if (existingIndex >= 0) {
+@@ -570,6 +573,9 @@ export function useSSE(options: {
+                         : current.modelReasoningEffort,
+                     effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
+                 }
++                if (Object.prototype.hasOwnProperty.call(patch, 'scratchlistUpdatedAt')) {
++                    nextSummary.scratchlistUpdatedAt = patch.scratchlistUpdatedAt
++                }
+ 
+                 // Gate versioned fields against THIS summary's watermarks —
+                 // not the detail query. Global SSE covers every session;
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index cbaf30f4..6c1314af 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -86,6 +86,13 @@ export default {
+   'sessions.group.new': 'New session in this directory',
+   'sessions.machineFilter.label': 'Filter sessions by machine',
+   'sessions.machineFilter.all': 'All',
++  'sessions.group.actions': 'Group actions',
++  'sessions.group.copyPath': 'Copy Path',
++  'sessions.group.archiveAll': 'Archive All Sessions',
++  'sessions.group.cleanOld': 'Clean Old Sessions ({count})',
++  'sessions.group.cleanOldHint': 'No inactive sessions older than 7 days',
++  'sessions.group.delete': 'Delete Group',
++  'sessions.group.deleteHint': 'Stop or archive active sessions first',
+   'codexSync.tooltip': 'Import sessions from Codex into Hapi',
+   'codexSync.newSessionAction': 'Import Codex history',
+   'codexSync.confirm.title': 'Import Codex sessions',
+@@ -230,6 +237,18 @@ export default {
+   'dialog.delete.scratchlist.other': 'This will also delete {n} scratchlist entries.',
+   'dialog.delete.confirm': 'Delete',
+   'dialog.delete.confirming': 'Deleting…',
++  'dialog.archiveAll.title': 'Archive All Sessions',
++  'dialog.archiveAll.description': 'Archive all active sessions in "{name}"? This will disconnect them.',
++  'dialog.archiveAll.confirm': 'Archive All',
++  'dialog.archiveAll.confirming': 'Archiving…',
++  'dialog.cleanOldSessions.title': 'Clean Old Sessions',
++  'dialog.cleanOldSessions.description': 'Delete {count} inactive sessions in "{name}" that have not been updated for at least 7 days? This action cannot be undone.',
++  'dialog.cleanOldSessions.confirm': 'Clean Sessions',
++  'dialog.cleanOldSessions.confirming': 'Cleaning…',
++  'dialog.deleteGroup.title': 'Delete Group',
++  'dialog.deleteGroup.description': 'Delete "{name}" and all {count} sessions? This action cannot be undone.',
++  'dialog.deleteGroup.confirm': 'Delete Group',
++  'dialog.deleteGroup.confirming': 'Deleting…',
+   'dialog.error.default': 'Operation failed. Please try again.',
+ 
+   // Session export
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index df8d22a0..2558a8fa 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -86,6 +86,13 @@ export default {
+   'sessions.group.new': '在此目录新建会话',
+   'sessions.machineFilter.label': '按机器筛选会话',
+   'sessions.machineFilter.all': '全部',
++  'sessions.group.actions': '分组操作',
++  'sessions.group.copyPath': '复制路径',
++  'sessions.group.archiveAll': '归档所有会话',
++  'sessions.group.cleanOld': '清理旧会话（{count}）',
++  'sessions.group.cleanOldHint': '没有超过 7 天未更新的非活动会话',
++  'sessions.group.delete': '删除分组',
++  'sessions.group.deleteHint': '请先停止或归档活动会话',
+   'codexSync.tooltip': '从 Codex 导入会话到 Hapi',
+   'codexSync.newSessionAction': '导入 Codex 历史',
+   'codexSync.confirm.title': '导入 Codex 会话',
+@@ -233,6 +240,18 @@ export default {
+   'dialog.delete.scratchlist.other': '这也将删除 {n} 条草稿清单条目。',
+   'dialog.delete.confirm': '删除',
+   'dialog.delete.confirming': '删除中…',
++  'dialog.archiveAll.title': '归档所有会话',
++  'dialog.archiveAll.description': '归档 "{name}" 中所有活动会话吗？这将断开这些会话。',
++  'dialog.archiveAll.confirm': '全部归档',
++  'dialog.archiveAll.confirming': '归档中…',
++  'dialog.cleanOldSessions.title': '清理旧会话',
++  'dialog.cleanOldSessions.description': '删除“{name}”中 {count} 个至少 7 天未更新的非活动会话吗？此操作无法撤销。',
++  'dialog.cleanOldSessions.confirm': '清理会话',
++  'dialog.cleanOldSessions.confirming': '清理中…',
++  'dialog.deleteGroup.title': '删除分组',
++  'dialog.deleteGroup.description': '删除 "{name}" 及其全部 {count} 个会话吗？此操作无法撤销。',
++  'dialog.deleteGroup.confirm': '删除分组',
++  'dialog.deleteGroup.confirming': '删除中…',
+ 
+   'dialog.error.default': '操作失败，请重试。',
+ 
+diff --git a/web/src/lib/projectGroupActions.test.ts b/web/src/lib/projectGroupActions.test.ts
+new file mode 100644
+index 00000000..8cfeb137
+--- /dev/null
++++ b/web/src/lib/projectGroupActions.test.ts
+@@ -0,0 +1,135 @@
++import { describe, expect, it } from 'vitest'
++import type { SessionSummary } from '@/types/api'
++import {
++    getProjectGroupActionAvailability,
++    isOldInactiveSession,
++    isSessionArchivable,
++    isSessionArchived
++} from './projectGroupActions'
++
++function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
++    return {
++        active: false,
++        thinking: false,
++        activeAt: 0,
++        updatedAt: 0,
++        metadata: null,
++        todoProgress: null,
++        pendingRequestsCount: 0,
++        pendingRequestKinds: [],
++        pendingRequests: [],
++        backgroundTaskCount: 0,
++        futureScheduledMessageCount: 0,
++        nextScheduledAt: null,
++        model: null,
++        effort: null,
++        ...overrides
++    }
++}
++
++const archived = (id: string) =>
++    makeSession({ id, metadata: { path: '/p', lifecycleState: 'archived' } })
++const running = (id: string) =>
++    makeSession({ id, active: true, metadata: { path: '/p', lifecycleState: 'running' } })
++const completedStub = (id: string) =>
++    makeSession({ id, metadata: { path: '/p' } }) // inactive, no lifecycleState
++
++describe('isSessionArchived', () => {
++    it('is true only when lifecycleState === archived', () => {
++        expect(isSessionArchived(archived('a'))).toBe(true)
++        expect(isSessionArchived(running('b'))).toBe(false)
++        // Inactive but never formally archived must not count as archived.
++        expect(isSessionArchived(completedStub('c'))).toBe(false)
++    })
++})
++
++describe('isSessionArchivable', () => {
++    it('is true for active sessions', () => {
++        expect(isSessionArchivable(running('a'))).toBe(true)
++    })
++
++    it('is true for split-brain rows (inactive but lifecycleState still running)', () => {
++        const splitBrain = makeSession({
++            id: 'sb',
++            active: false,
++            metadata: { path: '/p', lifecycleState: 'running' }
++        })
++        expect(isSessionArchivable(splitBrain)).toBe(true)
++    })
++
++    it('is false for already-archived and inactive completed stubs', () => {
++        expect(isSessionArchivable(archived('a'))).toBe(false)
++        expect(isSessionArchivable(completedStub('b'))).toBe(false)
++    })
++})
++
++describe('getProjectGroupActionAvailability', () => {
++    it('allows archive-all when any session is archivable', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
++            running('a'),
++            archived('b')
++        ])
++        expect(canArchiveAll).toBe(true)
++        // Not all archived → delete blocked.
++        expect(canDelete).toBe(false)
++    })
++
++    it('blocks delete for inactive sessions that were not archived', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            completedStub('b')
++        ])
++        expect(canArchiveAll).toBe(false)
++        expect(canDelete).toBe(false)
++    })
++
++    it('allows delete only when every session is archived', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            archived('b')
++        ])
++        expect(canArchiveAll).toBe(false)
++        expect(canDelete).toBe(true)
++    })
++
++    it('blocks delete when an active session is present', () => {
++        const { canDelete } = getProjectGroupActionAvailability([
++            archived('a'),
++            running('b')
++        ])
++        expect(canDelete).toBe(false)
++    })
++
++    it('blocks delete for an empty group', () => {
++        const { canArchiveAll, canDelete } = getProjectGroupActionAvailability([])
++        expect(canArchiveAll).toBe(false)
++        expect(canDelete).toBe(false)
++    })
++})
++
++describe('isOldInactiveSession', () => {
++    const now = 10 * 24 * 60 * 60 * 1000
++
++    it('matches inactive sessions at least seven days old', () => {
++        expect(isOldInactiveSession(makeSession({ id: 'old', updatedAt: now - 7 * 24 * 60 * 60 * 1000 }), now)).toBe(true)
++    })
++
++    it('rejects recent inactive sessions, old active sessions, and scheduled sessions', () => {
++        expect(isOldInactiveSession(makeSession({ id: 'recent', updatedAt: now - 6 * 24 * 60 * 60 * 1000 }), now)).toBe(false)
++        expect(isOldInactiveSession(makeSession({ id: 'active', active: true, updatedAt: 0 }), now)).toBe(false)
++        expect(isOldInactiveSession(makeSession({
++            id: 'scheduled',
++            updatedAt: 0,
++            futureScheduledMessageCount: 1,
++            nextScheduledAt: now + 1000
++        }), now)).toBe(false)
++    })
++
++    it('rejects an old session with recently updated scratchlist data', () => {
++        expect(isOldInactiveSession(makeSession({
++            id: 'scratchlist-recent',
++            updatedAt: 0,
++            scratchlistUpdatedAt: now - 24 * 60 * 60 * 1000
++        }), now)).toBe(false)
++    })
++})
+diff --git a/web/src/lib/projectGroupActions.ts b/web/src/lib/projectGroupActions.ts
+new file mode 100644
+index 00000000..c0114b24
+--- /dev/null
++++ b/web/src/lib/projectGroupActions.ts
+@@ -0,0 +1,58 @@
++import type { SessionSummary } from '@/types/api'
++
++/**
++ * Project-group bulk-action guards (tiann/hapi#881).
++ *
++ * A session's lifecycle is tracked by `metadata.lifecycleState`
++ * ('running' | 'archived' | undefined) alongside the live `active` flag.
++ */
++
++/** A session is "archived" only when its lifecycle metadata says so —
++ *  `active === false` alone is not enough (imported/completed stubs are
++ *  inactive but never formally archived). */
++export function isSessionArchived(session: SessionSummary): boolean {
++    return session.metadata?.lifecycleState === 'archived'
++}
++
++/** A session can be archived when it is live, or split-brain (inactive cache
++ *  row whose lifecycle metadata still reads 'running'). Matches the archive
++ *  route's accept condition in hub/src/web/routes/sessions.ts. */
++export function isSessionArchivable(session: SessionSummary): boolean {
++    return session.active || session.metadata?.lifecycleState === 'running'
++}
++
++export type ProjectGroupActionAvailability = {
++    /** At least one session can be archived. */
++    canArchiveAll: boolean
++    /** Every session is already archived — the precondition for deleting the
++     *  whole group (deliberate two-step: archive everything, then delete). */
++    canDelete: boolean
++}
++
++export function getProjectGroupActionAvailability(
++    sessions: SessionSummary[]
++): ProjectGroupActionAvailability {
++    return {
++        canArchiveAll: sessions.some(isSessionArchivable),
++        canDelete: sessions.length > 0 && sessions.every(isSessionArchived)
++    }
++}
++
++export const OLD_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000
++
++/** Old-session cleanup intentionally requires both conditions: inactive and
++ *  not updated within the last seven days. */
++export function isOldInactiveSession(
++    session: SessionSummary,
++    now: number = Date.now()
++): boolean {
++    const hasPendingScheduledMessage = (session.uninvokedScheduledMessageCount
++        ?? session.futureScheduledMessageCount) > 0
++    const lastUserDataUpdateAt = Math.max(
++        session.updatedAt,
++        session.scratchlistUpdatedAt ?? 0
++    )
++    return !session.active
++        && !hasPendingScheduledMessage
++        && lastUserDataUpdateAt <= now - OLD_SESSION_AGE_MS
++}
+-- 
+2.50.1 (Apple Git-155)
+

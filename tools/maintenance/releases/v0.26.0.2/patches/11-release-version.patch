@@ -1,0 +1,50 @@
+From f4fff25baedeb558979ffa56cf8e6643039d9095 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Wed, 5 Aug 2026 14:39:17 +0800
+Subject: [PATCH] chore(release): prepare v0.26.0.2
+
+---
+ .github/release-notes/v0.26.0.2.md | 10 ++++++++++
+ cli/package.json                   |  2 +-
+ shared/src/buildInfo.ts            |  2 +-
+ 3 files changed, 12 insertions(+), 2 deletions(-)
+ create mode 100644 .github/release-notes/v0.26.0.2.md
+
+diff --git a/.github/release-notes/v0.26.0.2.md b/.github/release-notes/v0.26.0.2.md
+new file mode 100644
+index 00000000..50498e7c
+--- /dev/null
++++ b/.github/release-notes/v0.26.0.2.md
+@@ -0,0 +1,10 @@
++## HAPI v0.26.0.2
++
++Maintenance hotfix on top of official `v0.26.0` / upstream `main`.
++
++### Fixes
++- Fix React error #185 (maximum update depth) on session chat: `MessageActions` no longer selects a fresh object from `useAuiState` every render (upstream [#1380](https://github.com/tiann/hapi/issues/1380) / [#1381](https://github.com/tiann/hapi/pull/1381)).
++
++### Carried from v0.26.0.1
++- Distribution overlay, schema attachments repair, PRs #1359, #986, #955, #906, and integration fixture repairs.
++
+diff --git a/cli/package.json b/cli/package.json
+index 6c41904a..e98e87d4 100644
+--- a/cli/package.json
++++ b/cli/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@twsxtd/hapi",
+-  "version": "0.26.0",
++  "version": "0.26.0.2",
+   "description": "App for agentic coding - access coding agent anywhere",
+   "author": "Kirill Dubovitskiy & weishu",
+   "license": "AGPL-3.0-only",
+diff --git a/shared/src/buildInfo.ts b/shared/src/buildInfo.ts
+index e6a03306..a223d705 100644
+--- a/shared/src/buildInfo.ts
++++ b/shared/src/buildInfo.ts
+@@ -1 +1 @@
+-export const APP_VERSION = '0.26.0'
++export const APP_VERSION = '0.26.0.2'
+-- 
+2.50.1 (Apple Git-155)
+
