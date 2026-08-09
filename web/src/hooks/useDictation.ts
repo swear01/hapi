@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
+import { saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
 import { useRealtimeDictation } from './useRealtimeDictation'
@@ -33,6 +34,7 @@ export function useDictation(config: {
     mode: TranscriptionMode
     getCurrentText: () => string
     onTextChange: (text: string) => void
+    sendMessage?: (sessionId: string, text: string) => Promise<void>
 }) {
     const onFinalTranscript = useCallback((transcript: string) => {
         config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
@@ -41,109 +43,128 @@ export function useDictation(config: {
         api: config.api,
         provider: config.provider,
         mode: config.mode,
-        onFinalTranscript
+        onFinalTranscript,
+        sendMessage: config.sendMessage
     })
     const browserCanRecord = typeof navigator !== 'undefined'
         && typeof navigator.mediaDevices?.getUserMedia === 'function'
         && typeof MediaRecorder !== 'undefined'
     const standardSupported = config.api !== null
         && config.provider !== null
-        && config.mode === 'standard'
-        && browserCanRecord
+
+    const supported = realtime.supported || (standardSupported && browserCanRecord)
     const [status, setStatus] = useState<ConversationStatus>('disconnected')
     const [error, setError] = useState<string | null>(null)
-    const recorderRef = useRef<MediaRecorder | null>(null)
-    const streamRef = useRef<MediaStream | null>(null)
-    const chunksRef = useRef<Blob[]>([])
     const mountedRef = useRef(true)
+    const recorderRef = useRef<MediaRecorder | null>(null)
+    const mediaStreamRef = useRef<MediaStream | null>(null)
+    const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-
     const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
 
     const stopTracks = useCallback(() => {
-        streamRef.current?.getTracks().forEach((track) => track.stop())
-        streamRef.current = null
+        if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach((track) => track.stop())
+            mediaStreamRef.current = null
+        }
     }, [])
 
     const start = useCallback(async () => {
-        if (!standardSupported || !config.provider || status === 'connecting' || status === 'connected') return
-        const operation = ++operationRef.current
-        const provider = config.provider
-        const language = localStorage.getItem('hapi-voice-lang') || undefined
+        if (status !== 'disconnected' && status !== 'error') return
         setError(null)
+        if (realtime.supported) {
+            await realtime.toggle()
+            return
+        }
+        if (!standardSupported || !browserCanRecord) {
+            setError('Voice input is not supported in this browser')
+            setStatus('error')
+            return
+        }
+        const mimeType = preferredMimeType()
+        operationRef.current += 1
+        const operation = operationRef.current
         setStatus('connecting')
+
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-            })
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
             if (operationRef.current !== operation) {
                 stream.getTracks().forEach((track) => track.stop())
                 return
             }
-            const mimeType = preferredMimeType()
-            const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
-            streamRef.current = stream
-            recorderRef.current = recorder
+            mediaStreamRef.current = stream
             chunksRef.current = []
+
+            const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+            recorderRef.current = recorder
+            const type = recorder.mimeType || mimeType || 'audio/webm'
+
             recorder.ondataavailable = (event) => {
                 if (event.data.size > 0) chunksRef.current.push(event.data)
             }
-            recorder.onerror = () => {
-                stopTracks()
-                setError('Audio recording failed')
-                setStatus('error')
-            }
+
             recorder.onstop = async () => {
                 stopTracks()
-                const type = recorder.mimeType || mimeType || 'audio/webm'
-                const blob = new Blob(chunksRef.current, { type })
-                recorderRef.current = null
-                chunksRef.current = []
-                const pendingSend = sendOnFinishRef.current
-                sendOnFinishRef.current = null
-
-                if (!blob.size) {
-                    transcribingRef.current = false
-                    if (mountedRef.current) {
-                        setError('No audio was recorded')
-                        setStatus('error')
-                    }
-                    return
-                }
-                transcribingRef.current = true
                 try {
-                    const result = await config.api!.transcribeVoice({
-                        file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
-                        provider,
-                        mode: 'standard',
-                        language
-                    })
-                    const transcribedText = result.text || ''
-                    if (pendingSend) {
-                        const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
-                        if (finalMessage.trim() && config.api) {
-                            try {
-                                await config.api.sendMessage(pendingSend.sessionId, finalMessage)
-                            } catch (sendError) {
-                                if (mountedRef.current) {
-                                    config.onTextChange(finalMessage)
-                                    setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
-                                    setStatus('error')
-                                    return
+                    const blob = new Blob(chunksRef.current, { type })
+                    recorderRef.current = null
+                    chunksRef.current = []
+                    const pendingSend = sendOnFinishRef.current
+                    sendOnFinishRef.current = null
+
+                    if (!blob.size) {
+                        transcribingRef.current = false
+                        if (pendingSend) {
+                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        }
+                        if (mountedRef.current) {
+                            if (pendingSend) config.onTextChange(pendingSend.initialText)
+                            setError('No audio was recorded')
+                            setStatus('error')
+                        }
+                        return
+                    }
+                    transcribingRef.current = true
+                    try {
+                        const result = await config.api!.transcribeVoice({
+                            file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
+                            provider: config.provider!,
+                            mode: 'standard',
+                            language: undefined
+                        })
+                        const transcribedText = result.text || ''
+                        if (pendingSend) {
+                            const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
+                            if (finalMessage.trim()) {
+                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
+                                try {
+                                    await sendMsg(pendingSend.sessionId, finalMessage)
+                                } catch (sendError) {
+                                    saveDraft(pendingSend.sessionId, finalMessage)
+                                    if (mountedRef.current) {
+                                        config.onTextChange(finalMessage)
+                                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
+                                        setStatus('error')
+                                        return
+                                    }
                                 }
                             }
+                        } else if (mountedRef.current) {
+                            config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))
                         }
-                    } else if (mountedRef.current) {
-                        config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))
-                    }
-                    if (mountedRef.current) {
-                        setStatus('disconnected')
-                    }
-                } catch (transcriptionError) {
-                    if (mountedRef.current) {
-                        setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
-                        setStatus('error')
+                        if (mountedRef.current) {
+                            setStatus('disconnected')
+                        }
+                    } catch (transcriptionError) {
+                        if (pendingSend) {
+                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        }
+                        if (mountedRef.current) {
+                            if (pendingSend) config.onTextChange(pendingSend.initialText)
+                            setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
+                            setStatus('error')
+                        }
                     }
                 } finally {
                     transcribingRef.current = false

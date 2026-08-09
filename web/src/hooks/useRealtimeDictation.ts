@@ -6,6 +6,7 @@ import {
     type TranscriptionProvider
 } from '@hapi/protocol/voice'
 import type { ApiClient } from '@/api/client'
+import { saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript } from './useDictation'
 import {
@@ -30,6 +31,7 @@ export function useRealtimeDictation(config: {
     provider: TranscriptionProvider | null
     mode: TranscriptionMode
     onFinalTranscript: (text: string) => void
+    sendMessage?: (sessionId: string, text: string) => Promise<void>
 }) {
     const supported = config.api !== null
         && config.mode === 'realtime'
@@ -61,10 +63,12 @@ export function useRealtimeDictation(config: {
         sendOnFinishRef.current = null
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
-            if (finalMessage.trim() && config.api) {
+            if (finalMessage.trim()) {
+                const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
                 try {
-                    await config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                    await sendMsg(pendingSend.sessionId, finalMessage)
                 } catch (sendError) {
+                    saveDraft(pendingSend.sessionId, finalMessage)
                     if (mountedRef.current) {
                         onFinalTranscriptRef.current(finalMessage)
                         setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
@@ -81,16 +85,25 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) {
             setStatus('disconnected')
         }
-    }, [config.api, updatePartial])
+    }, [config.api, config.sendMessage, updatePartial])
 
     const fail = useCallback((value: unknown) => {
-        if (!mountedRef.current) return
+        const pendingSend = sendOnFinishRef.current
+        sendOnFinishRef.current = null
+        if (pendingSend) {
+            const finalMessage = appendTranscript(pendingSend.initialText, partialRef.current)
+            saveDraft(pendingSend.sessionId, finalMessage)
+            if (mountedRef.current) {
+                onFinalTranscriptRef.current(finalMessage)
+            }
+        }
         elevenLabsActiveRef.current = false
         resolveElevenLabsCommitRef.current?.()
         resolveElevenLabsCommitRef.current = null
+        if (!mountedRef.current) return
         sessionRef.current?.cancel()
         sessionRef.current = null
-        setError(value instanceof Error ? value.message : 'Realtime transcription failed')
+        setError(value instanceof Error ? value.message : 'Transcription failed')
         setStatus('error')
     }, [])
 
