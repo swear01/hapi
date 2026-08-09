@@ -293,6 +293,24 @@ describe('wireTransportEvents', () => {
         expect(session.client.emitSessionReady).toHaveBeenCalledTimes(1);
     });
 
+    it('syncs a native sessionName from get_state as the HAPI title', () => {
+        const transport = createMockTransport();
+        wireTransportEvents(transport, session, []);
+
+        emitEvent({
+            type: 'response',
+            command: 'get_state',
+            success: true,
+            data: { sessionName: '  Native Pi Title  ' },
+        });
+
+        expect(session.client.updateMetadata).toHaveBeenCalledTimes(1);
+        const updateMetadata = session.client.updateMetadata as ReturnType<typeof vi.fn>;
+        expect(updateMetadata.mock.calls[0]![0]({ path: '/tmp/test', host: 'localhost' })).toMatchObject({
+            summary: { text: 'Native Pi Title' },
+        });
+    });
+
     it('marks session ready on get_state response (drains buffered sends) — issue #1143', () => {
         const transport = createMockTransport();
         wireTransportEvents(transport, session, []);

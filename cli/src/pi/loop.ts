@@ -1,5 +1,6 @@
 import { logger } from '@/ui/logger';
 import { convertAgentMessage } from '@/agent/messageConverter';
+import { createNativeSessionTitleMetadataSync } from '@/agent/nativeSessionTitle';
 import { PiTransport } from './piTransport';
 import { convertPiEvent, convertPiTurnUsage } from './piEventConverter';
 import { PiMessageAccumulator } from './piMessageAccumulator';
@@ -117,6 +118,7 @@ function applyGetState(
     data: {
         model?: { id?: string; modelId?: string; provider?: string };
         sessionId?: string;
+        sessionName?: string;
         thinkingLevel?: string;
         steeringMode?: 'all' | 'one-at-a-time';
         isStreaming?: boolean;
@@ -152,6 +154,8 @@ function applyGetState(
         session.updateMetadata((meta) => ({ ...meta, piSessionId: data.sessionId }));
         logger.debug(`[pi] Session ID persisted to metadata: ${data.sessionId}`);
     }
+
+    createNativeSessionTitleMetadataSync(session.client)(data.sessionName);
 
     if (data.thinkingLevel) {
         session.currentThinkingLevel = data.thinkingLevel as PiThinkingLevel;
