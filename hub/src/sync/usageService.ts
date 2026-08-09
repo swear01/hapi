@@ -1,4 +1,4 @@
-import type { UsageAgentStatus, UsageSummaryBucket, UsageSummaryResponse } from '@hapi/protocol/apiTypes'
+import type { UsageAgentStatus, UsageCost, UsageSummaryBucket, UsageSummaryResponse } from '@hapi/protocol/apiTypes'
 import type { StoredMessage, StoredSession } from '../store'
 import type { UsageEvent } from '../store/usage'
 import type { Store } from '../store'
@@ -169,8 +169,13 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         // Zero-token messages still carry presence information: an ACP agent
         // may report only context (`usage_update.used/size`) or only a
         // cumulative session cost. Both are indexed so the UI can distinguish
-        // "context-only"/"cost-only" from an agent that reports nothing.
-        const contextOnly = !hasProcessedTokens && firstCount(info, 'contextTokens', 'context_tokens') > 0
+        // "context-only"/"cost-only" from an agent that reports nothing. An
+        // explicit zero context is still a report (asCount returns null only
+        // for missing values), and a context window alone is a presence too.
+        const contextTokens = asCount(info.contextTokens ?? info.context_tokens)
+        const contextWindow = asCount(info.modelContextWindow ?? info.model_context_window)
+        const contextOnly = !hasProcessedTokens
+            && (contextTokens !== null || contextWindow !== null)
         if (!hasProcessedTokens && !contextOnly && cost === null) return null
         const threadId = explicitThreadId ?? session.id
         const scope = typeof data.scopeRole === 'string'
@@ -423,7 +428,6 @@ export function getUsageSummary(
     // Cumulative session cost is a point-in-time value, not a delta: keep the
     // latest in-range report per session and credit it once.
     const sessionCost = new Map<string, { amount: number; currency: string; createdAt: number; sourceSeq: number }>()
-
     for (const event of events) {
         let inputTokens = event.inputTokens
         let outputTokens = event.outputTokens
@@ -512,26 +516,22 @@ export function getUsageSummary(
         sessionsWithUsage.add(event.sessionId)
     }
 
-    let totalCost = 0
-    let totalCostCurrency = 'USD'
-    let latestCostAt = -1
-    const sessionById = new Map(sessions.map((session) => [session.id, session]))
+    // Costs are never summed across currencies into one labeled scalar: each
+    // currency keeps its own total (e.g. USD 1 + EUR 1 stays two entries).
+    const totalCosts = new Map<string, number>()
     for (const cost of sessionCost.values()) {
-        totalCost += cost.amount
-        if (cost.createdAt > latestCostAt) {
-            latestCostAt = cost.createdAt
-            totalCostCurrency = cost.currency
-        }
+        totalCosts.set(cost.currency, (totalCosts.get(cost.currency) ?? 0) + cost.amount)
     }
 
     // Per-agent availability: every session's agent starts as "not-reported";
     // the strongest status observed across its events upgrades it.
-    const agentEntries = new Map<string, { status: UsageAgentStatus; sessions: number; cost: number; costCurrency: string }>()
+    const sessionById = new Map(sessions.map((session) => [session.id, session]))
+    const agentEntries = new Map<string, { status: UsageAgentStatus; sessions: number; costs: Map<string, number> }>()
     for (const session of sessions) {
         const agent = sessionAgent(session)
         if (agent === 'unknown') continue
         const entry = agentEntries.get(agent)
-            ?? { status: 'not-reported' as UsageAgentStatus, sessions: 0, cost: 0, costCurrency: 'USD' }
+            ?? { status: 'not-reported' as UsageAgentStatus, sessions: 0, costs: new Map<string, number>() }
         entry.sessions += 1
         const status = sessionStatus.get(session.id)
         if (status && AGENT_STATUS_RANK[status] > AGENT_STATUS_RANK[entry.status]) {
@@ -546,9 +546,12 @@ export function getUsageSummary(
         if (agent === 'unknown') continue
         const entry = agentEntries.get(agent)
         if (!entry) continue
-        entry.cost += cost.amount
-        entry.costCurrency = cost.currency
+        entry.costs.set(cost.currency, (entry.costs.get(cost.currency) ?? 0) + cost.amount)
     }
+
+    const toCosts = (values: Map<string, number>): UsageCost[] => Array.from(values.entries())
+        .map(([currency, amount]) => ({ amount, currency }))
+        .sort((a, b) => b.amount - a.amount)
 
     const sortBuckets = (values: Map<string, Totals>): UsageSummaryBucket[] => Array.from(values.entries())
         .map(([key, value]) => toBucket(key, value))
@@ -556,7 +559,7 @@ export function getUsageSummary(
 
     return {
         range: { from, to: now },
-        totals: { ...totals, sessions: sessionsWithUsage.size, cost: totalCost, costCurrency: totalCostCurrency },
+        totals: { ...totals, sessions: sessionsWithUsage.size, costs: toCosts(totalCosts) },
         daily: Array.from(daily.entries())
             .map(([key, value]) => toBucket(key, value))
             .sort((a, b) => a.key.localeCompare(b.key)),
@@ -567,8 +570,7 @@ export function getUsageSummary(
                 agent,
                 status: entry.status,
                 sessions: entry.sessions,
-                cost: entry.cost,
-                costCurrency: entry.costCurrency
+                costs: toCosts(entry.costs)
             }))
             .sort((a, b) => a.agent.localeCompare(b.agent)),
         updatedAt: now

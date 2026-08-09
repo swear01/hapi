@@ -852,11 +852,12 @@ export class AcpSdkBackend implements AgentBackend {
             return;
         }
 
+        const previous = this.latestUsageUpdate
         this.latestUsageUpdate = {
-            contextTokens: contextTokens ?? undefined,
-            contextWindow: contextWindow ?? undefined,
-            tokenUsage: tokenUsage ?? this.latestUsageUpdate?.tokenUsage ?? null,
-            cost: cost ?? this.latestUsageUpdate?.cost ?? null
+            contextTokens: contextTokens ?? previous?.contextTokens,
+            contextWindow: contextWindow ?? previous?.contextWindow,
+            tokenUsage: tokenUsage ?? previous?.tokenUsage ?? null,
+            cost: cost ?? previous?.cost ?? null
         };
         this.forwardUsageUpdate();
     }

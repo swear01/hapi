@@ -892,8 +892,82 @@ describe('usage service', () => {
         const result = getUsageSummary(store, 'default', 'all')
         expect(result.totals.requests).toBe(0)
         expect(result.totals.totalTokens).toBe(0)
+        expect(result.totals.costs).toEqual([])
         expect(result.agents).toEqual([
-            expect.objectContaining({ agent: 'opencode', status: 'context-only', sessions: 1, cost: 0 })
+            expect.objectContaining({ agent: 'opencode', status: 'context-only', sessions: 1, costs: [] })
+        ])
+        store.close()
+    })
+
+    it('treats an explicit zero context or a context window alone as context presence', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-zero-context-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default',
+            'some-model'
+        )
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                model: 'some-model',
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 0,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.agents).toEqual([
+            expect.objectContaining({ agent: 'opencode', status: 'context-only', sessions: 1 })
+        ])
+        store.close()
+    })
+
+    it('keeps costs per currency instead of collapsing them into one scalar', () => {
+        const store = new Store(':memory:')
+        const usdSession = store.sessions.getOrCreateSession(
+            'acp-cost-usd-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const eurSession = store.sessions.getOrCreateSession(
+            'acp-cost-eur-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const costMessage = (cost: number, currency: string) => ({
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost,
+                costCurrency: currency,
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+        addAgentMessage(store, usdSession.id, costMessage(1, 'USD'))
+        addAgentMessage(store, eurSession.id, costMessage(1, 'EUR'))
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.costs).toEqual([
+            { amount: 1, currency: 'USD' },
+            { amount: 1, currency: 'EUR' }
+        ])
+        expect(result.agents).toEqual([
+            expect.objectContaining({ agent: 'opencode', status: 'cost-only', costs: [
+                { amount: 1, currency: 'USD' },
+                { amount: 1, currency: 'EUR' }
+            ] })
         ])
         store.close()
     })
@@ -934,11 +1008,10 @@ describe('usage service', () => {
         })
 
         const result = getUsageSummary(store, 'default', 'all')
-        expect(result.totals.cost).toBe(2.5)
-        expect(result.totals.costCurrency).toBe('USD')
+        expect(result.totals.costs).toEqual([{ amount: 2.5, currency: 'USD' }])
         expect(result.totals.requests).toBe(0)
         expect(result.agents).toEqual([
-            expect.objectContaining({ agent: 'opencode', status: 'cost-only', cost: 2.5, costCurrency: 'USD' })
+            expect.objectContaining({ agent: 'opencode', status: 'cost-only', costs: [{ amount: 2.5, currency: 'USD' }] })
         ])
         store.close()
     })
@@ -984,9 +1057,9 @@ describe('usage service', () => {
         expect(result.totals.inputTokens).toBe(160)
         expect(result.totals.outputTokens).toBe(35)
         // Cumulative cost is not a per-turn delta: the latest value wins.
-        expect(result.totals.cost).toBe(1.1)
+        expect(result.totals.costs).toEqual([{ amount: 1.1, currency: 'USD' }])
         expect(result.agents).toEqual([
-            expect.objectContaining({ agent: 'opencode', status: 'complete', cost: 1.1 })
+            expect.objectContaining({ agent: 'opencode', status: 'complete', costs: [{ amount: 1.1, currency: 'USD' }] })
         ])
         store.close()
     })
@@ -1017,10 +1090,9 @@ describe('usage service', () => {
         const result = getUsageSummary(store, 'default', 'all')
         expect(result.agents).toEqual([
             expect.objectContaining({ agent: 'claude', status: 'complete', sessions: 1 }),
-            expect.objectContaining({ agent: 'opencode', status: 'not-reported', sessions: 1, cost: 0 })
+            expect.objectContaining({ agent: 'opencode', status: 'not-reported', sessions: 1, costs: [] })
         ])
-        expect(result.totals.cost).toBe(0)
-        expect(result.totals.costCurrency).toBe('USD')
+        expect(result.totals.costs).toEqual([])
         store.close()
     })
 })

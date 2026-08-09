@@ -1028,6 +1028,59 @@ describe('AcpSdkBackend', () => {
         expect(usageMessages.at(-1)).toEqual(expect.objectContaining({ cost: 0.4, costCurrency: 'USD' }));
     });
 
+    it('preserves context fields when a state_update carries only tokens', async () => {
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
+
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+
+        const messages: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => {
+                // usage_update first reports context, then a state_update
+                // reports tokens without touching context. The final usage
+                // event must keep the previously reported context values.
+                backendInternal.handleSessionUpdate({
+                    sessionId: 'session-1',
+                    update: { sessionUpdate: 'usage_update', used: 2_000, size: 200_000 }
+                });
+                await sleep(5);
+                backendInternal.handleSessionUpdate({
+                    sessionId: 'session-1',
+                    update: { sessionUpdate: 'state_update', state: 'idle', usage: { input_tokens: 100, output_tokens: 20 } }
+                });
+                await sleep(5);
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
+
+        const usageMessages = messages.filter(
+            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
+        );
+        const final = usageMessages.at(-1);
+        expect(final).toEqual(expect.objectContaining({
+            inputTokens: 100,
+            outputTokens: 20,
+            contextTokens: 2_000,
+            contextWindow: 200_000
+        }));
+    });
+
     it('forwards title changes from session_info_update', () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const updates: Array<{ sessionId: string | null; title: string | null }> = [];
