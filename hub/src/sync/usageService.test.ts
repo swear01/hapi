@@ -928,8 +928,7 @@ describe('usage service', () => {
         store.close()
     })
 
-    it('keeps costs per currency instead of collapsing them into one scalar', () => {
-        const store = new Store(':memory:')
+    it('keeps costs per currency instead of collapsing them into one scalar', () => {        const store = new Store(':memory:')
         const usdSession = store.sessions.getOrCreateSession(
             'acp-cost-usd-test',
             { path: '/tmp', host: 'test', flavor: 'opencode' },
@@ -969,6 +968,71 @@ describe('usage service', () => {
                 { amount: 1, currency: 'EUR' }
             ] })
         ])
+        store.close()
+    })
+
+    it('derives bounded-range cost from the cumulative baseline', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-cost-range-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const costMessage = (cost: number, currency: string) => ({
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost,
+                costCurrency: currency,
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+        const day = 24 * 60 * 60 * 1000
+        // USD 10 was already spent before the 7-day window; USD 11 is the
+        // cumulative total now. The 7-day view must show the USD 1 growth,
+        // while the all-time view shows the full USD 11.
+        addAgentMessage(store, session.id, costMessage(10, 'USD'), Date.now() - 10 * day)
+        addAgentMessage(store, session.id, costMessage(11, 'USD'))
+
+        const sevenDay = getUsageSummary(store, 'default', '7d')
+        expect(sevenDay.totals.costs).toEqual([{ amount: 1, currency: 'USD' }])
+        const allTime = getUsageSummary(store, 'default', 'all')
+        expect(allTime.totals.costs).toEqual([{ amount: 11, currency: 'USD' }])
+        store.close()
+    })
+
+    it('omits a session cost whose baseline currency changed inside the range', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-cost-currency-switch-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const costMessage = (cost: number, currency: string) => ({
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost,
+                costCurrency: currency,
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+        const day = 24 * 60 * 60 * 1000
+        addAgentMessage(store, session.id, costMessage(10, 'USD'), Date.now() - 10 * day)
+        addAgentMessage(store, session.id, costMessage(2, 'EUR'))
+
+        const sevenDay = getUsageSummary(store, 'default', '7d')
+        expect(sevenDay.totals.costs).toEqual([])
         store.close()
     })
 
