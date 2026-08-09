@@ -266,6 +266,20 @@ describe('responsive settings pages', () => {
         expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     })
 
+    it('persists Create agent visibility across remounts', () => {
+        const first = renderPage(<SettingsDisplayPage />)
+        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'codex' })).toBeChecked()
+
+        fireEvent.click(screen.getByRole('checkbox', { name: 'codex' }))
+        expect(JSON.parse(localStorage.getItem('hapi:newSession:agentVisibility:v1') ?? '{}')).toEqual({ claude: true, codex: false })
+        first.unmount()
+
+        renderPage(<SettingsDisplayPage />)
+        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'codex' })).not.toBeChecked()
+    })
+
     it('keeps the session status description visible with its choice group', () => {
         renderPage(<SettingsDisplayPage />)
 
