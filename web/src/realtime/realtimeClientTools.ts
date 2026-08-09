@@ -3,7 +3,7 @@ import { VOICE_CONFIG } from './voiceConfig'
 
 // Store for session state and API client
 let sessionStore: {
-    getSession: (sessionId: string) => { agentState?: { requests?: Record<string, unknown> } } | null
+    getSession: (sessionId: string) => Promise<{ agentState?: { requests?: Record<string, unknown> } } | null> | { agentState?: { requests?: Record<string, unknown> } } | null
     sendMessage: (sessionId: string, message: string) => Promise<void> | void
     approvePermission: (sessionId: string, requestId: string) => Promise<void>
     denyPermission: (sessionId: string, requestId: string) => Promise<void>
@@ -88,7 +88,7 @@ export const realtimeClientTools = {
         }
 
         // Get the current session to check for permission requests
-        const session = sessionStore.getSession(sessionId)
+        const session = await sessionStore.getSession(sessionId)
         const requests = session?.agentState?.requests
 
         if (!requests || Object.keys(requests).length === 0) {

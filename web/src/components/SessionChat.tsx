@@ -1105,7 +1105,17 @@ function SessionChatInner(props: SessionChatProps) {
     // Register session store for voice client tools
     useEffect(() => {
         registerSessionStore({
-            getSession: (sessionId: string) => (sessionId === props.session.id ? (props.session as unknown as { agentState?: { requests?: Record<string, unknown> } }) : null),
+            getSession: async (sessionId: string) => {
+                if (sessionId === props.session.id) {
+                    return props.session as unknown as { agentState?: { requests?: Record<string, unknown> } }
+                }
+                try {
+                    const res = await props.api.getSession(sessionId)
+                    return res.session as unknown as { agentState?: { requests?: Record<string, unknown> } }
+                } catch {
+                    return null
+                }
+            },
             sendMessage: async (sessionId: string, message: string) => {
                 if (sessionId === props.session.id) {
                     const accepted = await props.onSend(message)

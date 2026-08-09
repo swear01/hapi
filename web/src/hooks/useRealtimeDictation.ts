@@ -66,7 +66,7 @@ export function useRealtimeDictation(config: {
                     await config.api.sendMessage(pendingSend.sessionId, finalMessage)
                 } catch (sendError) {
                     if (mountedRef.current) {
-                        onFinalTranscriptRef.current(text)
+                        onFinalTranscriptRef.current(finalMessage)
                         setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
                         setStatus('error')
                         return

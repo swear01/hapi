@@ -47,4 +47,21 @@ describe('realtimeClientTools', () => {
 
         expect(result).toBe('error (failed to send message)')
     })
+
+    it('approves permission for target session retrieved asynchronously', async () => {
+        const approvePermission = vi.fn(async () => {})
+        registerSessionStore({
+            getSession: async (id) => (id === 'session-A' ? { agentState: { requests: { 'req-123': {} } } } : null),
+            sendMessage: async () => {},
+            approvePermission,
+            denyPermission: async () => {}
+        })
+
+        updateCurrentSessionId('session-A')
+
+        const result = await realtimeClientTools.processPermissionRequest({ decision: 'allow' })
+
+        expect(result).toContain('done')
+        expect(approvePermission).toHaveBeenCalledWith('session-A', 'req-123')
+    })
 })
