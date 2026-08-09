@@ -539,9 +539,18 @@ export function getUsageSummary(
     // range; a currency change against the baseline cannot be diffed, so that
     // session's cost is omitted rather than invented.
     const rangedCost = new Map<string, { amount: number; currency: string }>()
+    const sessionById = new Map(sessions.map((session) => [session.id, session]))
     for (const [sessionId, point] of sessionCost) {
         const baseline = costBaselines.get(sessionId)
         if (from === null || !baseline) {
+            // 'all' keeps the full cumulative amount. For a bounded range a
+            // missing baseline is only a true zero when the session itself
+            // started inside the range; an older session with its first cost
+            // sample inside the window cannot be attributed, so it is omitted.
+            const session = sessionById.get(sessionId)
+            if (from !== null && !baseline && session && session.createdAt < from) {
+                continue
+            }
             rangedCost.set(sessionId, { amount: point.amount, currency: point.currency })
         } else if (baseline.currency === point.currency) {
             const amount = point.amount >= baseline.amount
@@ -559,7 +568,6 @@ export function getUsageSummary(
 
     // Per-agent availability: every session's agent starts as "not-reported";
     // the strongest status observed across its events upgrades it.
-    const sessionById = new Map(sessions.map((session) => [session.id, session]))
     const agentEntries = new Map<string, { status: UsageAgentStatus; sessions: number; costs: Map<string, number> }>()
     for (const session of sessions) {
         const agent = sessionAgent(session)

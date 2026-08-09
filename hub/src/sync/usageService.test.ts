@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { Store } from '../store'
 import { getUsageSummary } from './usageService'
 
@@ -1003,6 +1004,43 @@ describe('usage service', () => {
         expect(sevenDay.totals.costs).toEqual([{ amount: 1, currency: 'USD' }])
         const allTime = getUsageSummary(store, 'default', 'all')
         expect(allTime.totals.costs).toEqual([{ amount: 11, currency: 'USD' }])
+        store.close()
+    })
+
+    it('omits pre-range spend when an old session first reports cost inside the range', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-cost-old-session-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const day = 24 * 60 * 60 * 1000
+        // The session predates the 7-day window but its first (and only) cost
+        // sample lands inside it. The bounded view cannot attribute how much
+        // was already spent, so it omits the session; all-time keeps the full
+        // cumulative amount.
+        const internalDb = (store as unknown as { db: Database }).db
+        internalDb.prepare('UPDATE sessions SET created_at = ? WHERE id = ?')
+            .run(Date.now() - 30 * day, session.id)
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost: 5,
+                costCurrency: 'USD',
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+
+        const sevenDay = getUsageSummary(store, 'default', '7d')
+        expect(sevenDay.totals.costs).toEqual([])
+        const allTime = getUsageSummary(store, 'default', 'all')
+        expect(allTime.totals.costs).toEqual([{ amount: 5, currency: 'USD' }])
         store.close()
     })
 
