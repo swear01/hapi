@@ -194,16 +194,15 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
             if (typeof marker === 'string') {
                 return Math.max(last, data.lastIndexOf(marker))
             }
-            // Non-global RegExp (as required above): scan forward for the last
-            // match instead of relying on stateful lastIndex.
-            let searchFrom = 0
+            // Non-global RegExp (as required above): clone with the g flag and
+            // scan the original string so anchors keep their meaning, and bump
+            // past zero-width matches so the scan terminates.
+            const scan = new RegExp(marker.source, `${marker.flags}g`)
             let markerLast = -1
-            for (;;) {
-                const match = marker.exec(data.slice(searchFrom))
-                if (!match) break
-                const abs = searchFrom + match.index
-                markerLast = abs
-                searchFrom = abs + (match[0].length || 1)
+            let match: RegExpExecArray | null
+            while ((match = scan.exec(data)) !== null) {
+                markerLast = match.index
+                if (match[0].length === 0) scan.lastIndex += 1
             }
             return Math.max(last, markerLast)
         }, -1)
@@ -394,8 +393,12 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                 let reachedIdleMarker = false
                 sawOutput = true
                 lastOutputAt = Date.now()
-                promptBuffer = (promptBuffer + data).slice(-PROMPT_BUFFER_SIZE)
-                const markerBuffer = promptBuffer.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, '')
+                // Scan the full incoming chunk (plus the retained tail) before
+                // truncating, so a busy marker followed by more than
+                // PROMPT_BUFFER_SIZE bytes in one callback is still seen.
+                const markerInput = promptBuffer + data
+                promptBuffer = markerInput.slice(-PROMPT_BUFFER_SIZE)
+                const markerBuffer = markerInput.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, '')
                 // Auto-approve the first-run trust/safety prompt (Enter = default
                 // "Yes"). Do this BEFORE prompt detection so the trust screen
                 // isn't mistaken for the input prompt — otherwise the first user
@@ -425,6 +428,10 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                 const busyAt = busyMarkers.length > 0 ? lastMarkerIndex(markerBuffer, busyMarkers) : -1
                 const idleAt = idleMarkers.length > 0 ? lastMarkerIndex(markerBuffer, idleMarkers) : -1
                 if (idleAt > busyAt) {
+                    // The busy marker was seen earlier in this same chunk: the
+                    // run that produced it is the one ending now, so keep the
+                    // confirmation that lets completeAgentRun fire.
+                    if (agentRunActive && busyAt >= 0) agentRunSawBusyMarker = true
                     setThinking(false)
                     inputReady = true
                     reachedIdleMarker = true

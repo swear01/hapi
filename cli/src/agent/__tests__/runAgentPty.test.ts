@@ -270,6 +270,42 @@ describe('runAgentPty', () => {
         vi.useRealTimers()
     })
 
+    it('sees a busy marker in a single callback larger than the prompt buffer', async () => {
+        vi.useFakeTimers()
+        const thinking = vi.fn()
+        const onAgentRunCompleted = vi.fn()
+        const promise = runAgentPty(makeOpts({
+            promptMarkers: ['READY'],
+            busyMarkers: ['Generating'],
+            idleMarkers: ['? for shortcuts'],
+            requirePromptMarker: true,
+            thinkingSilenceTimeoutMs: null,
+            nextMessage: vi.fn()
+                .mockResolvedValueOnce({ message: 'first' })
+                .mockImplementationOnce(() => new Promise<{ message: string } | null>(() => {})),
+            onThinkingChange: thinking,
+            onAgentRunCompleted,
+        }))
+
+        harness.triggerData('READY')
+        await vi.advanceTimersByTimeAsync(520)
+        expect(thinking).toHaveBeenLastCalledWith(true)
+
+        // One callback: busy marker, then more than PROMPT_BUFFER_SIZE bytes,
+        // then the idle footer. The busy marker must not be lost to the
+        // truncation, or the agent run never completes and the pending web
+        // delivery stays blocked.
+        const filler = 'x'.repeat(5000)
+        harness.triggerData(`Generating ${filler}\r\n? for shortcuts`)
+        expect(thinking).toHaveBeenLastCalledWith(false)
+        expect(onAgentRunCompleted).toHaveBeenCalledTimes(1)
+
+        harness.triggerExit(0)
+        await vi.advanceTimersByTimeAsync(100)
+        await promise
+        vi.useRealTimers()
+    })
+
     it('recognizes a busy marker fragmented across PTY output chunks', async () => {
         const pending = deferred<{ message: string } | null>()
         const thinking = vi.fn()
