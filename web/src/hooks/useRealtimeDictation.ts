@@ -6,7 +6,7 @@ import {
     type TranscriptionProvider
 } from '@hapi/protocol/voice'
 import type { ApiClient } from '@/api/client'
-import { saveDraft, clearDraft } from '@/lib/composer-drafts'
+import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript } from './useDictation'
 import {
@@ -57,7 +57,7 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string } | null>(null)
 
     const finish = useCallback(async (text: string) => {
         const pendingSend = sendOnFinishRef.current
@@ -69,9 +69,15 @@ export function useRealtimeDictation(config: {
                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
                 try {
                     await sendMsg(pendingSend.sessionId, finalMessage)
-                    clearDraft(pendingSend.sessionId)
+                    const cur = getDraft(pendingSend.sessionId)
+                    if (cur === '' || cur === pendingSend.draftAtStart) {
+                        clearDraft(pendingSend.sessionId)
+                    }
                 } catch (sendError) {
-                    saveDraft(pendingSend.sessionId, finalMessage)
+                    const cur = getDraft(pendingSend.sessionId)
+                    if (cur === '' || cur === pendingSend.draftAtStart) {
+                        saveDraft(pendingSend.sessionId, finalMessage)
+                    }
                     if (mountedRef.current) {
                         if (!config.getCurrentText?.().trim()) {
                             onFinalTranscriptRef.current(finalMessage)
@@ -96,7 +102,10 @@ export function useRealtimeDictation(config: {
         sendOnFinishRef.current = null
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, partialRef.current)
-            saveDraft(pendingSend.sessionId, finalMessage)
+            const cur = getDraft(pendingSend.sessionId)
+            if (cur === '' || cur === pendingSend.draftAtStart) {
+                saveDraft(pendingSend.sessionId, finalMessage)
+            }
             if (mountedRef.current) {
                 if (!config.getCurrentText?.().trim()) {
                     onFinalTranscriptRef.current(finalMessage)
@@ -267,7 +276,7 @@ export function useRealtimeDictation(config: {
     }, [elevenLabs, fail])
 
     const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
-        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '' }
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId) }
         await stop()
     }, [stop])
 

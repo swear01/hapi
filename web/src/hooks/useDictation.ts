@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
-import { clearDraft, saveDraft } from '@/lib/composer-drafts'
+import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
 import { useRealtimeDictation } from './useRealtimeDictation'
@@ -64,7 +64,7 @@ export function useDictation(config: {
     const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string } | null>(null)
 
     const stopTracks = useCallback(() => {
         if (mediaStreamRef.current) {
@@ -118,9 +118,14 @@ export function useDictation(config: {
 
                     if (!mountedRef.current && !pendingSend) return
 
+                    const draftUnchanged = (sid: string, baseline: string) => {
+                        const cur = getDraft(sid)
+                        return cur === '' || cur === baseline
+                    }
+
                     if (!blob.size) {
                         transcribingRef.current = false
-                        if (pendingSend) {
+                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                             saveDraft(pendingSend.sessionId, pendingSend.initialText)
                         }
                         if (mountedRef.current) {
@@ -146,9 +151,13 @@ export function useDictation(config: {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
                                 try {
                                     await sendMsg(pendingSend.sessionId, finalMessage)
-                                    clearDraft(pendingSend.sessionId)
+                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                        clearDraft(pendingSend.sessionId)
+                                    }
                                 } catch (sendError) {
-                                    saveDraft(pendingSend.sessionId, finalMessage)
+                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                        saveDraft(pendingSend.sessionId, finalMessage)
+                                    }
                                     if (mountedRef.current) {
                                         if (!config.getCurrentText().trim()) {
                                             config.onTextChange(finalMessage)
@@ -166,7 +175,7 @@ export function useDictation(config: {
                             setStatus('disconnected')
                         }
                     } catch (transcriptionError) {
-                        if (pendingSend) {
+                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                             saveDraft(pendingSend.sessionId, pendingSend.initialText)
                         }
                         if (mountedRef.current) {
@@ -206,7 +215,8 @@ export function useDictation(config: {
     const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
         sendOnFinishRef.current = {
             sessionId: targetSessionId,
-            initialText: initialText ?? config.getCurrentText()
+            initialText: initialText ?? config.getCurrentText(),
+            draftAtStart: getDraft(targetSessionId)
         }
         await stop()
     }, [config, stop])

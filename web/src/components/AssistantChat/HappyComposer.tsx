@@ -1113,12 +1113,22 @@ export function HappyComposer(props: {
 
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
         if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
-            richInputRef.current?.flushSerializedText()
-            const targetSessionId = props.sessionId ?? ''
-            const initialText = api.composer().getState().text
-            api.composer().setText('')
-            if (targetSessionId && dictation.stopAndSend) {
-                await dictation.stopAndSend(targetSessionId, initialText)
+            const canDirectSend = dictation.status === 'connected'
+                && active
+                && attachments.length === 0
+                && pendingSchedule == null
+                && !props.scratchlistMode
+                && intent === 'default'
+            if (canDirectSend) {
+                richInputRef.current?.flushSerializedText()
+                const targetSessionId = props.sessionId ?? ''
+                const initialText = api.composer().getState().text
+                api.composer().setText('')
+                if (targetSessionId && dictation.stopAndSend) {
+                    await dictation.stopAndSend(targetSessionId, initialText)
+                } else {
+                    await dictation.toggle()
+                }
             } else {
                 await dictation.toggle()
             }
