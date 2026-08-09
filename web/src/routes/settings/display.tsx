@@ -10,6 +10,7 @@ import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
 import { MAX_SESSION_PREVIEW_LIMIT, MIN_SESSION_PREVIEW_LIMIT, normalizeSessionPreviewLimit, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { useThemeColors, type ThemeColorKeyId } from '@/hooks/useThemeColors'
 import { useSessionHeaderMetadata, type SessionHeaderMetadataKey } from '@/hooks/useSessionHeaderMetadata'
+import { loadCreateSelectionVisibility, saveCreateSelectionVisibility, type CreateSelectionKey } from '@/lib/createSelectionVisibility'
 import { SettingsChoiceGroup, SettingsFieldLabel, SettingsPageContent, SettingsRow, SettingsSection, SettingsSwitch } from '@/components/settings/SettingsPrimitives'
 
 function MinusIcon() {
@@ -139,6 +140,26 @@ export default function SettingsDisplayPage() {
     const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
     const { pinInProgressSessions, setPinInProgressSessions } = usePinInProgressSessions()
     const { preferences: sessionHeaderMetadata, setPreference: setSessionHeaderMetadata } = useSessionHeaderMetadata()
+    const [createSelectionVisibility, setCreateSelectionVisibility] = useState(loadCreateSelectionVisibility)
+    const createSelectionOptions: ReadonlyArray<{ key: CreateSelectionKey; labelKey: string }> = [
+        { key: 'machine', labelKey: 'settings.display.create.machine' },
+        { key: 'sessionType', labelKey: 'settings.display.create.sessionType' },
+        { key: 'agent', labelKey: 'settings.display.create.agent' },
+        { key: 'model', labelKey: 'settings.display.create.model' },
+        { key: 'effort', labelKey: 'settings.display.create.effort' },
+        { key: 'reasoningEffort', labelKey: 'settings.display.create.reasoningEffort' },
+        { key: 'grokPermissionMode', labelKey: 'settings.display.create.grokPermissionMode' },
+        { key: 'codexFamilyPermissionMode', labelKey: 'settings.display.create.codexFamilyPermissionMode' },
+        { key: 'collaborationMode', labelKey: 'settings.display.create.collaborationMode' },
+        { key: 'copilotAgentMode', labelKey: 'settings.display.create.copilotAgentMode' },
+        { key: 'fastMode', labelKey: 'settings.display.create.fastMode' },
+        { key: 'yolo', labelKey: 'settings.display.create.yolo' }
+    ]
+    const setCreateSelectionPreference = (key: CreateSelectionKey, value: boolean) => {
+        const next = { ...createSelectionVisibility, [key]: value }
+        setCreateSelectionVisibility(next)
+        saveCreateSelectionVisibility(next)
+    }
     const sessionHeaderOptions: ReadonlyArray<{ key: SessionHeaderMetadataKey; labelKey: string }> = [
         { key: 'showLabels', labelKey: 'settings.display.sessionHeader.showLabels' },
         { key: 'agent', labelKey: 'settings.display.sessionHeader.agent' },
@@ -182,6 +203,17 @@ export default function SettingsDisplayPage() {
                     options={getSessionListStatusModeOptions().map((option) => ({ value: option.value, label: t(option.labelKey) }))}
                     onChange={setSessionListStatusMode}
                 />
+            </SettingsSection>
+
+            <SettingsSection title={t('settings.display.create')} description={t('settings.display.create.description')}>
+                {createSelectionOptions.map((option) => (
+                    <SettingsSwitch
+                        key={option.key}
+                        label={t(option.labelKey)}
+                        checked={createSelectionVisibility[option.key]}
+                        onChange={(checked) => setCreateSelectionPreference(option.key, checked)}
+                    />
+                ))}
             </SettingsSection>
 
             <SettingsSection title={t('settings.display.sessionHeader')} description={t('settings.display.sessionHeader.description')}>

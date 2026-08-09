@@ -17,6 +17,7 @@ import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggesti
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
 import { useRecentPaths } from '@/hooks/useRecentPaths'
 import { useTranslation } from '@/lib/use-translation'
+import { loadCreateSelectionVisibility } from '@/lib/createSelectionVisibility'
 import { getCodexModelReasoningEfforts } from '@/lib/codexModelCapabilities'
 import {
     buildNewSessionCursorModelCatalog,
@@ -95,6 +96,7 @@ export function NewSession(props: {
     const { sessions, refetch: refetchSessions } = useSessions(props.api)
     const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
 
+    const [selectionVisibility] = useState(loadCreateSelectionVisibility)
     const [machineId, setMachineId] = useState<string | null>(props.initialMachineId ?? null)
     const [directory, setDirectory] = useState(props.initialDirectory ?? '')
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
@@ -1492,13 +1494,13 @@ export function NewSession(props: {
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
-            <MachineSelector
+            {selectionVisibility.machine ? <MachineSelector
                 machines={props.machines}
                 machineId={machineId}
                 isLoading={props.isLoading}
                 isDisabled={isFormDisabled}
                 onChange={handleMachineChange}
-            />
+            /> : null}
             {runnerSpawnError ? (
                 <div className="px-3 py-2 text-xs text-red-600">
                     Runner last spawn error: {runnerSpawnError}
@@ -1520,19 +1522,19 @@ export function NewSession(props: {
                 onPathClick={handlePathClick}
                 onChooseFolder={props.onChooseFolder ? handleChooseFolderClick : undefined}
             />
-            <SessionTypeSelector
+            {selectionVisibility.sessionType ? <SessionTypeSelector
                 sessionType={sessionType}
                 worktreeName={worktreeName}
                 worktreeInputRef={worktreeInputRef}
                 isDisabled={isFormDisabled}
                 onSessionTypeChange={setSessionType}
                 onWorktreeNameChange={setWorktreeName}
-            />
-            <AgentSelector
+            /> : null}
+            {selectionVisibility.agent ? <AgentSelector
                 agent={agent}
                 isDisabled={isFormDisabled}
                 onAgentChange={handleAgentChange}
-            />
+            /> : null}
             {agent === 'codex' ? (
                 <CodexImportActions
                     selectedSession={selectedCodexImportSession}
@@ -1559,7 +1561,7 @@ export function NewSession(props: {
                     onClear={() => setSelectedPiImportSessionId(null)}
                 />
             ) : null}
-            {agent === 'agy' ? (
+            {selectionVisibility.model && (agent === 'agy' ? (
                 <AgyModelSelector
                     machineId={machineId}
                     isLoading={agyModelsState.isLoading}
@@ -1653,53 +1655,53 @@ export function NewSession(props: {
                         onModelChange={setModel}
                     />
                 )
-            )}
-            <LaunchEffortSelector
+            ))}
+            {selectionVisibility.effort ? <LaunchEffortSelector
                 agent={agent}
                 effort={effort}
                 isDisabled={isFormDisabled}
                 onEffortChange={setEffort}
                 grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
-            />
-            <ReasoningEffortSelector
+            /> : null}
+            {selectionVisibility.reasoningEffort ? <ReasoningEffortSelector
                 agent={agent}
                 value={modelReasoningEffort}
                 availableOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
                 onChange={setModelReasoningEffort}
-            />
-            <GrokPermissionModeSelector
+            /> : null}
+            {selectionVisibility.grokPermissionMode ? <GrokPermissionModeSelector
                 agent={agent}
                 value={grokPermissionMode}
                 autoPermissionModeSupported={grokModelsState.autoPermissionModeSupported}
                 isDisabled={isFormDisabled}
                 onChange={setGrokPermissionMode}
-            />
-            <CodexFamilyPermissionModeSelector
+            /> : null}
+            {selectionVisibility.codexFamilyPermissionMode ? <CodexFamilyPermissionModeSelector
                 agent={agent}
                 value={codexFamilyPermissionMode}
                 isDisabled={isFormDisabled}
                 onChange={setCodexFamilyPermissionMode}
-            />
-            <CollaborationModeSelector
+            /> : null}
+            {selectionVisibility.collaborationMode ? <CollaborationModeSelector
                 agent={agent}
                 value={collaborationMode}
                 isDisabled={isFormDisabled}
                 onChange={setCollaborationMode}
-            />
-            <CopilotAgentModeSelector
+            /> : null}
+            {selectionVisibility.copilotAgentMode ? <CopilotAgentModeSelector
                 agent={agent}
                 value={copilotAgentMode}
                 isDisabled={isFormDisabled}
                 onChange={setCopilotAgentMode}
-            />
-            <FastModeSelector
+            /> : null}
+            {selectionVisibility.fastMode ? <FastModeSelector
                 visible={showCodexFastMode}
                 value={serviceTier}
                 isDisabled={isFormDisabled}
                 onChange={setServiceTier}
-            />
-            {agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) ? (
+            /> : null}
+            {selectionVisibility.yolo && agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) ? (
                 <YoloToggle
                     yoloMode={yoloMode}
                     isDisabled={isFormDisabled}
