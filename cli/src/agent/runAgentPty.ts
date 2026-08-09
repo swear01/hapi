@@ -186,6 +186,27 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
         typeof marker === 'string' ? data.includes(marker) : marker.test(data)
     const anyMarker = (data: string, list: (string | RegExp)[]): boolean =>
         list.some((m) => markerMatches(data, m))
+    // Position of the last marker occurrence in the chunk, or -1 when absent.
+    // When a chunk contains both busy and idle markers, the one whose text
+    // appears last reflects the final repaint, so it decides the state.
+    const lastMarkerIndex = (data: string, list: (string | RegExp)[]): number =>
+        list.reduce((last, marker) => {
+            if (typeof marker === 'string') {
+                return Math.max(last, data.lastIndexOf(marker))
+            }
+            // Non-global RegExp (as required above): scan forward for the last
+            // match instead of relying on stateful lastIndex.
+            let searchFrom = 0
+            let markerLast = -1
+            for (;;) {
+                const match = marker.exec(data.slice(searchFrom))
+                if (!match) break
+                const abs = searchFrom + match.index
+                markerLast = abs
+                searchFrom = abs + (match[0].length || 1)
+            }
+            return Math.max(last, markerLast)
+        }, -1)
 
     const markers = opts.promptMarkers ?? []
     const hasMarkers = markers.length > 0
@@ -396,18 +417,22 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                     && anyMarker(data, authFailureMarkers)) {
                     sawAuthFailureScreen = true
                 }
-                // Track the working/idle state from the live footer. The busy
-                // marker (spinner/"esc to interrupt") wins when both appear in a
-                // chunk; chunks with neither leave the state unchanged.
-                if (busyMarkers.length > 0 && anyMarker(markerBuffer, busyMarkers)) {
-                    if (agentRunActive) agentRunSawBusyMarker = true
-                    setThinking(true)
-                    inputReady = false
-                    promptBuffer = ''
-                } else if (idleMarkers.length > 0 && anyMarker(markerBuffer, idleMarkers)) {
+                // Track the working/idle state from the live footer. When a
+                // chunk carries both a busy and an idle marker, the marker whose
+                // text comes LAST wins: a trailing idle footer means the turn
+                // completed, while trailing "Generating" output means it is still
+                // running. Chunks with neither marker leave the state unchanged.
+                const busyAt = busyMarkers.length > 0 ? lastMarkerIndex(markerBuffer, busyMarkers) : -1
+                const idleAt = idleMarkers.length > 0 ? lastMarkerIndex(markerBuffer, idleMarkers) : -1
+                if (idleAt > busyAt) {
                     setThinking(false)
                     inputReady = true
                     reachedIdleMarker = true
+                    promptBuffer = ''
+                } else if (busyAt >= 0) {
+                    if (agentRunActive) agentRunSawBusyMarker = true
+                    setThinking(true)
+                    inputReady = false
                     promptBuffer = ''
                 } else if (thinking) {
                     // Still producing output (e.g. streaming response text with no

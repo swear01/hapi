@@ -235,6 +235,41 @@ describe('runAgentPty', () => {
         vi.useRealTimers()
     })
 
+    it('lets a trailing idle marker win when it shares a chunk with a busy marker (no watchdog)', async () => {
+        vi.useFakeTimers()
+        const thinking = vi.fn()
+        const nextMessage = vi.fn()
+            .mockResolvedValueOnce({ message: 'first' })
+            .mockImplementationOnce(() => new Promise<{ message: string } | null>(() => {}))
+        const promise = runAgentPty(makeOpts({
+            promptMarkers: ['READY'],
+            busyMarkers: ['Generating'],
+            idleMarkers: ['? for shortcuts'],
+            requirePromptMarker: true,
+            thinkingSilenceTimeoutMs: null,
+            nextMessage,
+            onThinkingChange: thinking,
+        }))
+
+        harness.triggerData('READY')
+        await vi.advanceTimersByTimeAsync(520)
+        expect(thinking).toHaveBeenLastCalledWith(true)
+
+        // One ANSI-decorated chunk carries both the busy frame and the final
+        // idle footer. With the watchdog disabled the busy marker alone would
+        // strand the run in the running state forever; the trailing idle marker
+        // must win and make the prompt input-ready again.
+        harness.triggerData('Generating \x1b[31m...\x1b[0m\r\n? for shortcuts')
+        expect(thinking).toHaveBeenLastCalledWith(false)
+        await vi.advanceTimersByTimeAsync(200)
+        expect(nextMessage).toHaveBeenCalledTimes(2)
+
+        harness.triggerExit(0)
+        await vi.advanceTimersByTimeAsync(100)
+        await promise
+        vi.useRealTimers()
+    })
+
     it('recognizes a busy marker fragmented across PTY output chunks', async () => {
         const pending = deferred<{ message: string } | null>()
         const thinking = vi.fn()
