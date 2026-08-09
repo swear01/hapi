@@ -593,7 +593,7 @@ export function getUsageSummary(
 
     const toCosts = (values: Map<string, number>): UsageCost[] => Array.from(values.entries())
         .map(([currency, amount]) => ({ amount, currency }))
-        .sort((a, b) => b.amount - a.amount)
+        .sort((a, b) => b.amount - a.amount || a.currency.localeCompare(b.currency))
 
     const sortBuckets = (values: Map<string, Totals>): UsageSummaryBucket[] => Array.from(values.entries())
         .map(([key, value]) => toBucket(key, value))

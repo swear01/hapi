@@ -960,13 +960,13 @@ describe('usage service', () => {
 
         const result = getUsageSummary(store, 'default', 'all')
         expect(result.totals.costs).toEqual([
-            { amount: 1, currency: 'USD' },
-            { amount: 1, currency: 'EUR' }
+            { amount: 1, currency: 'EUR' },
+            { amount: 1, currency: 'USD' }
         ])
         expect(result.agents).toEqual([
             expect.objectContaining({ agent: 'opencode', status: 'cost-only', costs: [
-                { amount: 1, currency: 'USD' },
-                { amount: 1, currency: 'EUR' }
+                { amount: 1, currency: 'EUR' },
+                { amount: 1, currency: 'USD' }
             ] })
         ])
         store.close()
