@@ -66,3 +66,67 @@ tools/maintenance/sync-from-upstream.sh \
 ```
 
 `--push` refuses carried PRs without `--pr-audit`. Immediately before applying patches, the script compares each audited head with GitHub's live `refs/pull/<number>/head`. Keep every PR in its own patch/commit. After rehearsal, run frozen install, full typecheck and tests, inspect the integrated diff, push with the guarded force-with-lease confirmation, tag from `main`, publish and verify all artifacts, then deploy through the Skillshare HAPI fleet workflow.
+
+## Standard release checklist (as executed for v0.27.2.1)
+
+The `sync-from-upstream.sh --push` path is the canonical rebuild; when the merge
+is performed by hand in an isolated worktree (conflict resolution + test fixes
+cannot be reproduced from raw patches alone), publish the validated state
+directly instead:
+
+1. Create the release worktree from the pinned upstream base:
+
+   ```bash
+   git worktree add ../hapi-release-v<tag> release/v<tag>
+   ```
+
+2. Merge the carried PR patches (`tools/maintenance/releases/<tag>/patches/`),
+   resolve conflicts, and DROP any PR rejected by operator decision (record the
+   drop in `manifest.tsv` with a comment; do not apply its patch).
+
+3. Prepare the release:
+   - `cli/package.json` version → four-part `<upstream>.<n>` (n > 0); keep
+     `optionalDependencies` pinned to the three-part upstream version.
+   - `shared/src/buildInfo.ts` `APP_VERSION` → same four-part version.
+   - `.github/release-notes/v<tag>.md` containing BOTH the literal strings
+     `Compared with the previous maintained release` and
+     `Compared with the official release` (the workflow greps for them).
+   - Run `tools/maintenance/audit-release.sh` to produce `audit.md` +
+     `pr-audit.tsv`, then write `manifest.tsv` (patch / state / upstream_ref /
+     source_commits; overlay is `regenerate`, carried PRs are `carry` with the
+     audited head sha).
+
+4. Validate: `bun install`, `bun typecheck` (cli/web/hub/desktop), then
+   `bun run test:shared && bun run test:hub && bun run test:web` and
+   `bun run test:cli`. Known environmental caveats:
+   - agy carrier tests (`src/agy/utils/*`) read real `/proc` and are
+     Linux-CI-only; guard them with `it.skipIf(process.platform !== 'linux')`.
+   - `src/runner/runner.integration.test.ts` and a few timing tests flake under
+     host load (they pass in isolation); re-run with `--maxWorkers=4`.
+   - `src/upgrade/tunwgPin.test.ts` downloads a pinned GitHub asset; pass a
+     short `timeoutMs` to `ensurePinnedTunwgBinary` in the test so it never
+     exceeds the vitest default.
+
+5. Commit `chore(release): prepare v<tag>` (+ `chore(maintenance): record
+   v<tag> release audit and patch manifest`), then update the fork's main and
+   tag (tag points at the final main commit, like v0.26.0.2):
+
+   ```bash
+   git fetch origin
+   git push origin <release-commit>:refs/heads/main --force-with-lease=<current origin/main sha>
+   git tag v<tag> <release-commit>
+   git push origin v<tag>
+   ```
+
+   The `--force-with-lease` replaces the standard script's
+   `HAPI_SYNC_CONFIRM=RESET_ORIGIN_MAIN_WITH_FORCE_WITH_LEASE` guard — verify
+   the lease sha is the current `origin/main` before pushing.
+
+6. The tag triggers `.github/workflows/release.yml`: it validates the four-part
+   tag against `cli/package.json`, verifies the commit is on `main`, requires
+   the release notes, builds all single-exe binaries, signs macOS with the local
+   `MACOS_SIGNING_P12` identity, builds the desktop apps, and publishes a
+   curated GitHub Release (never auto-generated notes; no Homebrew push).
+
+7. After the workflow completes, verify all artifacts on the GitHub Release and
+   deploy through the Skillshare HAPI fleet workflow.
