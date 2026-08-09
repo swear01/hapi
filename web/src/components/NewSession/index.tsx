@@ -102,6 +102,7 @@ export function NewSession(props: {
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
+    const visibleAgents = useMemo(() => CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate]), [agentVisibility])
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
@@ -154,6 +155,12 @@ export function NewSession(props: {
     )
     const worktreeInputRef = useRef<HTMLInputElement>(null)
     const preserveRestoredDraftRef = useRef(false)
+
+    useEffect(() => {
+        if (!visibleAgents.includes(agent) && visibleAgents[0]) {
+            setAgent(visibleAgents[0])
+        }
+    }, [agent, visibleAgents])
 
     useEffect(() => {
         if (sessionType === 'worktree') {
@@ -1484,7 +1491,8 @@ export function NewSession(props: {
         && serviceTier === 'fast'
         && codexModelsState.isLoading
     const canCreate = Boolean(
-        machineId
+        visibleAgents.includes(agent)
+        && machineId
         && trimmedDirectory
         && !isFormDisabled
         && !missingWorktreeDirectory
@@ -1534,7 +1542,7 @@ export function NewSession(props: {
                 agent={agent}
                 isDisabled={isFormDisabled}
                 onAgentChange={handleAgentChange}
-                visibleAgents={CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate])}
+                visibleAgents={visibleAgents}
             />
             {agent === 'codex' ? (
                 <CodexImportActions

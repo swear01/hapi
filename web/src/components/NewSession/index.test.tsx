@@ -730,3 +730,10 @@ describe('NewSession launch preferences', () => {
         })
     })
 })
+
+it('falls back when the preferred agent is hidden', async () => {
+    localStorage.setItem('hapi:newSession:agentVisibility:v1', JSON.stringify({ codex: false }))
+    const { container } = render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+
+    await waitFor(() => expect(container.querySelector<HTMLInputElement>('input[value="agy"]')?.checked).toBe(true))
+})
