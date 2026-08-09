@@ -32,6 +32,7 @@ export function useRealtimeDictation(config: {
     mode: TranscriptionMode
     onFinalTranscript: (text: string) => void
     sendMessage?: (sessionId: string, text: string) => Promise<void>
+    getCurrentText?: () => string
 }) {
     const supported = config.api !== null
         && config.mode === 'realtime'
@@ -70,7 +71,9 @@ export function useRealtimeDictation(config: {
                 } catch (sendError) {
                     saveDraft(pendingSend.sessionId, finalMessage)
                     if (mountedRef.current) {
-                        onFinalTranscriptRef.current(finalMessage)
+                        if (!config.getCurrentText?.().trim()) {
+                            onFinalTranscriptRef.current(finalMessage)
+                        }
                         setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
                         setStatus('error')
                         return
@@ -85,7 +88,7 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) {
             setStatus('disconnected')
         }
-    }, [config.api, config.sendMessage, updatePartial])
+    }, [config.api, config.getCurrentText, config.sendMessage, updatePartial])
 
     const fail = useCallback((value: unknown) => {
         const pendingSend = sendOnFinishRef.current
@@ -94,7 +97,9 @@ export function useRealtimeDictation(config: {
             const finalMessage = appendTranscript(pendingSend.initialText, partialRef.current)
             saveDraft(pendingSend.sessionId, finalMessage)
             if (mountedRef.current) {
-                onFinalTranscriptRef.current(finalMessage)
+                if (!config.getCurrentText?.().trim()) {
+                    onFinalTranscriptRef.current(finalMessage)
+                }
             }
         }
         elevenLabsActiveRef.current = false
@@ -105,7 +110,7 @@ export function useRealtimeDictation(config: {
         sessionRef.current = null
         setError(value instanceof Error ? value.message : 'Transcription failed')
         setStatus('error')
-    }, [])
+    }, [config.getCurrentText])
 
     const elevenLabs = useScribe({
         modelId: ELEVENLABS_REALTIME_TRANSCRIPTION_MODEL,

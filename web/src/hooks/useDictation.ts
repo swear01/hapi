@@ -44,7 +44,8 @@ export function useDictation(config: {
         provider: config.provider,
         mode: config.mode,
         onFinalTranscript,
-        sendMessage: config.sendMessage
+        sendMessage: config.sendMessage,
+        getCurrentText: config.getCurrentText
     })
     const browserCanRecord = typeof navigator !== 'undefined'
         && typeof navigator.mediaDevices?.getUserMedia === 'function'
@@ -146,7 +147,9 @@ export function useDictation(config: {
                                 } catch (sendError) {
                                     saveDraft(pendingSend.sessionId, finalMessage)
                                     if (mountedRef.current) {
-                                        config.onTextChange(finalMessage)
+                                        if (!config.getCurrentText().trim()) {
+                                            config.onTextChange(finalMessage)
+                                        }
                                         setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
                                         setStatus('error')
                                         return
@@ -164,7 +167,7 @@ export function useDictation(config: {
                             saveDraft(pendingSend.sessionId, pendingSend.initialText)
                         }
                         if (mountedRef.current) {
-                            if (pendingSend) config.onTextChange(pendingSend.initialText)
+                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
                             setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
                             setStatus('error')
                         }
