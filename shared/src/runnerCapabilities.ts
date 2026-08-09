@@ -10,8 +10,11 @@
  * socket-side advertisement, a runner upgraded in place would never get its
  * new capabilities observed by the hub.
  */
+import { getBuiltinAgentConfigDescriptors } from './agentConfig'
+
 export const RUNNER_CAPABILITIES = {
-    piExistingSessionResume: true
-} as const
+    piExistingSessionResume: true as const,
+    agentConfigs: getBuiltinAgentConfigDescriptors()
+}
 
 export type RunnerCapabilities = typeof RUNNER_CAPABILITIES
