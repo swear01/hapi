@@ -486,30 +486,9 @@ export function HappyComposer(props: {
     const dictationActive = voiceInput.voiceMode === 'dictation'
     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
     const handleDictationToggle = useCallback(async () => {
-        if (dictationActive) {
-            if (dictation.status === 'connecting') {
-                await dictation.toggle()
-                return
-            }
-            if (dictation.status === 'connected') {
-                if (!active || attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
-                    await dictation.toggle()
-                    return
-                }
-                richInputRef.current?.flushSerializedText()
-                const targetSessionId = props.sessionId ?? ''
-                const initialText = api.composer().getState().text
-                api.composer().setText('')
-                if (targetSessionId) {
-                    await dictation.stopAndSend?.(targetSessionId, initialText)
-                } else {
-                    await dictation.toggle()
-                }
-                return
-            }
-        }
         await dictation.toggle()
-    }, [active, api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
+    }, [dictation])
+
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)
@@ -1134,7 +1113,15 @@ export function HappyComposer(props: {
 
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
         if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
-            await handleDictationToggle()
+            richInputRef.current?.flushSerializedText()
+            const targetSessionId = props.sessionId ?? ''
+            const initialText = api.composer().getState().text
+            api.composer().setText('')
+            if (targetSessionId && dictation.stopAndSend) {
+                await dictation.stopAndSend(targetSessionId, initialText)
+            } else {
+                await dictation.toggle()
+            }
             return
         }
         // SessionChat preloads the ref only when restoring a rejected send:
@@ -1249,7 +1236,9 @@ export function HappyComposer(props: {
         resetPendingSendIntent,
         dictationActive,
         dictation.status,
-        handleDictationToggle,
+        dictation.toggle,
+        dictation.stopAndSend,
+        props.sessionId,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
