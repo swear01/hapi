@@ -496,6 +496,13 @@ export function UnifiedButton(props: {
 }) {
     const { t } = useTranslation()
     const voiceSendPendingRef = useRef(false)
+    const [voiceSendRequested, setVoiceSendRequested] = useState(false)
+
+    useEffect(() => {
+        if (!voiceSendRequested) return
+        setVoiceSendRequested(false)
+        props.onSend('default')
+    }, [voiceSendRequested, props.onSend])
 
     const isConnecting = props.voiceStatus === 'connecting'
     const isConnected = props.voiceStatus === 'connected'
@@ -545,7 +552,7 @@ export function UnifiedButton(props: {
             try {
                 const committed = await props.onVoiceToggle()
                 if (committed === true) {
-                    props.onSend('default')
+                    setVoiceSendRequested(true)
                 }
             } finally {
                 voiceSendPendingRef.current = false
@@ -564,7 +571,7 @@ export function UnifiedButton(props: {
                 >
                     {stopIcon}
                 </button>
-                {isDictation ? (
+                {isDictation && isConnected ? (
                     <button
                         type="button"
                         onClick={handleVoiceSendClick}

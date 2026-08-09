@@ -402,6 +402,27 @@ describe('UnifiedButton — voice active state', () => {
         expect(sendBtn).toBeNull()
     })
 
+    it('renders ONLY Stop button during connecting status even when dictationEnabled is true', () => {
+        const onVoiceToggle = vi.fn()
+        const onSend = vi.fn()
+        renderInProviders(
+            <UnifiedButton
+                canSend={false}
+                voiceStatus="connecting"
+                voiceEnabled
+                dictationEnabled
+                controlsDisabled={false}
+                onSend={onSend}
+                onVoiceToggle={onVoiceToggle}
+            />,
+        )
+
+        const stopBtn = screen.getByRole('button', { name: 'Connecting…' })
+        const sendBtn = screen.queryByRole('button', { name: 'Send' })
+        expect(stopBtn).toBeInTheDocument()
+        expect(sendBtn).toBeNull()
+    })
+
     it('renders both Stop and Send buttons in dictation mode (dictationEnabled is true)', () => {
         const onVoiceToggle = vi.fn()
         const onSend = vi.fn()
