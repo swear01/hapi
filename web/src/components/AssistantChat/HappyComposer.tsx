@@ -1256,6 +1256,7 @@ export function HappyComposer(props: {
         props.sessionId,
         props.agentFlavor,
         props.thinking,
+        active,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
