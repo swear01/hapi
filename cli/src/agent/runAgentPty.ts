@@ -95,6 +95,8 @@ export type RunAgentPtyOpts = {
      * Strings match as substrings; RegExps match with `.test()`.
      */
     idleMarkers?: (string | RegExp)[]
+    /** Time without PTY output before clearing thinking; null waits for an idle marker. */
+    thinkingSilenceTimeoutMs?: number | null
     debugPrefix: string
     signal?: AbortSignal
     nextMessage: () => Promise<{ message: string } | null>
@@ -223,10 +225,11 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
     // turn never started (a --resume replay swallowed the first message). A working
     // claude repaints its spinner footer every few hundred ms, so once output has
     // been SILENT for IDLE_SILENCE_MS while we still think it's busy, the turn is
-    // really over → force idle. Scoped to agents with a busy marker (claude): agy
-    // can sit silent mid-inference (no animated spinner), so it keeps marker-only
-    // clearing and no silence watchdog.
-    const IDLE_SILENCE_MS = 3000
+    // really over → force idle. Agents with a reliable idle marker can disable
+    // this and wait for that explicit completion signal instead.
+    const thinkingSilenceTimeoutMs = opts.thinkingSilenceTimeoutMs === undefined
+        ? 3000
+        : opts.thinkingSilenceTimeoutMs
     let idleWatchdog: ReturnType<typeof setTimeout> | null = null
     let agentRunActive = false
     let agentRunSawBusyMarker = false
@@ -245,12 +248,12 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
     // (Re)start the silence timer. Called when thinking begins and on every output
     // chunk while thinking, so the window only elapses once claude has gone quiet.
     const armIdleWatchdog = (): void => {
-        if (!hasBusyMarkers || !thinking) return
+        if (!hasBusyMarkers || !thinking || thinkingSilenceTimeoutMs === null) return
         disarmIdleWatchdog()
         idleWatchdog = setTimeout(() => {
             idleWatchdog = null
             if (thinking) {
-                logger.debug(`${debugPrefix} idle watchdog: ${IDLE_SILENCE_MS}ms of silence; forcing idle`)
+                logger.debug(`${debugPrefix} idle watchdog: ${thinkingSilenceTimeoutMs}ms of silence; forcing idle`)
                 thinking = false
                 // The turn really ended even though no idle marker arrived, so the
                 // prompt is usable again — let the next queued message proceed.
@@ -258,7 +261,7 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                 opts.onThinkingChange?.(false)
                 completeAgentRun()
             }
-        }, IDLE_SILENCE_MS)
+        }, thinkingSilenceTimeoutMs)
         idleWatchdog.unref?.()
     }
     const setThinking = (next: boolean): void => {
@@ -371,6 +374,7 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                 sawOutput = true
                 lastOutputAt = Date.now()
                 promptBuffer = (promptBuffer + data).slice(-PROMPT_BUFFER_SIZE)
+                const markerBuffer = promptBuffer.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, '')
                 // Auto-approve the first-run trust/safety prompt (Enter = default
                 // "Yes"). Do this BEFORE prompt detection so the trust screen
                 // isn't mistaken for the input prompt — otherwise the first user
@@ -379,7 +383,7 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                     trustHandled = true
                     logger.debug(`${debugPrefix} trust prompt detected; auto-approving with Enter`)
                     manager.write('\r')
-                } else if (hasMarkers && !promptSeen && anyMarker(promptBuffer, markers)) {
+                } else if (hasMarkers && !promptSeen && anyMarker(markerBuffer, markers)) {
                     promptSeen = true
                     inputReady = true
                 }
@@ -395,12 +399,12 @@ export async function runAgentPty(opts: RunAgentPtyOpts): Promise<void> {
                 // Track the working/idle state from the live footer. The busy
                 // marker (spinner/"esc to interrupt") wins when both appear in a
                 // chunk; chunks with neither leave the state unchanged.
-                if (busyMarkers.length > 0 && anyMarker(data, busyMarkers)) {
+                if (busyMarkers.length > 0 && anyMarker(markerBuffer, busyMarkers)) {
                     if (agentRunActive) agentRunSawBusyMarker = true
                     setThinking(true)
                     inputReady = false
                     promptBuffer = ''
-                } else if (idleMarkers.length > 0 && anyMarker(promptBuffer, idleMarkers)) {
+                } else if (idleMarkers.length > 0 && anyMarker(markerBuffer, idleMarkers)) {
                     setThinking(false)
                     inputReady = true
                     reachedIdleMarker = true
