@@ -220,7 +220,8 @@ export function useRealtimeDictation(config: {
         lastFinishedTranscriptRef.current = null
         try {
             await session.stop()
-            const committedText = lastFinishedTranscriptRef.current?.trim() ?? ''
+            const finishedText = lastFinishedTranscriptRef.current as string | null
+            const committedText = finishedText?.trim() ?? ''
             return committedText.length > 0
         } catch (stopError) {
             fail(stopError)
