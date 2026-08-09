@@ -46,7 +46,7 @@ export function useRealtimeDictation(config: {
     const elevenLabsActiveRef = useRef(false)
     const elevenLabsFinalizedRef = useRef(false)
     const resolveElevenLabsCommitRef = useRef<(() => void) | null>(null)
-    const lastFinishedTranscriptRef = useRef<string | null>(null)
+    const lastCommitSucceededRef = useRef(false)
     onFinalTranscriptRef.current = config.onFinalTranscript
 
     const updatePartial = useCallback((text: string) => {
@@ -54,9 +54,9 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const finish = useCallback((text: string) => {
+    const finish = useCallback((text: string, committed = true) => {
         if (!mountedRef.current) return
-        lastFinishedTranscriptRef.current = text
+        lastCommitSucceededRef.current = committed && text.trim().length > 0
         updatePartial('')
         onFinalTranscriptRef.current(text)
         setStatus('disconnected')
@@ -86,7 +86,7 @@ export function useRealtimeDictation(config: {
             if (!elevenLabsActiveRef.current) return
             elevenLabsFinalizedRef.current = true
             elevenLabsActiveRef.current = false
-            finish(text)
+            finish(text, true)
             resolveElevenLabsCommitRef.current?.()
             resolveElevenLabsCommitRef.current = null
         },
@@ -100,7 +100,7 @@ export function useRealtimeDictation(config: {
             resolveElevenLabsCommitRef.current?.()
             resolveElevenLabsCommitRef.current = null
             sessionRef.current = null
-            finish(partial)
+            finish(partial, false)
             setError('ElevenLabs realtime transcription disconnected')
             setStatus('error')
         }
@@ -127,7 +127,7 @@ export function useRealtimeDictation(config: {
                 if (operationRef.current === operation) updatePartial(text)
             },
             onFinal: (text) => {
-                if (operationRef.current === operation) finish(text)
+                if (operationRef.current === operation) finish(text, true)
             },
             onError: (realtimeError) => {
                 if (operationRef.current === operation) fail(realtimeError)
@@ -165,7 +165,7 @@ export function useRealtimeDictation(config: {
                                 new Promise<void>((resolve) => setTimeout(resolve, 2_500))
                             ])
                         } finally {
-                            if (elevenLabsActiveRef.current && !elevenLabsFinalizedRef.current) finish(partialRef.current)
+                            if (elevenLabsActiveRef.current && !elevenLabsFinalizedRef.current) finish(partialRef.current, false)
                             elevenLabsActiveRef.current = false
                             resolveElevenLabsCommitRef.current = null
                             elevenLabs.disconnect()
@@ -217,12 +217,10 @@ export function useRealtimeDictation(config: {
             return false
         }
         setStatus('connecting')
-        lastFinishedTranscriptRef.current = null
+        lastCommitSucceededRef.current = false
         try {
             await session.stop()
-            const finishedText = lastFinishedTranscriptRef.current as string | null
-            const committedText = finishedText?.trim() ?? ''
-            return committedText.length > 0
+            return lastCommitSucceededRef.current
         } catch (stopError) {
             fail(stopError)
             return false
