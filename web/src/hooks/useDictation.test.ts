@@ -214,4 +214,64 @@ describe('useDictation', () => {
             expect(result.current.status).toBe('error')
         })
     })
+
+    it('forwards saved language from localStorage to transcribeVoice', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+        localStorage.setItem('hapi-voice-lang', 'zh-TW')
+
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: '轉錄內容' }))
+        }
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn()
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.toggle())
+
+        await waitFor(() => {
+            expect(api.transcribeVoice).toHaveBeenCalledWith(expect.objectContaining({
+                language: 'zh-TW'
+            }))
+        })
+    })
+
+    it('reports supported as false when browser recording APIs are unavailable', () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: undefined
+        })
+        const { result } = renderHook(() => useDictation({
+            api: {} as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn()
+        }))
+
+        expect(result.current.supported).toBe(false)
+    })
 })

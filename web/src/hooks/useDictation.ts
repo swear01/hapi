@@ -49,10 +49,12 @@ export function useDictation(config: {
     const browserCanRecord = typeof navigator !== 'undefined'
         && typeof navigator.mediaDevices?.getUserMedia === 'function'
         && typeof MediaRecorder !== 'undefined'
-    const standardSupported = config.api !== null
+    const standardSupported = config.mode === 'standard'
+        && config.api !== null
         && config.provider !== null
+        && browserCanRecord
 
-    const supported = realtime.supported || (standardSupported && browserCanRecord)
+    const supported = realtime.supported || standardSupported
     const [status, setStatus] = useState<ConversationStatus>('disconnected')
     const [error, setError] = useState<string | null>(null)
     const mountedRef = useRef(true)
@@ -127,11 +129,12 @@ export function useDictation(config: {
                     }
                     transcribingRef.current = true
                     try {
+                        const savedLanguage = (typeof localStorage !== 'undefined' && localStorage.getItem('hapi-voice-lang')) || undefined
                         const result = await config.api!.transcribeVoice({
                             file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
                             provider: config.provider!,
                             mode: 'standard',
-                            language: undefined
+                            language: savedLanguage
                         })
                         const transcribedText = result.text || ''
                         if (pendingSend) {
@@ -221,5 +224,5 @@ export function useDictation(config: {
 
     return config.mode === 'realtime'
         ? { ...realtime, stopAndSend: realtime.stopAndSend }
-        : { supported: standardSupported, status, error, partialTranscript: '', toggle, stopAndSend }
+        : { supported, status, error, partialTranscript: '', toggle, stopAndSend }
 }

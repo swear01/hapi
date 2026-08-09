@@ -471,17 +471,12 @@ export function HappyComposer(props: {
         getCurrentText: getCurrentComposerText,
         onTextChange: setComposerText,
         sendMessage: async (sessionId: string, text: string) => {
-            if (sessionId === props.sessionId) {
-                api.composer().setText(text)
-                api.composer().send()
-            } else if (props.voiceTranscriptionApi) {
+            if (props.voiceTranscriptionApi) {
                 await props.voiceTranscriptionApi.sendMessage(sessionId, text)
             }
         }
     }), [
         props.voiceTranscriptionApi,
-        props.sessionId,
-        api,
         voiceInput.provider,
         voiceInput.transcriptionMode,
         getCurrentComposerText,
