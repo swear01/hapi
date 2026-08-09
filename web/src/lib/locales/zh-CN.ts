@@ -795,6 +795,8 @@ export default {
   'settings.display.sessionListStatus.standard': '标准',
   'settings.display.sessionListStatus.detailed': '详细',
   'settings.display.sessionListStatus.detailedDescription': '显示会话停止的原因：权限、输入、后台任务、新活动或定时消息（时钟图标）。',
+  'settings.display.createAgents': '创建 Agent',
+  'settings.display.createAgents.description': '选择创建会话时要显示的 Agent。',
   'settings.display.sessionHeader': '会话顶部信息',
   'settings.display.sessionHeader.description': '选择在会话标题下方显示的信息。移动端显示 Agent 类型及优先级最高的一个可用信息。',
   'settings.display.sessionHeader.showLabels': '显示字段标题',

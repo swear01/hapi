@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
-import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
+import { CREATABLE_AGENT_FLAVORS, type CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
@@ -17,6 +17,7 @@ import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggesti
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
 import { useRecentPaths } from '@/hooks/useRecentPaths'
 import { useTranslation } from '@/lib/use-translation'
+import { loadCreateAgentVisibility } from '@/lib/createAgentVisibility'
 import { getCodexModelReasoningEfforts } from '@/lib/codexModelCapabilities'
 import {
     buildNewSessionCursorModelCatalog,
@@ -95,6 +96,7 @@ export function NewSession(props: {
     const { sessions, refetch: refetchSessions } = useSessions(props.api)
     const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
 
+    const [agentVisibility] = useState(loadCreateAgentVisibility)
     const [machineId, setMachineId] = useState<string | null>(props.initialMachineId ?? null)
     const [directory, setDirectory] = useState(props.initialDirectory ?? '')
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
@@ -1532,6 +1534,7 @@ export function NewSession(props: {
                 agent={agent}
                 isDisabled={isFormDisabled}
                 onAgentChange={handleAgentChange}
+                visibleAgents={CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate])}
             />
             {agent === 'codex' ? (
                 <CodexImportActions

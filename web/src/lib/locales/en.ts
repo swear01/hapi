@@ -796,6 +796,8 @@ export default {
   'settings.display.sessionListStatus.standard': 'Standard',
   'settings.display.sessionListStatus.detailed': 'Detailed',
   'settings.display.sessionListStatus.detailedDescription': 'Shows why a session stopped: permission, input, background work, new activity, or a scheduled message (clock icon).',
+  'settings.display.createAgents': 'Create agents',
+  'settings.display.createAgents.description': 'Choose which agents appear when creating a session.',
   'settings.display.sessionHeader': 'Session header',
   'settings.display.sessionHeader.description': 'Choose which details appear below the session title. Mobile shows the agent plus the highest-priority available detail.',
   'settings.display.sessionHeader.showLabels': 'Show field labels',

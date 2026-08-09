@@ -41,7 +41,7 @@ vi.mock('@tanstack/react-router', () => ({
     useNavigate: () => navigate,
 }))
 
-vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1 }))
+vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1, CREATABLE_AGENT_FLAVORS: ['claude', 'codex'], getFlavorLabel: (agent: string) => agent }))
 
 vi.mock('@/hooks/useTheme', () => ({
     useAppearance: () => ({ appearance: 'system', setAppearance }),
