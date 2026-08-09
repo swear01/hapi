@@ -160,10 +160,8 @@ vi.mock('./MachineSelector', () => ({
     )
 }))
 vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
-vi.mock('./GrokPermissionModeSelector', () => ({ GrokPermissionModeSelector: () => null }))
-vi.mock('./CodexFamilyPermissionModeSelector', () => ({ CodexFamilyPermissionModeSelector: () => null }))
+vi.mock('./PermissionField', () => ({ PermissionField: () => null }))
 vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
-vi.mock('./YoloToggle', () => ({ YoloToggle: () => null }))
 vi.mock('./OpencodeModelSelector', () => ({ OpencodeModelSelector: () => null }))
 vi.mock('./AgyModelSelector', () => ({
     AgyModelSelector: (props: { selectedModel: string | null; onModelChange: (model: string | null) => void }) => (

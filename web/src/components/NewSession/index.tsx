@@ -45,8 +45,6 @@ import { PiImportActions } from './PiImportActions'
 import { clearBatchImportedCodexSelection, resolveCodexImportRedirectSessionId } from './codexImportMerge'
 import { AgyModelSelector } from './AgyModelSelector'
 import { DirectorySection } from './DirectorySection'
-import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
-import { CodexFamilyPermissionModeSelector } from './CodexFamilyPermissionModeSelector'
 import { CopilotAgentModeSelector } from './CopilotAgentModeSelector'
 import { FastModeSelector } from './FastModeSelector'
 import { MachineSelector } from './MachineSelector'
@@ -66,7 +64,7 @@ import {
     savePreferredYoloMode,
 } from './preferences'
 import { SessionTypeSelector } from './SessionTypeSelector'
-import { YoloToggle } from './YoloToggle'
+import { PermissionField } from './PermissionField'
 import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
 import { PiSessionImportDialog } from '@/components/PiSessionImportDialog'
@@ -1668,18 +1666,20 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
                 onChange={setModelReasoningEffort}
             />
-            <GrokPermissionModeSelector
+            <PermissionField
                 agent={agent}
-                value={grokPermissionMode}
+                nativeValue={agent === 'grok' ? grokPermissionMode : codexFamilyPermissionMode}
+                yoloMode={yoloMode}
                 autoPermissionModeSupported={grokModelsState.autoPermissionModeSupported}
                 isDisabled={isFormDisabled}
-                onChange={setGrokPermissionMode}
-            />
-            <CodexFamilyPermissionModeSelector
-                agent={agent}
-                value={codexFamilyPermissionMode}
-                isDisabled={isFormDisabled}
-                onChange={setCodexFamilyPermissionMode}
+                onNativeChange={(mode) => {
+                    if (agent === 'grok') {
+                        setGrokPermissionMode(mode as GrokPermissionMode)
+                    } else {
+                        setCodexFamilyPermissionMode(mode)
+                    }
+                }}
+                onYoloToggle={setYoloMode}
             />
             <CollaborationModeSelector
                 agent={agent}
@@ -1699,13 +1699,6 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onChange={setServiceTier}
             />
-            {agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) ? (
-                <YoloToggle
-                    yoloMode={yoloMode}
-                    isDisabled={isFormDisabled}
-                    onToggle={setYoloMode}
-                />
-            ) : null}
 
             {(error ?? spawnError) ? (
                 <div className="px-3 py-2 text-sm text-red-600">
