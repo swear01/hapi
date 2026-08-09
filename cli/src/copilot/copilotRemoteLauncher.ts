@@ -338,24 +338,21 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
         if (!backend || !sessionId) {
             throw new Error('Copilot agent mode switching is unavailable before the remote session is ready');
         }
-        if (agentMode === 'interactive') {
-            // Interactive is the ACP server default (spawned without --mode), not a
-            // valid session/set_mode mode id; mirror buildCopilotAcpArgs as a no-op.
-            this.currentAgentMode = agentMode;
-            this.applyDisplayAgentMode(agentMode);
-            return;
-        }
         if (this.setModeSupported === false) {
             throw new Error('This Copilot CLI build does not support agent mode switching');
         }
 
+        // `interactive` is the legacy TUI name for the ACP default `agent` mode
+        // (spawned without --mode); map it to the valid ACP session mode id so
+        // runtime switches back to Interactive leave the backend in sync.
+        const backendMode = agentMode === 'interactive' ? 'agent' : agentMode;
         try {
-            await backend.setMode(sessionId, agentMode);
+            await backend.setMode(sessionId, backendMode);
             this.setModeSupported = true;
-            logger.debug(`[copilot-remote] Applied agent mode via setMode: ${agentMode}`);
+            logger.debug(`[copilot-remote] Applied agent mode via setMode: ${backendMode}`);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (/method not found|does not support session\/set_mode|no mode config option|invalid mode/i.test(message)) {
+            if (/method not found|does not support session\/set_mode|no mode config option/i.test(message)) {
                 this.setModeSupported = false;
                 logger.warn('[copilot-remote] Copilot CLI build does not support set_mode; agent mode changes require restart');
                 this.session.sendSessionEvent({

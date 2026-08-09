@@ -94,41 +94,30 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
         expect(internals.displayAgentMode).toBe('interactive');
     });
 
-    it('treats interactive as a no-op without calling setMode', async () => {
-        const setMode = vi.fn().mockRejectedValue(new Error('transport unavailable'));
+    it('maps interactive to the ACP agent mode via setMode', async () => {
+        const setMode = vi.fn().mockResolvedValue(undefined);
         const { launcher, internals } = createLauncher(setMode);
 
         await expect(launcher.applyAgentMode('interactive')).resolves.toBeUndefined();
 
-        expect(setMode).not.toHaveBeenCalled();
+        expect(setMode).toHaveBeenCalledWith('copilot-session', 'agent');
         expect(internals.currentAgentMode).toBe('interactive');
         expect(internals.displayAgentMode).toBe('interactive');
     });
 
-    it('classifies Invalid mode responses as unsupported runtime switching', async () => {
-        const setMode = vi.fn().mockRejectedValue(
-            new Error("Invalid mode 'plan'. Supported values: agent, plan, autopilot.")
-        );
+    it('does not permanently disable switching after an Invalid mode rejection', async () => {
+        const setMode = vi.fn()
+            .mockRejectedValueOnce(
+                new Error("Invalid mode 'plan'. Supported values: agent, plan, autopilot.")
+            )
+            .mockResolvedValueOnce(undefined);
         const { launcher, internals } = createLauncher(setMode);
 
         await expect(launcher.applyAgentMode('plan')).rejects.toThrow("Invalid mode 'plan'");
-        await expect(launcher.applyAgentMode('autopilot')).rejects.toThrow(
-            'does not support agent mode switching'
-        );
+        await expect(launcher.applyAgentMode('autopilot')).resolves.toBeUndefined();
 
-        expect(setMode).toHaveBeenCalledTimes(1);
-        expect(internals.currentAgentMode).toBe('interactive');
-    });
-
-    it('continues startup when setMode is rejected with Invalid mode', async () => {
-        const setMode = vi.fn().mockRejectedValue(new Error("Invalid mode 'plan'"));
-        const { internals } = createLauncher(setMode);
-        internals.currentAgentMode = 'plan';
-
-        await expect(internals.applyInitialAgentMode()).resolves.toBeUndefined();
-
-        expect(internals.currentAgentMode).toBe('plan');
-        expect(internals.displayAgentMode).toBe('plan');
+        expect(setMode).toHaveBeenCalledTimes(2);
+        expect(internals.currentAgentMode).toBe('autopilot');
     });
 
     it('applies Auto after an explicit model selection', async () => {
