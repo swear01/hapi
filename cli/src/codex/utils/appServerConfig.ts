@@ -12,6 +12,7 @@ import type {
     UserInput
 } from '../appServerTypes';
 import { resolveCodexPermissionModeConfig } from './permissionModeConfig';
+import { resolveManagedProviderWireModel } from '@/host/providerModel';
 
 export const codexCollaborationSpawnAgentInstructions = [
     'Codex sub-agent spawning rules:',
@@ -223,8 +224,9 @@ export function buildThreadStartParams(args: {
         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
     };
 
-    if (args.mode.model) {
-        params.model = args.mode.model;
+    const wireModel = resolveManagedProviderWireModel(args.mode.model);
+    if (wireModel) {
+        params.model = wireModel;
     }
     if (args.mode.personality) {
         params.personality = args.mode.personality;
@@ -298,13 +300,14 @@ export function buildTurnStartParams(args: {
         if (!model) {
             throw new Error(`Collaboration mode '${collaborationMode}' requires a resolved model`);
         }
-        const { developerInstructions } = resolveInstructions(args);
         params.collaborationMode = {
             mode: collaborationMode,
             settings: {
                 model,
                 ...(modelReasoningEffort !== undefined ? { reasoning_effort: modelReasoningEffort } : {}),
-                developer_instructions: appendCollaborationInstructions(developerInstructions, args.mode?.proactiveMultiAgent)
+                developer_instructions: collaborationMode === 'plan'
+                    ? null
+                    : appendCollaborationInstructions(resolveInstructions(args).developerInstructions, args.mode?.proactiveMultiAgent)
             }
         };
     } else if (model) {

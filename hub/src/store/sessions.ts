@@ -36,6 +36,11 @@ import { updateVersionedField } from './versionedUpdates'
 //     write-once-keep semantics. Mirror of pickExistingSessionMetadata
 //     in cli/src/agent/sessionFactory.ts.
 //
+//   - ALERT_STATE_FIELDS: durable operator-facing alert state that must
+//     survive sparse metadata writes (e.g. archive). Without this,
+//     lastModelError (banner / amber dot / ack) vanishes when a write
+//     omits it — the user never dismissed the error.
+//
 // `cursorSessionProtocol` is paired with `cursorSessionId`: protocol is
 // tied to a specific chat id, so a write that explicitly sets a new
 // `cursorSessionId` must drop a stale prior protocol. Handled in
@@ -64,6 +69,8 @@ const SIMPLE_RESUME_TOKENS = [
     'copilotSessionId',
     'piSessionId'
 ] as const
+
+const ALERT_STATE_FIELDS = ['lastModelError'] as const
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -120,6 +127,47 @@ function preserveCursorProtocolPair(
     return merged
 }
 
+/**
+ * Hub-owned fields on lastModelError (ack + delivery watermark) must survive
+ * stale CLI metadata rewrites of the same eventId. Web ack / NotificationHub
+ * write these on the hub copy; the CLI's local snapshot often lacks them.
+ * Identity is eventId — wall-clock atTs is display-only.
+ */
+function preserveModelErrorHubFields(
+    prior: Record<string, unknown>,
+    next: Record<string, unknown>,
+    merged: Record<string, unknown> | null
+): Record<string, unknown> | null {
+    const oldError = isPlainObject(prior.lastModelError) ? prior.lastModelError : null
+    const newError = isPlainObject(next.lastModelError) ? next.lastModelError : null
+    if (
+        !oldError
+        || !newError
+        || typeof oldError.eventId !== 'string'
+        || oldError.eventId !== newError.eventId
+    ) {
+        return merged
+    }
+
+    const preserved: Record<string, unknown> = { ...newError }
+    let changed = false
+    if (typeof oldError.acknowledgedAt === 'number' && newError.acknowledgedAt === undefined) {
+        preserved.acknowledgedAt = oldError.acknowledgedAt
+        changed = true
+    }
+    if (typeof oldError.notifiedAt === 'number' && newError.notifiedAt === undefined) {
+        preserved.notifiedAt = oldError.notifiedAt
+        changed = true
+    }
+    if (!changed) {
+        return merged
+    }
+
+    const result = merged ?? { ...next }
+    result.lastModelError = preserved
+    return result
+}
+
 export function mergeSessionMetadata(prior: unknown, next: unknown): unknown {
     if (!isPlainObject(prior) || !isPlainObject(next)) {
         return next
@@ -128,7 +176,9 @@ export function mergeSessionMetadata(prior: unknown, next: unknown): unknown {
     merged = carryForwardIfMissing(prior, next, merged, PARSE_IDENTITY_FIELDS)
     merged = carryForwardIfMissing(prior, next, merged, ROUTING_FIELDS)
     merged = carryForwardIfMissing(prior, next, merged, SIMPLE_RESUME_TOKENS)
+    merged = carryForwardIfMissing(prior, next, merged, ALERT_STATE_FIELDS)
     merged = preserveCursorProtocolPair(prior, next, merged)
+    merged = preserveModelErrorHubFields(prior, next, merged)
     return merged ?? next
 }
 
@@ -693,8 +743,15 @@ export function getSessionsByNamespace(db: Database, namespace: string): StoredS
 }
 
 export function deleteSession(db: Database, id: string, namespace: string): boolean {
-    const result = db.prepare(
-        'DELETE FROM sessions WHERE id = ? AND namespace = ?'
-    ).run(id, namespace)
+    // Refuse while a running attached job exists — CASCADE would erase the live
+    // meter for idle (active=false) outliving work. Callers must transfer/clear first.
+    const result = db.prepare(`
+        DELETE FROM sessions
+        WHERE id = ? AND namespace = ?
+          AND NOT EXISTS (
+              SELECT 1 FROM session_jobs
+              WHERE session_id = sessions.id AND status = 'running'
+          )
+    `).run(id, namespace)
     return result.changes > 0
 }

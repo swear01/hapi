@@ -27,10 +27,11 @@ export function CheckIcon(props: { className?: string }) {
     )
 }
 
-export function SettingsPageContent(props: { description?: string; children: ReactNode }) {
+export function SettingsPageContent(props: { title?: string; description?: string; children: ReactNode }) {
     return (
         <div className="mx-auto w-full max-w-[720px] space-y-5 px-3 py-4 lg:px-6 lg:py-6">
             <div>
+                {props.title ? <h1 className="text-xl font-semibold text-[var(--app-fg)]">{props.title}</h1> : null}
                 {props.description ? <p className="text-sm text-[var(--app-hint)]">{props.description}</p> : null}
             </div>
             {props.children}
@@ -82,9 +83,15 @@ export function SettingsChoiceGroup<T extends string | number>(props: {
     value: T
     options: ReadonlyArray<{ value: T; label: string; description?: string }>
     onChange: (value: T) => void
-    columns?: 2 | 4 | 5
+    columns?: 2 | 3 | 4 | 5
 }) {
-    const columns = props.columns === 5 ? 'grid-cols-5' : props.columns === 4 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2'
+    const columns = props.columns === 5
+        ? 'grid-cols-5'
+        : props.columns === 4
+            ? 'grid-cols-2 sm:grid-cols-4'
+            : props.columns === 3
+                ? 'grid-cols-3'
+                : 'grid-cols-2'
     return (
         <div className="px-3 py-3">
             <SettingsFieldLabel hidden={props.hideLabel} description={props.description}>{props.label}</SettingsFieldLabel>

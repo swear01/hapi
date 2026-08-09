@@ -1,0 +1,233 @@
+import { describe, expect, it } from 'bun:test'
+import { Database } from 'bun:sqlite'
+import { Store } from './index'
+
+function getColumns(store: Store, table: string): string[] {
+    const db: Database = (store as unknown as { db: Database }).db
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+    return rows.map((row) => row.name)
+}
+
+describe('Store V22→V23 migration: session_jobs table', () => {
+    it('fresh DB has session_jobs with expected columns', () => {
+        const store = new Store(':memory:')
+        const cols = getColumns(store, 'session_jobs')
+        expect(cols).toContain('session_id')
+        expect(cols).toContain('job_key')
+        expect(cols).toContain('label')
+        expect(cols).toContain('status')
+        expect(cols).toContain('done')
+        expect(cols).toContain('total')
+        expect(cols).toContain('remaining')
+        expect(cols).toContain('heartbeat_at')
+        expect(cols).toContain('started_at')
+        expect(cols).toContain('updated_at')
+        store.close()
+    })
+
+    it('upserts, patches, deletes a job and surfaces primary running', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
+
+        const created = store.sessionJobs.upsert(session.id, 'beets', {
+            label: 'beets import',
+            status: 'running',
+            remaining: 100,
+            unit: 'tracks'
+        })
+        expect(created.outcome).toBe('upserted')
+        if (created.outcome !== 'upserted') throw new Error('unreachable')
+
+        const primary = store.sessionJobs.getPrimaryRunning(session.id)
+        expect(primary?.key).toBe('beets')
+        expect(primary?.remaining).toBe(100)
+
+        // Stable primary: earliest started_at wins even after a newer job heartbeats.
+        store.sessionJobs.upsert(session.id, 'newer', {
+            label: 'sidecar',
+            status: 'running',
+            remaining: 1,
+            startedAt: (primary!.startedAt) + 60_000
+        })
+        store.sessionJobs.patch(session.id, 'newer', { remaining: 0 })
+        expect(store.sessionJobs.getPrimaryRunning(session.id)?.key).toBe('beets')
+        expect(store.sessionJobs.delete(session.id, 'newer')).toBe(true)
+
+        const patched = store.sessionJobs.patch(session.id, 'beets', { remaining: 80 })
+        expect(patched?.remaining).toBe(80)
+
+        expect(store.sessionJobs.delete(session.id, 'beets')).toBe(true)
+        expect(store.sessionJobs.getPrimaryRunning(session.id)).toBeNull()
+        store.close()
+    })
+
+    it('refuses delete while a running job exists; cascades terminal jobs', async () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
+        store.sessionJobs.upsert(session.id, 'job', { label: 'x', status: 'running' })
+        expect(store.sessionJobs.list(session.id)).toHaveLength(1)
+        expect(store.sessions.deleteSession(session.id, 'default')).toBe(false)
+        expect(store.sessionJobs.list(session.id)).toHaveLength(1)
+
+        store.sessionJobs.patch(session.id, 'job', { status: 'completed' })
+        expect(store.sessions.deleteSession(session.id, 'default')).toBe(true)
+        expect(store.sessionJobs.list(session.id)).toHaveLength(0)
+        store.close()
+    })
+
+    it('preserves startedAt on PUT without body.startedAt; honors explicit correction', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('test', { path: '/tmp' }, null, 'default')
+        const historical = 1_785_304_595_000
+
+        const created = store.sessionJobs.upsert(session.id, 'beets', {
+            label: 'beets import',
+            status: 'running',
+            remaining: 10
+        }, 2_000)
+        expect(created.outcome).toBe('upserted')
+        if (created.outcome !== 'upserted') throw new Error('unreachable')
+        expect(created.job.startedAt).toBe(2_000)
+
+        const progress = store.sessionJobs.upsert(session.id, 'beets', {
+            label: 'beets import',
+            status: 'running',
+            remaining: 9
+        }, 3_000)
+        expect(progress.outcome).toBe('upserted')
+        if (progress.outcome !== 'upserted') throw new Error('unreachable')
+        expect(progress.job.startedAt).toBe(2_000)
+        expect(progress.job.remaining).toBe(9)
+
+        const corrected = store.sessionJobs.upsert(session.id, 'beets', {
+            label: 'beets import',
+            status: 'running',
+            remaining: 9,
+            startedAt: historical
+        }, 4_000)
+        expect(corrected.outcome).toBe('upserted')
+        if (corrected.outcome !== 'upserted') throw new Error('unreachable')
+        expect(corrected.job.startedAt).toBe(historical)
+
+        const patched = store.sessionJobs.patch(session.id, 'beets', { remaining: 8 }, 5_000)
+        expect(patched?.startedAt).toBe(historical)
+        expect(patched?.remaining).toBe(8)
+        store.close()
+    })
+
+    it('transfers jobs on merge without colliding keys', () => {
+        const store = new Store(':memory:')
+        const oldSession = store.sessions.getOrCreateSession('old', { path: '/a' }, null, 'default')
+        const newSession = store.sessions.getOrCreateSession('new', { path: '/b' }, null, 'default')
+        store.sessionJobs.upsert(oldSession.id, 'beets', {
+            label: 'beets',
+            status: 'running',
+            remaining: 5
+        })
+        const result = store.sessionJobs.transfer(oldSession.id, newSession.id)
+        expect(result.moved).toBe(1)
+        expect(store.sessionJobs.getPrimaryRunning(newSession.id)?.remaining).toBe(5)
+        expect(store.sessionJobs.list(oldSession.id)).toHaveLength(0)
+        store.close()
+    })
+
+    it('on key collision keeps a running source over a terminal target', () => {
+        const store = new Store(':memory:')
+        const from = store.sessions.getOrCreateSession('from', { path: '/a' }, null, 'default')
+        const to = store.sessions.getOrCreateSession('to', { path: '/b' }, null, 'default')
+        store.sessionJobs.upsert(to.id, 'beets', {
+            label: 'stale',
+            status: 'completed',
+            remaining: 0
+        }, 1_000)
+        store.sessionJobs.upsert(from.id, 'beets', {
+            label: 'live',
+            status: 'running',
+            remaining: 3
+        }, 2_000)
+        const result = store.sessionJobs.transfer(from.id, to.id)
+        expect(result.collided).toBe(1)
+        expect(result.moved).toBe(1)
+        const primary = store.sessionJobs.getPrimaryRunning(to.id)
+        expect(primary?.label).toBe('live')
+        expect(primary?.status).toBe('running')
+        expect(store.sessionJobs.list(from.id)).toHaveLength(0)
+        store.close()
+    })
+
+    it('on key collision prefers a newer terminal source over an older terminal target', () => {
+        const store = new Store(':memory:')
+        const from = store.sessions.getOrCreateSession('from-term', { path: '/a' }, null, 'default')
+        const to = store.sessions.getOrCreateSession('to-term', { path: '/b' }, null, 'default')
+        store.sessionJobs.upsert(to.id, 'beets', {
+            label: 'old-complete',
+            status: 'completed',
+            remaining: 0
+        }, 1_000)
+        store.sessionJobs.upsert(from.id, 'beets', {
+            label: 'new-fail',
+            status: 'failed',
+            remaining: 0
+        }, 2_000)
+        const result = store.sessionJobs.transfer(from.id, to.id)
+        expect(result.collided).toBe(1)
+        expect(result.moved).toBe(1)
+        const kept = store.sessionJobs.list(to.id)
+        expect(kept).toHaveLength(1)
+        expect(kept[0]?.label).toBe('new-fail')
+        expect(kept[0]?.status).toBe('failed')
+        expect(store.sessionJobs.list(from.id)).toHaveLength(0)
+        store.close()
+    })
+
+    it('on dual-running same-key collision keeps both under remapped source key', () => {
+        const store = new Store(':memory:')
+        const fromId = 'aaaaaaaa-1111-1111-1111-111111111111'
+        const toId = 'bbbbbbbb-2222-2222-2222-222222222222'
+        const from = store.sessions.getOrCreateSession(
+            'tag-from-dual',
+            { path: '/a' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            fromId
+        )
+        const to = store.sessions.getOrCreateSession(
+            'tag-to-dual',
+            { path: '/b' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            toId
+        )
+        expect(from.id).toBe(fromId)
+        expect(to.id).toBe(toId)
+        store.sessionJobs.upsert(to.id, 'beets', {
+            label: 'target-live',
+            status: 'running',
+            remaining: 9
+        }, 1_000)
+        store.sessionJobs.upsert(from.id, 'beets', {
+            label: 'source-live',
+            status: 'running',
+            remaining: 3
+        }, 2_000)
+        const result = store.sessionJobs.transfer(from.id, to.id)
+        expect(result.collided).toBe(1)
+        expect(result.moved).toBe(1)
+        expect(result.keyRedirects).toEqual([
+            { fromKey: 'beets', toKey: 'beets.aaaaaaaa' }
+        ])
+        const onTarget = store.sessionJobs.list(to.id)
+        expect(onTarget).toHaveLength(2)
+        expect(onTarget.map((j) => j.key).sort()).toEqual(['beets', 'beets.aaaaaaaa'])
+        expect(store.sessionJobs.get(to.id, 'beets')?.label).toBe('target-live')
+        expect(store.sessionJobs.get(to.id, 'beets.aaaaaaaa')?.label).toBe('source-live')
+        expect(store.sessionJobs.list(from.id)).toHaveLength(0)
+        store.close()
+    })
+})

@@ -406,6 +406,13 @@ export const ScratchlistEntryUpdateRequestSchema = z.object({
 
 export type ScratchlistEntryUpdateRequest = z.infer<typeof ScratchlistEntryUpdateRequestSchema>
 
+/** Dismiss the model-error banner for a specific displayed error (by eventId). */
+export const AcknowledgeModelErrorRequestSchema = z.object({
+    eventId: z.string().min(1)
+})
+
+export type AcknowledgeModelErrorRequest = z.infer<typeof AcknowledgeModelErrorRequestSchema>
+
 /** Per-session legacy stream-json → ACP migrator request. See tiann/hapi#824. */
 export const CursorMigrateToAcpRequestSchema = z.object({
     /** Skip removing the legacy ~/.cursor/chats source store.db even after verify passes. */
@@ -579,6 +586,7 @@ export type QueuedStateResponse = {
 export const SpawnSessionRequestSchema = z.object({
     directory: z.string().min(1),
     agent: AgentFlavorSchema.optional(),
+    providerProfileId: z.string().uuid().nullable().optional(),
     model: z.string().optional(),
     effort: z.string().optional(),
     modelReasoningEffort: z.string().optional(),
@@ -586,10 +594,21 @@ export const SpawnSessionRequestSchema = z.object({
     permissionMode: PermissionModeSchema.optional(),
     sessionType: z.enum(['simple', 'worktree']).optional(),
     worktreeName: z.string().optional(),
+    resumeSessionId: z.string().optional(),
     serviceTier: z.enum(['fast', 'standard']).optional(),
     collaborationMode: CodexCollaborationModeSchema.optional(),
     copilotAgentMode: CopilotAgentModeSchema.optional(),
     startingMode: z.enum(['remote', 'pty']).optional()
+}).superRefine((data, ctx) => {
+    // Public machine-spawn only validates Codex transcript workspace roots.
+    // Hub-driven session resume for other flavors uses RPC, not this schema.
+    if (data.resumeSessionId && data.agent !== 'codex') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['resumeSessionId'],
+            message: 'resumeSessionId is only supported for Codex machine spawns'
+        })
+    }
 })
 
 export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>

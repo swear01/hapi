@@ -1,4 +1,7 @@
 import {
+    AttachedJobPatchSchema,
+    AttachedJobUpsertSchema,
+    AcknowledgeModelErrorRequestSchema,
     CursorMigrateToAcpRequestSchema,
     DeleteUploadRequestSchema,
     ForkConversationRequestSchema,
@@ -33,6 +36,7 @@ import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeFo
 import { requireSessionFromParam, requireSyncEngine } from './guards'
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+const OLD_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 function commandsFromMetadataSlashCommands(names: readonly string[] | undefined): SlashCommand[] {
     if (!names?.length) {
@@ -113,13 +117,22 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             sessionRecords = sessionRecords.slice(0, limit)
         }
         const scheduledCounts = engine.getFutureScheduledMessageCounts(sessionRecords.map((session) => session.id))
+        const uninvokedScheduledCounts = engine.getUninvokedScheduledMessageCounts(sessionRecords.map((session) => session.id))
         const nextScheduledAt = engine.getNextScheduledAtBySessionIds(sessionRecords.map((session) => session.id))
+        const scratchlistUpdatedAt = engine.getScratchlistUpdatedAtBySessionIds(sessionRecords.map((session) => session.id))
+        const attachedJobs = engine.getPrimaryAttachedJobsBySessionIds(sessionRecords.map((session) => session.id))
         const sessions = sessionRecords.map((session) => {
-            const summary = toSessionSummary(session)
+            const summary = toSessionSummary(session, {
+                attachedJob: attachedJobs.get(session.id) ?? null,
+                // Same allocator as SSE emits — equal-ms terminal patches stay applyable.
+                attachedJobUpdatedAt: engine.allocateAttachedJobVersion(session.id)
+            })
             return {
                 ...summary,
                 futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
-                nextScheduledAt: nextScheduledAt.get(session.id) ?? null
+                uninvokedScheduledMessageCount: uninvokedScheduledCounts.get(session.id) ?? 0,
+                nextScheduledAt: nextScheduledAt.get(session.id) ?? null,
+                scratchlistUpdatedAt: scratchlistUpdatedAt.get(session.id)
             }
         })
 
@@ -445,6 +458,39 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         await engine.archiveSession(sessionResult.sessionId)
         return c.json({ ok: true })
+    })
+
+    app.post('/sessions/:id/model-error/acknowledge', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = AcknowledgeModelErrorRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+
+        try {
+            await engine.acknowledgeModelError(sessionResult.sessionId, parsed.data.eventId)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to acknowledge model error'
+            if (
+                message.includes('concurrently')
+                || message.includes('version')
+                || message.includes('changed')
+            ) {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
     })
 
     app.post('/sessions/:id/migrate-to-acp', async (c) => {
@@ -829,13 +875,34 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
         }
 
+        if (c.req.query('requireArchived') === '1'
+            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
+            return c.json({ error: 'Session is no longer archived' }, 409)
+        }
+
+        if (c.req.query('cleanOld') === '1') {
+            const pending = engine.getUninvokedScheduledMessageCounts([sessionResult.sessionId]).get(sessionResult.sessionId) ?? 0
+            const scratchAt = engine.getScratchlistUpdatedAtBySessionIds([sessionResult.sessionId]).get(sessionResult.sessionId) ?? 0
+            if (pending > 0 || Math.max(sessionResult.session.updatedAt, scratchAt) > Date.now() - OLD_SESSION_AGE_MS) {
+                return c.json({ error: 'Session is no longer eligible for cleanup' }, 409)
+            }
+        }
+
+        // Attached jobs outlive active=false; CASCADE would erase the live meter and
+        // leave supervisors PATCHing a deleted session (404 forever).
+        if (engine.getPrimaryAttachedJob(sessionResult.sessionId)) {
+            return c.json({
+                error: 'Cannot delete a session while an attached job is running. Complete or clear it first.'
+            }, 409)
+        }
+
         try {
             await engine.deleteSession(sessionResult.sessionId)
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to delete session'
-            // Map "active session" error to 409 conflict (race condition: session became active)
-            if (message.includes('active')) {
+            // Map lifecycle conflicts to 409 (active race, or running attached job)
+            if (message.includes('active') || message.includes('attached job')) {
                 return c.json({ error: message }, 409)
             }
             return c.json({ error: message }, 500)
@@ -1178,6 +1245,157 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const removed = engine.deleteScratchlistEntry(sessionResult.sessionId, entryId)
         if (!removed) {
             return c.json({ error: 'Scratchlist entry not found' }, 404)
+        }
+        return c.json({ ok: true })
+    })
+
+    // tiann/hapi#1404 — session-attached long-running jobs (works while agent idle).
+    const JOB_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+    function resolveJobOwnerSession(
+        c: Context<WebAppEnv>,
+        engine: SyncEngine
+    ): { requestedSessionId: string; sessionId: string; session: Session } | Response {
+        const rawId = c.req.param('id') ?? ''
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            // Session may already be deleted after merge — still try acceptor redirect.
+            const namespace = c.get('namespace')
+            const redirected = engine.resolveAttachedJobSessionId(rawId, namespace)
+            if (redirected !== rawId) {
+                const access = engine.resolveSessionAccess(redirected, namespace)
+                if (access.ok) {
+                    return {
+                        requestedSessionId: rawId,
+                        sessionId: access.sessionId,
+                        session: access.session,
+                    }
+                }
+            }
+            return sessionResult
+        }
+        const namespace = c.get('namespace')
+        const ownerId = engine.resolveAttachedJobSessionId(sessionResult.sessionId, namespace)
+        if (ownerId === sessionResult.sessionId) {
+            return {
+                requestedSessionId: sessionResult.sessionId,
+                sessionId: sessionResult.sessionId,
+                session: sessionResult.session,
+            }
+        }
+        const access = engine.resolveSessionAccess(ownerId, namespace)
+        if (!access.ok) {
+            return {
+                requestedSessionId: sessionResult.sessionId,
+                sessionId: sessionResult.sessionId,
+                session: sessionResult.session,
+            }
+        }
+        return {
+            requestedSessionId: sessionResult.sessionId,
+            sessionId: access.sessionId,
+            session: access.session,
+        }
+    }
+
+    function resolveJobKey(
+        c: Context<WebAppEnv>,
+        engine: SyncEngine,
+        owner: { requestedSessionId: string; sessionId: string },
+        jobKey: string
+    ): string {
+        return engine.resolveAttachedJobKey(
+            owner.requestedSessionId,
+            owner.sessionId,
+            jobKey,
+            c.get('namespace')
+        )
+    }
+
+    app.get('/sessions/:id/jobs', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        return c.json({
+            jobs: engine.listSessionJobs(sessionResult.sessionId),
+            primary: engine.getPrimaryAttachedJob(sessionResult.sessionId)
+        })
+    })
+
+    app.put('/sessions/:id/jobs/:jobKey', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const rawJobKey = c.req.param('jobKey')
+        if (!rawJobKey || !JOB_KEY_RE.test(rawJobKey)) {
+            return c.json({ error: 'Invalid jobKey (1-128 chars: alnum, . _ -)' }, 400)
+        }
+        const jobKey = resolveJobKey(c, engine, sessionResult, rawJobKey)
+        const body = await c.req.json().catch(() => null)
+        const parsed = AttachedJobUpsertSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+        const result = engine.upsertSessionJob(sessionResult.sessionId, jobKey, parsed.data)
+        if (result.outcome === 'session-not-found') {
+            return c.json({ error: 'Session not found' }, 404)
+        }
+        return c.json({ job: result.job })
+    })
+
+    app.patch('/sessions/:id/jobs/:jobKey', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const rawJobKey = c.req.param('jobKey')
+        if (!rawJobKey || !JOB_KEY_RE.test(rawJobKey)) {
+            return c.json({ error: 'Invalid jobKey (1-128 chars: alnum, . _ -)' }, 400)
+        }
+        const jobKey = resolveJobKey(c, engine, sessionResult, rawJobKey)
+        const body = await c.req.json().catch(() => null)
+        const parsed = AttachedJobPatchSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+        const job = engine.patchSessionJob(sessionResult.sessionId, jobKey, parsed.data)
+        if (!job) {
+            return c.json({ error: 'Job not found' }, 404)
+        }
+        return c.json({ job })
+    })
+
+    app.delete('/sessions/:id/jobs/:jobKey', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const rawJobKey = c.req.param('jobKey')
+        if (!rawJobKey || !JOB_KEY_RE.test(rawJobKey)) {
+            return c.json({ error: 'Invalid jobKey (1-128 chars: alnum, . _ -)' }, 400)
+        }
+        const jobKey = resolveJobKey(c, engine, sessionResult, rawJobKey)
+        const removed = engine.deleteSessionJob(sessionResult.sessionId, jobKey)
+        if (!removed) {
+            return c.json({ error: 'Job not found' }, 404)
         }
         return c.json({ ok: true })
     })

@@ -53,8 +53,22 @@ import type {
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
+import type {
+    AgentProvider,
+    ProviderListResponse,
+    ProviderHealthCheckResponse,
+    ProviderMutationResponse,
+    ProviderProfileInput,
+    ProviderProfileUpdate
+} from '@hapi/protocol'
+import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+import type { FleetUpgradePolicy, HubUpgradeOffer } from '@hapi/protocol/upgradeChannel'
+
+export type UpgradeInfoResponse = {
+    offer: HubUpgradeOffer
+    policy: FleetUpgradePolicy
+}
 
 export type ProviderCredentialSource = 'env' | 'settings' | 'none'
 
@@ -539,6 +553,14 @@ export class ApiClient {
         return response as CancelMessageResponse
     }
 
+    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
+        const response = await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
+            { method: 'POST', body: JSON.stringify({}) }
+        )
+        return response as SteerQueuedMessageResponse
+    }
+
     async abortSession(sessionId: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
             method: 'POST',
@@ -570,6 +592,13 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
             method: 'POST',
             body: JSON.stringify({})
+        })
+    }
+
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-error/acknowledge`, {
+            method: 'POST',
+            body: JSON.stringify({ eventId })
         })
     }
 
@@ -747,6 +776,31 @@ export class ApiClient {
         return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
     }
 
+    async restartMachineRunner(machineId: string): Promise<{ message: string }> {
+        return await this.request<{ message: string }>(
+            `/api/machines/${encodeURIComponent(machineId)}/restart-runner`,
+            { method: 'POST', body: '{}' }
+        )
+    }
+
+    async upgradeMachineRunner(machineId: string): Promise<{ message: string; response?: unknown }> {
+        return await this.request<{ message: string; response?: unknown }>(
+            `/api/machines/${encodeURIComponent(machineId)}/upgrade-runner`,
+            { method: 'POST', body: '{}' }
+        )
+    }
+
+    async getUpgradeInfo(): Promise<UpgradeInfoResponse> {
+        return await this.request<UpgradeInfoResponse>('/api/upgrade/offer')
+    }
+
+    async setFleetUpgradePolicy(policy: FleetUpgradePolicy): Promise<{ policy: FleetUpgradePolicy }> {
+        return await this.request<{ policy: FleetUpgradePolicy }>(
+            '/api/upgrade/policy',
+            { method: 'PUT', body: JSON.stringify({ policy }) }
+        )
+    }
+
     async listMachineDirectory(
         machineId: string,
         path: string,
@@ -759,6 +813,39 @@ export class ApiClient {
                 body: JSON.stringify({ path, includeHidden: options?.includeHidden === true })
             }
         )
+    }
+
+    async listProviderProfiles(machineId: string, agent?: AgentProvider): Promise<ProviderListResponse> {
+        const query = agent ? `?agent=${encodeURIComponent(agent)}` : ''
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers${query}`)
+    }
+
+    async createProviderProfile(machineId: string, input: ProviderProfileInput): Promise<ProviderMutationResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers`, {
+            method: 'POST',
+            body: JSON.stringify(input)
+        })
+    }
+
+    async updateProviderProfile(machineId: string, id: string, patch: ProviderProfileUpdate): Promise<ProviderMutationResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(patch)
+        })
+    }
+
+    async setDefaultProvider(machineId: string, agent: AgentProvider, id: string | null): Promise<ProviderMutationResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/default`, {
+            method: 'POST',
+            body: JSON.stringify({ agent, id })
+        })
+    }
+
+    async checkProviderHealth(machineId: string, id: string, refreshModels = true): Promise<ProviderHealthCheckResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(id)}/health`, {
+            method: 'POST',
+            body: JSON.stringify({ refreshModels })
+        })
     }
 
     async checkMachinePathsExists(
@@ -784,11 +871,13 @@ export class ApiClient {
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
         effort?: string,
+        resumeSessionId?: string,
         permissionMode?: PermissionMode,
         serviceTier?: 'fast' | 'standard',
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty'
+        startingMode?: 'remote' | 'pty',
+        providerProfileId?: string | null
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
@@ -801,11 +890,13 @@ export class ApiClient {
                 sessionType,
                 worktreeName,
                 effort,
+                resumeSessionId,
                 permissionMode,
                 serviceTier,
                 collaborationMode,
                 copilotAgentMode,
-                startingMode
+                startingMode,
+                providerProfileId
             })
         })
     }
@@ -929,8 +1020,12 @@ export class ApiClient {
         })
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    async deleteSession(sessionId: string, options?: { cleanOld?: boolean; requireArchived?: boolean }): Promise<void> {
+        const params = new URLSearchParams()
+        if (options?.cleanOld) params.set('cleanOld', '1')
+        if (options?.requireArchived) params.set('requireArchived', '1')
+        const suffix = params.size > 0 ? `?${params}` : ''
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
             method: 'DELETE'
         })
     }

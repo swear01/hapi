@@ -22,6 +22,7 @@ import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
 import { createUsageRoutes } from './routes/usage'
+import { createUpgradeRoutes, createUpgradeCliRoutes } from './routes/upgrade'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
@@ -199,19 +200,26 @@ function findWebappDistDir(): { distDir: string; indexHtmlPath: string } {
     return { distDir, indexHtmlPath: join(distDir, 'index.html') }
 }
 
+export function getWebAssetCacheHeaders(path: string): Record<string, string> {
+    if (path.startsWith('/assets/')) {
+        return {
+            'Cache-Control': 'public, max-age=31536000, immutable'
+        }
+    }
+
+    return {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'CDN-Cache-Control': 'no-store',
+        'Cloudflare-CDN-Cache-Control': 'no-store'
+    }
+}
+
 function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
-    const headers: Record<string, string> = {
-        'Content-Type': asset.mimeType
-    }
-
-    if (asset.path === '/sw.js') {
-        headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
-        headers['CDN-Cache-Control'] = 'no-store'
-        headers['Cloudflare-CDN-Cache-Control'] = 'no-store'
-    }
-
     return new Response(Bun.file(asset.sourcePath), {
-        headers
+        headers: {
+            'Content-Type': asset.mimeType,
+            ...getWebAssetCacheHeaders(asset.path)
+        }
     })
 }
 
@@ -239,6 +247,7 @@ function createWebApp(options: {
     const corsOriginOption = corsOrigins.includes('*') ? '*' : corsOrigins
     const corsMiddleware = cors({
         origin: corsOriginOption,
+        // PUT: fleet upgrade policy route (this PR).
         allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
         // last-event-id: browsers attach it to EventSource reconnects for
         // SSE replay; allow it in case a browser preflights the request.
@@ -269,6 +278,7 @@ function createWebApp(options: {
     })
 
     app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/cli', createUpgradeCliRoutes())
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
@@ -282,6 +292,7 @@ function createWebApp(options: {
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
     app.route('/api', createUsageRoutes(options.store))
+    app.route('/api', createUpgradeRoutes(options.getSyncEngine))
     app.route('/api', createGitRoutes(options.getSyncEngine))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
     app.route('/api', createCodexDesktopRoutes({
@@ -376,7 +387,14 @@ from GitHub Pages instead of through the relay tunnel.
         return app
     }
 
-    app.use('/assets/*', serveStatic({ root: distDir }))
+    app.use('/assets/*', serveStatic({
+        root: distDir,
+        onFound: (_path, c) => {
+            for (const [name, value] of Object.entries(getWebAssetCacheHeaders(c.req.path))) {
+                c.header(name, value)
+            }
+        }
+    }))
 
     app.use('*', async (c, next) => {
         if (c.req.path.startsWith('/api')) {
@@ -384,7 +402,14 @@ from GitHub Pages instead of through the relay tunnel.
             return
         }
 
-        return await serveStatic({ root: distDir })(c, next)
+        return await serveStatic({
+            root: distDir,
+            onFound: (_path, staticContext) => {
+                for (const [name, value] of Object.entries(getWebAssetCacheHeaders(staticContext.req.path))) {
+                    staticContext.header(name, value)
+                }
+            }
+        })(c, next)
     })
 
     app.get('*', async (c, next) => {

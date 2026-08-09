@@ -50,6 +50,62 @@ export const WorktreeMetadataSchema = z.object({
 
 export type WorktreeMetadata = z.infer<typeof WorktreeMetadataSchema>
 
+export const CodexTokenUsageSchema = z.object({
+    inputTokens: z.number(),
+    cachedInputTokens: z.number(),
+    outputTokens: z.number(),
+    reasoningOutputTokens: z.number(),
+    totalTokens: z.number()
+})
+
+export type CodexTokenUsage = z.infer<typeof CodexTokenUsageSchema>
+
+export const CodexUsageRateLimitSchema = z.object({
+    usedPercent: z.number(),
+    windowMinutes: z.number(),
+    resetAt: z.number().optional()
+})
+
+export type CodexUsageRateLimit = z.infer<typeof CodexUsageRateLimitSchema>
+
+// Credit-based plans (e.g. Codex Pro on `limit_id: premium`) bill from a
+// balance instead of a 5h/weekly rolling window. When the subscription
+// is also exhausted the codex transcript shows primary=null + secondary=null
+// + credits.has_credits=false; the indicator needs to surface that
+// distinctly from a fresh-account "no rate-limit data yet" state.
+export const CodexUsageCreditsSchema = z.object({
+    hasCredits: z.boolean().optional(),
+    unlimited: z.boolean().optional(),
+    balance: z.string().optional()
+})
+
+export type CodexUsageCredits = z.infer<typeof CodexUsageCreditsSchema>
+
+export const CodexUsageSchema = z.object({
+    contextWindow: z.object({
+        usedTokens: z.number(),
+        limitTokens: z.number(),
+        percent: z.number(),
+        updatedAt: z.number()
+    }).optional(),
+    rateLimits: z.object({
+        fiveHour: CodexUsageRateLimitSchema.optional(),
+        weekly: CodexUsageRateLimitSchema.optional()
+    }).optional().default({}),
+    credits: CodexUsageCreditsSchema.optional(),
+    // Codex surfaces 'primary' / 'secondary' / 'credits' as the canonical
+    // names. Carry through as-is so the UI can render the exact phrase
+    // (e.g. 'You have exceeded your weekly limit', or 'You have run out
+    // of credits') without re-deriving from the boolean state.
+    rateLimitReachedType: z.string().optional(),
+    planType: z.string().optional(),
+    limitId: z.string().optional(),
+    totalTokenUsage: CodexTokenUsageSchema.optional(),
+    lastTokenUsage: CodexTokenUsageSchema.optional()
+})
+
+export type CodexUsage = z.infer<typeof CodexUsageSchema>
+
 export const MetadataSchema = z.object({
     path: z.string(),
     host: z.string(),
@@ -117,6 +173,18 @@ export const MetadataSchema = z.object({
     // Set only after a completed fresh-session clear. The source row remains
     // archived; web clients use this durable link to follow the replacement.
     supersededBySessionId: z.string().optional(),
+    // After session merge/dedup transfers session_jobs: the target remembers
+    // which source ids it absorbed (so job REST can follow a deleted
+    // pre-merge $HAPI_SESSION_ID), and a kept-alive source points at the
+    // post-merge owner. Must be declared here — SessionCache.refreshSession
+    // parses via MetadataSchema and strips unknown keys (tiann/hapi#1404).
+    // Hub-owned: CLI update-metadata cannot forge/erase (HUB_OWNED_METADATA_KEYS).
+    jobsAcceptedFromSessionIds: z.array(z.string()).optional(),
+    jobsTransferredToSessionId: z.string().optional(),
+    // When merge remaps a live source job key (same-key dual-running), map
+    // `${fromSessionId}/${fromKey}` → toKey on the post-merge owner so
+    // pre-merge supervisors keep PATCHing the right row.
+    jobKeyRedirects: z.record(z.string(), z.string()).optional(),
     // Durable in-progress state for runner-backed OpenCode /clear.
     opencodeClearOperation: OpencodeClearOperationSchema.optional(),
     preferredPermissionMode: PermissionModeSchema.optional(),
@@ -125,6 +193,9 @@ export const MetadataSchema = z.object({
     // Launch mode, surfaced so the web can show the agent-terminal toggle only
     // for PTY sessions (a 'remote'/SDK session has no agent PTY to view).
     startingMode: z.enum(['local', 'remote', 'pty']).nullish(),
+    providerProfileId: z.string().uuid().nullable().optional(),
+    providerProfileName: z.string().optional(),
+    providerProfileRevision: z.number().int().positive().optional(),
     capabilities: SessionCapabilitiesSchema.optional(),
     conversationHistoryPoints: z.record(z.string(), z.literal(true)).optional(),
     // Native locators for historical fork/rewind (e.g. Grok prompt indexes).
@@ -158,7 +229,22 @@ export const MetadataSchema = z.object({
     // field stores only modelId (shared across all flavors); this preserves
     // the provider so web can resolve the exact model when two providers
     // share a modelId.
-    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional()
+    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional(),
+    lastModelError: z.object({
+        /** Stable identity for this error event (not wall-clock order). */
+        eventId: z.string().min(1),
+        kind: z.string(),
+        transient: z.boolean(),
+        rawSnippet: z.string(),
+        /** Display / telemetry timestamp only — not used for notify/ack identity. */
+        atTs: z.number(),
+        priorAssistantClaimsDone: z.boolean(),
+        retriedAndFailed: z.boolean().optional(),
+        acknowledgedAt: z.number().optional(),
+        /** Hub-owned: successful push/FCM/Telegram delivery watermark. */
+        notifiedAt: z.number().optional()
+    }).optional(),
+    codexUsage: CodexUsageSchema.optional()
 })
 
 export type Metadata = z.infer<typeof MetadataSchema>
@@ -197,6 +283,7 @@ export const AgentStateSchema = z.object({
     // re-spawn in the same mode — notably 'pty', which has no agent terminal
     // otherwise (a reopened PTY session would silently fall back to 'remote').
     startingMode: z.enum(['local', 'remote', 'pty']).nullish(),
+    steeringActive: z.boolean().nullish(),
     requests: z.record(z.string(), AgentStateRequestSchema).nullish(),
     completedRequests: z.record(z.string(), AgentStateCompletedRequestSchema).nullish()
 })
@@ -288,7 +375,9 @@ export const DecryptedMessageSchema = z.object({
     content: z.unknown(),
     createdAt: z.number(),
     invokedAt: z.number().nullable().optional(),
-    scheduledAt: z.number().nullable().optional()
+    scheduledAt: z.number().nullable().optional(),
+    // Live signal via messages-consumed (steered:true); not persisted by the hub.
+    steered: z.boolean().optional()
 })
 
 export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
@@ -360,6 +449,62 @@ const VersionedTeamStatePatchSchema = z.object({
     value: TeamStateSchema.nullable()
 })
 
+/** Opt-in long-running work owned by a session (tiann/hapi#1404). */
+export const AttachedJobStatusSchema = z.enum(['running', 'completed', 'failed'])
+
+export const AttachedJobSchema = z.object({
+    key: z.string().min(1).max(128),
+    label: z.string().min(1).max(200),
+    status: AttachedJobStatusSchema,
+    done: z.number().nonnegative().optional(),
+    total: z.number().positive().optional(),
+    remaining: z.number().nonnegative().optional(),
+    unit: z.string().min(1).max(64).optional(),
+    detail: z.string().max(500).optional(),
+    heartbeatAt: z.number(),
+    startedAt: z.number(),
+    updatedAt: z.number()
+}).strict()
+
+export type AttachedJob = z.infer<typeof AttachedJobSchema>
+export type AttachedJobStatus = z.infer<typeof AttachedJobStatusSchema>
+
+export const AttachedJobUpsertSchema = z.object({
+    label: z.string().min(1).max(200),
+    status: AttachedJobStatusSchema.optional().default('running'),
+    done: z.number().nonnegative().optional(),
+    total: z.number().positive().optional(),
+    remaining: z.number().nonnegative().optional(),
+    unit: z.string().min(1).max(64).optional(),
+    detail: z.string().max(500).optional(),
+    heartbeatAt: z.number().optional(),
+    startedAt: z.number().optional()
+}).strict()
+
+export type AttachedJobUpsert = z.infer<typeof AttachedJobUpsertSchema>
+
+/** Progress/heartbeat only — no startedAt (use PUT upsert with explicit startedAt to correct). */
+export const AttachedJobPatchSchema = z.object({
+    label: z.string().min(1).max(200).optional(),
+    status: AttachedJobStatusSchema.optional(),
+    done: z.number().nonnegative().nullable().optional(),
+    total: z.number().positive().nullable().optional(),
+    remaining: z.number().nonnegative().nullable().optional(),
+    unit: z.string().min(1).max(64).nullable().optional(),
+    detail: z.string().max(500).nullable().optional(),
+    heartbeatAt: z.number().optional()
+}).strict()
+
+export type AttachedJobPatch = z.infer<typeof AttachedJobPatchSchema>
+
+// Dual SSE (global + per-session) has no shared delivery order. Version is a
+// monotonic per-session emit watermark (not primary.updatedAt — primary
+// switches can go backwards). Lagged heartbeats cannot resurrect a clear.
+const VersionedAttachedJobPatchSchema = z.object({
+    version: z.number(),
+    value: AttachedJobSchema.nullable()
+})
+
 export const SessionPatchSchema = z.object({
     active: z.boolean().optional(),
     thinking: z.boolean().optional(),
@@ -392,7 +537,11 @@ export const SessionPatchSchema = z.object({
     // signal, not the payload. Keep this minimal: per the operator's 80/20
     // ruling, scratchlist mutations are rare relative to keep-alive
     // patches, so a fresh event type would be overkill.
-    scratchlistUpdatedAt: z.number().optional()
+    scratchlistUpdatedAt: z.number().optional(),
+    // tiann/hapi#1404 — session-attached long-running jobs. Unlike
+    // scratchlist (watermark → refetch), the list row needs the progress
+    // payload inline. Versioned like todos so dual-SSE reorder is safe.
+    attachedJob: VersionedAttachedJobPatchSchema.optional()
 }).strict()
 
 export type SessionPatch = z.infer<typeof SessionPatchSchema>
@@ -429,10 +578,30 @@ export const MachineMetadataSchema = z.object({
     platform: z.string(),
     happyCliVersion: z.string(),
     displayName: z.string().optional(),
+    /** process.arch when the runner last registered (x64, arm64, …). */
+    arch: z.string().optional(),
     homeDir: z.string().optional(),
     happyHomeDir: z.string().optional(),
     happyLibDir: z.string().optional(),
-    workspaceRoots: z.array(z.string()).optional()
+    workspaceRoots: z.array(z.string()).optional(),
+    /** Machine-scoped RPC capability ids this runner registers (see runnerCapabilities). */
+    capabilities: z.array(z.string()).optional(),
+    /** True when this runner process started with HAPI_DISABLE_VERSION_HANDOFF=1. */
+    versionHandoffDisabled: z.boolean().optional(),
+    /**
+     * True when an external supervisor owns restart (systemd/pm2/etc.).
+     * Set only via HAPI_RUNNER_SUPERVISED=1 — never inferred from versionHandoffDisabled.
+     */
+    supervisedRestart: z.boolean().optional(),
+    /** CLI binary/package mtime when this runner process started. */
+    startedCliMtimeMs: z.number().optional(),
+    /** Current on-disk CLI binary/package mtime (may differ after upgrade). */
+    installedCliMtimeMs: z.number().optional(),
+    /**
+     * Hub-artifact build generation this runner last applied (source fingerprint).
+     * Used to detect same-semver soup rebuilds that still need fleet upgrade.
+     */
+    cliArtifactGeneration: z.string().optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
@@ -553,7 +722,9 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
     SessionChangedSchema.extend({
         type: z.literal('messages-consumed'),
         localIds: z.array(z.string()),
-        invokedAt: z.number()
+        invokedAt: z.number(),
+        // True when messages were steered into an active turn (not a normal queue drain).
+        steered: z.boolean().optional()
     }),
     SessionChangedSchema.extend({
         type: z.literal('message-cancelled'),
@@ -590,3 +761,11 @@ export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
 ])
 
 export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>
+
+export const SteerQueuedMessageResponseSchema = z.discriminatedUnion('status', [
+    z.object({ status: z.literal('steered'), localId: z.string() }),
+    z.object({ status: z.literal('invoked'), message: DecryptedMessageSchema }),
+    z.object({ status: z.literal('failed'), error: z.string(), localId: z.string().nullable() }),
+])
+
+export type SteerQueuedMessageResponse = z.infer<typeof SteerQueuedMessageResponseSchema>

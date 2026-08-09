@@ -63,6 +63,7 @@ function createApp(session: Session, opts?: {
     getSessionExport?: (sessionId: string, session: Session) => unknown
     sessionExists?: boolean
     archiveSession?: (sessionId: string) => Promise<void>
+    acknowledgeModelError?: (sessionId: string, eventId: string) => Promise<void>
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
     forkConversation?: SyncEngine['forkConversation']
@@ -122,6 +123,7 @@ function createApp(session: Session, opts?: {
     }))
     const sessionExists = opts?.sessionExists !== false
     const archiveSessionMock = opts?.archiveSession ?? (async () => {})
+    const acknowledgeModelErrorMock = opts?.acknowledgeModelError ?? (async () => {})
     const engine = {
         resolveSessionAccess: () => sessionExists
             ? { ok: true, sessionId: session.id, session }
@@ -145,6 +147,7 @@ function createApp(session: Session, opts?: {
         archiveSession: archiveSessionMock,
         setSessionPinned: opts?.setSessionPinned ?? (() => {}),
         setSessionPinMode: opts?.setSessionPinMode ?? (() => {}),
+        acknowledgeModelError: acknowledgeModelErrorMock,
         getSessionExport: opts?.getSessionExport ?? (() => ({
             type: 'success',
             payload: {
@@ -160,7 +163,9 @@ function createApp(session: Session, opts?: {
             commands: []
         })),
         forkConversation: opts?.forkConversation ?? (async () => ({ type: 'success', sessionId: 'child-1' })),
-        rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' }))
+        rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
+        getPrimaryAttachedJobsBySessionIds: () => new Map(),
+        allocateAttachedJobVersion: () => Date.now()
     } as Partial<SyncEngine>
 
     const app = new Hono<WebAppEnv>()
@@ -1422,7 +1427,11 @@ describe('sessions routes', () => {
                 scheduledIds.push(ids)
                 return new Map(ids.map((id) => [id, 0]))
             },
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getPrimaryAttachedJobsBySessionIds: () => new Map(),
+            allocateAttachedJobVersion: () => Date.now(),
             resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
         } as unknown as Partial<SyncEngine>
 
@@ -1454,7 +1463,11 @@ describe('sessions routes', () => {
         const engine = {
             getSessionsByNamespace: () => sessions,
             getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getPrimaryAttachedJobsBySessionIds: () => new Map(),
+            allocateAttachedJobVersion: () => Date.now(),
             resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
         } as unknown as Partial<SyncEngine>
 
@@ -1469,6 +1482,62 @@ describe('sessions routes', () => {
         expect(response.status).toBe(200)
         const body = await response.json() as { sessions: Array<{ id: string }> }
         expect(body.sessions.map((s) => s.id)).toEqual(['new-inactive'])
+    })
+
+    describe('POST /sessions/:id/model-error/acknowledge', () => {
+        it('forwards eventId to the engine when body is valid', async () => {
+            const calls: Array<[string, string]> = []
+            const { app } = createApp(createSession(), {
+                acknowledgeModelError: async (sessionId, eventId) => {
+                    calls.push([sessionId, eventId])
+                }
+            })
+
+            const response = await app.request('/api/sessions/session-1/model-error/acknowledge', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ eventId: 'evt-ack-1' })
+            })
+
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({ ok: true })
+            expect(calls).toEqual([['session-1', 'evt-ack-1']])
+        })
+
+        it('returns 400 when eventId is missing', async () => {
+            let called = false
+            const { app } = createApp(createSession(), {
+                acknowledgeModelError: async () => { called = true }
+            })
+
+            const response = await app.request('/api/sessions/session-1/model-error/acknowledge', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({})
+            })
+
+            expect(response.status).toBe(400)
+            expect(called).toBe(false)
+        })
+
+        it('returns 409 when the displayed error no longer matches', async () => {
+            const { app } = createApp(createSession(), {
+                acknowledgeModelError: async () => {
+                    throw new Error('Model error changed; refresh before acknowledging.')
+                }
+            })
+
+            const response = await app.request('/api/sessions/session-1/model-error/acknowledge', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ eventId: 'evt-stale' })
+            })
+
+            expect(response.status).toBe(409)
+            expect(await response.json()).toEqual({
+                error: 'Model error changed; refresh before acknowledging.'
+            })
+        })
     })
 
 })

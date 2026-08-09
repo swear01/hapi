@@ -7,6 +7,7 @@ import {
 } from '@hapi/protocol/voice'
 import type { ApiClient } from '@/api/client'
 import type { ConversationStatus } from '@/realtime/types'
+import { appendTranscript } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -46,6 +47,8 @@ export function useRealtimeDictation(config: {
     const elevenLabsActiveRef = useRef(false)
     const elevenLabsFinalizedRef = useRef(false)
     const resolveElevenLabsCommitRef = useRef<(() => void) | null>(null)
+    const lastCommitSucceededRef = useRef(false)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
     onFinalTranscriptRef.current = config.onFinalTranscript
 
     const updatePartial = useCallback((text: string) => {
@@ -53,12 +56,21 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const finish = useCallback((text: string) => {
-        if (!mountedRef.current) return
-        updatePartial('')
-        onFinalTranscriptRef.current(text)
-        setStatus('disconnected')
-    }, [updatePartial])
+    const finish = useCallback((text: string, committed = true) => {
+        const pendingSend = sendOnFinishRef.current
+        sendOnFinishRef.current = null
+        lastCommitSucceededRef.current = committed && text.trim().length > 0
+        if (pendingSend) {
+            const finalMessage = appendTranscript(pendingSend.initialText, text)
+            if (finalMessage.trim() && config.api) {
+                void config.api.sendMessage(pendingSend.sessionId, finalMessage)
+            }
+        } else if (mountedRef.current) {
+            updatePartial('')
+            onFinalTranscriptRef.current(text)
+        }
+        if (mountedRef.current) setStatus('disconnected')
+    }, [config.api, updatePartial])
 
     const fail = useCallback((value: unknown) => {
         if (!mountedRef.current) return
@@ -84,7 +96,7 @@ export function useRealtimeDictation(config: {
             if (!elevenLabsActiveRef.current) return
             elevenLabsFinalizedRef.current = true
             elevenLabsActiveRef.current = false
-            finish(text)
+            finish(text, true)
             resolveElevenLabsCommitRef.current?.()
             resolveElevenLabsCommitRef.current = null
         },
@@ -98,7 +110,7 @@ export function useRealtimeDictation(config: {
             resolveElevenLabsCommitRef.current?.()
             resolveElevenLabsCommitRef.current = null
             sessionRef.current = null
-            finish(partial)
+            finish(partial, false)
             setError('ElevenLabs realtime transcription disconnected')
             setStatus('error')
         }
@@ -125,7 +137,7 @@ export function useRealtimeDictation(config: {
                 if (operationRef.current === operation) updatePartial(text)
             },
             onFinal: (text) => {
-                if (operationRef.current === operation) finish(text)
+                if (operationRef.current === operation) finish(text, true)
             },
             onError: (realtimeError) => {
                 if (operationRef.current === operation) fail(realtimeError)
@@ -163,7 +175,7 @@ export function useRealtimeDictation(config: {
                                 new Promise<void>((resolve) => setTimeout(resolve, 2_500))
                             ])
                         } finally {
-                            if (elevenLabsActiveRef.current && !elevenLabsFinalizedRef.current) finish(partialRef.current)
+                            if (elevenLabsActiveRef.current && !elevenLabsFinalizedRef.current) finish(partialRef.current, false)
                             elevenLabsActiveRef.current = false
                             resolveElevenLabsCommitRef.current = null
                             elevenLabs.disconnect()
@@ -201,7 +213,7 @@ export function useRealtimeDictation(config: {
         }
     }, [config.api, config.provider, elevenLabs, fail, finish, status, supported, updatePartial])
 
-    const stop = useCallback(async () => {
+    const stop = useCallback(async (): Promise<boolean> => {
         const session = sessionRef.current
         if (!session) {
             operationRef.current += 1
@@ -212,21 +224,32 @@ export function useRealtimeDictation(config: {
                 elevenLabs.disconnect()
             }
             setStatus('disconnected')
-            return
+            return false
         }
         setStatus('connecting')
+        lastCommitSucceededRef.current = false
         try {
             await session.stop()
+            return lastCommitSucceededRef.current
         } catch (stopError) {
             fail(stopError)
+            return false
         } finally {
             if (sessionRef.current === session) sessionRef.current = null
         }
     }, [elevenLabs, fail])
 
-    const toggle = useCallback(async () => {
-        if (status === 'connected' || status === 'connecting') await stop()
-        else await start()
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '' }
+        await stop()
+    }, [stop])
+
+    const toggle = useCallback(async (): Promise<boolean> => {
+        if (status === 'connected' || status === 'connecting') return await stop()
+        else {
+            await start()
+            return false
+        }
     }, [start, status, stop])
 
     useEffect(() => {
@@ -244,5 +267,5 @@ export function useRealtimeDictation(config: {
         }
     }, [])
 
-    return { supported, status, error, partialTranscript, toggle }
+    return { supported, status, error, partialTranscript, toggle, stopAndSend }
 }

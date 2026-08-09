@@ -68,7 +68,15 @@ const updateStateSchema = z.object({
     agentState: z.unknown().nullable()
 })
 
-const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
+// Hub-only merge/clear links. CLI update-metadata must not forge or erase them
+// (same strip/restore as supersededBySessionId — see sessionHandlers.test.ts).
+const HUB_OWNED_METADATA_KEYS = [
+    'supersededBySessionId',
+    'opencodeClearOperation',
+    'jobsAcceptedFromSessionIds',
+    'jobsTransferredToSessionId',
+    'jobKeyRedirects',
+] as const
 
 function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
     if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
@@ -364,7 +372,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         onSessionReady?.(data)
     })
 
-    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean }) => {
+    socket.on('messages-consumed', (data: {
+        sid: string
+        localIds: string[]
+        clearQueuedThinkingGrace?: boolean
+        steered?: boolean
+    }) => {
         if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
             return
         }
@@ -408,7 +421,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         // Emit only after the DB transaction succeeds. This is an ACK-level
         // batch contract, so preserve its original timestamp even when IDs are
         // heterogeneous, replayed, or unknown.
-        onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
+        onWebappEvent?.({
+            type: 'messages-consumed',
+            sessionId: data.sid,
+            localIds,
+            invokedAt,
+            ...(data.steered === true ? { steered: true } : {})
+        })
     })
 
     socket.on('session-end', (data: SessionEndPayload) => {

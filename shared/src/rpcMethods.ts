@@ -10,6 +10,11 @@ export const RPC_METHODS = {
     StopRunner: 'stop-runner',
     ListMachineDirectory: 'list-directory',
     PathExists: 'path-exists',
+    ProviderList: 'provider-list',
+    ProviderCreate: 'provider-create',
+    ProviderUpdate: 'provider-update',
+    ProviderSetDefault: 'provider-set-default',
+    ProviderHealthCheck: 'provider-health-check',
     CursorChatStoreStatus: 'cursor-chat-store-status',
     GitStatus: 'git-status',
     GitDiffNumstat: 'git-diff-numstat',
@@ -42,8 +47,11 @@ export const RPC_METHODS = {
     ListCopilotModels: 'listCopilotModels',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
+    /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
+    SteerQueuedMessage: 'steer-queued-message',
     ForkConversation: 'fork-conversation',
     RewindConversation: 'rewind-conversation',
+    RunnerSelfUpgrade: 'runner-self-upgrade',
 } as const
 
 export const RPC_TARGET_MISSING_ERROR_CODE = 'rpc_target_missing' as const

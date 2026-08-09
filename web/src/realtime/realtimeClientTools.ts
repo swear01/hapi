@@ -4,7 +4,7 @@ import { VOICE_CONFIG } from './voiceConfig'
 // Store for session state and API client
 let sessionStore: {
     getSession: (sessionId: string) => { agentState?: { requests?: Record<string, unknown> } } | null
-    sendMessage: (sessionId: string, message: string) => void
+    sendMessage: (sessionId: string, message: string) => Promise<void> | void
     approvePermission: (sessionId: string, requestId: string) => Promise<void>
     denyPermission: (sessionId: string, requestId: string) => Promise<void>
 } | null = null
@@ -50,8 +50,13 @@ export const realtimeClientTools = {
             console.log('[Voice] Sending message to session:', sessionId)
         }
 
-        sessionStore.sendMessage(sessionId, message)
-        return "sent [DO NOT say anything else, simply say 'sent']"
+        try {
+            await sessionStore.sendMessage(sessionId, message)
+            return "sent [DO NOT say anything else, simply say 'sent']"
+        } catch (sendError) {
+            console.error('[Voice] Failed to send message to session:', sendError)
+            return 'error (failed to send message)'
+        }
     },
 
     /**

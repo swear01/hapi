@@ -4,22 +4,11 @@ import { useAppearance } from '@/hooks/useTheme'
 import { useFontScale } from '@/hooks/useFontScale'
 import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { useAppContext } from '@/lib/app-context'
+import { isDefaultNamespaceToken } from '@/lib/tokenNamespace'
 import { settingsCategories } from '@/routes/settings/categories'
 import { ChevronRightIcon } from './SettingsPrimitives'
 
 const OWNER_ONLY_CATEGORIES = new Set(['storage', 'usage'])
-
-export function getNamespaceFromToken(token: string): string | null {
-    try {
-        const payload = token.split('.')[1]
-        if (!payload) return null
-        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '=')
-        const decoded = JSON.parse(atob(base64)) as { ns?: unknown }
-        return typeof decoded.ns === 'string' ? decoded.ns : null
-    } catch {
-        return null
-    }
-}
 
 export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
     const navigate = useNavigate()
@@ -33,13 +22,16 @@ export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
         general: locale === 'zh-CN' ? '简体中文' : 'English',
         display: `${t(`settings.display.appearance.${appearance}`)} · ${Math.round(fontScale * 100)}%`,
         chat: t(`settings.chat.enterBehavior.${composerEnterBehavior}`),
+        providers: t('settings.providers.summary'),
         voice: t('settings.hub.voice.summary'),
         machines: t('settings.hub.machines.summary'),
         storage: t('settings.storage.summary'),
         usage: t('settings.usage.summary'),
         about: `v${__APP_VERSION__}`,
     }
-    const visibleCategories = settingsCategories.filter((category) => !OWNER_ONLY_CATEGORIES.has(category.id) || getNamespaceFromToken(token) === 'default')
+    const visibleCategories = settingsCategories.filter((category) => (
+        !OWNER_ONLY_CATEGORIES.has(category.id) || isDefaultNamespaceToken(token)
+    ))
 
     return (
         <nav aria-label={t('settings.title')} className={props.mobile ? 'divide-y divide-[var(--app-divider)]' : 'space-y-1 p-3'}>

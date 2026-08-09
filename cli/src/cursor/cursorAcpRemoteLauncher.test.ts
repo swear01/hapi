@@ -4,20 +4,50 @@ import type { EnhancedMode } from './loop';
 
 const harness = vi.hoisted(() => ({
     initializeError: null as Error | null,
-    initializeAttempts: 0,
     loadSessionError: null as Error | null,
+    newSessionError: null as Error | null,
+    failSetConfigOption: false,
     supportsLoadSession: true,
     loadSessionCalled: false,
     newSessionCalled: false,
+    newSessionAttempts: 0,
     promptCalls: 0,
     prompts: [] as unknown[][],
+    deferSoftSteer: null as Promise<void> | null,
+    softSteerDispatchError: null as Error | null,
+    deferSoftSteerDispatch: null as Promise<void> | null,
     backendArgs: null as { command: string; args?: string[] } | null,
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
     releaseSetConfigOption: null as (() => void) | null,
     deferLoadSession: null as Promise<void> | null,
     releaseLoadSession: null as (() => void) | null,
-    stderrErrorHandler: null as ((error: { type: string; message: string; raw?: string }) => void) | null,
+    stderrErrorHandler: null as ((error: {
+        type: string
+        message: string
+        raw: string
+    }) => void) | null,
+    emitStderrOnPrompt: null as {
+        type: 'rate_limit' | 'model_not_found' | 'authentication' | 'quota_exceeded' | 'unknown'
+        message: string
+        raw: string
+    } | null,
+    emitStderrOnInitialize: null as {
+        type: 'rate_limit' | 'model_not_found' | 'authentication' | 'quota_exceeded' | 'unknown'
+        message: string
+        raw: string
+    } | null,
+    emitStderrOnLoadSession: null as {
+        type: 'rate_limit' | 'model_not_found' | 'authentication' | 'quota_exceeded' | 'unknown'
+        message: string
+        raw: string
+    } | null,
+    emitTextOnPrompt: null as string | null,
+    promptReject: null as Error | null,
+    deferPrompt: null as Promise<void> | null,
+    releasePrompt: null as (() => void) | null,
+    /** When cancelPrompt runs, reject the deferred prompt with this error. */
+    rejectPromptOnCancel: null as Error | null,
     disconnectError: null as Error | null,
     overlayCleanup: null as ReturnType<typeof vi.fn> | null
 }));
@@ -39,15 +69,10 @@ vi.mock('./utils/cursorAcpBackend', () => ({
         harness.backendArgs = { command: 'agent', args };
         return {
             initialize: vi.fn(async () => {
-                harness.initializeAttempts += 1;
-                if (harness.initializeError && harness.initializeAttempts === 1) {
-                    harness.stderrErrorHandler?.({
-                        type: 'model_not_found',
-                        message: harness.initializeError.message,
-                        raw: harness.initializeError.message
-                    });
-                    throw harness.initializeError;
+                if (harness.emitStderrOnInitialize && harness.stderrErrorHandler) {
+                    harness.stderrErrorHandler(harness.emitStderrOnInitialize);
                 }
+                if (harness.initializeError) throw harness.initializeError;
             }),
             authenticateIfAvailable: vi.fn(async () => {}),
             supportsLoadSession: vi.fn(() => harness.supportsLoadSession),
@@ -56,11 +81,23 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 if (harness.deferLoadSession) {
                     await harness.deferLoadSession;
                 }
+                if (harness.emitStderrOnLoadSession && harness.stderrErrorHandler) {
+                    harness.stderrErrorHandler(harness.emitStderrOnLoadSession);
+                }
                 if (harness.loadSessionError) throw harness.loadSessionError;
                 return 'loaded-acp-session';
             }),
             newSession: vi.fn(async () => {
+                harness.newSessionAttempts += 1;
                 harness.newSessionCalled = true;
+                if (harness.newSessionError && harness.newSessionAttempts === 1) {
+                    harness.stderrErrorHandler?.({
+                        type: 'model_not_found',
+                        message: harness.newSessionError.message,
+                        raw: harness.newSessionError.message
+                    });
+                    throw harness.newSessionError;
+                }
                 return 'new-acp-session';
             }),
             setMode: vi.fn(async () => {}),
@@ -69,13 +106,20 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 if (configId === 'model-opt' && harness.deferSetConfigOption) {
                     await harness.deferSetConfigOption;
                 }
+                if (harness.failSetConfigOption && configId === 'model-opt') {
+                    throw new Error('set_config_option rejected');
+                }
                 harness.setConfigOptionCalls.push({ sessionId, configId, value });
             }),
             pinSessionModelWireId: vi.fn(),
             getSessionModelsMetadata: vi.fn(() => ({
                 availableModels: [
                     { modelId: 'composer-2.5[fast=true]' },
-                    { modelId: 'composer-2.5[fast=false]' }
+                    { modelId: 'composer-2.5[fast=false]' },
+                    { modelId: 'gpt-5.3-codex[reasoning=medium,fast=false]' },
+                    { modelId: 'gpt-5.3-codex[reasoning=medium,fast=true]' },
+                    { modelId: 'cursor-grok-4.5-medium' },
+                    { modelId: 'cursor-grok-4.5-medium-fast' },
                 ],
                 currentModelId: 'composer-2.5[fast=true]'
             })),
@@ -96,20 +140,53 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                         options: [
                             { value: 'default[]' },
                             { value: 'composer-2.5[fast=true]' },
-                            { value: 'composer-2.5[fast=false]' }
+                            { value: 'composer-2.5[fast=false]' },
+                            { value: 'gpt-5.3-codex[reasoning=medium,fast=false]' },
+                            { value: 'gpt-5.3-codex[reasoning=medium,fast=true]' },
+                            { value: 'cursor-grok-4.5-medium' },
+                            { value: 'cursor-grok-4.5-medium-fast' },
                         ]
                     };
                 }
                 return undefined;
             }),
-            prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
+            prompt: vi.fn(async (
+                _sessionId: string,
+                content: unknown[],
+                onMessage?: (message: { type: string; text?: string }) => void
+            ) => {
                 harness.promptCalls++;
                 harness.prompts.push(content);
+                if (harness.deferPrompt) {
+                    await harness.deferPrompt;
+                }
+                if (harness.emitTextOnPrompt && onMessage) {
+                    onMessage({ type: 'text', text: harness.emitTextOnPrompt });
+                }
+                if (harness.emitStderrOnPrompt && harness.stderrErrorHandler) {
+                    harness.stderrErrorHandler(harness.emitStderrOnPrompt);
+                }
+                if (harness.promptReject) {
+                    throw harness.promptReject;
+                }
             }),
-            cancelPrompt: vi.fn(async () => {}),
+            cancelPrompt: vi.fn(async () => {
+                // Settlement of a deferred prompt is owned by the test so
+                // userAbortRequested is visible before classifyAcpRpcRejection.
+                if (harness.rejectPromptOnCancel) {
+                    harness.promptReject = harness.rejectPromptOnCancel;
+                }
+            }),
+            beginSoftSteerPrompt: vi.fn(() => ({
+                dispatched: harness.softSteerDispatchError
+                    ? Promise.reject(harness.softSteerDispatchError)
+                    : (harness.deferSoftSteerDispatch ?? Promise.resolve()),
+                completed: harness.deferSoftSteer ?? Promise.resolve()
+            })),
+            softSteerPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
-            onStderrError: vi.fn((handler) => {
-                harness.stderrErrorHandler = handler ?? null;
+            onStderrError: vi.fn((handler: typeof harness.stderrErrorHandler) => {
+                harness.stderrErrorHandler = handler;
             }),
             setUsageUpdateListener: vi.fn(),
             setSessionInfoUpdateListener: vi.fn(),
@@ -163,12 +240,20 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn() }
 }));
 
-import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
+import {
+    classifyCursorAcpLoadError,
+    cursorAcpRemoteLauncher
+} from './cursorAcpRemoteLauncher';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
 import { CursorSession } from './session';
 import { ApiSessionClient } from '@/api/apiSession';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import {
+    _resetSharedCursorModelsCacheForTests,
+    writeSharedCursorModelsCache
+} from '@/modules/common/cursorModelsSharedCache';
 
-function makeSession(sessionId: string | null): CursorSession {
+function makeSession(sessionId: string | null, opts?: { keepQueueOpen?: boolean }): CursorSession {
     const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
     const client = makeClient();
 
@@ -187,22 +272,30 @@ function makeSession(sessionId: string | null): CursorSession {
     });
 
     session.onSessionFoundWithProtocol = vi.fn();
-    queue.close();
+    if (!opts?.keepQueueOpen) {
+        queue.close();
+    }
 
     return session;
 }
 
 function makeClient() {
+    const handlers = new Map<string, (payload?: unknown) => Promise<unknown>>();
     return {
         sessionId: 'test-session-id',
         rpcHandlerManager: {
-            registerHandler: vi.fn(),
+            handlers,
+            registerHandler: vi.fn((method: string, handler: (payload?: unknown) => Promise<unknown>) => {
+                handlers.set(method, handler)
+            }),
             unregisterHandler: vi.fn()
         },
         updateMetadata: vi.fn(),
+        updateAgentState: vi.fn(),
         flushMetadata: vi.fn(async () => true),
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
+        emitMessagesConsumed: vi.fn(),
         keepAlive: vi.fn(),
         emitSessionReady: vi.fn()
     } as unknown as ApiSessionClient;
@@ -211,19 +304,33 @@ function makeClient() {
 describe('cursorAcpRemoteLauncher', () => {
     beforeEach(() => {
         harness.initializeError = null;
-        harness.initializeAttempts = 0;
         harness.loadSessionError = null;
+        harness.newSessionError = null;
+        harness.failSetConfigOption = false;
         harness.supportsLoadSession = true;
         harness.loadSessionCalled = false;
         harness.newSessionCalled = false;
+        harness.newSessionAttempts = 0;
         harness.promptCalls = 0;
         harness.prompts = [];
+        harness.deferPrompt = null;
+        harness.deferSoftSteer = null;
+        harness.softSteerDispatchError = null;
+        harness.deferSoftSteerDispatch = null;
         harness.setConfigOptionCalls = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
         harness.deferLoadSession = null;
         harness.releaseLoadSession = null;
         harness.stderrErrorHandler = null;
+        harness.emitStderrOnPrompt = null;
+        harness.emitStderrOnInitialize = null;
+        harness.emitStderrOnLoadSession = null;
+        harness.emitTextOnPrompt = null;
+        harness.promptReject = null;
+        harness.deferPrompt = null;
+        harness.releasePrompt = null;
+        harness.rejectPromptOnCancel = null;
         harness.disconnectError = null;
         harness.overlayCleanup = null;
         legacyLauncher.mockClear();
@@ -233,6 +340,188 @@ describe('cursorAcpRemoteLauncher', () => {
 
     afterEach(() => {
         vi.clearAllMocks();
+        _resetSharedCursorModelsCacheForTests();
+    });
+
+    it('waits for a soft steer that outlives an abort before the next prompt', async () => {
+        let releasePrompt!: () => void;
+        let releaseSoftSteer!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
+        const session = makeSession(null, { keepQueueOpen: true });
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
+        await handlers.get(RPC_METHODS.Abort)!();
+        session.queue.push('next', mode, 'next');
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        await Promise.resolve();
+        expect(harness.promptCalls).toBe(1);
+
+        releaseSoftSteer();
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('restores a queued steer when ACP dispatch fails', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.softSteerDispatchError = new Error('stdin closed');
+        const session = makeSession(null, { keepQueueOpen: true });
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
+            .resolves.toEqual({ steered: false, error: 'Failed to soft-steer into active turn' });
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
+
+        harness.softSteerDispatchError = null;
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('restores a queued steer when ACP rejects it after dispatch', async () => {
+        let releasePrompt!: () => void;
+        let rejectSoftSteer!: (error: Error) => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteer = new Promise((_, reject) => { rejectSoftSteer = reject; });
+        const session = makeSession(null, { keepQueueOpen: true });
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
+            .resolves.toEqual({ steered: true });
+        rejectSoftSteer(new Error('request rejected'));
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('prevents cancellation once ACP steer dispatch starts', async () => {
+        let releasePrompt!: () => void;
+        let releaseDispatch!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
+        const session = makeSession(null, { keepQueueOpen: true });
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
+        await Promise.resolve();
+        expect(session.queue.cancelByLocalId('steer')).toBe(false);
+        releaseDispatch();
+        await expect(steerResult).resolves.toEqual({ steered: true });
+        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('blocks the next prompt while soft-steer dispatch is pending', async () => {
+        let releasePrompt!: () => void;
+        let releaseDispatch!: () => void;
+        let releaseSoftSteer!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
+        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
+        const session = makeSession(null, { keepQueueOpen: true });
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
+        await Promise.resolve();
+        session.queue.push('next', mode, 'next');
+        harness.deferPrompt = null;
+        releasePrompt();
+        await Promise.resolve();
+        expect(harness.promptCalls).toBe(1);
+
+        releaseDispatch();
+        await expect(steerResult).resolves.toEqual({ steered: true });
+        expect(harness.promptCalls).toBe(1);
+        releaseSoftSteer();
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('acknowledges a steer dispatched before an overlapping abort', async () => {
+        let releasePrompt!: () => void;
+        let releaseDispatch!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
+        const session = makeSession(null, { keepQueueOpen: true });
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
+        await Promise.resolve();
+        await handlers.get(RPC_METHODS.Abort)!();
+        releaseDispatch();
+
+        await expect(steerResult).resolves.toEqual({ steered: true });
+        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
+        expect(vi.mocked(session.client.emitMessagesConsumed).mock.calls
+            .filter(([ids]) => ids.includes('steer'))).toHaveLength(1);
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
     });
 
     it('spawns agent acp backend, not stream-json', async () => {
@@ -323,10 +612,98 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(legacyLauncher).not.toHaveBeenCalled();
     });
 
-    it('remaps stale spawn model and retries initialize once on model rejection', async () => {
-        harness.initializeError = new Error(
-            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: grok-4.5[fast=false]. Available models: auto, cursor-grok-4.5-medium, cursor-grok-4.5-medium-fast'
+    it('retries session/new once after remapping a rejected bracket wire (#1430)', async () => {
+        _resetSharedCursorModelsCacheForTests();
+        harness.newSessionError = new Error(
+            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: gpt-5.3-codex[fast=false]. Available models: auto, gpt-5.3-codex, gpt-5.3-codex-fast'
         );
+
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            flushMetadata: vi.fn(async () => true),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            keepAlive: vi.fn(),
+            emitSessionReady: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default',
+            model: 'gpt-5.3-codex[fast=false]'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('hold-open', { permissionMode: 'default' });
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.newSessionAttempts).toBe(2));
+        await vi.waitFor(() => {
+            expect(harness.backendArgs?.args).toEqual(['--model', 'gpt-5.3-codex', 'acp']);
+            expect(
+                harness.setConfigOptionCalls.some(
+                    (call) =>
+                        call.configId === 'model-opt'
+                        && call.value === 'gpt-5.3-codex[reasoning=medium,fast=false]'
+                )
+            ).toBe(true);
+            expect(session.model).toBe('gpt-5.3-codex[fast=false]');
+        });
+
+        queue.close();
+        await runPromise;
+    });
+
+    it('fails launch when remapped spawn cannot restore the desired variant (#1430)', async () => {
+        _resetSharedCursorModelsCacheForTests();
+        harness.failSetConfigOption = true;
+        harness.newSessionError = new Error(
+            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: composer-2.5[fast=true]. Available models: auto, composer-2.5'
+        );
+
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const client = makeClient();
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default',
+            model: 'composer-2.5[fast=true]'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.close();
+
+        await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow(
+            /Cursor model is not available via ACP: composer-2\.5\[fast=true\]/
+        );
+        expect(harness.newSessionAttempts).toBe(2);
+        expect(harness.backendArgs?.args).toEqual(['--model', 'composer-2.5', 'acp']);
+    });
+
+    it('spawns bare remap but reapplies original fast=true variant via ACP (#1430)', async () => {
+        writeSharedCursorModelsCache({
+            success: true,
+            availableModels: [{ modelId: 'composer-2.5' }],
+            currentModelId: 'composer-2.5',
+            cliModelSkus: [{ modelId: 'composer-2.5' }],
+        });
 
         const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
         const keepAlive = vi.fn();
@@ -352,25 +729,26 @@ describe('cursorAcpRemoteLauncher', () => {
             startedBy: 'runner',
             startingMode: 'remote',
             permissionMode: 'default',
-            model: 'grok-4.5[fast=false]'
+            model: 'composer-2.5[fast=true]'
         });
         session.onSessionFoundWithProtocol = vi.fn();
         queue.push('hold-open', { permissionMode: 'default' });
 
         const runPromise = cursorAcpRemoteLauncher(session);
-        await vi.waitFor(() => expect(harness.initializeAttempts).toBe(2));
         await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
-
-        expect(harness.backendArgs?.args).toContain('cursor-grok-4.5-medium');
-        expect(keepAlive).toHaveBeenCalled();
-        expect(
-            (client.sendAgentMessage as ReturnType<typeof vi.fn>).mock.calls.some((call) =>
-                JSON.stringify(call[0]).includes('Cannot use this model')
-            )
-        ).toBe(false);
+        await vi.waitFor(() => {
+            expect(harness.backendArgs?.args).toEqual(['--model', 'composer-2.5', 'acp']);
+            expect(
+                harness.setConfigOptionCalls.some(
+                    (call) => call.configId === 'model-opt' && call.value === 'composer-2.5[fast=true]'
+                )
+            ).toBe(true);
+            expect(session.model).toBe('composer-2.5[fast=true]');
+        });
 
         queue.close();
         await runPromise;
+        _resetSharedCursorModelsCacheForTests();
     });
 
     it('surfaces Cursor model rejection from session/load instead of claiming legacy protocol', async () => {
@@ -957,5 +1335,271 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(JSON.stringify(harness.prompts[0])).not.toContain('$name');
         expect(JSON.stringify(harness.prompts[1])).toContain('second');
         expect(JSON.stringify(harness.prompts[1])).not.toContain('skill_lookup');
+    });
+
+    it('keeps generic unknown stderr status-only and still emits ready', async () => {
+        // Bot Major: type:unknown comes from any stderr with error/failed/exception.
+        // Must not set turnHasModelError / suppress ready / write lastModelError.
+        harness.emitStderrOnPrompt = {
+            type: 'unknown',
+            message: 'Some plugin failed to load: exception during init',
+            raw: 'Some plugin failed to load: exception during init'
+        };
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+            updateMetadata: ReturnType<typeof vi.fn>
+            sendAgentMessage: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(harness.promptCalls).toBe(1);
+        expect(client.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' });
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError'
+        )).toBe(false);
+        const wroteLastModelError = client.updateMetadata.mock.calls.some((call) => {
+            const updater = call[0] as (m: Record<string, unknown>) => Record<string, unknown>;
+            if (typeof updater !== 'function') return false;
+            return Boolean(updater({}).lastModelError);
+        });
+        expect(wroteLastModelError).toBe(false);
+    });
+
+    it('keeps weak typed authentication stderr status-only and still emits ready', async () => {
+        // Transport types "authentication provider initialized" as authentication
+        // via bare substring; strong-signature gate must keep it status-only.
+        harness.emitStderrOnPrompt = {
+            type: 'authentication',
+            message: 'authentication provider initialized',
+            raw: 'authentication provider initialized'
+        };
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(client.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' });
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError'
+        )).toBe(false);
+    });
+
+    it('records modelError for model_not_found stderr during prompt and suppresses ready', async () => {
+        harness.emitStderrOnPrompt = {
+            type: 'model_not_found',
+            message: 'Cannot use this model: cursor-bad-id. Available models: auto',
+            raw: 'Cannot use this model: cursor-bad-id. Available models: auto'
+        };
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError' && call[0]?.kind === 'model_not_found'
+        )).toBe(true);
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'ready'
+        )).toBe(false);
+    });
+
+    it('ignores Cannot use this model stderr during initialize/load so remap can succeed', async () => {
+        // Setup/load remap rejects a stale spawn model on stderr, then continues.
+        // Must not persist lastModelError / suppress later ready.
+        const stale = {
+            type: 'model_not_found' as const,
+            message: 'Cannot use this model: grok-4.5[fast=true]. Available models: auto',
+            raw: 'Cannot use this model: grok-4.5[fast=true]. Available models: auto'
+        };
+        harness.emitStderrOnInitialize = stale;
+        harness.emitStderrOnLoadSession = stale;
+
+        const session = makeSession('resume-remap-ok', { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+            updateMetadata: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(harness.loadSessionCalled).toBe(true);
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError'
+        )).toBe(false);
+        expect(client.updateMetadata.mock.calls.some((call) => {
+            const updater = call[0] as (m: Record<string, unknown>) => Record<string, unknown>;
+            if (typeof updater !== 'function') return false;
+            return Boolean(updater({}).lastModelError);
+        })).toBe(false);
+        expect(client.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' });
+    });
+
+    it('still records modelError for typed rate_limit stderr and suppresses ready', async () => {
+        harness.emitStderrOnPrompt = {
+            type: 'rate_limit',
+            message: 'Rate limit exceeded.',
+            raw: 'status 429 ratelimitexceeded'
+        };
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+            updateMetadata: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError' && call[0]?.kind === 'rate_limited'
+        )).toBe(true);
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'ready'
+        )).toBe(false);
+        const wroteLastModelError = client.updateMetadata.mock.calls.some((call) => {
+            const updater = call[0] as (m: Record<string, unknown>) => Record<string, unknown>;
+            if (typeof updater !== 'function') return false;
+            const next = updater({});
+            return (next.lastModelError as { kind?: string } | undefined)?.kind === 'rate_limited';
+        });
+        expect(wroteLastModelError).toBe(true);
+    });
+
+    it('prefers structural RPC classification over text fallback when both fire', async () => {
+        // Prompt callback emits wire text first (unknown_t_prefix / non-transient),
+        // then the promise rejects with WritableIterable (transport_closed / transient).
+        harness.emitTextOnPrompt = '\n\nError: T: WritableIterable is closed';
+        harness.promptReject = new Error('WritableIterable is closed');
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+            updateMetadata: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        const modelErrors = client.sendSessionEvent.mock.calls
+            .map((call) => call[0])
+            .filter((event) => event?.type === 'modelError');
+        expect(modelErrors).toHaveLength(1);
+        expect(modelErrors[0]?.kind).toBe('transport_closed');
+        expect(modelErrors[0]?.transient).toBe(true);
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'ready'
+        )).toBe(false);
+    });
+
+    it('prefers specific deferred stderr over generic transport_closed RPC', async () => {
+        // Strong quota stderr first, then generic transport close — keep the
+        // non-transient cause so retry copy is not “safe to retry”.
+        harness.emitStderrOnPrompt = {
+            type: 'quota_exceeded',
+            message: 'Quota exceeded.',
+            raw: 'resource exhausted'
+        };
+        harness.promptReject = new Error('WritableIterable is closed');
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        const modelErrors = client.sendSessionEvent.mock.calls
+            .map((call) => call[0])
+            .filter((event) => event?.type === 'modelError');
+        expect(modelErrors).toHaveLength(1);
+        expect(modelErrors[0]?.kind).toBe('quota_exhausted');
+        expect(modelErrors[0]?.transient).toBe(false);
+    });
+
+    it('still records modelError for canceled RPC rejection without user abort', async () => {
+        harness.promptReject = new Error('Error: T: [canceled] Operation aborted');
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            sendSessionEvent: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+        session.queue.close();
+        await cursorAcpRemoteLauncher(session);
+
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError' && call[0]?.kind === 'canceled'
+        )).toBe(true);
+    });
+
+    it('does not promote user Abort cancel rejection to modelError', async () => {
+        // Cursor rejects session/prompt after session/cancel with this wire shape;
+        // classifier maps it to kind=canceled, but Abort must not page/notify.
+        // Switch → requestExit → handleAbort sets shouldExit + userAbortRequested
+        // before we settle the deferred prompt rejection (ordering matches
+        // cancel-then-reject on the wire; avoids queue.reset hang in tests).
+        harness.deferPrompt = new Promise<void>((resolve) => {
+            harness.releasePrompt = resolve;
+        });
+        harness.rejectPromptOnCancel = new Error('Error: T: [canceled] Operation aborted');
+
+        const session = makeSession(null, { keepQueueOpen: true });
+        const client = session.client as unknown as {
+            rpcHandlerManager: { registerHandler: ReturnType<typeof vi.fn> }
+            sendSessionEvent: ReturnType<typeof vi.fn>
+            updateMetadata: ReturnType<typeof vi.fn>
+        };
+
+        session.queue.push('hello', { permissionMode: 'default' });
+
+        const launchPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+
+        const switchHandler = client.rpcHandlerManager.registerHandler.mock.calls.find(
+            (call) => call[0] === 'switch'
+        )?.[1] as (() => Promise<void>) | undefined;
+        expect(switchHandler).toBeTypeOf('function');
+        await switchHandler!();
+        harness.releasePrompt?.();
+        await launchPromise;
+
+        expect(client.sendSessionEvent.mock.calls.some(
+            (call) => call[0]?.type === 'modelError'
+        )).toBe(false);
+        const wroteLastModelError = client.updateMetadata.mock.calls.some((call) => {
+            const updater = call[0] as (m: Record<string, unknown>) => Record<string, unknown>;
+            if (typeof updater !== 'function') return false;
+            return Boolean(updater({}).lastModelError);
+        });
+        expect(wroteLastModelError).toBe(false);
     });
 });

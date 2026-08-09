@@ -5,15 +5,17 @@ import { resolve } from 'node:path'
 import { ApiClient } from '@/api/api'
 import type { ApiSessionClient } from '@/api/apiSession'
 import type { AgentState, MachineMetadata, Metadata, Session } from '@/api/types'
-import { notifyRunnerSessionStarted } from '@/runner/controlClient'
+import { getInstalledCliMtimeMs, notifyRunnerSessionStarted } from '@/runner/controlClient'
 import { readSettings } from '@/persistence'
 import { configuration } from '@/configuration'
 import { logger } from '@/ui/logger'
 import { runtimePath } from '@/projectPath'
 import { getInvokedCwd } from '@/utils/invokedCwd'
 import { readWorktreeEnv } from '@/utils/worktreeEnv'
+import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv'
 import packageJson from '../../package.json'
+import { durableTargetGeneration, readUpgradeTarget } from '@/upgrade/upgradeTarget'
 
 export { HAPI_SESSION_ID_ENV, exportHapiSessionEnv, exportHapiHubAuthEnv } from '@/agent/hapiSessionEnv'
 
@@ -41,15 +43,30 @@ export type SessionBootstrapResult = {
     workingDirectory: string
 }
 
-export function buildMachineMetadata(options?: { workspaceRoots?: string[] }): MachineMetadata {
+export function buildMachineMetadata(options?: {
+    workspaceRoots?: string[]
+    startedCliMtimeMs?: number
+}): MachineMetadata {
+    const installedCliMtimeMs = getInstalledCliMtimeMs()
+    const startedCliMtimeMs = options?.startedCliMtimeMs ?? installedCliMtimeMs
+    const cliArtifactGeneration = durableTargetGeneration(readUpgradeTarget()) ?? undefined
     return {
         host: process.env.HAPI_HOSTNAME || os.hostname(),
         platform: os.platform(),
+        arch: process.arch,
         happyCliVersion: packageJson.version,
         homeDir: os.homedir(),
         happyHomeDir: configuration.happyHomeDir,
         happyLibDir: runtimePath(),
-        workspaceRoots: options?.workspaceRoots
+        workspaceRoots: options?.workspaceRoots,
+        capabilities: [...CURRENT_MACHINE_CAPABILITIES],
+        versionHandoffDisabled: process.env.HAPI_DISABLE_VERSION_HANDOFF === '1',
+        // Explicit supervisor opt-in only. HAPI_DISABLE_VERSION_HANDOFF is orthogonal
+        // (skips mtime/version self-restart) and must not imply Restart=always.
+        supervisedRestart: process.env.HAPI_RUNNER_SUPERVISED === '1',
+        ...(typeof startedCliMtimeMs === 'number' ? { startedCliMtimeMs } : {}),
+        ...(typeof installedCliMtimeMs === 'number' ? { installedCliMtimeMs } : {}),
+        ...(cliArtifactGeneration ? { cliArtifactGeneration } : {}),
     }
 }
 
@@ -64,6 +81,10 @@ export function buildSessionMetadata(options: {
     const happyLibDir = runtimePath()
     const worktreeInfo = readWorktreeEnv()
     const now = options.now ?? Date.now()
+    const providerProfileId = process.env.HAPI_PROVIDER_PROFILE_ID?.trim()
+    const providerProfileName = process.env.HAPI_PROVIDER_PROFILE_NAME?.trim()
+    const providerProfileRevision = Number(process.env.HAPI_PROVIDER_PROFILE_REVISION)
+    const usesSystemProvider = process.env.HAPI_PROVIDER_PROFILE_SYSTEM === '1'
 
     return {
         path: options.workingDirectory,
@@ -81,6 +102,13 @@ export function buildSessionMetadata(options: {
         lifecycleState: 'running',
         lifecycleStateSince: now,
         flavor: options.flavor,
+        providerProfileId: usesSystemProvider
+            ? null
+            : (providerProfileId || undefined),
+        providerProfileName: usesSystemProvider ? undefined : (providerProfileName || undefined),
+        providerProfileRevision: !usesSystemProvider && Number.isInteger(providerProfileRevision) && providerProfileRevision > 0
+            ? providerProfileRevision
+            : undefined,
         capabilities: {
             terminal: true
         },
@@ -99,6 +127,7 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.claudeSessionId !== undefined) preserved.claudeSessionId = metadata.claudeSessionId
     if (metadata.codexSessionId !== undefined) preserved.codexSessionId = metadata.codexSessionId
     if (metadata.codexSourceSessionId !== undefined) preserved.codexSourceSessionId = metadata.codexSourceSessionId
+    if (metadata.codexUsage !== undefined) preserved.codexUsage = metadata.codexUsage
     if (metadata.geminiSessionId !== undefined) preserved.geminiSessionId = metadata.geminiSessionId
     if (metadata.opencodeSessionId !== undefined) preserved.opencodeSessionId = metadata.opencodeSessionId
     if (metadata.grokSessionId !== undefined) preserved.grokSessionId = metadata.grokSessionId
