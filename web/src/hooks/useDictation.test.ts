@@ -168,4 +168,50 @@ describe('useDictation', () => {
             expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload')
         })
     })
+
+    it('restores draft via onTextChange if sendMessage fails while still mounted', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const onTextChange = vi.fn()
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
+            sendMessage: vi.fn(async () => { throw new Error('Send failed') })
+        }
+
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => 'draft text',
+            onTextChange
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'draft text'))
+
+        await waitFor(() => {
+            expect(onTextChange).toHaveBeenCalledWith('draft text voice text')
+            expect(result.current.status).toBe('error')
+        })
+    })
 })

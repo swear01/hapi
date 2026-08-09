@@ -487,10 +487,11 @@ export function HappyComposer(props: {
                 return
             }
             if (dictation.status === 'connected') {
-                if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
+                if (!active || attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
                     await dictation.toggle()
                     return
                 }
+                richInputRef.current?.flushSerializedText()
                 const targetSessionId = props.sessionId ?? ''
                 const initialText = api.composer().getState().text
                 api.composer().setText('')
@@ -503,7 +504,7 @@ export function HappyComposer(props: {
             }
         }
         await dictation.toggle()
-    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
+    }, [active, api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)

@@ -123,7 +123,16 @@ export function useDictation(config: {
                     if (pendingSend) {
                         const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                         if (finalMessage.trim() && config.api) {
-                            await config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                            try {
+                                await config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                            } catch (sendError) {
+                                if (mountedRef.current) {
+                                    config.onTextChange(finalMessage)
+                                    setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
+                                    setStatus('error')
+                                    return
+                                }
+                            }
                         }
                     } else if (mountedRef.current) {
                         config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))

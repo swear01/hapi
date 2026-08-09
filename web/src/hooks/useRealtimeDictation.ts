@@ -56,13 +56,22 @@ export function useRealtimeDictation(config: {
 
     const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
 
-    const finish = useCallback((text: string) => {
+    const finish = useCallback(async (text: string) => {
         const pendingSend = sendOnFinishRef.current
         sendOnFinishRef.current = null
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
             if (finalMessage.trim() && config.api) {
-                void config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                try {
+                    await config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                } catch (sendError) {
+                    if (mountedRef.current) {
+                        onFinalTranscriptRef.current(text)
+                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
+                        setStatus('error')
+                        return
+                    }
+                }
             }
         } else if (mountedRef.current) {
             updatePartial('')
@@ -252,6 +261,7 @@ export function useRealtimeDictation(config: {
         mountedRef.current = true
         return () => {
             mountedRef.current = false
+            if (sendOnFinishRef.current) return
             operationRef.current += 1
             startAbortRef.current?.abort()
             startAbortRef.current = null
