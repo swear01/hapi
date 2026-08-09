@@ -164,8 +164,11 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
-    const stopAndSend = useCallback(async (targetSessionId: string) => {
-        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: config.getCurrentText() }
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
+        sendOnFinishRef.current = {
+            sessionId: targetSessionId,
+            initialText: initialText ?? config.getCurrentText()
+        }
         await stop()
     }, [config, stop])
 

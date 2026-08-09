@@ -481,18 +481,29 @@ export function HappyComposer(props: {
     const dictationActive = voiceInput.voiceMode === 'dictation'
     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
     const handleDictationToggle = useCallback(async () => {
-        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
-            const targetSessionId = props.sessionId ?? ''
-            api.composer().setText('')
-            if (targetSessionId) {
-                await dictation.stopAndSend?.(targetSessionId)
-            } else {
+        if (dictationActive) {
+            if (dictation.status === 'connecting') {
                 await dictation.toggle()
+                return
             }
-            return
+            if (dictation.status === 'connected') {
+                if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
+                    await dictation.toggle()
+                    return
+                }
+                const targetSessionId = props.sessionId ?? ''
+                const initialText = api.composer().getState().text
+                api.composer().setText('')
+                if (targetSessionId) {
+                    await dictation.stopAndSend?.(targetSessionId, initialText)
+                } else {
+                    await dictation.toggle()
+                }
+                return
+            }
         }
         await dictation.toggle()
-    }, [api, dictation, dictationActive, props.sessionId])
+    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)

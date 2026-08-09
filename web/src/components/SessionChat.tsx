@@ -1106,11 +1106,14 @@ function SessionChatInner(props: SessionChatProps) {
     useEffect(() => {
         registerSessionStore({
             getSession: (sessionId: string) => (sessionId === props.session.id ? (props.session as unknown as { agentState?: { requests?: Record<string, unknown> } }) : null),
-            sendMessage: (sessionId: string, message: string) => {
+            sendMessage: async (sessionId: string, message: string) => {
                 if (sessionId === props.session.id) {
-                    props.onSend(message)
+                    const accepted = await props.onSend(message)
+                    if (!accepted) {
+                        throw new Error('Message was not accepted')
+                    }
                 } else {
-                    props.api.sendMessage(sessionId, message)
+                    await props.api.sendMessage(sessionId, message)
                 }
             },
             approvePermission: async (sessionId: string, requestId: string) => {

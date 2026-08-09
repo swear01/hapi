@@ -30,4 +30,21 @@ describe('realtimeClientTools', () => {
         expect(sessionBOnSend).not.toHaveBeenCalled()
         expect(mockApi.sendMessage).toHaveBeenCalledWith('session-A', 'fix the bug')
     })
+
+    it('returns error when sessionStore.sendMessage throws or rejects', async () => {
+        registerSessionStore({
+            getSession: () => null,
+            sendMessage: async () => {
+                throw new Error('Network error')
+            },
+            approvePermission: async (_sessionId: string, _requestId: string) => {},
+            denyPermission: async (_sessionId: string, _requestId: string) => {}
+        })
+
+        updateCurrentSessionId('session-A')
+
+        const result = await realtimeClientTools.messageCodingAgent({ message: 'do something' })
+
+        expect(result).toBe('error (failed to send message)')
+    })
 })

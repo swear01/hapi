@@ -155,7 +155,7 @@ describe('useDictation', () => {
         expect(result.current.status).toBe('connected')
 
         act(() => {
-            result.current.stopAndSend('session-A')
+            result.current.stopAndSend('session-A', 'explicit initial text')
         })
 
         unmount()
@@ -165,7 +165,7 @@ describe('useDictation', () => {
         })
 
         await waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial text voice payload')
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload')
         })
     })
 })
