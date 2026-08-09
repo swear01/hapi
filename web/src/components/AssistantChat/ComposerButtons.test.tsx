@@ -340,37 +340,43 @@ describe('UnifiedButton — voice active state', () => {
 
         expect(() => {
             rerender(
-                <UnifiedButton
-                    canSend={false}
-                    voiceStatus="connecting"
-                    voiceEnabled
-                    dictationEnabled
-                    controlsDisabled={false}
-                    onSend={onSend}
-                    onVoiceToggle={onVoiceToggle}
-                />,
+                <I18nProvider>
+                    <UnifiedButton
+                        canSend={false}
+                        voiceStatus="connecting"
+                        voiceEnabled
+                        dictationEnabled
+                        controlsDisabled={false}
+                        onSend={onSend}
+                        onVoiceToggle={onVoiceToggle}
+                    />
+                </I18nProvider>,
             )
             rerender(
-                <UnifiedButton
-                    canSend={false}
-                    voiceStatus="connected"
-                    voiceEnabled
-                    dictationEnabled
-                    controlsDisabled={false}
-                    onSend={onSend}
-                    onVoiceToggle={onVoiceToggle}
-                />,
+                <I18nProvider>
+                    <UnifiedButton
+                        canSend={false}
+                        voiceStatus="connected"
+                        voiceEnabled
+                        dictationEnabled
+                        controlsDisabled={false}
+                        onSend={onSend}
+                        onVoiceToggle={onVoiceToggle}
+                    />
+                </I18nProvider>,
             )
             rerender(
-                <UnifiedButton
-                    canSend={false}
-                    voiceStatus="disconnected"
-                    voiceEnabled
-                    dictationEnabled
-                    controlsDisabled={false}
-                    onSend={onSend}
-                    onVoiceToggle={onVoiceToggle}
-                />,
+                <I18nProvider>
+                    <UnifiedButton
+                        canSend={false}
+                        voiceStatus="disconnected"
+                        voiceEnabled
+                        dictationEnabled
+                        controlsDisabled={false}
+                        onSend={onSend}
+                        onVoiceToggle={onVoiceToggle}
+                    />
+                </I18nProvider>,
             )
         }).not.toThrow()
     })
