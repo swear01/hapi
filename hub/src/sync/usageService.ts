@@ -425,31 +425,12 @@ export function getUsageSummary(
         }
     }
 
-    // Cumulative session cost is a point-in-time value, not a delta: keep the
-    // latest in-range report per session and credit it once. For bounded
-    // ranges the amount shown is the cumulative growth inside the range
-    // (latest in-range point minus the latest point before the range).
+    // Cumulative session cost is a point-in-time value, not a delta: every
+    // reported point is kept in chronological order so resets can be detected.
+    // For bounded ranges the amount shown is the cumulative growth inside the
+    // range (points walked against the latest point before the range).
     type CostPoint = { amount: number; currency: string; createdAt: number; sourceSeq: number }
-    const costBaselines = new Map<string, CostPoint>()
-    const sessionCost = new Map<string, CostPoint>()
-    const considerCostPoint = (sessionId: string, point: CostPoint): void => {
-        if (from !== null && point.createdAt < from) {
-            const previous = costBaselines.get(sessionId)
-            if (!previous
-                || point.createdAt > previous.createdAt
-                || (point.createdAt === previous.createdAt && point.sourceSeq > previous.sourceSeq)) {
-                costBaselines.set(sessionId, point)
-            }
-            return
-        }
-        if (point.createdAt > now) return
-        const previous = sessionCost.get(sessionId)
-        if (!previous
-            || point.createdAt > previous.createdAt
-            || (point.createdAt === previous.createdAt && point.sourceSeq > previous.sourceSeq)) {
-            sessionCost.set(sessionId, point)
-        }
-    }
+    const sessionCostPoints = new Map<string, CostPoint[]>()
     for (const event of events) {
         let inputTokens = event.inputTokens
         let outputTokens = event.outputTokens
@@ -502,12 +483,14 @@ export function getUsageSummary(
             }
         }
         if (event.cost !== null) {
-            considerCostPoint(event.sessionId, {
+            const points = sessionCostPoints.get(event.sessionId) ?? []
+            points.push({
                 amount: event.cost,
                 currency: event.costCurrency ?? 'USD',
                 createdAt: event.createdAt,
                 sourceSeq: event.sourceSeq
             })
+            sessionCostPoints.set(event.sessionId, points)
         }
         if (duplicateCumulativeEvent || !isInRange(event) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) continue
         // Cache reads and writes partition processed input. Preserve the
@@ -535,30 +518,50 @@ export function getUsageSummary(
 
     // Costs are never summed across currencies into one labeled scalar: each
     // currency keeps its own total (e.g. USD 1 + EUR 1 stays two entries).
-    // For bounded ranges the session cost is the cumulative growth inside the
-    // range; a currency change against the baseline cannot be diffed, so that
-    // session's cost is omitted rather than invented.
+    // For a bounded range the session cost is the cumulative growth inside
+    // the range, walking every in-range point against the previous one: a
+    // counter reset (a lower value) contributes its full amount, so spend
+    // accumulated before the reset is not discarded. A currency change in the
+    // chain cannot be diffed, so that session's cost is omitted.
     const rangedCost = new Map<string, { amount: number; currency: string }>()
     const sessionById = new Map(sessions.map((session) => [session.id, session]))
-    for (const [sessionId, point] of sessionCost) {
-        const baseline = costBaselines.get(sessionId)
-        if (from === null || !baseline) {
-            // 'all' keeps the full cumulative amount. For a bounded range a
-            // missing baseline is only a true zero when the session itself
-            // started inside the range; an older session with its first cost
-            // sample inside the window cannot be attributed, so it is omitted.
-            const session = sessionById.get(sessionId)
-            if (from !== null && !baseline && session && session.createdAt < from) {
-                continue
+    for (const [sessionId, points] of sessionCostPoints) {
+        const session = sessionById.get(sessionId)
+        const baseline = from !== null
+            ? [...points].reverse().find((point) => point.createdAt < from) ?? null
+            : null
+        const inRange = from !== null
+            ? points.filter((point) => point.createdAt >= from && point.createdAt <= now)
+            : points
+        if (inRange.length === 0) continue
+        // A missing baseline is only a true zero when the session itself
+        // started inside the range; an older session with its first cost
+        // sample inside the window cannot be attributed, so it is omitted.
+        if (from !== null && !baseline && session && session.createdAt < from) {
+            continue
+        }
+        let previous = baseline
+        let total = 0
+        let currency: string | null = null
+        let mismatch = false
+        for (const point of inRange) {
+            if (previous !== null && previous.currency !== point.currency) {
+                mismatch = true
+                break
             }
-            rangedCost.set(sessionId, { amount: point.amount, currency: point.currency })
-        } else if (baseline.currency === point.currency) {
-            const amount = point.amount >= baseline.amount
-                ? point.amount - baseline.amount
-                : point.amount
-            if (amount > 0) {
-                rangedCost.set(sessionId, { amount, currency: point.currency })
+            if (previous === null) {
+                total += point.amount
+            } else {
+                total += point.amount >= previous.amount
+                    ? point.amount - previous.amount
+                    : point.amount
             }
+            previous = point
+            currency = point.currency
+        }
+        if (mismatch) continue
+        if (total > 0 && currency !== null) {
+            rangedCost.set(sessionId, { amount: total, currency })
         }
     }
     const totalCosts = new Map<string, number>()

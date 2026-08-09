@@ -1044,6 +1044,42 @@ describe('usage service', () => {
         store.close()
     })
 
+    it('preserves spend across cumulative-cost resets', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-cost-reset-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const costMessage = (cost: number) => ({
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost,
+                costCurrency: 'USD',
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+        const day = 24 * 60 * 60 * 1000
+        // 10 -> 11 accumulates 1; the drop to 2 is a provider reset that
+        // restarts the counter, so 2 more counts. All-time total: 13.
+        addAgentMessage(store, session.id, costMessage(10), Date.now() - 10 * day)
+        addAgentMessage(store, session.id, costMessage(11), Date.now() - 2 * day)
+        addAgentMessage(store, session.id, costMessage(2))
+
+        const allTime = getUsageSummary(store, 'default', 'all')
+        expect(allTime.totals.costs).toEqual([{ amount: 13, currency: 'USD' }])
+        // 7-day view: baseline 10, in-range 11 -> 2 is 1 + 2 = 3.
+        const sevenDay = getUsageSummary(store, 'default', '7d')
+        expect(sevenDay.totals.costs).toEqual([{ amount: 3, currency: 'USD' }])
+        store.close()
+    })
+
     it('omits a session cost whose baseline currency changed inside the range', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(
