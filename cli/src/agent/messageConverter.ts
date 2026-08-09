@@ -70,6 +70,9 @@ export function convertAgentMessage(message: AgentMessage, model?: string | null
                 type: 'token_count',
                 model: typeof model === 'string' && model.trim() ? model.trim() : null,
                 ...INCLUSIVE_INPUT_TOKEN_USAGE_MARKER,
+                ...(message.cost !== undefined
+                    ? { cost: message.cost, costCurrency: message.costCurrency ?? 'USD' }
+                    : {}),
                 info: {
                     total: {
                         inputTokens: message.inputTokens

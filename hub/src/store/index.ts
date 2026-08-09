@@ -33,7 +33,7 @@ export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 export { UsageStore } from './usageStore'
 
-const SCHEMA_VERSION: number = 22
+const SCHEMA_VERSION: number = 23
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -290,6 +290,7 @@ export class Store {
             19: () => this.migrateFromV19ToV20(),
             20: () => this.migrateFromV20ToV21(),
             21: () => this.migrateFromV21ToV22(),
+            22: () => this.migrateFromV22ToV23(),
         })
 
         if (currentVersion === 0) {
@@ -469,6 +470,9 @@ export class Store {
                 last_output_tokens INTEGER,
                 last_cache_read_tokens INTEGER,
                 last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -769,6 +773,13 @@ export class Store {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                last_input_tokens INTEGER,
+                last_output_tokens INTEGER,
+                last_cache_read_tokens INTEGER,
+                last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -851,6 +862,29 @@ export class Store {
         if (!columns.has('global_pinned')) {
             this.db.exec('ALTER TABLE sessions ADD COLUMN global_pinned INTEGER NOT NULL DEFAULT 0')
         }
+    }
+
+    private migrateFromV22ToV23(): void {
+        // Usage events are a rebuildable index. v23 adds cumulative-cost and
+        // context-only presence markers; the derived rows must be re-derived
+        // under the new semantics instead of mixing old and new rows.
+        const columns = new Set(
+            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        if (!columns.has('context_only')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
+        }
+        if (!columns.has('cost')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
+        }
+        if (!columns.has('cost_currency')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
+        }
+        this.db.exec(`
+            DELETE FROM usage_events;
+            DELETE FROM usage_scan_state;
+        `)
     }
 
     private getSessionColumnNames(): Set<string> {

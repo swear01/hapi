@@ -866,4 +866,161 @@ describe('usage service', () => {
         expect(store.usage.getEvents([target.id])).toHaveLength(1)
         store.close()
     })
+
+    it('marks an ACP agent as context-only when it reports context without tokens', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-context-only-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default',
+            'some-model'
+        )
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                model: 'some-model',
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 4_200,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(0)
+        expect(result.totals.totalTokens).toBe(0)
+        expect(result.agents).toEqual([
+            expect.objectContaining({ agent: 'opencode', status: 'context-only', sessions: 1, cost: 0 })
+        ])
+        store.close()
+    })
+
+    it('records cumulative ACP cost once per session and marks cost-only agents', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-cost-only-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost: 1.25,
+                costCurrency: 'USD',
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        }, Date.now() - 60_000)
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost: 2.5,
+                costCurrency: 'USD',
+                info: {
+                    total: { inputTokens: 0, outputTokens: 0 },
+                    contextTokens: 1_200,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.cost).toBe(2.5)
+        expect(result.totals.costCurrency).toBe('USD')
+        expect(result.totals.requests).toBe(0)
+        expect(result.agents).toEqual([
+            expect.objectContaining({ agent: 'opencode', status: 'cost-only', cost: 2.5, costCurrency: 'USD' })
+        ])
+        store.close()
+    })
+
+    it('keeps cost separate from token events and counts the latest cost once per session', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession(
+            'acp-tokens-plus-cost-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default',
+            'some-model'
+        )
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost: 0.5,
+                costCurrency: 'USD',
+                info: {
+                    total: { inputTokens: 100, outputTokens: 20 },
+                    contextTokens: 4_200,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+        addAgentMessage(store, session.id, {
+            type: 'codex',
+            data: {
+                type: 'token_count',
+                cost: 1.1,
+                costCurrency: 'USD',
+                info: {
+                    total: { inputTokens: 60, outputTokens: 15 },
+                    contextTokens: 5_000,
+                    modelContextWindow: 200_000
+                }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.totals.requests).toBe(2)
+        expect(result.totals.inputTokens).toBe(160)
+        expect(result.totals.outputTokens).toBe(35)
+        // Cumulative cost is not a per-turn delta: the latest value wins.
+        expect(result.totals.cost).toBe(1.1)
+        expect(result.agents).toEqual([
+            expect.objectContaining({ agent: 'opencode', status: 'complete', cost: 1.1 })
+        ])
+        store.close()
+    })
+
+    it('reports agents without any usage events as not-reported', () => {
+        const store = new Store(':memory:')
+        const silent = store.sessions.getOrCreateSession(
+            'acp-silent-test',
+            { path: '/tmp', host: 'test', flavor: 'opencode' },
+            null,
+            'default'
+        )
+        const reporting = store.sessions.getOrCreateSession(
+            'acp-reporting-test',
+            { path: '/tmp', host: 'test', flavor: 'claude' },
+            null,
+            'default',
+            'test-model'
+        )
+        addAgentMessage(store, reporting.id, {
+            type: 'output',
+            data: {
+                type: 'assistant',
+                message: { id: 'claude-usage', usage: { input_tokens: 10, output_tokens: 2 } }
+            }
+        })
+
+        const result = getUsageSummary(store, 'default', 'all')
+        expect(result.agents).toEqual([
+            expect.objectContaining({ agent: 'claude', status: 'complete', sessions: 1 }),
+            expect.objectContaining({ agent: 'opencode', status: 'not-reported', sessions: 1, cost: 0 })
+        ])
+        expect(result.totals.cost).toBe(0)
+        expect(result.totals.costCurrency).toBe('USD')
+        store.close()
+    })
 })

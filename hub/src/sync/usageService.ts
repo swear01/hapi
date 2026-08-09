@@ -1,4 +1,4 @@
-import type { UsageSummaryBucket, UsageSummaryResponse } from '@hapi/protocol/apiTypes'
+import type { UsageAgentStatus, UsageSummaryBucket, UsageSummaryResponse } from '@hapi/protocol/apiTypes'
 import type { StoredMessage, StoredSession } from '../store'
 import type { UsageEvent } from '../store/usage'
 import type { Store } from '../store'
@@ -17,12 +17,42 @@ function asCount(value: unknown): number | null {
         : null
 }
 
+/** Cost amounts keep their fractional precision (unlike token counts). */
+function asAmount(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? value
+        : null
+}
+
 function firstCount(record: RecordValue, ...keys: string[]): number {
     for (const key of keys) {
         const value = asCount(record[key])
         if (value !== null) return value
     }
     return 0
+}
+
+/**
+ * ACP `usage_update.cost` is a cumulative session cost. HAPI's generic wire
+ * carries it flat (`cost` + `costCurrency`), but the ACP object shape
+ * (`{ amount, currency }`) is also accepted for robustness.
+ */
+function parseUsageCost(data: RecordValue): { amount: number; currency: string } | null {
+    const costRecord = asRecord(data.cost)
+    const amount = costRecord !== null ? asAmount(costRecord.amount) : asAmount(data.cost)
+    if (amount === null) return null
+    const currencyValue = costRecord !== null ? costRecord.currency : data.costCurrency
+    const currency = typeof currencyValue === 'string' && currencyValue.trim()
+        ? currencyValue.trim()
+        : 'USD'
+    return { amount, currency }
+}
+
+const AGENT_STATUS_RANK: Record<UsageAgentStatus, number> = {
+    'complete': 3,
+    'cost-only': 2,
+    'context-only': 1,
+    'not-reported': 0
 }
 
 function normalizeInputTokens(
@@ -94,7 +124,10 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
             lastInputTokens: null,
             lastOutputTokens: null,
             lastCacheReadTokens: null,
-            lastCacheCreationTokens: null
+            lastCacheCreationTokens: null,
+            contextOnly: false,
+            cost: null,
+            costCurrency: null
         }
     }
 
@@ -131,7 +164,14 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
         const outputTokens = firstCount(total, 'outputTokens', 'output_tokens')
         const cacheReadTokens = firstCount(total, 'cachedInputTokens', 'cached_input_tokens', 'cacheReadTokens', 'cache_read_input_tokens')
         const cacheCreationTokens = firstCount(total, 'cacheWriteInputTokens', 'cache_write_input_tokens', 'cacheCreationTokens', 'cache_creation_input_tokens')
-        if (rawInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) return null
+        const hasProcessedTokens = rawInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens > 0
+        const cost = parseUsageCost(data)
+        // Zero-token messages still carry presence information: an ACP agent
+        // may report only context (`usage_update.used/size`) or only a
+        // cumulative session cost. Both are indexed so the UI can distinguish
+        // "context-only"/"cost-only" from an agent that reports nothing.
+        const contextOnly = !hasProcessedTokens && firstCount(info, 'contextTokens', 'context_tokens') > 0
+        if (!hasProcessedTokens && !contextOnly && cost === null) return null
         const threadId = explicitThreadId ?? session.id
         const scope = typeof data.scopeRole === 'string'
             ? data.scopeRole
@@ -207,7 +247,10 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
             lastInputTokens,
             lastOutputTokens,
             lastCacheReadTokens,
-            lastCacheCreationTokens
+            lastCacheCreationTokens,
+            contextOnly,
+            cost: cost?.amount ?? null,
+            costCurrency: cost?.currency ?? null
         }
     }
 
@@ -357,6 +400,30 @@ export function getUsageSummary(
     const cumulativeFingerprints = new Set<string>()
     const dayFormatter = createDayFormatter(timeZone)
 
+    // All-time agent availability is independent of the selected range: a
+    // session that ever reported tokens/context/cost keeps that status even
+    // when the current range has no events.
+    const sessionStatus = new Map<string, UsageAgentStatus>()
+    for (const event of events) {
+        const status: UsageAgentStatus | null = event.inputTokens + event.outputTokens
+                + event.cacheReadTokens + event.cacheCreationTokens > 0
+            ? 'complete'
+            : event.cost !== null
+                ? 'cost-only'
+                : event.contextOnly
+                    ? 'context-only'
+                    : null
+        if (!status) continue
+        const previous = sessionStatus.get(event.sessionId)
+        if (!previous || AGENT_STATUS_RANK[status] > AGENT_STATUS_RANK[previous]) {
+            sessionStatus.set(event.sessionId, status)
+        }
+    }
+
+    // Cumulative session cost is a point-in-time value, not a delta: keep the
+    // latest in-range report per session and credit it once.
+    const sessionCost = new Map<string, { amount: number; currency: string; createdAt: number; sourceSeq: number }>()
+
     for (const event of events) {
         let inputTokens = event.inputTokens
         let outputTokens = event.outputTokens
@@ -408,6 +475,19 @@ export function getUsageSummary(
                 cumulativeFingerprints.add(fingerprint)
             }
         }
+        if (event.cost !== null && isInRange(event)) {
+            const previous = sessionCost.get(event.sessionId)
+            if (!previous
+                || event.createdAt > previous.createdAt
+                || (event.createdAt === previous.createdAt && event.sourceSeq > previous.sourceSeq)) {
+                sessionCost.set(event.sessionId, {
+                    amount: event.cost,
+                    currency: event.costCurrency ?? 'USD',
+                    createdAt: event.createdAt,
+                    sourceSeq: event.sourceSeq
+                })
+            }
+        }
         if (duplicateCumulativeEvent || !isInRange(event) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) continue
         // Cache reads and writes partition processed input. Preserve the
         // request and its primary token counts when a provider emits an
@@ -432,18 +512,65 @@ export function getUsageSummary(
         sessionsWithUsage.add(event.sessionId)
     }
 
+    let totalCost = 0
+    let totalCostCurrency = 'USD'
+    let latestCostAt = -1
+    const sessionById = new Map(sessions.map((session) => [session.id, session]))
+    for (const cost of sessionCost.values()) {
+        totalCost += cost.amount
+        if (cost.createdAt > latestCostAt) {
+            latestCostAt = cost.createdAt
+            totalCostCurrency = cost.currency
+        }
+    }
+
+    // Per-agent availability: every session's agent starts as "not-reported";
+    // the strongest status observed across its events upgrades it.
+    const agentEntries = new Map<string, { status: UsageAgentStatus; sessions: number; cost: number; costCurrency: string }>()
+    for (const session of sessions) {
+        const agent = sessionAgent(session)
+        if (agent === 'unknown') continue
+        const entry = agentEntries.get(agent)
+            ?? { status: 'not-reported' as UsageAgentStatus, sessions: 0, cost: 0, costCurrency: 'USD' }
+        entry.sessions += 1
+        const status = sessionStatus.get(session.id)
+        if (status && AGENT_STATUS_RANK[status] > AGENT_STATUS_RANK[entry.status]) {
+            entry.status = status
+        }
+        agentEntries.set(agent, entry)
+    }
+    for (const [sessionId, cost] of sessionCost) {
+        const session = sessionById.get(sessionId)
+        if (!session) continue
+        const agent = sessionAgent(session)
+        if (agent === 'unknown') continue
+        const entry = agentEntries.get(agent)
+        if (!entry) continue
+        entry.cost += cost.amount
+        entry.costCurrency = cost.currency
+    }
+
     const sortBuckets = (values: Map<string, Totals>): UsageSummaryBucket[] => Array.from(values.entries())
         .map(([key, value]) => toBucket(key, value))
         .sort((a, b) => b.totalTokens - a.totalTokens)
 
     return {
         range: { from, to: now },
-        totals: { ...totals, sessions: sessionsWithUsage.size },
+        totals: { ...totals, sessions: sessionsWithUsage.size, cost: totalCost, costCurrency: totalCostCurrency },
         daily: Array.from(daily.entries())
             .map(([key, value]) => toBucket(key, value))
             .sort((a, b) => a.key.localeCompare(b.key)),
         byAgent: sortBuckets(byAgent),
         byModel: sortBuckets(byModel),
+        agents: Array.from(agentEntries.entries())
+            .map(([agent, entry]) => ({
+                agent,
+                status: entry.status,
+                sessions: entry.sessions,
+                cost: entry.cost,
+                costCurrency: entry.costCurrency
+            }))
+            .sort((a, b) => a.agent.localeCompare(b.agent)),
         updatedAt: now
     }
 }

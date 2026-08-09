@@ -869,6 +869,19 @@ export type UsageSummaryBucket = {
     requests: number
 }
 
+export type UsageAgentStatus = 'complete' | 'context-only' | 'cost-only' | 'not-reported'
+
+export type UsageAgentAvailability = {
+    agent: string
+    /** Whether the underlying agent reports full token usage, only context,
+     *  only cumulative cost, or nothing at all. */
+    status: UsageAgentStatus
+    sessions: number
+    /** Latest cumulative cost across this agent's sessions (0 when unknown). */
+    cost: number
+    costCurrency: string
+}
+
 export type UsageSummaryResponse = {
     range: {
         from: number | null
@@ -883,9 +896,12 @@ export type UsageSummaryResponse = {
         uncachedTokens: number
         requests: number
         sessions: number
+        cost: number
+        costCurrency: string
     }
     daily: Array<UsageSummaryBucket & { key: string }>
     byAgent: UsageSummaryBucket[]
     byModel: UsageSummaryBucket[]
+    agents: UsageAgentAvailability[]
     updatedAt: number
 }

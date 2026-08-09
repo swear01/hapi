@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import type { UsageSummaryBucket } from '@hapi/protocol/apiTypes'
+import type { UsageAgentStatus, UsageSummaryBucket } from '@hapi/protocol/apiTypes'
 import { SettingsPageContent, SettingsRow, SettingsSection } from '@/components/settings/SettingsPrimitives'
 import { useAppContext } from '@/lib/app-context'
 import { queryKeys } from '@/lib/query-keys'
@@ -13,6 +13,50 @@ function formatTokens(value: number): string {
     if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}K`
     if (value < 1_000_000_000) return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`
     return `${(value / 1_000_000_000).toFixed(1)}B`
+}
+
+function formatCost(amount: number, currency: string): string {
+    try {
+        return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
+    } catch {
+        return `${amount.toFixed(4)} ${currency}`
+    }
+}
+
+const AGENT_STATUS_ORDER: UsageAgentStatus[] = ['complete', 'context-only', 'cost-only', 'not-reported']
+
+type AgentStatusStyle = Record<UsageAgentStatus, { className: string; label: string }>
+
+function AgentAvailabilityList(props: { rows: Array<{ agent: string; status: UsageAgentStatus; sessions: number; cost: number; costCurrency: string }> }) {
+    const { t } = useTranslation()
+    if (props.rows.length === 0) {
+        return <div className="px-3 py-4 text-sm text-[var(--app-hint)]">{t('settings.usage.agents.empty')}</div>
+    }
+    const statusStyle: AgentStatusStyle = {
+        'complete': { className: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400', label: t('settings.usage.agents.status.complete') },
+        'context-only': { className: 'bg-amber-500/15 text-amber-600 dark:text-amber-400', label: t('settings.usage.agents.status.contextOnly') },
+        'cost-only': { className: 'bg-sky-500/15 text-sky-600 dark:text-sky-400', label: t('settings.usage.agents.status.costOnly') },
+        'not-reported': { className: 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]', label: t('settings.usage.agents.status.notReported') }
+    }
+    const rows = [...props.rows].sort((a, b) => {
+        const rankDiff = AGENT_STATUS_ORDER.indexOf(a.status) - AGENT_STATUS_ORDER.indexOf(b.status)
+        return rankDiff !== 0 ? rankDiff : a.agent.localeCompare(b.agent)
+    })
+    return (
+        <div className="divide-y divide-[var(--app-divider)]">
+            {rows.map((row) => (
+                <div key={row.agent} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
+                    <span className="min-w-0 truncate font-medium text-[var(--app-fg)]">{row.agent}</span>
+                    <span className="flex shrink-0 items-center gap-2">
+                        {row.cost > 0 ? <span className="text-xs text-[var(--app-hint)]">{formatCost(row.cost, row.costCurrency)}</span> : null}
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle[row.status].className}`}>
+                            {statusStyle[row.status].label}
+                        </span>
+                    </span>
+                </div>
+            ))}
+        </div>
+    )
 }
 
 function UsageBarList(props: { rows: UsageSummaryBucket[]; empty: string }) {
@@ -101,6 +145,12 @@ export default function SettingsUsagePage() {
                                 <div className="mt-1 text-xl font-semibold text-[var(--app-fg)]">{typeof value === 'number' ? formatTokens(value) : value}</div>
                             </div>
                         ))}
+                        {query.data.totals.cost > 0 ? (
+                            <div className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-3 shadow-sm">
+                                <div className="text-xs text-[var(--app-hint)]">{t('settings.usage.cost')}</div>
+                                <div className="mt-1 text-xl font-semibold text-[var(--app-fg)]">{formatCost(query.data.totals.cost, query.data.totals.costCurrency)}</div>
+                            </div>
+                        ) : null}
                     </div>
                     <SettingsSection title={t('settings.usage.daily.title')}>
                         {query.data.daily.length === 0 ? <div className="px-3 py-4 text-sm text-[var(--app-hint)]">{t('settings.usage.empty')}</div> : (
@@ -123,6 +173,9 @@ export default function SettingsUsagePage() {
                             <UsageBarList rows={query.data.byModel} empty={t('settings.usage.empty')} />
                         </SettingsSection>
                     </div>
+                    <SettingsSection title={t('settings.usage.agents.title')} description={t('settings.usage.agents.description')}>
+                        <AgentAvailabilityList rows={query.data.agents} />
+                    </SettingsSection>
                     <div className="text-xs text-[var(--app-hint)]">
                         {t('settings.usage.sessions', { count: query.data.totals.sessions })}
                     </div>
