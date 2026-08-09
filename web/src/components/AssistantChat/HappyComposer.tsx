@@ -62,7 +62,7 @@ import { PiThinkingLevelPanel } from './PiThinkingLevelPanel'
 import type { ApiClient } from '@/api/client'
 import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
 import { useDictation } from '@/hooks/useDictation'
-import type { ComposerSendIntent } from '@/lib/messageDelivery'
+import { resolveMessageDeliveryMode, type ComposerSendIntent } from '@/lib/messageDelivery'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 
 export interface TextInputState {
@@ -470,9 +470,9 @@ export function HappyComposer(props: {
         mode: voiceInput.transcriptionMode,
         getCurrentText: getCurrentComposerText,
         onTextChange: setComposerText,
-        sendMessage: async (sessionId: string, text: string) => {
+        sendMessage: async (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => {
             if (props.voiceTranscriptionApi) {
-                await props.voiceTranscriptionApi.sendMessage(sessionId, text)
+                await props.voiceTranscriptionApi.sendMessage(sessionId, text, null, undefined, undefined, deliveryMode)
             }
         }
     }), [
@@ -1123,9 +1123,14 @@ export function HappyComposer(props: {
                 richInputRef.current?.flushSerializedText()
                 const targetSessionId = props.sessionId ?? ''
                 const initialText = api.composer().getState().text
+                const deliveryMode = resolveMessageDeliveryMode({
+                    agentFlavor: props.agentFlavor,
+                    isSessionThinking: props.thinking ?? false,
+                    intent: 'default'
+                })
                 api.composer().setText('')
                 if (targetSessionId && dictation.stopAndSend) {
-                    await dictation.stopAndSend(targetSessionId, initialText)
+                    await dictation.stopAndSend(targetSessionId, initialText, deliveryMode)
                 } else {
                     await dictation.toggle()
                 }
@@ -1249,6 +1254,8 @@ export function HappyComposer(props: {
         dictation.toggle,
         dictation.stopAndSend,
         props.sessionId,
+        props.agentFlavor,
+        props.thinking,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {

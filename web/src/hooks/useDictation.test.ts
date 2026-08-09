@@ -166,7 +166,7 @@ describe('useDictation', () => {
         })
 
         await waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload')
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload', null, undefined, undefined, undefined)
         })
     })
 
@@ -406,7 +406,7 @@ describe('useDictation', () => {
         await act(() => result.current.stopAndSend('session-A', 'initial draft'))
 
         await waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial draft voice text')
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial draft voice text', null, undefined, undefined, undefined)
         })
         expect(getDraft('session-A')).toBe('')
     })
@@ -453,6 +453,103 @@ describe('useDictation', () => {
                 language: 'zh-TW'
             }))
         })
+    })
+
+    it('forwards deliveryMode to sendMessage when stopAndSend specifies it', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const sendMessage = vi.fn(async () => {})
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'steer me' })),
+            sendMessage
+        }
+
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn(),
+            sendMessage
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'initial', 'steer'))
+
+        await waitFor(() => {
+            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial steer me', 'steer')
+        })
+    })
+
+    it('does not clear newer draft saved after stopAndSend started', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        saveDraft('session-A', 'draft at start')
+
+        const sendMessage = vi.fn(async () => {})
+        const api = {
+            transcribeVoice: vi.fn(async () => {
+                // Simulate user editing draft during transcription
+                saveDraft('session-A', 'newer draft typed by user')
+                return { text: 'transcribed' }
+            }),
+            sendMessage
+        }
+
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn(),
+            sendMessage
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'initial draft'))
+
+        await waitFor(() => {
+            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial draft transcribed', undefined)
+        })
+        expect(getDraft('session-A')).toBe('newer draft typed by user')
     })
 
     it('reports supported as false when browser recording APIs are unavailable', () => {

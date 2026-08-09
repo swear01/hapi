@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
+import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
 import { useRealtimeDictation } from './useRealtimeDictation'
 
@@ -34,7 +35,7 @@ export function useDictation(config: {
     mode: TranscriptionMode
     getCurrentText: () => string
     onTextChange: (text: string) => void
-    sendMessage?: (sessionId: string, text: string) => Promise<void>
+    sendMessage?: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
 }) {
     const onFinalTranscript = useCallback((transcript: string) => {
         config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
@@ -64,7 +65,7 @@ export function useDictation(config: {
     const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
 
     const stopTracks = useCallback(() => {
         if (mediaStreamRef.current) {
@@ -148,9 +149,9 @@ export function useDictation(config: {
                         if (pendingSend) {
                             const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                             if (finalMessage.trim()) {
-                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
+                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                                 try {
-                                    await sendMsg(pendingSend.sessionId, finalMessage)
+                                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
                                     if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                                         clearDraft(pendingSend.sessionId)
                                     }
@@ -212,11 +213,12 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
         sendOnFinishRef.current = {
             sessionId: targetSessionId,
             initialText: initialText ?? config.getCurrentText(),
-            draftAtStart: getDraft(targetSessionId)
+            draftAtStart: getDraft(targetSessionId),
+            deliveryMode
         }
         await stop()
     }, [config, stop])
