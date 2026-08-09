@@ -269,6 +269,57 @@ describe('useDictation', () => {
         expect(onTextChange).not.toHaveBeenCalledWith('initial voice text')
     })
 
+    it('does not clobber replacement draft when zero-byte recording completes', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockZeroByteMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob([], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockZeroByteMediaRecorder)
+
+        const onTextChange = vi.fn()
+        let currentText = 'initial'
+        const api = {
+            transcribeVoice: vi.fn(),
+            sendMessage: vi.fn()
+        }
+
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => currentText,
+            onTextChange
+        }))
+
+        await act(() => result.current.toggle())
+        act(() => {
+            result.current.stopAndSend('session-A', 'initial')
+            currentText = 'user typed replacement text'
+        })
+
+        await waitFor(() => {
+            expect(result.current.status).toBe('error')
+            expect(result.current.error).toBe('No audio was recorded')
+        })
+        expect(onTextChange).not.toHaveBeenCalledWith('initial')
+    })
+
     it('forwards saved language from localStorage to transcribeVoice', async () => {
         const stopTrack = vi.fn()
         Object.defineProperty(navigator, 'mediaDevices', {

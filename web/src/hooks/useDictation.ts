@@ -122,7 +122,7 @@ export function useDictation(config: {
                             saveDraft(pendingSend.sessionId, pendingSend.initialText)
                         }
                         if (mountedRef.current) {
-                            if (pendingSend) config.onTextChange(pendingSend.initialText)
+                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
                             setError('No audio was recorded')
                             setStatus('error')
                         }
