@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
+import { getDraft, saveDraft } from '@/lib/composer-drafts'
 import { appendTranscript, useDictation } from './useDictation'
 
 describe('appendTranscript', () => {
@@ -318,6 +319,96 @@ describe('useDictation', () => {
             expect(result.current.error).toBe('No audio was recorded')
         })
         expect(onTextChange).not.toHaveBeenCalledWith('initial')
+    })
+
+    it('does not transcribe when unmounted without stopAndSend', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
+            sendMessage: vi.fn()
+        }
+
+        const { result, unmount } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn()
+        }))
+
+        await act(() => result.current.toggle())
+        unmount()
+
+        await new Promise((r) => setTimeout(r, 50))
+        expect(api.transcribeVoice).not.toHaveBeenCalled()
+    })
+
+    it('clears persisted draft when sendMessage succeeds', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        saveDraft('session-A', 'old draft')
+
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
+            sendMessage: vi.fn(async () => {})
+        }
+
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn()
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'initial draft'))
+
+        await waitFor(() => {
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial draft voice text')
+        })
+        expect(getDraft('session-A')).toBe('')
     })
 
     it('forwards saved language from localStorage to transcribeVoice', async () => {

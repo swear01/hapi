@@ -6,7 +6,7 @@ import {
     type TranscriptionProvider
 } from '@hapi/protocol/voice'
 import type { ApiClient } from '@/api/client'
-import { saveDraft } from '@/lib/composer-drafts'
+import { saveDraft, clearDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript } from './useDictation'
 import {
@@ -62,12 +62,14 @@ export function useRealtimeDictation(config: {
     const finish = useCallback(async (text: string) => {
         const pendingSend = sendOnFinishRef.current
         sendOnFinishRef.current = null
+        updatePartial('')
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
             if (finalMessage.trim()) {
                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
                 try {
                     await sendMsg(pendingSend.sessionId, finalMessage)
+                    clearDraft(pendingSend.sessionId)
                 } catch (sendError) {
                     saveDraft(pendingSend.sessionId, finalMessage)
                     if (mountedRef.current) {
@@ -81,7 +83,6 @@ export function useRealtimeDictation(config: {
                 }
             }
         } else if (mountedRef.current) {
-            updatePartial('')
             onFinalTranscriptRef.current(text)
             setStatus('disconnected')
         }

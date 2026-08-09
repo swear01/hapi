@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
-import { saveDraft } from '@/lib/composer-drafts'
+import { clearDraft, saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
 import { useRealtimeDictation } from './useRealtimeDictation'
@@ -116,6 +116,8 @@ export function useDictation(config: {
                     const pendingSend = sendOnFinishRef.current
                     sendOnFinishRef.current = null
 
+                    if (!mountedRef.current && !pendingSend) return
+
                     if (!blob.size) {
                         transcribingRef.current = false
                         if (pendingSend) {
@@ -144,6 +146,7 @@ export function useDictation(config: {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string) => config.api!.sendMessage(sid, msg))
                                 try {
                                     await sendMsg(pendingSend.sessionId, finalMessage)
+                                    clearDraft(pendingSend.sessionId)
                                 } catch (sendError) {
                                     saveDraft(pendingSend.sessionId, finalMessage)
                                     if (mountedRef.current) {
