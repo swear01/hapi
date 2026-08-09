@@ -15,9 +15,15 @@ function formatTokens(value: number): string {
     return `${(value / 1_000_000_000).toFixed(1)}B`
 }
 
-function formatCost(amount: number, currency: string): string {
+export function formatCost(amount: number, currency: string): string {
+    // Costs below the currency's standard fraction digits (e.g. USD 0.004)
+    // would render as $0.00; use significant digits so nonzero spend stays
+    // visible.
+    const precision = amount > 0 && amount < 0.01
+        ? { minimumSignificantDigits: 2, maximumSignificantDigits: 4 }
+        : {}
     try {
-        return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
+        return new Intl.NumberFormat(undefined, { style: 'currency', currency, ...precision }).format(amount)
     } catch {
         return `${amount.toFixed(4)} ${currency}`
     }
