@@ -158,6 +158,9 @@ export function NewSession(props: {
 
     useEffect(() => {
         if (!visibleAgents.includes(agent) && visibleAgents[0]) {
+            // A hidden agent must not keep restored-draft launch state: the
+            // fallback behaves like a manual agent switch, so normalize.
+            preserveRestoredDraftRef.current = false
             setAgent(visibleAgents[0])
         }
     }, [agent, visibleAgents])
@@ -235,31 +238,42 @@ export function NewSession(props: {
             return
         }
         restoredFromBrowseRef.current = true
-        preserveRestoredDraftRef.current = true
-        setAgent(draft.agent)
-        setModel(draft.model)
-        setCursorSelectedBase(draft.cursorSelectedBase)
-        setEffort(draft.effort)
-        setModelReasoningEffort(draft.modelReasoningEffort)
-        setOpencodeSelectedModel(
-            draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
-        )
-        setAgySelectedModel(
-            draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
-        )
-        setServiceTier(draft.serviceTier)
-        setCollaborationMode(draft.collaborationMode)
-        setCopilotAgentMode(draft.copilotAgentMode)
-        setYoloMode(draft.yoloMode)
-        setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
-        setGrokPermissionMode(draft.grokPermissionMode)
-        setSessionType(draft.sessionType)
-        setWorktreeName(draft.worktreeName)
+        if (visibleAgents.includes(draft.agent)) {
+            preserveRestoredDraftRef.current = true
+            setAgent(draft.agent)
+            setModel(draft.model)
+            setCursorSelectedBase(draft.cursorSelectedBase)
+            setEffort(draft.effort)
+            setModelReasoningEffort(draft.modelReasoningEffort)
+            setOpencodeSelectedModel(
+                draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
+            )
+            setAgySelectedModel(
+                draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
+            )
+            setServiceTier(draft.serviceTier)
+            setCollaborationMode(draft.collaborationMode)
+            setCopilotAgentMode(draft.copilotAgentMode)
+            setYoloMode(draft.yoloMode)
+            setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
+            setGrokPermissionMode(draft.grokPermissionMode)
+            setSessionType(draft.sessionType)
+            setWorktreeName(draft.worktreeName)
+        } else if (visibleAgents[0]) {
+            // The draft agent is hidden in settings: restore only the
+            // agent-agnostic fields and let the normalization effects pick
+            // defaults for the fallback agent (no stale model/permission state).
+            setAgent(visibleAgents[0])
+            setYoloMode(draft.yoloMode)
+            setSessionType(draft.sessionType)
+            setWorktreeName(draft.worktreeName)
+        }
         clearNewSessionFormDraft()
     }, [
         props.initialDirectory,
         props.initialMachineId,
-        machineId
+        machineId,
+        visibleAgents
     ])
 
     useEffect(() => {
