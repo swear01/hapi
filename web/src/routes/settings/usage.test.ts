@@ -12,6 +12,12 @@ describe('formatCost', () => {
         expect(rendered).toContain('0.00')
     })
 
+    it('keeps sub-unit amounts nonzero for zero-decimal currencies', () => {
+        const rendered = formatCost(0.4, 'JPY')
+        expect(rendered).not.toBe('¥0')
+        expect(rendered).toContain('0.4')
+    })
+
     it('falls back to a plain amount for unknown currencies', () => {
         expect(formatCost(0.5, 'NOPE')).toBe('0.5000 NOPE')
     })
