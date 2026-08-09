@@ -94,6 +94,43 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
         expect(internals.displayAgentMode).toBe('interactive');
     });
 
+    it('treats interactive as a no-op without calling setMode', async () => {
+        const setMode = vi.fn().mockRejectedValue(new Error('transport unavailable'));
+        const { launcher, internals } = createLauncher(setMode);
+
+        await expect(launcher.applyAgentMode('interactive')).resolves.toBeUndefined();
+
+        expect(setMode).not.toHaveBeenCalled();
+        expect(internals.currentAgentMode).toBe('interactive');
+        expect(internals.displayAgentMode).toBe('interactive');
+    });
+
+    it('classifies Invalid mode responses as unsupported runtime switching', async () => {
+        const setMode = vi.fn().mockRejectedValue(
+            new Error("Invalid mode 'plan'. Supported values: agent, plan, autopilot.")
+        );
+        const { launcher, internals } = createLauncher(setMode);
+
+        await expect(launcher.applyAgentMode('plan')).rejects.toThrow("Invalid mode 'plan'");
+        await expect(launcher.applyAgentMode('autopilot')).rejects.toThrow(
+            'does not support agent mode switching'
+        );
+
+        expect(setMode).toHaveBeenCalledTimes(1);
+        expect(internals.currentAgentMode).toBe('interactive');
+    });
+
+    it('continues startup when setMode is rejected with Invalid mode', async () => {
+        const setMode = vi.fn().mockRejectedValue(new Error("Invalid mode 'plan'"));
+        const { internals } = createLauncher(setMode);
+        internals.currentAgentMode = 'plan';
+
+        await expect(internals.applyInitialAgentMode()).resolves.toBeUndefined();
+
+        expect(internals.currentAgentMode).toBe('plan');
+        expect(internals.displayAgentMode).toBe('plan');
+    });
+
     it('applies Auto after an explicit model selection', async () => {
         const setModel = vi.fn().mockResolvedValue(undefined);
         const { internals } = createLauncher(vi.fn().mockResolvedValue(undefined));
