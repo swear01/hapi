@@ -1,0 +1,834 @@
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+index e58021fc7424ddd3a2283a10f519878fb544add2..0e646982fa3a850c3c9f072841de1a717cb8ce0a 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+@@ -6,9 +6,12 @@ const harness = vi.hoisted(() => ({
+     initializeError: null as Error | null,
+     initializeAttempts: 0,
+     loadSessionError: null as Error | null,
++    newSessionError: null as Error | null,
++    failSetConfigOption: false,
+     supportsLoadSession: true,
+     loadSessionCalled: false,
+     newSessionCalled: false,
++    newSessionAttempts: 0,
+     promptCalls: 0,
+     prompts: [] as unknown[][],
+     backendArgs: null as { command: string; args?: string[] } | null,
+@@ -60,7 +63,16 @@ vi.mock('./utils/cursorAcpBackend', () => ({
+                 return 'loaded-acp-session';
+             }),
+             newSession: vi.fn(async () => {
++                harness.newSessionAttempts += 1;
+                 harness.newSessionCalled = true;
++                if (harness.newSessionError && harness.newSessionAttempts === 1) {
++                    harness.stderrErrorHandler?.({
++                        type: 'model_not_found',
++                        message: harness.newSessionError.message,
++                        raw: harness.newSessionError.message
++                    });
++                    throw harness.newSessionError;
++                }
+                 return 'new-acp-session';
+             }),
+             setMode: vi.fn(async () => {}),
+@@ -69,13 +81,20 @@ vi.mock('./utils/cursorAcpBackend', () => ({
+                 if (configId === 'model-opt' && harness.deferSetConfigOption) {
+                     await harness.deferSetConfigOption;
+                 }
++                if (harness.failSetConfigOption && configId === 'model-opt') {
++                    throw new Error('set_config_option rejected');
++                }
+                 harness.setConfigOptionCalls.push({ sessionId, configId, value });
+             }),
+             pinSessionModelWireId: vi.fn(),
+             getSessionModelsMetadata: vi.fn(() => ({
+                 availableModels: [
+                     { modelId: 'composer-2.5[fast=true]' },
+-                    { modelId: 'composer-2.5[fast=false]' }
++                    { modelId: 'composer-2.5[fast=false]' },
++                    { modelId: 'gpt-5.3-codex[reasoning=medium,fast=false]' },
++                    { modelId: 'gpt-5.3-codex[reasoning=medium,fast=true]' },
++                    { modelId: 'cursor-grok-4.5-medium' },
++                    { modelId: 'cursor-grok-4.5-medium-fast' },
+                 ],
+                 currentModelId: 'composer-2.5[fast=true]'
+             })),
+@@ -96,7 +115,11 @@ vi.mock('./utils/cursorAcpBackend', () => ({
+                         options: [
+                             { value: 'default[]' },
+                             { value: 'composer-2.5[fast=true]' },
+-                            { value: 'composer-2.5[fast=false]' }
++                            { value: 'composer-2.5[fast=false]' },
++                            { value: 'gpt-5.3-codex[reasoning=medium,fast=false]' },
++                            { value: 'gpt-5.3-codex[reasoning=medium,fast=true]' },
++                            { value: 'cursor-grok-4.5-medium' },
++                            { value: 'cursor-grok-4.5-medium-fast' },
+                         ]
+                     };
+                 }
+@@ -167,6 +190,10 @@ import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcp
+ import { createCursorAcpBackend } from './utils/cursorAcpBackend';
+ import { CursorSession } from './session';
+ import { ApiSessionClient } from '@/api/apiSession';
++import {
++    _resetSharedCursorModelsCacheForTests,
++    writeSharedCursorModelsCache
++} from '@/modules/common/cursorModelsSharedCache';
+ 
+ function makeSession(sessionId: string | null): CursorSession {
+     const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
+@@ -213,9 +240,12 @@ describe('cursorAcpRemoteLauncher', () => {
+         harness.initializeError = null;
+         harness.initializeAttempts = 0;
+         harness.loadSessionError = null;
++        harness.newSessionError = null;
++        harness.failSetConfigOption = false;
+         harness.supportsLoadSession = true;
+         harness.loadSessionCalled = false;
+         harness.newSessionCalled = false;
++        harness.newSessionAttempts = 0;
+         harness.promptCalls = 0;
+         harness.prompts = [];
+         harness.setConfigOptionCalls = [];
+@@ -233,6 +263,7 @@ describe('cursorAcpRemoteLauncher', () => {
+ 
+     afterEach(() => {
+         vi.clearAllMocks();
++        _resetSharedCursorModelsCacheForTests();
+     });
+ 
+     it('spawns agent acp backend, not stream-json', async () => {
+@@ -323,6 +354,145 @@ describe('cursorAcpRemoteLauncher', () => {
+         expect(legacyLauncher).not.toHaveBeenCalled();
+     });
+ 
++    it('retries session/new once after remapping a rejected bracket wire (#1430)', async () => {
++        _resetSharedCursorModelsCacheForTests();
++        harness.newSessionError = new Error(
++            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: gpt-5.3-codex[fast=false]. Available models: auto, gpt-5.3-codex, gpt-5.3-codex-fast'
++        );
++
++        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
++        const client = {
++            rpcHandlerManager: { registerHandler: vi.fn() },
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => true),
++            sendSessionEvent: vi.fn(),
++            sendAgentMessage: vi.fn(),
++            keepAlive: vi.fn(),
++            emitSessionReady: vi.fn()
++        } as unknown as ApiSessionClient;
++
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default',
++            model: 'gpt-5.3-codex[fast=false]'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('hold-open', { permissionMode: 'default' });
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.newSessionAttempts).toBe(2));
++        await vi.waitFor(() => {
++            expect(harness.backendArgs?.args).toEqual(['--model', 'gpt-5.3-codex', 'acp']);
++            expect(
++                harness.setConfigOptionCalls.some(
++                    (call) =>
++                        call.configId === 'model-opt'
++                        && call.value === 'gpt-5.3-codex[reasoning=medium,fast=false]'
++                )
++            ).toBe(true);
++            expect(session.model).toBe('gpt-5.3-codex[fast=false]');
++        });
++
++        queue.close();
++        await runPromise;
++    });
++
++    it('fails launch when remapped spawn cannot restore the desired variant (#1430)', async () => {
++        _resetSharedCursorModelsCacheForTests();
++        harness.failSetConfigOption = true;
++        harness.newSessionError = new Error(
++            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: composer-2.5[fast=true]. Available models: auto, composer-2.5'
++        );
++
++        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
++        const client = makeClient();
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default',
++            model: 'composer-2.5[fast=true]'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.close();
++
++        await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow(
++            /Cursor model is not available via ACP: composer-2\.5\[fast=true\]/
++        );
++        expect(harness.newSessionAttempts).toBe(2);
++        expect(harness.backendArgs?.args).toEqual(['--model', 'composer-2.5', 'acp']);
++    });
++
++    it('spawns bare remap but reapplies original fast=true variant via ACP (#1430)', async () => {
++        writeSharedCursorModelsCache({
++            success: true,
++            availableModels: [{ modelId: 'composer-2.5' }],
++            currentModelId: 'composer-2.5',
++            cliModelSkus: [{ modelId: 'composer-2.5' }],
++        });
++
++        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
++        const keepAlive = vi.fn();
++        const client = {
++            rpcHandlerManager: { registerHandler: vi.fn() },
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => true),
++            sendSessionEvent: vi.fn(),
++            sendAgentMessage: vi.fn(),
++            keepAlive,
++            emitSessionReady: vi.fn()
++        } as unknown as ApiSessionClient;
++
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default',
++            model: 'composer-2.5[fast=true]'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('hold-open', { permissionMode: 'default' });
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
++        await vi.waitFor(() => {
++            expect(harness.backendArgs?.args).toEqual(['--model', 'composer-2.5', 'acp']);
++            expect(
++                harness.setConfigOptionCalls.some(
++                    (call) => call.configId === 'model-opt' && call.value === 'composer-2.5[fast=true]'
++                )
++            ).toBe(true);
++            expect(session.model).toBe('composer-2.5[fast=true]');
++        });
++
++        queue.close();
++        await runPromise;
++        _resetSharedCursorModelsCacheForTests();
++    });
++
+     it('remaps stale spawn model and retries initialize once on model rejection', async () => {
+         harness.initializeError = new Error(
+             'ACP process exited (code=1, signal=null). stderr: Cannot use this model: grok-4.5[fast=false]. Available models: auto, cursor-grok-4.5-medium, cursor-grok-4.5-medium-fast'
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index 6b0ddaf8a881993b6a673745c79c409e702b250f..55aa27868ff33e51abbcf84ce16f55255fb9bac1 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -110,15 +110,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+         const autoReview = isCursorAutoReviewMode(session.getPermissionMode() as PermissionMode);
+         this.spawnedWithAutoReview = autoReview;
+ 
+-        const requestedSpawnModel = session.model;
++        // Desired hub/UI model (may be a bracket wire). Spawn may use a remap for
++        // `agent --model`, but applyLiveModel must reapply this original so variants
++        // like composer-2.5[fast=true] are not silently coerced to fast=false (#1430).
++        const desiredModel = session.model;
++        const requestedSpawnModel = desiredModel;
+         let spawnModel = resolveCursorSpawnModel(requestedSpawnModel);
+         let backend: AcpSdkBackend | null = null;
+         let recentStderrHint: string | null = null;
+ 
+         for (let connectAttempt = 0; connectAttempt < 2; connectAttempt += 1) {
+-            if (spawnModel && spawnModel !== session.model) {
+-                session.setModel(spawnModel);
+-                session.pushKeepAlive();
++            if (spawnModel && spawnModel !== desiredModel) {
++                // Status only — do not session.setModel(spawnModel) or keepalive will
++                // overwrite the desired variant before ACP apply.
+                 this.messageBuffer.addMessage(`[MODEL:${spawnModel}]`, 'system');
+             }
+ 
+@@ -231,8 +235,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                     if (remapped && loadAttempt === 0) {
+                         logger.info(`[cursor-acp] Remapping stale resume model ${spawnModel} → ${remapped}`);
+                         spawnModel = remapped;
+-                        session.setModel(remapped);
+-                        session.pushKeepAlive();
++                        // Keep session.model as desiredModel; only the process --model remaps.
+                         this.messageBuffer.addMessage(`[MODEL:${remapped}]`, 'system');
+                         await backend.disconnect();
+                         backend = createCursorAcpBackend({
+@@ -274,11 +277,64 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                     'Cursor ACP session/load is not supported by this agent build. Start a new Cursor session.'
+                 );
+             } else {
+-                acpSessionId = await backend.newSession({
+-                    cwd: session.path,
+-                    mcpServers: mcpServerList,
+-                });
+-                break;
++                try {
++                    acpSessionId = await backend.newSession({
++                        cwd: session.path,
++                        mcpServers: mcpServerList,
++                    });
++                    break;
++                } catch (error) {
++                    // Cursor often accepts initialize then rejects at session/new when
++                    // --model is a stale bracket wire and the shared cache was empty.
++                    const errMsg = error instanceof Error ? error.message : String(error);
++                    const remapped = tryRemapCursorSpawnModelFromConnectError(
++                        spawnModel,
++                        requestedSpawnModel,
++                        errMsg,
++                        recentStderrHint
++                    );
++                    if (remapped && loadAttempt === 0) {
++                        logger.info(`[cursor-acp] Remapping stale spawn model ${spawnModel} → ${remapped}`);
++                        spawnModel = remapped;
++                        this.messageBuffer.addMessage(`[MODEL:${remapped}]`, 'system');
++                        await backend.disconnect();
++                        backend = createCursorAcpBackend({
++                            cwd: session.path,
++                            model: spawnModel,
++                            autoReview,
++                            worktree: session.cursorWorktree,
++                            addDirs: session.cursorAddDirs
++                        });
++                        this.backend = backend;
++                        registerAcpSessionTitleSync(backend, session.client);
++                        backend.setUsageUpdateListener((message) => this.handleAgentMessage(message));
++                        recentStderrHint = null;
++                        this.wireStderrErrorListener(backend, (hint) => {
++                            recentStderrHint = hint;
++                        });
++                        await backend.initialize();
++                        await backend.authenticateIfAvailable('cursor_login');
++                        this.extensionAdapter = new CursorExtensionAdapter(
++                            session.client,
++                            backend,
++                            (message) => this.handleAgentMessage(message),
++                            () => this.handleCreatePlanAccepted()
++                        );
++                        this.permissionAdapter = new PermissionAdapter(
++                            session.client,
++                            backend,
++                            () => session.getPermissionMode(),
++                            (response) => this.extensionAdapter!.handlePermissionResponse(response)
++                        );
++                        continue;
++                    }
++
++                    logger.warn('[cursor-acp] session/new failed', formatAcpLoadError(error));
++                    throw new Error(classifyCursorAcpLoadError(error, {
++                        recentStderr: recentStderrHint,
++                        action: 'start'
++                    }));
++                }
+             }
+         }
+         if (!acpSessionId) {
+@@ -313,10 +369,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+         const previousSetModel = session.setModel.bind(session);
+ 
+         await applyCursorAcpMode(backend, acpSessionId, session.getPermissionMode() as PermissionMode);
+-        if (session.model) {
+-            await this.applyLiveModel(backend, acpSessionId, session.model, previousSetModel, {
++        const modelToApply = desiredModel ?? session.model;
++        if (modelToApply) {
++            // If we remapped --model for spawn, restoring the original variant is
++            // mandatory — continuing on whatever ACP defaulted to silently changes
++            // capabilities/cost (#1430).
++            const mustRestoreDesiredModel = Boolean(
++                desiredModel
++                && spawnModel
++                && spawnModel !== desiredModel
++            );
++            await this.applyLiveModel(backend, acpSessionId, modelToApply, previousSetModel, {
+                 optimistic: false,
+-                throwOnFailure: false
++                throwOnFailure: mustRestoreDesiredModel
+             });
+         } else if (this.currentBackendModel && !isSpawnDefaultModel(this.currentBackendModel)) {
+             this.pushModelStatusLine(this.currentBackendModel);
+diff --git a/cli/src/cursor/utils/cursorModeConfig.test.ts b/cli/src/cursor/utils/cursorModeConfig.test.ts
+index ecd0bb6dc67485173298432ed7c5791f0a7c18a9..fbc987b3e64466cacec1b9c0930107ded2736176 100644
+--- a/cli/src/cursor/utils/cursorModeConfig.test.ts
++++ b/cli/src/cursor/utils/cursorModeConfig.test.ts
+@@ -138,10 +138,19 @@ describe('wireIdForCursorSessionState', () => {
+         ).toBe('cursor-grok-4.5-medium');
+     });
+ 
+-    it('uses resolved wire id for base-only requests', () => {
++    it('keeps spawn-safe bare/SKU requests instead of re-persisting ACP wires (#1430)', () => {
+         expect(
+             wireIdForCursorSessionState('composer-2.5', 'composer-2.5[fast=true]')
+-        ).toBe('composer-2.5[fast=true]');
++        ).toBe('composer-2.5');
++        expect(
++            wireIdForCursorSessionState('gpt-5.3-codex', 'gpt-5.3-codex[reasoning=medium,fast=false]')
++        ).toBe('gpt-5.3-codex');
++    });
++
++    it('prefers spawn-safe bare/SKU resolved ids over bracketed requests (#1428)', () => {
++        expect(
++            wireIdForCursorSessionState('gpt-5.3-codex[fast=false]', 'gpt-5.3-codex')
++        ).toBe('gpt-5.3-codex');
+     });
+ });
+ 
+@@ -198,6 +207,37 @@ describe('applyCursorAcpModel', () => {
+         expect(setConfigOption).not.toHaveBeenCalled();
+     });
+ 
++    it('prefers compatible option wires over bare metadata bases (#1430)', async () => {
++        const setConfigOption = vi.fn(async () => {});
++        const backend = mockModelBackend({
++            setConfigOption,
++            getSessionModelsMetadata: vi.fn(() => ({
++                availableModels: [{ modelId: 'claude-opus-4-8' }],
++                currentModelId: 'claude-opus-4-8'
++            })),
++            getConfigOptionByCategory: vi.fn(() => ({
++                id: 'model-opt',
++                options: [
++                    { value: 'claude-opus-4-8[thinking=true,context=300k,effort=low,fast=false]' },
++                    { value: 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]' },
++                ]
++            }))
++        });
++
++        await expect(
++            applyCursorAcpModel(backend, 's1', 'claude-opus-4-8[effort=high]')
++        ).resolves.toEqual({
++            applied: true,
++            resolvedWireId: 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]',
++            requestedWireId: 'claude-opus-4-8[effort=high]'
++        });
++        expect(setConfigOption).toHaveBeenCalledWith(
++            's1',
++            'model-opt',
++            'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]'
++        );
++    });
++
+     it('resolves spawn wire id via config option list when metadata lists one variant', async () => {
+         const setConfigOption = vi.fn(async () => {});
+         const backend = mockModelBackend({
+@@ -390,10 +430,10 @@ describe('resolveCursorAcpWireId', () => {
+         );
+     });
+ 
+-    it('does not match partial ACP parameter requests against full config option wire ids', () => {
++    it('maps partial hub wires onto the nearest full ACP config option wire (#1428)', () => {
+         expect(resolveCursorAcpWireId('claude-opus-4-8[effort=high]', [
+             { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=low,fast=false]' },
+             { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]' }
+-        ])).toBe(null);
++        ])).toBe('claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]');
+     });
+ });
+diff --git a/cli/src/cursor/utils/cursorModeConfig.ts b/cli/src/cursor/utils/cursorModeConfig.ts
+index 7fbb0738f7fe43c4b9ecf494f638d41404e3b9c7..83389071e1ea501f1046451c0a0cef0efd0e899b 100644
+--- a/cli/src/cursor/utils/cursorModeConfig.ts
++++ b/cli/src/cursor/utils/cursorModeConfig.ts
+@@ -94,22 +94,39 @@ export type ApplyCursorAcpModelResult = {
+ type ConfigOption = NonNullable<ReturnType<AcpSdkBackend['getConfigOptionByCategory']>>;
+ type ParameterizedCursorModelResult = ApplyCursorAcpModelResult | 'unsupported' | 'failed';
+ 
+-/** Wire id stored on session + keepalive (preserve explicit variant picks). */
++/**
++ * Wire id stored on session + keepalive.
++ * Spawn-safe requested ids (bare / CLI SKU) must stay spawn-safe — do not
++ * re-persist ACP parameterized wires after apply (#1428 / #1430).
++ */
+ export function wireIdForCursorSessionState(requested: string, resolved: string): string {
+-    const trimmed = requested.trim();
+-    if (trimmed.includes('[')) {
+-        const legacyBase = resolveCursorLegacyModelBase(cursorModelBaseId(trimmed));
+-        if (legacyBase !== cursorModelBaseId(trimmed)) {
+-            return resolved;
++    const trimmedRequested = requested.trim();
++    const trimmedResolved = resolved.trim();
++
++    // Bare/SKU request: keep it even when ACP resolved a bracket wire.
++    if (trimmedRequested && !trimmedRequested.includes('[')) {
++        return trimmedRequested;
++    }
++
++    // Prefer a spawn-safe resolved id when the request was a wire.
++    if (trimmedResolved && !trimmedResolved.includes('[')) {
++        return trimmedResolved;
++    }
++
++    if (trimmedRequested.includes('[')) {
++        const legacyBase = resolveCursorLegacyModelBase(cursorModelBaseId(trimmedRequested));
++        if (legacyBase !== cursorModelBaseId(trimmedRequested)) {
++            return trimmedResolved || trimmedRequested;
+         }
+-        return trimmed;
++        return trimmedRequested;
+     }
+-    return resolved;
++
++    return trimmedResolved || trimmedRequested;
+ }
+ 
+ /**
+  * Map a spawn / hub wire id onto a live ACP configOptions entry.
+- * Exact wire ids only — no legacy alias, base-only, or nearest-variant fallback.
++ * Uses exact match, then SKU/wire remap (including non-legacy bracket strip).
+  */
+ export function resolveCursorAcpWireId(
+     requested: string,
+@@ -209,13 +226,27 @@ export async function applyCursorAcpModel(
+         return parameterized;
+     }
+ 
++    // Prefer the live model-option value list for set_config_option. Merging in
++    // metadata bare bases first lets spawn-safe remap return a bare id that the
++    // option catalog rejects (wire-only options).
+     const optionWireIds = modelOption?.options?.map((option) => ({ modelId: option.value })) ?? [];
+-    const catalog = [...available, ...optionWireIds];
+-    const resolved = resolveCursorAcpWireId(trimmed, catalog);
++    const resolved = (
++        optionWireIds.length > 0
++            ? resolveCursorAcpWireId(trimmed, optionWireIds)
++            : null
++    ) ?? resolveCursorAcpWireId(trimmed, [...available, ...optionWireIds]);
+     if (!resolved) {
+         logger.debug(`[cursor-acp] Model ${trimmed} is not in ACP configOptions; skipping`);
+         return { applied: false };
+     }
++    if (
++        modelOption?.options
++        && modelOption.options.length > 0
++        && !optionHasValue(modelOption, resolved)
++    ) {
++        logger.debug(`[cursor-acp] Model ${resolved} is not an ACP model option value; skipping`);
++        return { applied: false };
++    }
+ 
+     const trySetConfigOption = async (): Promise<boolean> => {
+         if (!modelOption || !backend.setConfigOption) {
+diff --git a/cli/src/cursor/utils/cursorStaleModelRemap.test.ts b/cli/src/cursor/utils/cursorStaleModelRemap.test.ts
+index c2b717b1ee41728c6553e7ca8ff5fced1a3b8b3c..76194d64b35663f3b128578ef7469602253b8145 100644
+--- a/cli/src/cursor/utils/cursorStaleModelRemap.test.ts
++++ b/cli/src/cursor/utils/cursorStaleModelRemap.test.ts
+@@ -64,4 +64,27 @@ describe('cursorStaleModelRemap', () => {
+             )
+         ).toBe('cursor-grok-4.5-high');
+     });
++
++    it('pre-spawns bare base when cache only lists bare ACP catalog ids (#1428)', () => {
++        writeSharedCursorModelsCache({
++            success: true,
++            availableModels: [
++                { modelId: 'gpt-5.3-codex' },
++                { modelId: 'composer-2.5' },
++            ],
++            currentModelId: 'gpt-5.3-codex',
++            cliModelSkus: [{ modelId: 'gpt-5.3-codex' }],
++        });
++
++        expect(resolveCursorSpawnModel('gpt-5.3-codex[fast=false]')).toBe('gpt-5.3-codex');
++        expect(resolveCursorSpawnModel('composer-2.5[fast=true]')).toBe('composer-2.5');
++    });
++
++    it('remaps rejected bracket wires from stderr Available models (#1428)', () => {
++        const remapped = tryRemapCursorSpawnModelFromError(
++            'gpt-5.3-codex[fast=false]',
++            'Cannot use this model: gpt-5.3-codex[fast=false]. Available models: auto, gpt-5.3-codex, gpt-5.3-codex-fast, composer-2.5'
++        );
++        expect(remapped).toBe('gpt-5.3-codex');
++    });
+ });
+diff --git a/shared/src/cursorCliSku.test.ts b/shared/src/cursorCliSku.test.ts
+index 91c7f344fa0a5ca5e094b682d944d44a03987885..36316337d9cafae7d55d8fef4a0b954b085d664a 100644
+--- a/shared/src/cursorCliSku.test.ts
++++ b/shared/src/cursorCliSku.test.ts
+@@ -109,6 +109,81 @@ describe('remapStaleCursorModelId', () => {
+             ])
+         ).toBe('cursor-grok-4.5-high-fast');
+     });
++
++    it('maps non-legacy bracket wires onto bare catalog bases (#1428)', () => {
++        const bareCatalog = [
++            { modelId: 'gpt-5.3-codex' },
++            { modelId: 'composer-2.5' },
++            { modelId: 'claude-opus-5' },
++            { modelId: 'grok-4.5' },
++        ];
++        expect(remapStaleCursorModelId('gpt-5.3-codex[fast=false]', bareCatalog)).toBe('gpt-5.3-codex');
++        expect(remapStaleCursorModelId('claude-opus-5[fast=false]', bareCatalog)).toBe('claude-opus-5');
++        expect(remapStaleCursorModelId('composer-2.5[fast=false]', bareCatalog)).toBe('composer-2.5');
++        expect(remapStaleCursorModelId('grok-4.5[fast=false]', bareCatalog)).toBe('grok-4.5');
++    });
++
++    it('maps bracket wires onto matching CLI SKUs from stderr-style catalogs', () => {
++        const skuCatalog = [
++            { modelId: 'gpt-5.3-codex' },
++            { modelId: 'gpt-5.3-codex-fast' },
++            { modelId: 'gpt-5.3-codex-high' },
++            { modelId: 'gpt-5.3-codex-high-fast' },
++        ];
++        expect(remapStaleCursorModelId('gpt-5.3-codex[fast=false]', skuCatalog)).toBe('gpt-5.3-codex');
++        expect(remapStaleCursorModelId('gpt-5.3-codex[fast=true]', skuCatalog)).toBe('gpt-5.3-codex-fast');
++    });
++
++    it('maps incomplete hub wires onto nearest live ACP configOption wires', () => {
++        const wireCatalog = [
++            { modelId: 'gpt-5.3-codex[reasoning=medium,fast=false]' },
++            { modelId: 'gpt-5.3-codex[reasoning=medium,fast=true]' },
++        ];
++        expect(remapStaleCursorModelId('gpt-5.3-codex[fast=false]', wireCatalog)).toBe(
++            'gpt-5.3-codex[reasoning=medium,fast=false]'
++        );
++        expect(remapStaleCursorModelId('gpt-5.3-codex[fast=true]', wireCatalog)).toBe(
++            'gpt-5.3-codex[reasoning=medium,fast=true]'
++        );
++    });
++
++    it('prefers CLI SKU over an exact cached ACP wire (mixed catalog spawn-safe)', () => {
++        expect(
++            remapStaleCursorModelId('gpt-5.3-codex[fast=false]', [
++                { modelId: 'gpt-5.3-codex[fast=false]' },
++                { modelId: 'gpt-5.3-codex' },
++                { modelId: 'gpt-5.3-codex-fast' },
++            ])
++        ).toBe('gpt-5.3-codex');
++        expect(
++            remapStaleCursorModelId('gpt-5.3-codex[fast=true]', [
++                { modelId: 'gpt-5.3-codex[fast=true]' },
++                { modelId: 'gpt-5.3-codex' },
++                { modelId: 'gpt-5.3-codex-fast' },
++            ])
++        ).toBe('gpt-5.3-codex-fast');
++    });
++
++    it('does not pick a wire that contradicts explicit request params', () => {
++        expect(
++            remapStaleCursorModelId('claude-opus-4-8[thinking=false,effort=high]', [
++                { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]' },
++                { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=low,fast=false]' },
++            ])
++        ).toBeNull();
++        expect(
++            remapStaleCursorModelId('claude-opus-4-8[thinking=true,effort=high]', [
++                { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=low,fast=false]' },
++                { modelId: 'claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]' },
++            ])
++        ).toBe('claude-opus-4-8[thinking=true,context=300k,effort=high,fast=false]');
++    });
++
++    it('does not silently downgrade unavailable explicit CLI SKU variants', () => {
++        expect(
++            remapStaleCursorModelId('gpt-5.5-high-fast', [{ modelId: 'gpt-5.5-medium' }])
++        ).toBeNull();
++    });
+ });
+ 
+ describe('parseCursorAvailableModelsFromRejection', () => {
+diff --git a/shared/src/cursorCliSku.ts b/shared/src/cursorCliSku.ts
+index c199f7fc16b4f17ff06f84c1904e61b693d166b3..0414d33f59112eaeb0ba18c450b15a2607b0f461 100644
+--- a/shared/src/cursorCliSku.ts
++++ b/shared/src/cursorCliSku.ts
+@@ -279,6 +279,100 @@ export function parseCursorAvailableModelsFromRejection(text: string): string[]
+         .filter((part) => part.length > 0 && part.toLowerCase() !== 'auto');
+ }
+ 
++function rewriteSkuBase(sku: string, fromBase: string, toBase: string): string {
++    if (fromBase === toBase || !sku.startsWith(fromBase)) {
++        return sku;
++    }
++    return `${toBase}${sku.slice(fromBase.length)}`;
++}
++
++/**
++ * Prefer a `--model`-safe catalog id (bare base or CLI SKU) over an ACP wire.
++ * Cursor rejects many bracketed wires on process start even when session/new
++ * later exposes parameterized `currentModelId` wires.
++ */
++function preferSpawnSafeCatalogId(
++    candidate: string,
++    requestedWire: string,
++    available: readonly { modelId: string }[]
++): string {
++    if (!isCursorAcpWireModelId(candidate)) {
++        return candidate;
++    }
++
++    const wireBase = cursorModelBaseId(requestedWire);
++    const legacyBase = resolveCursorLegacyModelBase(wireBase);
++    const syntheticSku = rewriteSkuBase(
++        syntheticSkuFromWireParams(wireBase, parseCursorWireParams(requestedWire)),
++        wireBase,
++        legacyBase
++    );
++    const fromSku = pickBestCatalogSku(syntheticSku, available);
++    if (fromSku) {
++        return fromSku;
++    }
++
++    for (const base of [legacyBase, wireBase]) {
++        const bare = available.find(
++            (entry) => entry.modelId === base && !isCursorAcpWireModelId(entry.modelId)
++        );
++        if (bare) {
++            return bare.modelId;
++        }
++    }
++
++    return candidate;
++}
++
++function pickBestCatalogWire(
++    requestedWire: string,
++    available: readonly { modelId: string }[]
++): string | null {
++    const wireBase = cursorModelBaseId(requestedWire);
++    const legacyBase = resolveCursorLegacyModelBase(wireBase);
++    const acceptedBases = new Set([wireBase, legacyBase]);
++    const requestedParams = Object.entries(parseCursorWireParams(requestedWire));
++    const wires = available.filter((entry) => {
++        const modelId = entry.modelId.trim();
++        if (
++            !modelId
++            || !isCursorAcpWireModelId(modelId)
++            || !acceptedBases.has(resolveCursorLegacyModelBase(cursorModelBaseId(modelId)))
++        ) {
++            return false;
++        }
++        // Every explicit request param must be present on the candidate (do not
++        // drop context/thinking/etc. via synthetic-SKU scoring alone).
++        if (requestedParams.length === 0) {
++            return true;
++        }
++        const candidateParams = parseCursorWireParams(modelId);
++        return requestedParams.every(([key, value]) => candidateParams[key] === value);
++    });
++    if (wires.length === 0) {
++        return null;
++    }
++    if (wires.length === 1) {
++        return wires[0].modelId;
++    }
++
++    const syntheticSku = rewriteSkuBase(
++        syntheticSkuFromWireParams(wireBase, parseCursorWireParams(requestedWire)),
++        wireBase,
++        legacyBase
++    );
++    let best = wires[0].modelId;
++    let bestScore = Number.NEGATIVE_INFINITY;
++    for (const entry of wires) {
++        const score = scoreWireAgainstSku(syntheticSku, entry.modelId);
++        if (score > bestScore) {
++            bestScore = score;
++            best = entry.modelId;
++        }
++    }
++    return best;
++}
++
+ /**
+  * Remap a stale hub/ACP wire id onto a live Cursor catalog entry.
+  * Returns null when no catalog candidate matches.
+@@ -296,20 +390,42 @@ export function remapStaleCursorModelId(
+     const legacyWire = isCursorAcpWireModelId(trimmed)
+         && resolveCursorLegacyModelBase(cursorModelBaseId(trimmed)) !== cursorModelBaseId(trimmed);
+     if (exact && !legacyWire) {
+-        return trimmed;
++        // Mixed caches often list the exact ACP wire *and* a CLI SKU. Prefer the
++        // spawn-safe id so `agent --model` does not receive a rejected bracket wire.
++        return isCursorAcpWireModelId(trimmed)
++            ? preferSpawnSafeCatalogId(trimmed, trimmed, available)
++            : trimmed;
+     }
+ 
+     if (isCursorAcpWireModelId(trimmed)) {
+         const wireBase = cursorModelBaseId(trimmed);
+-        if (resolveCursorLegacyModelBase(wireBase) === wireBase) {
+-            return null;
+-        }
+-        const syntheticSku = syntheticSkuFromWireParams(
++        const legacyBase = resolveCursorLegacyModelBase(wireBase);
++        const syntheticSku = rewriteSkuBase(
++            syntheticSkuFromWireParams(wireBase, parseCursorWireParams(trimmed)),
+             wireBase,
+-            parseCursorWireParams(trimmed)
++            legacyBase
+         );
+-        return pickBestCatalogSku(syntheticSku, available)
+-            ?? matchCliSkuToAcpWireId(syntheticSku, available);
++
++        // Prefer bare / CLI SKU rows (what `agent --model … acp` accepts).
++        const fromSku = pickBestCatalogSku(syntheticSku, available);
++        if (fromSku) {
++            return fromSku;
++        }
++
++        for (const base of [legacyBase, wireBase]) {
++            const bare = available.find(
++                (entry) => entry.modelId === base && !isCursorAcpWireModelId(entry.modelId)
++            );
++            if (bare) {
++                return bare.modelId;
++            }
++        }
++
++        // Wire-only catalogs (session configOptions): nearest compatible same-base wire.
++        // Do not fall through to SKU→wire matching — that drops explicit params like
++        // thinking/context and can pick a contradictory variant.
++        const fromWire = pickBestCatalogWire(trimmed, available);
++        return fromWire ? preferSpawnSafeCatalogId(fromWire, trimmed, available) : null;
+     }
+ 
+     const legacyBase = resolveCursorLegacyModelBase(cursorCliSkuBaseId(trimmed));
+@@ -319,6 +435,8 @@ export function remapStaleCursorModelId(
+             ?? matchCliSkuToAcpWireId(rewritten, available);
+     }
+ 
++    // Non-legacy, non-wire ids must remain exact; let Cursor report unavailability
++    // instead of silently downgrading e.g. gpt-5.5-high-fast → gpt-5.5-medium.
+     return null;
+ }
+ 
+@@ -340,10 +458,8 @@ export function matchCliSkuToAcpWireId(
+     }
+ 
+     if (isCursorAcpWireModelId(trimmed)) {
+-        if (resolveCursorLegacyModelBase(cursorModelBaseId(trimmed)) !== cursorModelBaseId(trimmed)) {
+-            return remapStaleCursorModelId(trimmed, available);
+-        }
+-        return null;
++        // Bracketed hub wires (including non-legacy) must remap onto live catalog rows.
++        return remapStaleCursorModelId(trimmed, available);
+     }
+ 
+     const skuBase = cursorCliSkuBaseId(trimmed);

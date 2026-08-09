@@ -1,0 +1,710 @@
+diff --git a/cli/src/claude/claudeRemote.test.ts b/cli/src/claude/claudeRemote.test.ts
+index 5aebb77a6e85062e62758fad44fec3e4e99ac69e..a3f5f9fae32decfac38c45586c4326677bf15eda 100644
+--- a/cli/src/claude/claudeRemote.test.ts
++++ b/cli/src/claude/claudeRemote.test.ts
+@@ -106,7 +106,7 @@ describe('claudeRemote async message handling', () => {
+             queryMock.mockReset();
+             querySpy.mockRestore();
+         }
+-    });
++    }, 15000);
+ 
+     it('continues consuming assistant messages even when next user message is pending', async () => {
+         const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
+diff --git a/web/src/components/AssistantChat/ComposerButtons.test.tsx b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+index 8f3f123e0e9fcbe2a94b9568bc5b55813b40e041..52f940af466097ceaa7d300b59fa2dd21c236c9c 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.test.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+@@ -317,3 +317,230 @@ describe('ComposerButtons responsive toolbar', () => {
+         expect(getComposerToolbarJustifyContent('split')).toBe('flex-start')
+     })
+ })
++
++describe('UnifiedButton — voice active state', () => {
++    afterEach(() => {
++        cleanup()
++    })
++
++    it('preserves React hook order when re-rendering across disconnected, connecting, and connected states', () => {
++        const onVoiceToggle = vi.fn()
++        const onSend = vi.fn()
++        const { rerender } = renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="disconnected"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        expect(() => {
++            rerender(
++                <I18nProvider>
++                    <UnifiedButton
++                        canSend={false}
++                        voiceStatus="connecting"
++                        voiceEnabled
++                        dictationEnabled
++                        controlsDisabled={false}
++                        onSend={onSend}
++                        onVoiceToggle={onVoiceToggle}
++                    />
++                </I18nProvider>,
++            )
++            rerender(
++                <I18nProvider>
++                    <UnifiedButton
++                        canSend={false}
++                        voiceStatus="connected"
++                        voiceEnabled
++                        dictationEnabled
++                        controlsDisabled={false}
++                        onSend={onSend}
++                        onVoiceToggle={onVoiceToggle}
++                    />
++                </I18nProvider>,
++            )
++            rerender(
++                <I18nProvider>
++                    <UnifiedButton
++                        canSend={false}
++                        voiceStatus="disconnected"
++                        voiceEnabled
++                        dictationEnabled
++                        controlsDisabled={false}
++                        onSend={onSend}
++                        onVoiceToggle={onVoiceToggle}
++                    />
++                </I18nProvider>,
++            )
++        }).not.toThrow()
++    })
++
++    it('renders ONLY Stop button when in voice assistant mode (dictationEnabled is false)', () => {
++        const onVoiceToggle = vi.fn()
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connected"
++                voiceEnabled
++                dictationEnabled={false}
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const stopBtn = screen.getByRole('button', { name: 'Stop' })
++        const sendBtn = screen.queryByRole('button', { name: 'Send' })
++        expect(stopBtn).toBeInTheDocument()
++        expect(sendBtn).toBeNull()
++    })
++
++    it('renders ONLY Stop button during connecting status even when dictationEnabled is true', () => {
++        const onVoiceToggle = vi.fn()
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connecting"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const stopBtn = screen.getByRole('button', { name: /connecting/i })
++        const sendBtn = screen.queryByRole('button', { name: 'Send' })
++        expect(stopBtn).toBeInTheDocument()
++        expect(sendBtn).toBeNull()
++    })
++
++    it('renders both Stop and Send buttons in dictation mode (dictationEnabled is true)', () => {
++        const onVoiceToggle = vi.fn()
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connected"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const stopBtn = screen.getByRole('button', { name: 'Stop' })
++        const sendBtn = screen.getByRole('button', { name: 'Send' })
++        expect(stopBtn).toBeInTheDocument()
++        expect(sendBtn).toBeInTheDocument()
++    })
++
++    it('clicking Stop button calls onVoiceToggle without calling onSend', () => {
++        const onVoiceToggle = vi.fn()
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connected"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const stopBtn = screen.getByRole('button', { name: 'Stop' })
++        fireEvent.click(stopBtn)
++        expect(onVoiceToggle).toHaveBeenCalledOnce()
++        expect(onSend).not.toHaveBeenCalled()
++    })
++
++    it('clicking Send button during active dictation calls onVoiceToggle and onSend', async () => {
++        const onVoiceToggle = vi.fn(async () => true)
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connected"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const sendBtn = screen.getByRole('button', { name: 'Send' })
++        await act(async () => {
++            fireEvent.click(sendBtn)
++        })
++        expect(onVoiceToggle).toHaveBeenCalledOnce()
++        expect(onSend).toHaveBeenCalledOnce()
++        expect(onSend).toHaveBeenCalledWith('default')
++    })
++
++    it('does not call onSend if onVoiceToggle returns false (transcription failure / no audio)', async () => {
++        const onVoiceToggle = vi.fn(async () => false)
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connected"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const sendBtn = screen.getByRole('button', { name: 'Send' })
++        await act(async () => {
++            fireEvent.click(sendBtn)
++        })
++        expect(onVoiceToggle).toHaveBeenCalledOnce()
++        expect(onSend).not.toHaveBeenCalled()
++    })
++
++    it('prevents double-tap reentrancy while voice send is pending', async () => {
++        let resolveVoiceToggle!: (res: boolean) => void
++        const onVoiceToggle = vi.fn(() => new Promise<boolean>((resolve) => {
++            resolveVoiceToggle = resolve
++        }))
++        const onSend = vi.fn()
++        renderInProviders(
++            <UnifiedButton
++                canSend={false}
++                voiceStatus="connected"
++                voiceEnabled
++                dictationEnabled
++                controlsDisabled={false}
++                onSend={onSend}
++                onVoiceToggle={onVoiceToggle}
++            />,
++        )
++
++        const sendBtn = screen.getByRole('button', { name: 'Send' })
++        fireEvent.click(sendBtn)
++        fireEvent.click(sendBtn) // second click while in flight
++        expect(onVoiceToggle).toHaveBeenCalledOnce()
++        expect(onSend).not.toHaveBeenCalled()
++
++        await act(async () => {
++            resolveVoiceToggle(true)
++        })
++        expect(onSend).toHaveBeenCalledOnce()
++    })
++})
++
++
+diff --git a/web/src/components/AssistantChat/ComposerButtons.tsx b/web/src/components/AssistantChat/ComposerButtons.tsx
+index 8973a807abe28ec8a7de036de5e6f23995ea783d..ccd8104a570f848a58acb2619b7d7d3680654ff0 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.tsx
+@@ -6,7 +6,7 @@ import { ScheduleTimePicker } from './ScheduleTimePicker'
+ import type { PendingSchedule } from './ScheduleTimePicker'
+ import { useFue } from '@/lib/use-fue'
+ import { FueCallout, FueDot } from '@/components/Fue'
+-import { Children, isValidElement, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react'
++import { Children, isValidElement, useEffect, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react'
+ import { useComposerToolbarLayout, type ComposerToolbarItemId, type ComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
+ import { useLongPress } from '@/hooks/useLongPress'
+ import type { ComposerSendIntent } from '@/lib/messageDelivery'
+@@ -474,9 +474,10 @@ export function UnifiedButton(props: {
+     canSend: boolean
+     voiceStatus: ConversationStatus
+     voiceEnabled: boolean
++    dictationEnabled?: boolean
+     controlsDisabled: boolean
+     onSend: (intent?: ComposerSendIntent) => void
+-    onVoiceToggle: () => void
++    onVoiceToggle: () => void | boolean | Promise<void | boolean>
+     voiceLabel?: string
+     /**
+      * When true, the send button repaints amber and the aria-label
+@@ -494,17 +495,24 @@ export function UnifiedButton(props: {
+     allowQueueGesture?: boolean
+ }) {
+     const { t } = useTranslation()
++    const voiceSendPendingRef = useRef(false)
++    const [voiceSendRequested, setVoiceSendRequested] = useState(false)
++
++    useEffect(() => {
++        if (!voiceSendRequested) return
++        setVoiceSendRequested(false)
++        props.onSend('default')
++    }, [voiceSendRequested, props.onSend])
+ 
+     const isConnecting = props.voiceStatus === 'connecting'
+     const isConnected = props.voiceStatus === 'connected'
+     const isVoiceActive = isConnecting || isConnected
+     const hasText = props.canSend
+     const routesToScratchlist = props.routesToScratchlist ?? false
++    const isDictation = props.dictationEnabled ?? false
+ 
+     const handleClick = () => {
+-        if (isVoiceActive) {
+-            props.onVoiceToggle() // Stop voice
+-        } else if (hasText) {
++        if (hasText) {
+             props.onSend('default') // Send message (or scratchlist add — wrapper decides)
+         } else if (props.voiceEnabled && !routesToScratchlist) {
+             props.onVoiceToggle() // Start voice (suppressed in scratchlist mode)
+@@ -530,19 +538,60 @@ export function UnifiedButton(props: {
+         disabled: props.controlsDisabled,
+     })
+ 
++    if (isVoiceActive) {
++        const stopIcon = isConnecting ? <LoadingIcon /> : <StopIcon />
++        const stopAriaLabel = isConnecting ? t('voice.connecting') : t('composer.stop')
++        const sendAriaLabel = routesToScratchlist ? t('scratchlist.sendToScratchlist') : t('composer.send')
++        const sendClassName = routesToScratchlist
++            ? 'bg-amber-500 text-white hover:bg-amber-600'
++            : 'bg-black text-white'
++
++        const handleVoiceSendClick = async () => {
++            if (voiceSendPendingRef.current) return
++            voiceSendPendingRef.current = true
++            try {
++                const committed = await props.onVoiceToggle()
++                if (committed === true) {
++                    setVoiceSendRequested(true)
++                }
++            } finally {
++                voiceSendPendingRef.current = false
++            }
++        }
++
++        return (
++            <div className="flex items-center gap-1">
++                <button
++                    type="button"
++                    onClick={props.onVoiceToggle}
++                    disabled={props.controlsDisabled}
++                    aria-label={stopAriaLabel}
++                    title={stopAriaLabel}
++                    className="ml-1 flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 bg-black text-white"
++                >
++                    {stopIcon}
++                </button>
++                {isDictation && isConnected ? (
++                    <button
++                        type="button"
++                        onClick={handleVoiceSendClick}
++                        disabled={props.controlsDisabled}
++                        aria-label={sendAriaLabel}
++                        title={sendAriaLabel}
++                        className={`ml-1 flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${sendClassName}`}
++                    >
++                        <SendIcon />
++                    </button>
++                ) : null}
++            </div>
++        )
++    }
++
+     let icon: React.ReactNode
+     let className: string
+     let ariaLabel: string
+ 
+-    if (isConnecting) {
+-        icon = <LoadingIcon />
+-        className = 'bg-black text-white'
+-        ariaLabel = t('voice.connecting')
+-    } else if (isConnected) {
+-        icon = <StopIcon />
+-        className = 'bg-black text-white'
+-        ariaLabel = t('composer.stop')
+-    } else if (routesToScratchlist) {
++    if (routesToScratchlist) {
+         // Amber send button - matches the scratchlist drawer accent.
+         // Single visual signal carries the "this goes to the scratchlist"
+         // contract; without it, the modal state is invisible to the user.
+@@ -571,7 +620,7 @@ export function UnifiedButton(props: {
+     const isDisabled = props.controlsDisabled || (
+         routesToScratchlist
+             ? !hasText
+-            : !hasText && !props.voiceEnabled && !isVoiceActive
++            : !hasText && !props.voiceEnabled
+     )
+ 
+     return (
+@@ -907,6 +956,7 @@ export function ComposerButtons(props: {
+                 canSend={props.canSend}
+                 voiceStatus={props.voiceStatus}
+                 voiceEnabled={props.voiceEnabled}
++                dictationEnabled={props.dictationEnabled}
+                 controlsDisabled={props.controlsDisabled}
+                 onSend={props.onSend}
+                 onVoiceToggle={props.onVoiceToggle}
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 118bd01f9e15dcb8e1800119ff03c7621471219e..b59646813455d56cb0d09272d33a96d3d2282d4a 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -1129,11 +1129,19 @@ export function HappyComposer(props: {
+             && pendingSchedule == null
+             && props.onParkScratchlist
+         ) {
+-            if (!canSend || parkInFlightRef.current) return
++            const snapshot = api.composer().getState()
++            const liveAttachmentsReady = snapshot.attachments.every((attachment) => {
++                if (attachment.status.type === 'complete') return true
++                if (attachment.status.type !== 'requires-action') return false
++                return Boolean((attachment as { path?: string }).path)
++            })
++            const liveCanSend = (
++                snapshot.text.trim().length > 0 || snapshot.attachments.length > 0
++            ) && liveAttachmentsReady && !controlsDisabled
++            if (!liveCanSend || parkInFlightRef.current) return
+             parkInFlightRef.current = true
+             setIsParkingScratchlist(true)
+             try {
+-                const snapshot = api.composer().getState()
+                 const prepared = await props.onParkScratchlist(
+                     snapshot.text,
+                     snapshot.attachments,
+diff --git a/web/src/hooks/useDictation.test.ts b/web/src/hooks/useDictation.test.ts
+index 77d3870c2196e4e213461225d6016ddbf0e9e544..8352f18ed96b0f30bc88f09f61a1131dd72537ea 100644
+--- a/web/src/hooks/useDictation.test.ts
++++ b/web/src/hooks/useDictation.test.ts
+@@ -52,15 +52,74 @@ describe('useDictation', () => {
+             onTextChange
+         }), { wrapper: StrictMode })
+ 
+-        await act(() => result.current.toggle())
++        await act(async () => { await result.current.toggle() })
+         expect(result.current.status).toBe('connected')
+-        await act(() => result.current.toggle())
++        await act(async () => { await result.current.toggle() })
+ 
+         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft dictated words'))
+         expect(api.transcribeVoice).toHaveBeenCalledOnce()
+         expect(stopTrack).toHaveBeenCalled()
+     })
+ 
++    it('resolves stop promise only after transcription and onTextChange complete', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        let resolveTranscription!: (val: { text: string }) => void
++        const onTextChange = vi.fn()
++        const api = {
++            transcribeVoice: vi.fn(() => new Promise<{ text: string }>((resolve) => {
++                resolveTranscription = resolve
++            }))
++        }
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => 'existing draft',
++            onTextChange
++        }))
++
++        await act(async () => { await result.current.toggle() })
++        expect(result.current.status).toBe('connected')
++
++        let toggleResolved = false
++        const togglePromise = act(async () => {
++            await result.current.toggle()
++            toggleResolved = true
++        })
++
++        // togglePromise should NOT resolve until transcribeVoice finishes
++        expect(toggleResolved).toBe(false)
++        expect(onTextChange).not.toHaveBeenCalled()
++
++        resolveTranscription({ text: 'async dictated text' })
++        await togglePromise
++
++        expect(toggleResolved).toBe(true)
++        expect(onTextChange).toHaveBeenCalledWith('existing draft async dictated text')
++    })
++
++
+     it('shows on-device partial text and inserts only the final transcript', async () => {
+         vi.stubGlobal('navigator', {
+             userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0 Safari/537.36',
+@@ -102,12 +161,12 @@ describe('useDictation', () => {
+             onTextChange
+         }))
+ 
+-        await act(() => result.current.toggle())
++        await act(async () => { await result.current.toggle() })
+         act(() => recognition?.emit('live words', false))
+         expect(result.current.partialTranscript).toBe('live words')
+         expect(onTextChange).not.toHaveBeenCalled()
+         act(() => recognition?.emit('final words', true))
+-        await act(() => result.current.toggle())
++        await act(async () => { await result.current.toggle() })
+ 
+         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft final words'))
+         expect(result.current.partialTranscript).toBe('')
+diff --git a/web/src/hooks/useDictation.ts b/web/src/hooks/useDictation.ts
+index 9976b597daeac04ebd1a799a783b4fcc35466bf7..b1b96af8f02b58e8c624c9b6c2293e45e6d6c907 100644
+--- a/web/src/hooks/useDictation.ts
++++ b/web/src/hooks/useDictation.ts
+@@ -58,6 +58,7 @@ export function useDictation(config: {
+     const mountedRef = useRef(true)
+     const operationRef = useRef(0)
+     const transcribingRef = useRef(false)
++    const stopResolverRef = useRef<((success: boolean) => void) | null>(null)
+ 
+     const stopTracks = useCallback(() => {
+         streamRef.current?.getTracks().forEach((track) => track.stop())
+@@ -98,14 +99,23 @@ export function useDictation(config: {
+                 const blob = new Blob(chunksRef.current, { type })
+                 recorderRef.current = null
+                 chunksRef.current = []
+-                if (!mountedRef.current) return
++                if (!mountedRef.current) {
++                    const resolve = stopResolverRef.current
++                    stopResolverRef.current = null
++                    resolve?.(false)
++                    return
++                }
+                 if (!blob.size) {
+                     transcribingRef.current = false
+                     setError('No audio was recorded')
+                     setStatus('error')
++                    const resolve = stopResolverRef.current
++                    stopResolverRef.current = null
++                    resolve?.(false)
+                     return
+                 }
+                 transcribingRef.current = true
++                let success = false
+                 try {
+                     const result = await config.api!.transcribeVoice({
+                         file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
+@@ -114,14 +124,24 @@ export function useDictation(config: {
+                         language
+                     })
+                     if (!mountedRef.current) return
+-                    config.onTextChange(appendTranscript(config.getCurrentText(), result.text))
++                    const transcript = result.text.trim()
++                    if (!transcript) {
++                        setError('No speech was transcribed')
++                        setStatus('error')
++                        return
++                    }
++                    config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
+                     setStatus('disconnected')
++                    success = true
+                 } catch (transcriptionError) {
+                     if (!mountedRef.current) return
+                     setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
+                     setStatus('error')
+                 } finally {
+                     transcribingRef.current = false
++                    const resolve = stopResolverRef.current
++                    stopResolverRef.current = null
++                    resolve?.(success)
+                 }
+             }
+             recorder.start()
+@@ -134,23 +154,31 @@ export function useDictation(config: {
+         }
+     }, [config, standardSupported, status, stopTracks])
+ 
+-    const stop = useCallback(async () => {
+-        if (transcribingRef.current) return
++    const stop = useCallback(async (): Promise<boolean> => {
++        if (transcribingRef.current) return false
+         operationRef.current += 1
+         const recorder = recorderRef.current
+         if (recorder && recorder.state !== 'inactive') {
+             transcribingRef.current = true
+             setStatus('connecting')
++            const completionPromise = new Promise<boolean>((resolve) => {
++                stopResolverRef.current = resolve
++            })
+             recorder.stop()
++            return await completionPromise
+         } else {
+             setStatus('disconnected')
+             stopTracks()
++            return false
+         }
+     }, [stopTracks])
+ 
+-    const toggle = useCallback(async () => {
+-        if (status === 'connected' || status === 'connecting') await stop()
+-        else await start()
++    const toggle = useCallback(async (): Promise<boolean> => {
++        if (status === 'connected' || status === 'connecting') return await stop()
++        else {
++            await start()
++            return false
++        }
+     }, [start, status, stop])
+ 
+     useEffect(() => {
+diff --git a/web/src/hooks/useRealtimeDictation.ts b/web/src/hooks/useRealtimeDictation.ts
+index 8ed207e053baa5d8bbc75ac6e69e433db3d0a51f..fde7109b12a81939278704e19bd4a991b8aeee3e 100644
+--- a/web/src/hooks/useRealtimeDictation.ts
++++ b/web/src/hooks/useRealtimeDictation.ts
+@@ -46,6 +46,7 @@ export function useRealtimeDictation(config: {
+     const elevenLabsActiveRef = useRef(false)
+     const elevenLabsFinalizedRef = useRef(false)
+     const resolveElevenLabsCommitRef = useRef<(() => void) | null>(null)
++    const lastCommitSucceededRef = useRef(false)
+     onFinalTranscriptRef.current = config.onFinalTranscript
+ 
+     const updatePartial = useCallback((text: string) => {
+@@ -53,8 +54,9 @@ export function useRealtimeDictation(config: {
+         if (mountedRef.current) setPartialTranscript(text)
+     }, [])
+ 
+-    const finish = useCallback((text: string) => {
++    const finish = useCallback((text: string, committed = true) => {
+         if (!mountedRef.current) return
++        lastCommitSucceededRef.current = committed && text.trim().length > 0
+         updatePartial('')
+         onFinalTranscriptRef.current(text)
+         setStatus('disconnected')
+@@ -84,7 +86,7 @@ export function useRealtimeDictation(config: {
+             if (!elevenLabsActiveRef.current) return
+             elevenLabsFinalizedRef.current = true
+             elevenLabsActiveRef.current = false
+-            finish(text)
++            finish(text, true)
+             resolveElevenLabsCommitRef.current?.()
+             resolveElevenLabsCommitRef.current = null
+         },
+@@ -98,7 +100,7 @@ export function useRealtimeDictation(config: {
+             resolveElevenLabsCommitRef.current?.()
+             resolveElevenLabsCommitRef.current = null
+             sessionRef.current = null
+-            finish(partial)
++            finish(partial, false)
+             setError('ElevenLabs realtime transcription disconnected')
+             setStatus('error')
+         }
+@@ -125,7 +127,7 @@ export function useRealtimeDictation(config: {
+                 if (operationRef.current === operation) updatePartial(text)
+             },
+             onFinal: (text) => {
+-                if (operationRef.current === operation) finish(text)
++                if (operationRef.current === operation) finish(text, true)
+             },
+             onError: (realtimeError) => {
+                 if (operationRef.current === operation) fail(realtimeError)
+@@ -163,7 +165,7 @@ export function useRealtimeDictation(config: {
+                                 new Promise<void>((resolve) => setTimeout(resolve, 2_500))
+                             ])
+                         } finally {
+-                            if (elevenLabsActiveRef.current && !elevenLabsFinalizedRef.current) finish(partialRef.current)
++                            if (elevenLabsActiveRef.current && !elevenLabsFinalizedRef.current) finish(partialRef.current, false)
+                             elevenLabsActiveRef.current = false
+                             resolveElevenLabsCommitRef.current = null
+                             elevenLabs.disconnect()
+@@ -201,7 +203,7 @@ export function useRealtimeDictation(config: {
+         }
+     }, [config.api, config.provider, elevenLabs, fail, finish, status, supported, updatePartial])
+ 
+-    const stop = useCallback(async () => {
++    const stop = useCallback(async (): Promise<boolean> => {
+         const session = sessionRef.current
+         if (!session) {
+             operationRef.current += 1
+@@ -212,21 +214,27 @@ export function useRealtimeDictation(config: {
+                 elevenLabs.disconnect()
+             }
+             setStatus('disconnected')
+-            return
++            return false
+         }
+         setStatus('connecting')
++        lastCommitSucceededRef.current = false
+         try {
+             await session.stop()
++            return lastCommitSucceededRef.current
+         } catch (stopError) {
+             fail(stopError)
++            return false
+         } finally {
+             if (sessionRef.current === session) sessionRef.current = null
+         }
+     }, [elevenLabs, fail])
+ 
+-    const toggle = useCallback(async () => {
+-        if (status === 'connected' || status === 'connecting') await stop()
+-        else await start()
++    const toggle = useCallback(async (): Promise<boolean> => {
++        if (status === 'connected' || status === 'connecting') return await stop()
++        else {
++            await start()
++            return false
++        }
+     }, [start, status, stop])
+ 
+     useEffect(() => {

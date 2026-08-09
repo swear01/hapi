@@ -1,0 +1,810 @@
+diff --git a/docs/guide/pwa.md b/docs/guide/pwa.md
+index 3eeb659efa465ce1a0b5565fc02b66d965f6fd3f..e40beea7084d6aeb866a6d33146b28ab1857f6e3 100644
+--- a/docs/guide/pwa.md
++++ b/docs/guide/pwa.md
+@@ -74,6 +74,21 @@ On Android, HAPI appears in the system share sheet. When you share content to HA
+ 
+ This lets you share images, PDFs, text, and other files directly into a session from any app.
+ 
++### Native / deep-link ingest
++
++Companions that cannot use Web Share Target (for example a native app on a headset share sheet) can open the same picker with a fragment deep link:
++
++```
++{hapiOrigin}/share#url=…&text=…&title=…
++```
++
++- Fragment params: `url`, `text`, `title` (all optional; omit empty). Optional companion file hand-off: `fileUrl`, `fileName`, `fileType` — the page fetches `fileUrl` (CORS) into the same IndexedDB `files[]` as Web Share Target (capped at the same 50 MiB upload limit). The fragment is **not** sent on the HTTP request, so shared content does not appear in hub access logs.
++- When any are present and query `id` is absent, the web app synthesizes the same IndexedDB transfer used by the POST path, scrubs the fragment, then continues with the session picker / create-new flow (`?id=`).
++- When query `id` is present (Web Share Target redirect), that path wins; fragment content is ignored for ingest.
++- Deep links cannot embed binaries in the fragment; a companion may hand off one file with `fileUrl`. Use Web Share Target POST for direct or multi-file payloads.
++
++See [Web Share Target](https://developer.chrome.com/docs/capabilities/web-apis/web-share-target) for the POST vs GET distinction.
++
+ ## Caching Strategy
+ 
+ HAPI uses intelligent caching:
+diff --git a/web/README.md b/web/README.md
+index 0f706c52f5578f660d842744783bf49bd754ef8a..421424beb3f195c09b264744d19bdb5eeccb8443 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -30,6 +30,7 @@ See `src/router.tsx` for route definitions.
+ - `/sessions/$sessionId/files` - File browser with git status.
+ - `/sessions/$sessionId/file` - File viewer with diff support.
+ - `/sessions/$sessionId/terminal` - Terminal interface.
++- `/share` - Share-target landing (Web Share Target POST → `?id=`, or native `/share#url=&text=&title=`).
+ - `/settings` - Settings category hub (mobile) and responsive master-detail shell.
+ - `/settings/general` - Language preferences.
+ - `/settings/display` - Appearance, typography, colors, and session list preferences.
+diff --git a/web/src/lib/attachmentAdapter.ts b/web/src/lib/attachmentAdapter.ts
+index 89e071269c15b17e916036b63996720bdecee3a6..01db33eb04eab32ca2e043511a5be9ddbb8fbe9c 100644
+--- a/web/src/lib/attachmentAdapter.ts
++++ b/web/src/lib/attachmentAdapter.ts
+@@ -6,7 +6,8 @@ import { randomId } from '@/lib/randomId'
+ import { getRestoredUploadMetadata } from '@/lib/composer-attachment-drafts'
+ import type { AttachmentDraftHandoff } from '@/lib/composer-draft-transfer'
+ 
+-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
++/** Composer / share upload ceiling — keep deep-link fetch in sync. */
++export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+ const MAX_PREVIEW_BYTES = 5 * 1024 * 1024
+ 
+ type PendingUploadAttachment = PendingAttachment & {
+diff --git a/web/src/lib/shareTransfer.test.ts b/web/src/lib/shareTransfer.test.ts
+index f9244a349f00166245e6e9e139cbd618db50eb51..37c20339b7a1ab0520d918856dacd5aaafb554b4 100644
+--- a/web/src/lib/shareTransfer.test.ts
++++ b/web/src/lib/shareTransfer.test.ts
+@@ -1,7 +1,13 @@
+ import { describe, expect, it, vi } from 'vitest'
+ import {
++    buildSharePayloadFromDeepLink,
+     buildSharePayloadFromFormData,
++    buildSharePayloadFromSearchFields,
++    hasShareDeepLinkContent,
+     ingestShareRequest,
++    parseShareDeepLinkFields,
++    parseShareHash,
++    parseShareSearch,
+     type ShareTransferPayload,
+ } from './shareTransfer'
+ 
+@@ -79,6 +85,200 @@ describe('buildSharePayloadFromFormData', () => {
+     })
+ })
+ 
++describe('parseShareSearch', () => {
++    it('keeps id and error as today', () => {
++        expect(parseShareSearch({ id: 'xfer-1', error: 'ingest' })).toEqual({
++            id: 'xfer-1',
++            error: 'ingest',
++        })
++    })
++
++    it('ignores url/text/title in the query (content belongs in the fragment)', () => {
++        expect(parseShareSearch({
++            id: 'xfer-1',
++            url: 'https://example.com',
++            text: 'hello',
++            title: 'Title',
++        })).toEqual({ id: 'xfer-1' })
++    })
++})
++
++describe('parseShareHash / parseShareDeepLinkFields', () => {
++    it('parses url, text, and title from a fragment', () => {
++        expect(parseShareHash('#url=https%3A%2F%2Fexample.com&text=hello&title=Title')).toEqual({
++            url: 'https://example.com',
++            text: 'hello',
++            title: 'Title',
++        })
++    })
++
++    it('accepts a hash without a leading #', () => {
++        expect(parseShareHash('text=note')).toEqual({ text: 'note' })
++    })
++
++    it('omits empty content fields', () => {
++        expect(parseShareDeepLinkFields({ url: '', text: '  ', title: '' })).toEqual({})
++    })
++
++    it('preserves surrounding whitespace on non-empty content fields', () => {
++        expect(parseShareDeepLinkFields({
++            title: '  Title  ',
++            text: '    indented\n',
++            url: ' https://example.com/path ',
++        })).toEqual({
++            title: '  Title  ',
++            text: '    indented\n',
++            url: ' https://example.com/path ',
++        })
++    })
++})
++
++describe('hasShareDeepLinkContent', () => {
++    it('is true for url-only', () => {
++        expect(hasShareDeepLinkContent({ url: 'https://a.example' })).toBe(true)
++    })
++
++    it('is true for text-only', () => {
++        expect(hasShareDeepLinkContent({ text: 'note' })).toBe(true)
++    })
++
++    it('is true when both url and text are set', () => {
++        expect(hasShareDeepLinkContent({
++            url: 'https://a.example',
++            text: 'note',
++        })).toBe(true)
++    })
++
++    it('is false when empty', () => {
++        expect(hasShareDeepLinkContent({})).toBe(false)
++    })
++
++    it('is true when fileUrl is present', () => {
++        expect(hasShareDeepLinkContent({
++            fileUrl: 'http://127.0.0.1:9/s',
++        })).toBe(true)
++    })
++})
++
++describe('buildSharePayloadFromSearchFields', () => {
++    it('builds the same text payload shape as form-data (url-only)', () => {
++        expect(buildSharePayloadFromSearchFields(
++            { url: 'https://example.com/page' },
++            1700000000000,
++        )).toEqual({
++            title: '',
++            text: '',
++            url: 'https://example.com/page',
++            files: [],
++            createdAt: 1700000000000,
++        })
++    })
++
++    it('builds text-only payload', () => {
++        expect(buildSharePayloadFromSearchFields(
++            { text: 'Hello world' },
++            42,
++        )).toEqual({
++            title: '',
++            text: 'Hello world',
++            url: '',
++            files: [],
++            createdAt: 42,
++        })
++    })
++
++    it('builds combined title+text+url payload', () => {
++        expect(buildSharePayloadFromSearchFields({
++            title: 'My note',
++            text: 'Hello world',
++            url: 'https://example.com/page',
++        }, 99)).toEqual({
++            title: 'My note',
++            text: 'Hello world',
++            url: 'https://example.com/page',
++            files: [],
++            createdAt: 99,
++        })
++    })
++})
++
++describe('buildSharePayloadFromDeepLink', () => {
++    it('fetches fileUrl into files[]', async () => {
++        const bytes = new Uint8Array([1, 2, 3, 4])
++        const fetchMock = vi.fn(async () => new Response(bytes, {
++            status: 200,
++            headers: { 'content-type': 'image/jpeg' },
++        }))
++        const payload = await buildSharePayloadFromDeepLink(
++            {
++                title: 'Shot',
++                fileUrl: 'http://127.0.0.1:9/once',
++                fileName: 'shot.jpg',
++                fileType: 'image/jpeg',
++            },
++            55,
++            { fetch: fetchMock as unknown as typeof fetch },
++        )
++        expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:9/once')
++        expect(payload.title).toBe('Shot')
++        expect(payload.files).toHaveLength(1)
++        expect(payload.files[0]).toMatchObject({
++            name: 'shot.jpg',
++            type: 'image/jpeg',
++        })
++        expect(payload.files[0].blob.size).toBe(4)
++        expect(payload.createdAt).toBe(55)
++    })
++
++    it('throws when fileUrl fetch fails', async () => {
++        const fetchMock = vi.fn(async () => new Response(null, { status: 404 }))
++        await expect(buildSharePayloadFromDeepLink(
++            { fileUrl: 'http://127.0.0.1:9/missing' },
++            1,
++            { fetch: fetchMock as unknown as typeof fetch },
++        )).rejects.toThrow(/fileUrl fetch failed/)
++    })
++
++    it('rejects when Content-Length exceeds the upload ceiling', async () => {
++        const fetchMock = vi.fn(async () => new Response(new Uint8Array([1]), {
++            status: 200,
++            headers: {
++                'content-type': 'application/octet-stream',
++                'content-length': String(51 * 1024 * 1024),
++            },
++        }))
++        await expect(buildSharePayloadFromDeepLink(
++            { fileUrl: 'http://127.0.0.1:9/huge' },
++            1,
++            { fetch: fetchMock as unknown as typeof fetch },
++        )).rejects.toThrow(/too large/)
++    })
++
++    it('rejects when streamed body exceeds the upload ceiling', async () => {
++        const chunk = new Uint8Array(1024 * 1024)
++        let reads = 0
++        const stream = new ReadableStream<Uint8Array>({
++            pull(controller) {
++                reads += 1
++                if (reads <= 51) {
++                    controller.enqueue(chunk)
++                    return
++                }
++                controller.close()
++            },
++        })
++        const fetchMock = vi.fn(async () => new Response(stream, {
++            status: 200,
++            headers: { 'content-type': 'application/octet-stream' },
++        }))
++        await expect(buildSharePayloadFromDeepLink(
++            { fileUrl: 'http://127.0.0.1:9/stream' },
++            1,
++            { fetch: fetchMock as unknown as typeof fetch },
++        )).rejects.toThrow(/too large/)
++    })
++})
++
+ describe('ingestShareRequest', () => {
+     // jsdom/undici loses File objects when serializing FormData through
+     // `new Request({ body })` and re-parsing via `request.formData()`. The
+diff --git a/web/src/lib/shareTransfer.ts b/web/src/lib/shareTransfer.ts
+index 427b95aef657c452ecd6922f0a093eacccc42d61..3e7df4fa3a624577368c1f55f2045ec9888a0d7a 100644
+--- a/web/src/lib/shareTransfer.ts
++++ b/web/src/lib/shareTransfer.ts
+@@ -1,4 +1,5 @@
+ import { shareTargetPathname } from './sharePath'
++import { MAX_UPLOAD_BYTES } from './attachmentAdapter'
+ 
+ /**
+  * Share-target transfer storage.
+@@ -42,6 +43,205 @@ export type ShareTransferPayload = {
+     createdAt: number
+ }
+ 
++/**
++ * Router search for `/share`: only SW redirect fields. Native deep-link
++ * content must NOT live in the query string — it is logged by hub request
++ * middleware (Hono `logger()`) and any upstream access log. Companions open
++ * `/share#url=&text=&title=` instead; see `parseShareHash`.
++ */
++export type ShareSearch = {
++    id?: string
++    error?: string
++}
++
++/** Deep-link content fields (hash fragment only). */
++export type ShareDeepLinkFields = {
++    url?: string
++    text?: string
++    title?: string
++    /**
++     * Companion-hosted one-shot HTTP(S) URL for a shared file (image/video).
++     * Fragment stays text-sized; the share page fetches bytes into IDB.
++     * Not logged on the hub request line (fragment-only).
++     */
++    fileUrl?: string
++    fileName?: string
++    fileType?: string
++}
++
++function nonEmptyString(value: unknown): string | undefined {
++    if (typeof value !== 'string') return undefined
++    // Emptiness uses trim, but return the original string so GET ingest
++    // matches POST form-data (which preserves surrounding whitespace).
++    return value.trim().length > 0 ? value : undefined
++}
++
++/** Router `validateSearch` for `/share` — id/error only. */
++export function parseShareSearch(search: Record<string, unknown>): ShareSearch {
++    const result: ShareSearch = {}
++    if (typeof search.id === 'string' && search.id) {
++        result.id = search.id
++    }
++    if (typeof search.error === 'string' && search.error) {
++        result.error = search.error
++    }
++    return result
++}
++
++/** Parse url/text/title(/file*) from a flat record (hash params or tests). */
++export function parseShareDeepLinkFields(
++    fields: Record<string, unknown>
++): ShareDeepLinkFields {
++    const result: ShareDeepLinkFields = {}
++    const url = nonEmptyString(fields.url)
++    if (url) result.url = url
++    const text = nonEmptyString(fields.text)
++    if (text) result.text = text
++    const title = nonEmptyString(fields.title)
++    if (title) result.title = title
++    const fileUrl = nonEmptyString(fields.fileUrl)
++    if (fileUrl) result.fileUrl = fileUrl
++    const fileName = nonEmptyString(fields.fileName)
++    if (fileName) result.fileName = fileName
++    const fileType = nonEmptyString(fields.fileType)
++    if (fileType) result.fileType = fileType
++    return result
++}
++
++/**
++ * Read native deep-link content from the URL fragment.
++ * Fragments are not sent on the HTTP request, so shared text never reaches
++ * hub access logs. `hash` may include a leading `#`.
++ */
++export function parseShareHash(hash: string): ShareDeepLinkFields {
++    const raw = hash.startsWith('#') ? hash.slice(1) : hash
++    if (!raw) return {}
++    return parseShareDeepLinkFields(
++        Object.fromEntries(new URLSearchParams(raw).entries())
++    )
++}
++
++/** Drop the fragment from the address bar after reading (no navigation). */
++export function scrubShareHashFromLocation(): void {
++    if (typeof window === 'undefined') return
++    if (!window.location.hash) return
++    window.history.replaceState(
++        null,
++        '',
++        `${window.location.pathname}${window.location.search}`
++    )
++}
++
++/** True when deep-link content is present (id path is decided separately). */
++export function hasShareDeepLinkContent(fields: ShareDeepLinkFields): boolean {
++    return Boolean(fields.url || fields.text || fields.title || fields.fileUrl)
++}
++
++/**
++ * Text/url/title payload (no fetch). Prefer {@link buildSharePayloadFromDeepLink}
++ * when `fileUrl` may be present.
++ */
++export function buildSharePayloadFromSearchFields(
++    fields: ShareDeepLinkFields,
++    now: number = Date.now()
++): ShareTransferPayload {
++    return {
++        title: fields.title ?? '',
++        text: fields.text ?? '',
++        url: fields.url ?? '',
++        files: [],
++        createdAt: now,
++    }
++}
++
++/**
++ * Native companion ingest: text fields plus optional `fileUrl` fetch into
++ * `files[]` (same shape as Web Share Target POST). `fileUrl` must be
++ * CORS-readable from the HAPI origin (companions send ACAO *).
++ * Enforces {@link MAX_UPLOAD_BYTES} while streaming so a crafted link cannot
++ * buffer an unbounded response into IndexedDB before the composer rejects it.
++ */
++export async function buildSharePayloadFromDeepLink(
++    fields: ShareDeepLinkFields,
++    now: number = Date.now(),
++    deps: { fetch?: typeof fetch } = {}
++): Promise<ShareTransferPayload> {
++    const base = buildSharePayloadFromSearchFields(fields, now)
++    const fileUrl = fields.fileUrl?.trim()
++    if (!fileUrl) return base
++
++    const doFetch = deps.fetch ?? fetch
++    const response = await doFetch(fileUrl)
++    if (!response.ok) {
++        throw new Error(`share fileUrl fetch failed: ${response.status}`)
++    }
++    const contentLength = response.headers.get('content-length')
++    if (contentLength) {
++        const declared = Number(contentLength)
++        if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
++            throw new Error(
++                `share fileUrl too large: ${declared} bytes (max ${MAX_UPLOAD_BYTES})`
++            )
++        }
++    }
++    const blob = await readResponseBlobLimited(response, MAX_UPLOAD_BYTES)
++    const headerType = response.headers.get('content-type')?.split(';')[0]?.trim()
++    const type = fields.fileType?.trim()
++        || headerType
++        || blob.type
++        || 'application/octet-stream'
++    const name = fields.fileName?.trim() || guessFileName(fileUrl, type)
++    return {
++        ...base,
++        files: [{ name, type, blob }],
++    }
++}
++
++async function readResponseBlobLimited(
++    response: Response,
++    maxBytes: number
++): Promise<Blob> {
++    if (!response.body) {
++        const blob = await response.blob()
++        if (blob.size > maxBytes) {
++            throw new Error(
++                `share fileUrl too large: ${blob.size} bytes (max ${maxBytes})`
++            )
++        }
++        return blob
++    }
++    const reader = response.body.getReader()
++    const chunks: Uint8Array[] = []
++    let total = 0
++    for (;;) {
++        const { done, value } = await reader.read()
++        if (done) break
++        if (!value) continue
++        total += value.byteLength
++        if (total > maxBytes) {
++            await reader.cancel()
++            throw new Error(
++                `share fileUrl too large: exceeds ${maxBytes} bytes`
++            )
++        }
++        chunks.push(value)
++    }
++    const contentType = response.headers.get('content-type') ?? undefined
++    return new Blob(chunks as BlobPart[], { type: contentType })
++}
++
++function guessFileName(fileUrl: string, type: string): string {
++    try {
++        const path = new URL(fileUrl).pathname
++        const leaf = path.split('/').filter(Boolean).pop()
++        if (leaf && leaf.includes('.')) return leaf
++    } catch {
++        // ignore invalid URL
++    }
++    const subtype = type.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'bin'
++    return `shared.${subtype}`
++}
++
+ type StoredRecord = ShareTransferPayload & { id: string }
+ 
+ function openDb(): Promise<IDBDatabase> {
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index eac164626332b96843ca8c05c36c0dd9c0551b9c..f52cb87361c2fd9cf1b6f40d0e368c4052398ef5 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -69,7 +69,7 @@ import SettingsStoragePage from '@/routes/settings/storage'
+ import SettingsUsagePage from '@/routes/settings/usage'
+ import SharePage from '@/routes/share'
+ import { setSharePendingTransfer } from '@/lib/sharePendingState'
+-import { deleteShareTransfer } from '@/lib/shareTransfer'
++import { deleteShareTransfer, parseShareSearch } from '@/lib/shareTransfer'
+ 
+ 
+ function BackIcon(props: { className?: string }) {
+@@ -1213,19 +1213,12 @@ const settingsUsageRoute = createRoute({
+ // Web Share Target landing route. Service worker (`web/src/sw.ts`)
+ // intercepts the manifest's `POST /share` and 303-redirects here with an
+ // IDB transfer id. `error=ingest` is set when the SW failed to write IDB.
++// Native / deep-link clients open `/share#url=&text=&title=` (fragment, not
++// query) so shared content is never part of the HTTP request line.
+ const shareRoute = createRoute({
+     getParentRoute: () => rootRoute,
+     path: '/share',
+-    validateSearch: (search: Record<string, unknown>): { id?: string; error?: string } => {
+-        const result: { id?: string; error?: string } = {}
+-        if (typeof search.id === 'string' && search.id) {
+-            result.id = search.id
+-        }
+-        if (typeof search.error === 'string' && search.error) {
+-            result.error = search.error
+-        }
+-        return result
+-    },
++    validateSearch: (search: Record<string, unknown>) => parseShareSearch(search),
+     component: SharePage,
+ })
+ 
+diff --git a/web/src/routes/share/index.test.tsx b/web/src/routes/share/index.test.tsx
+index d2692195e8b31ad7268d4719102d91599124b410..36e11a7501ef4bb00f7683da5b646216fb186c9a 100644
+--- a/web/src/routes/share/index.test.tsx
++++ b/web/src/routes/share/index.test.tsx
+@@ -1,10 +1,16 @@
+-import { render, screen } from '@testing-library/react'
+-import { describe, expect, it, vi } from 'vitest'
++import { StrictMode } from 'react'
++import { render, screen, waitFor } from '@testing-library/react'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import SharePage from './index'
+ 
++const navigateMock = vi.fn()
++const searchMock = vi.fn<() => Record<string, string | undefined>>(() => ({}))
++const putShareTransferMock = vi.fn()
++const getShareTransferMock = vi.fn()
++
+ vi.mock('@tanstack/react-router', () => ({
+-    useNavigate: () => vi.fn(),
+-    useSearch: () => ({}),
++    useNavigate: () => navigateMock,
++    useSearch: () => searchMock(),
+ }))
+ 
+ vi.mock('@/lib/app-context', () => ({
+@@ -19,7 +25,31 @@ vi.mock('@/lib/use-translation', () => ({
+     useTranslation: () => ({ t: (key: string) => key }),
+ }))
+ 
++vi.mock('@/lib/shareTransfer', async () => {
++    const actual = await vi.importActual<typeof import('@/lib/shareTransfer')>('@/lib/shareTransfer')
++    return {
++        ...actual,
++        putShareTransfer: (...args: unknown[]) => putShareTransferMock(...args),
++        getShareTransfer: (...args: unknown[]) => getShareTransferMock(...args),
++        deleteShareTransfer: vi.fn(),
++    }
++})
++
++function setShareHash(hash: string): void {
++    const path = `/share${hash ? (hash.startsWith('#') ? hash : `#${hash}`) : ''}`
++    window.history.replaceState(null, '', path)
++}
++
+ describe('SharePage', () => {
++    beforeEach(() => {
++        navigateMock.mockReset()
++        searchMock.mockReset()
++        searchMock.mockReturnValue({})
++        putShareTransferMock.mockReset()
++        getShareTransferMock.mockReset()
++        setShareHash('')
++    })
++
+     it('uses paired button theme colors for the missing-share action', async () => {
+         render(<SharePage />)
+ 
+@@ -28,4 +58,124 @@ describe('SharePage', () => {
+         expect(backButton).toHaveClass('text-[var(--app-button-text)]')
+         expect(backButton).not.toHaveClass('text-white')
+     })
++
++    it('empty hash → no-id UX and does not put a transfer', async () => {
++        searchMock.mockReturnValue({})
++        setShareHash('')
++        render(<SharePage />)
++
++        expect(await screen.findByText('share.error.noId')).toBeInTheDocument()
++        expect(putShareTransferMock).not.toHaveBeenCalled()
++    })
++
++    it('url-only hash deep-link synthesizes a transfer then replaces to ?id=', async () => {
++        searchMock.mockReturnValue({})
++        setShareHash('#url=https%3A%2F%2Fexample.com%2Fclip')
++        putShareTransferMock.mockResolvedValue('xfer-url')
++
++        render(<SharePage />)
++
++        await waitFor(() => {
++            expect(putShareTransferMock).toHaveBeenCalledTimes(1)
++        })
++        expect(putShareTransferMock.mock.calls[0][0]).toMatchObject({
++            url: 'https://example.com/clip',
++            text: '',
++            title: '',
++            files: [],
++        })
++        expect(navigateMock).toHaveBeenCalledWith({
++            to: '/share',
++            search: { id: 'xfer-url' },
++            replace: true,
++        })
++        expect(window.location.hash).toBe('')
++    })
++
++    it('text-only hash deep-link synthesizes a transfer', async () => {
++        searchMock.mockReturnValue({})
++        setShareHash('#text=shared%20note')
++        putShareTransferMock.mockResolvedValue('xfer-text')
++
++        render(<SharePage />)
++
++        await waitFor(() => {
++            expect(putShareTransferMock).toHaveBeenCalledWith(
++                expect.objectContaining({ text: 'shared note', url: '', title: '' }),
++            )
++        })
++        expect(navigateMock).toHaveBeenCalledWith({
++            to: '/share',
++            search: { id: 'xfer-text' },
++            replace: true,
++        })
++    })
++
++    it('url+text hash deep-link synthesizes both fields', async () => {
++        searchMock.mockReturnValue({})
++        const hash = new URLSearchParams({
++            url: 'https://example.com',
++            text: 'caption',
++            title: 'Title',
++        }).toString()
++        setShareHash(`#${hash}`)
++        putShareTransferMock.mockResolvedValue('xfer-both')
++
++        render(<SharePage />)
++
++        await waitFor(() => {
++            expect(putShareTransferMock).toHaveBeenCalledWith(
++                expect.objectContaining({
++                    url: 'https://example.com',
++                    text: 'caption',
++                    title: 'Title',
++                }),
++            )
++        })
++    })
++
++    it('StrictMode remount still ingests once and navigates to ?id=', async () => {
++        searchMock.mockReturnValue({})
++        setShareHash('#text=strict-mode-proof')
++        putShareTransferMock.mockResolvedValue('xfer-strict')
++
++        render(
++            <StrictMode>
++                <SharePage />
++            </StrictMode>,
++        )
++
++        await waitFor(() => {
++            expect(navigateMock).toHaveBeenCalledWith({
++                to: '/share',
++                search: { id: 'xfer-strict' },
++                replace: true,
++            })
++        })
++        expect(putShareTransferMock).toHaveBeenCalledTimes(1)
++        expect(putShareTransferMock).toHaveBeenCalledWith(
++            expect.objectContaining({ text: 'strict-mode-proof' }),
++        )
++        expect(window.location.hash).toBe('')
++    })
++
++    it('id present wins: loads IndexedDB and ignores hash content', async () => {
++        searchMock.mockReturnValue({ id: 'xfer-existing' })
++        setShareHash('#url=https%3A%2F%2Fshould-not-ingest.example&text=ignored')
++        getShareTransferMock.mockResolvedValue({
++            title: 'from-idb',
++            text: 'payload',
++            url: 'https://idb.example',
++            files: [],
++            createdAt: 1,
++        })
++
++        render(<SharePage />)
++
++        expect(await screen.findByText('share.title')).toBeInTheDocument()
++        expect(putShareTransferMock).not.toHaveBeenCalled()
++        expect(getShareTransferMock).toHaveBeenCalledWith('xfer-existing')
++        expect(navigateMock).not.toHaveBeenCalled()
++        expect(window.location.hash).toBe('')
++    })
+ })
+diff --git a/web/src/routes/share/index.tsx b/web/src/routes/share/index.tsx
+index 637c7a90580a67a9aa12a45b84c1ea9abe75fdd5..bd6c78c241e488348beb9ab08271adb66e1d500b 100644
+--- a/web/src/routes/share/index.tsx
++++ b/web/src/routes/share/index.tsx
+@@ -1,12 +1,18 @@
+-import { useCallback, useEffect, useMemo, useState } from 'react'
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { useNavigate, useSearch } from '@tanstack/react-router'
+ import { useAppContext } from '@/lib/app-context'
+ import { useSessions } from '@/hooks/queries/useSessions'
+ import { useTranslation } from '@/lib/use-translation'
+ import { LoadingState } from '@/components/LoadingState'
+ import {
++    buildSharePayloadFromDeepLink,
+     deleteShareTransfer,
+     getShareTransfer,
++    hasShareDeepLinkContent,
++    parseShareHash,
++    putShareTransfer,
++    scrubShareHashFromLocation,
++    type ShareSearch,
+     type ShareTransferPayload,
+ } from '@/lib/shareTransfer'
+ import { setSharePendingTransfer } from '@/lib/sharePendingState'
+@@ -106,10 +112,17 @@ export default function SharePage() {
+ 
+     // Pulled via the typed validateSearch in router.tsx; reading
+     // `window.location.search` directly would diverge from the rest of the
+-    // codebase and miss future schema tightening.
+-    const search = useSearch({ from: '/share' }) as { id?: string; error?: string }
++    // codebase and miss future schema tightening. Deep-link *content* is
++    // intentionally read from the hash (not query) so it never hits hub logs.
++    // Capture the fragment once in state so StrictMode's effect remount does
++    // not lose it after the first pass scrubs the address bar.
++    const search = useSearch({ from: '/share' }) as ShareSearch
+     const transferId = search.id ?? null
+     const ingestError = search.error === 'ingest'
++    const [deepLink] = useState(() =>
++        parseShareHash(typeof window === 'undefined' ? '' : window.location.hash)
++    )
++    const ingestPromiseRef = useRef<Promise<string> | null>(null)
+ 
+     useEffect(() => {
+         let cancelled = false
+@@ -117,23 +130,45 @@ export default function SharePage() {
+             setLoad({ state: 'missing', reason: 'ingest-error' })
+             return
+         }
+-        if (!transferId) {
+-            setLoad({ state: 'missing', reason: 'no-id' })
+-            return
+-        }
+-        getShareTransfer(transferId).then((payload) => {
+-            if (cancelled) return
+-            if (!payload) {
++        if (transferId) {
++            // id path wins; drop any leftover fragment so content is not left
++            // beside the transfer id in the address bar.
++            scrubShareHashFromLocation()
++            getShareTransfer(transferId).then((payload) => {
++                if (cancelled) return
++                if (!payload) {
++                    setLoad({ state: 'missing', reason: 'not-found' })
++                    return
++                }
++                setLoad({ state: 'ready', payload })
++            }).catch(() => {
++                if (cancelled) return
+                 setLoad({ state: 'missing', reason: 'not-found' })
+-                return
+-            }
+-            setLoad({ state: 'ready', payload })
+-        }).catch(() => {
+-            if (cancelled) return
+-            setLoad({ state: 'missing', reason: 'not-found' })
+-        })
++            })
++            return () => { cancelled = true }
++        }
++        // Native / deep-link ingest via URL fragment (not query): synthesize
++        // the same IDB transfer the SW would create from POST, scrub the
++        // fragment, then replace to ?id= for picker / create-new.
++        scrubShareHashFromLocation()
++        if (hasShareDeepLinkContent(deepLink)) {
++            ingestPromiseRef.current ??= buildSharePayloadFromDeepLink(deepLink)
++                .then((payload) => putShareTransfer(payload))
++            void ingestPromiseRef.current.then(
++                (id) => {
++                    if (cancelled) return
++                    navigate({ to: '/share', search: { id }, replace: true })
++                },
++                () => {
++                    if (cancelled) return
++                    setLoad({ state: 'missing', reason: 'ingest-error' })
++                },
++            )
++            return () => { cancelled = true }
++        }
++        setLoad({ state: 'missing', reason: 'no-id' })
+         return () => { cancelled = true }
+-    }, [transferId, ingestError])
++    }, [transferId, ingestError, navigate, deepLink])
+ 
+     // Snapshot the active session list once when sessions finish loading so
+     // the picker doesn't re-shuffle under the operator's finger as SSE

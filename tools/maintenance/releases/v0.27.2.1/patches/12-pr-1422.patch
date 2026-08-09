@@ -1,0 +1,361 @@
+diff --git a/web/src/components/ExpandableErrorMessage.test.tsx b/web/src/components/ExpandableErrorMessage.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..aafabb365f754887b1301e3e3ab855c31fbbadaf
+--- /dev/null
++++ b/web/src/components/ExpandableErrorMessage.test.tsx
+@@ -0,0 +1,31 @@
++import { fireEvent, render, screen } from '@testing-library/react'
++import { describe, expect, it } from 'vitest'
++
++import { ExpandableErrorMessage } from './ExpandableErrorMessage'
++
++const props = {
++    expandLabel: 'Show full error',
++    collapseLabel: 'Collapse error',
++}
++
++describe('ExpandableErrorMessage', () => {
++    it.each([
++        ['emoji', '😀'],
++        ['combining-mark sequence', 'e\u0301'],
++        ['ZWJ sequence', '👩‍💻'],
++    ])('counts %s as one grapheme', (_, grapheme) => {
++        const withinLimit = grapheme.repeat(160)
++        const overLimit = `${withinLimit}TAIL`
++
++        const { rerender } = render(<ExpandableErrorMessage {...props} message={withinLimit} />)
++        expect(screen.queryByRole('button')).not.toBeInTheDocument()
++
++        rerender(<ExpandableErrorMessage {...props} message={overLimit} />)
++        const toggle = screen.getByRole('button', { name: /Show full error/ })
++        expect(toggle).toHaveTextContent('…')
++        expect(toggle).not.toHaveTextContent('TAIL')
++
++        fireEvent.click(toggle)
++        expect(toggle).toHaveTextContent(overLimit)
++    })
++})
+diff --git a/web/src/components/ExpandableErrorMessage.tsx b/web/src/components/ExpandableErrorMessage.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbca1a20b08741729368e2178be0a0840b6cd3ac
+--- /dev/null
++++ b/web/src/components/ExpandableErrorMessage.tsx
+@@ -0,0 +1,48 @@
++import { useState } from 'react'
++
++const DEFAULT_MAX_LENGTH = 160
++
++function splitGraphemes(value: string) {
++    if (typeof Intl.Segmenter === 'function') {
++        return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value), ({ segment }) => segment)
++    }
++
++    return Array.from(value)
++}
++
++export function ExpandableErrorMessage(props: {
++    message: string
++    expandLabel: string
++    collapseLabel: string
++    className?: string
++    maxLength?: number
++}) {
++    const [expanded, setExpanded] = useState(false)
++    const maxLength = props.maxLength ?? DEFAULT_MAX_LENGTH
++    const singleLine = props.message.replace(/\s+/g, ' ').trim()
++    const graphemes = splitGraphemes(singleLine)
++    const truncated = graphemes.length > maxLength
++    const preview = truncated
++        ? `${graphemes.slice(0, maxLength).join('').trimEnd()}…`
++        : props.message
++
++    return (
++        <div role="alert" className={props.className}>
++            {truncated ? (
++                <button
++                    type="button"
++                    data-hapi-expandable-error-toggle="true"
++                    aria-expanded={expanded}
++                    aria-label={`${expanded ? props.collapseLabel : props.expandLabel}: ${expanded ? props.message : preview}`}
++                    title={expanded ? props.collapseLabel : props.expandLabel}
++                    onClick={() => setExpanded((current) => !current)}
++                    className={`block w-full min-w-0 cursor-pointer text-left hover:text-[var(--app-fg)] ${expanded ? 'whitespace-pre-wrap break-words' : 'truncate'}`}
++                >
++                    {expanded ? props.message : preview}
++                </button>
++            ) : (
++                props.message
++            )}
++        </div>
++    )
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 20752c92f2c068db0ac16d2b01b1b06edd1e71ad..1041f6ebf19e9a3c2f559111a19db9a400396995 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -444,6 +444,8 @@ export default {
+   'files.changes.error.gitStatusUnavailableWithDetail': 'Git status unavailable: {error}',
+   'files.changes.error.unstagedDiffUnavailableWithDetail': 'Unstaged diff unavailable: {error}',
+   'files.changes.error.stagedDiffUnavailableWithDetail': 'Staged diff unavailable: {error}',
++  'files.changes.expandError': 'Show full error',
++  'files.changes.collapseError': 'Collapse error',
+   'files.directories.empty': 'Empty directory.',
+   'files.directories.error.listFailed': 'Failed to list directory.',
+   'files.directories.error.listFailedWithDetail': 'Failed to list directory: {error}',
+@@ -478,6 +480,8 @@ export default {
+   'file.page.imagePreviewAlt': 'Image preview for {name}',
+   'file.page.empty': 'File is empty.',
+   'file.page.noChanges': 'No changes to display.',
++  'file.page.expandError': 'Show full error',
++  'file.page.collapseError': 'Collapse error',
+   'file.error.readFailed': 'Failed to read file.',
+   'file.error.readFailedWithDetail': 'Failed to read file: {error}',
+   'file.error.diffUnavailable': 'Diff unavailable.',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index c1b56d8d8cf35491af1f984386b1b2b0627f4745..81401412b01b457c749ca057d9a695b0dbb777a2 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -443,6 +443,8 @@ export default {
+   'files.changes.error.gitStatusUnavailableWithDetail': 'Git 状态不可用：{error}',
+   'files.changes.error.unstagedDiffUnavailableWithDetail': '未暂存 Diff 不可用：{error}',
+   'files.changes.error.stagedDiffUnavailableWithDetail': '已暂存 Diff 不可用：{error}',
++  'files.changes.expandError': '展开完整错误',
++  'files.changes.collapseError': '收起错误',
+   'files.directories.empty': '空目录。',
+   'files.directories.error.listFailed': '加载目录失败。',
+   'files.directories.error.listFailedWithDetail': '加载目录失败：{error}',
+@@ -477,6 +479,8 @@ export default {
+   'file.page.imagePreviewAlt': '{name} 图片预览',
+   'file.page.empty': '文件为空。',
+   'file.page.noChanges': '没有可显示的变更。',
++  'file.page.expandError': '展开完整错误',
++  'file.page.collapseError': '收起错误',
+   'file.error.readFailed': '读取文件失败。',
+   'file.error.readFailedWithDetail': '读取文件失败：{error}',
+   'file.error.diffUnavailable': 'Diff 不可用。',
+diff --git a/web/src/routes/sessions/file.test.tsx b/web/src/routes/sessions/file.test.tsx
+index d484608dfffa839306185a2c52a28a4a143eccc2..b68e8dcc634e3377881e13191526fbf92a2c3edf 100644
+--- a/web/src/routes/sessions/file.test.tsx
++++ b/web/src/routes/sessions/file.test.tsx
+@@ -7,6 +7,8 @@ import FilePage from './file'
+ 
+ const goBackMock = vi.fn()
+ const copyMock = vi.hoisted(() => vi.fn())
++const getGitDiffFileMock = vi.hoisted(() => vi.fn())
++const readSessionFileMock = vi.hoisted(() => vi.fn())
+ 
+ const sampleMarkdown = '# Heading\n\n| Col A | Col B |\n| --- | --- |\n| one | two |'
+ const filePath = 'docs/README.md'
+@@ -24,11 +26,8 @@ vi.mock('@tanstack/react-router', () => ({
+ vi.mock('@/lib/app-context', () => ({
+     useAppContext: () => ({
+         api: {
+-            getGitDiffFile: vi.fn(async () => ({ success: true, stdout: '' })),
+-            readSessionFile: vi.fn(async () => ({
+-                success: true,
+-                content: encodedContent,
+-            })),
++            getGitDiffFile: getGitDiffFileMock,
++            readSessionFile: readSessionFileMock,
+         },
+     }),
+ }))
+@@ -73,6 +72,11 @@ function renderWithProviders() {
+ describe('FilePage markdown preview', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
++        getGitDiffFileMock.mockResolvedValue({ success: true, stdout: '' })
++        readSessionFileMock.mockResolvedValue({
++            success: true,
++            content: encodedContent,
++        })
+         window.localStorage.clear()
+     })
+ 
+@@ -107,4 +111,25 @@ describe('FilePage markdown preview', () => {
+             expect(screen.getByTestId('markdown-preview')).toBeInTheDocument()
+         })
+     })
++
++    it('collapses long preview errors until clicked', async () => {
++        const tail = 'FULL ERROR TAIL'
++        const longError = `Command failed: git diff --no-ext-diff -- TASKS.md ${'diagnostic '.repeat(30)}${tail}`
++        getGitDiffFileMock.mockResolvedValue({ success: false, error: longError })
++
++        renderWithProviders()
++
++        const errorToggle = await screen.findByRole('button', { name: /Show full error/ })
++        expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
++        expect(errorToggle).toHaveTextContent('…')
++        expect(errorToggle).not.toHaveTextContent(tail)
++
++        fireEvent.click(errorToggle)
++        expect(errorToggle).toHaveAttribute('aria-expanded', 'true')
++        expect(errorToggle).toHaveTextContent(longError)
++
++        fireEvent.click(errorToggle)
++        expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
++        expect(errorToggle).not.toHaveTextContent(tail)
++    })
+ })
+diff --git a/web/src/routes/sessions/file.tsx b/web/src/routes/sessions/file.tsx
+index 163855b08a056212b58c5ee98e8d5b7c7f0eed97..29dcb426e00a3b9d739e403b072be9c676d2ce65 100644
+--- a/web/src/routes/sessions/file.tsx
++++ b/web/src/routes/sessions/file.tsx
+@@ -14,6 +14,7 @@ import { useTranslation } from '@/lib/use-translation'
+ import { decodeBase64 } from '@/lib/utils'
+ import { ImagePreview } from '@/components/ImagePreview'
+ import { MarkdownRenderer } from '@/components/MarkdownRenderer'
++import { ExpandableErrorMessage } from '@/components/ExpandableErrorMessage'
+ import {
+     getInitialMarkdownPreviewMode,
+     isMarkdownFile,
+@@ -389,20 +390,33 @@ export default function FilePage() {
+             <div className="app-scroll-y flex-1 min-h-0">
+                 <div className="mx-auto w-full max-w-content p-4">
+                     {diffErrorMessage ? (
+-                        <div className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]">
+-                            {diffErrorMessage}
+-                        </div>
++                        <ExpandableErrorMessage
++                            message={diffErrorMessage}
++                            expandLabel={t('file.page.expandError')}
++                            collapseLabel={t('file.page.collapseError')}
++                            className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]"
++                        />
+                     ) : null}
+                     {missingPath ? (
+                         <div className="text-sm text-[var(--app-hint)]">{t('file.page.missingPath')}</div>
+                     ) : loading ? (
+                         <FileContentSkeleton label={t('loading.file')} />
+                     ) : fileErrorMessage ? (
+-                        <div className="text-sm text-[var(--app-hint)]">{fileErrorMessage}</div>
++                        <ExpandableErrorMessage
++                            message={fileErrorMessage}
++                            expandLabel={t('file.page.expandError')}
++                            collapseLabel={t('file.page.collapseError')}
++                            className="text-sm text-[var(--app-hint)]"
++                        />
+                     ) : displayMode === 'diff' && diffContent ? (
+                         <DiffDisplay diffContent={diffContent} />
+                     ) : displayMode === 'diff' && diffError ? (
+-                        <div className="text-sm text-[var(--app-hint)]">{diffErrorMessage}</div>
++                        <ExpandableErrorMessage
++                            message={diffErrorMessage ?? ''}
++                            expandLabel={t('file.page.expandError')}
++                            collapseLabel={t('file.page.collapseError')}
++                            className="text-sm text-[var(--app-hint)]"
++                        />
+                     ) : displayMode === 'file' ? (
+                         imagePreviewUrl ? (
+                             <ImagePreview
+diff --git a/web/src/routes/sessions/files.test.tsx b/web/src/routes/sessions/files.test.tsx
+index 74dee59957bf37909e8378adc33588c92d56cff3..6aa53c62571e32ac7d3d528c45a3f4f0243cfb1f 100644
+--- a/web/src/routes/sessions/files.test.tsx
++++ b/web/src/routes/sessions/files.test.tsx
+@@ -18,9 +18,10 @@ const mocks = vi.hoisted(() => ({
+     sessionHeaderProps: null as null | {
+         onSessionReopened?: (newSessionId: string) => void | Promise<void>
+     },
++    gitError: null as string | null,
+     search: {
+-        tab: 'directories' as const,
+-        query: '感',
++        tab: 'directories' as 'changes' | 'directories',
++        query: '感' as string | undefined,
+     },
+ }))
+ 
+@@ -54,7 +55,7 @@ vi.mock('@/hooks/queries/useSession', () => ({
+ vi.mock('@/hooks/queries/useGitStatusFiles', () => ({
+     useGitStatusFiles: () => ({
+         status: null,
+-        error: null,
++        error: mocks.gitError,
+         isLoading: false,
+         refetch: vi.fn(),
+     }),
+@@ -107,6 +108,9 @@ function renderFilesPage() {
+ describe('FilesPage search navigation', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
++        mocks.gitError = null
++        mocks.search.tab = 'directories'
++        mocks.search.query = '感'
+         window.localStorage.clear()
+         window.sessionStorage.clear()
+     })
+@@ -165,6 +169,9 @@ describe('FilesPage reopen draft transfer', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
+         mocks.sessionHeaderProps = null
++        mocks.gitError = null
++        mocks.search.tab = 'directories'
++        mocks.search.query = '感'
+         window.localStorage.clear()
+         window.sessionStorage.clear()
+     })
+@@ -187,3 +194,35 @@ describe('FilesPage reopen draft transfer', () => {
+         })
+     })
+ })
++
++describe('FilesPage change errors', () => {
++    beforeEach(() => {
++        vi.clearAllMocks()
++        mocks.gitError = null
++        mocks.search.tab = 'changes'
++        mocks.search.query = undefined
++        window.localStorage.clear()
++        window.sessionStorage.clear()
++    })
++
++    it('collapses long Git status errors until clicked', () => {
++        const tail = 'FULL GIT STATUS ERROR TAIL'
++        const longError = `Command failed: git status --porcelain=v2 --branch --untracked-files=all ${'diagnostic '.repeat(30)}${tail}`
++        mocks.gitError = longError
++
++        renderFilesPage()
++
++        const errorToggle = screen.getByRole('button', { name: /Show full error/ })
++        expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
++        expect(errorToggle).toHaveTextContent('…')
++        expect(errorToggle).not.toHaveTextContent(tail)
++
++        fireEvent.click(errorToggle)
++        expect(errorToggle).toHaveAttribute('aria-expanded', 'true')
++        expect(errorToggle).toHaveTextContent(longError)
++
++        fireEvent.click(errorToggle)
++        expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
++        expect(errorToggle).not.toHaveTextContent(tail)
++    })
++})
+diff --git a/web/src/routes/sessions/files.tsx b/web/src/routes/sessions/files.tsx
+index 5e1bfa36339dd66ad67d502b03dca14f6fb5e077..d8f8e585ccbf78545e60402779b56e90415e2b17 100644
+--- a/web/src/routes/sessions/files.tsx
++++ b/web/src/routes/sessions/files.tsx
+@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { useNavigate, useParams, useSearch } from '@tanstack/react-router'
+ import type { FileSearchItem, GitFileStatus } from '@/types/api'
+ import { FileIcon } from '@/components/FileIcon'
++import { ExpandableErrorMessage } from '@/components/ExpandableErrorMessage'
+ import { DirectoryTree } from '@/components/SessionFiles/DirectoryTree'
+ import { SessionHeader } from '@/components/SessionHeader'
+ import { LoadingState } from '@/components/LoadingState'
+@@ -578,9 +579,12 @@ export default function FilesPage() {
+             <div ref={scrollRef} className="app-scroll-y flex-1 min-h-0">
+                 <div className="mx-auto w-full max-w-content">
+                     {showGitErrorBanner && activeTab === 'changes' ? (
+-                        <div className="border-b border-[var(--app-divider)] bg-amber-500/10 px-3 py-2 text-xs text-[var(--app-hint)]">
+-                            {gitErrorMessage}
+-                        </div>
++                        <ExpandableErrorMessage
++                            message={gitErrorMessage ?? ''}
++                            expandLabel={t('files.changes.expandError')}
++                            collapseLabel={t('files.changes.collapseError')}
++                            className="border-b border-[var(--app-divider)] bg-amber-500/10 px-3 py-2 text-xs text-[var(--app-hint)]"
++                        />
+                     ) : null}
+                     {shouldSearch ? (
+                         searchResults.isLoading ? (

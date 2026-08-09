@@ -1,0 +1,399 @@
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 118bd01f9e15dcb8e1800119ff03c7621471219e..7cd1f37d52c61cc46ff792a841f6b3b77132839b 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -480,8 +480,33 @@ export function HappyComposer(props: {
+     const dictation = useDictation(dictationConfig)
+     const dictationActive = voiceInput.voiceMode === 'dictation'
+     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
++    const handleDictationToggle = useCallback(async () => {
++        if (dictationActive) {
++            if (dictation.status === 'connecting') {
++                await dictation.toggle()
++                return
++            }
++            if (dictation.status === 'connected') {
++                if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
++                    await dictation.toggle()
++                    return
++                }
++                const targetSessionId = props.sessionId ?? ''
++                const initialText = api.composer().getState().text
++                api.composer().setText('')
++                if (targetSessionId) {
++                    await dictation.stopAndSend?.(targetSessionId, initialText)
++                } else {
++                    await dictation.toggle()
++                }
++                return
++            }
++        }
++        await dictation.toggle()
++    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
++
+     const effectiveVoiceToggle = dictationActive
+-        ? (dictation.supported ? dictation.toggle : undefined)
++        ? (dictation.supported ? handleDictationToggle : undefined)
+         : onVoiceToggle
+     const previousVoiceModeRef = useRef(voiceInput.voiceMode)
+     useEffect(() => {
+@@ -1102,6 +1127,10 @@ export function HappyComposer(props: {
+     }, [pendingSendIntentRef])
+ 
+     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
++        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
++            await handleDictationToggle()
++            return
++        }
+         // SessionChat preloads the ref only when restoring a rejected send:
+         // queue retries remain queue, while an ordinary fresh send always
+         // starts from the explicit/default argument. Capture it before the
+@@ -1212,6 +1241,9 @@ export function HappyComposer(props: {
+         sendError,
+         pendingSendIntentRef,
+         resetPendingSendIntent,
++        dictationActive,
++        dictation.status,
++        handleDictationToggle,
+     ])
+ 
+     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 52bcbdd6798507f914f27c0efef64247e2256952..597bfe325da07def3a4af41b8cc897d47e3b02bc 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1105,15 +1105,28 @@ function SessionChatInner(props: SessionChatProps) {
+     // Register session store for voice client tools
+     useEffect(() => {
+         registerSessionStore({
+-            getSession: () => props.session as { agentState?: { requests?: Record<string, unknown> } } | null,
+-            sendMessage: (_sessionId: string, message: string) => props.onSend(message),
+-            approvePermission: async (_sessionId: string, requestId: string) => {
+-                await props.api.approvePermission(props.session.id, requestId)
+-                props.onRefresh()
++            getSession: (sessionId: string) => (sessionId === props.session.id ? (props.session as unknown as { agentState?: { requests?: Record<string, unknown> } }) : null),
++            sendMessage: async (sessionId: string, message: string) => {
++                if (sessionId === props.session.id) {
++                    const accepted = await props.onSend(message)
++                    if (!accepted) {
++                        throw new Error('Message was not accepted')
++                    }
++                } else {
++                    await props.api.sendMessage(sessionId, message)
++                }
+             },
+-            denyPermission: async (_sessionId: string, requestId: string) => {
+-                await props.api.denyPermission(props.session.id, requestId)
+-                props.onRefresh()
++            approvePermission: async (sessionId: string, requestId: string) => {
++                await props.api.approvePermission(sessionId, requestId)
++                if (sessionId === props.session.id) {
++                    props.onRefresh()
++                }
++            },
++            denyPermission: async (sessionId: string, requestId: string) => {
++                await props.api.denyPermission(sessionId, requestId)
++                if (sessionId === props.session.id) {
++                    props.onRefresh()
++                }
+             }
+         })
+     }, [props.session, props.api, props.onSend, props.onRefresh])
+diff --git a/web/src/hooks/useDictation.test.ts b/web/src/hooks/useDictation.test.ts
+index 77d3870c2196e4e213461225d6016ddbf0e9e544..e95613801a537f28b40dc47c4f39a42cb1c8b09f 100644
+--- a/web/src/hooks/useDictation.test.ts
++++ b/web/src/hooks/useDictation.test.ts
+@@ -112,4 +112,60 @@ describe('useDictation', () => {
+         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft final words'))
+         expect(result.current.partialTranscript).toBe('')
+     })
++
++    it('sends message to target session when unmounted after stopAndSend', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        const onTextChange = vi.fn()
++        let resolveTranscribe: ((res: { text: string }) => void) | null = null
++        const api = {
++            transcribeVoice: vi.fn(() => new Promise<{ text: string }>((resolve) => { resolveTranscribe = resolve })),
++            sendMessage: vi.fn(async () => {})
++        }
++
++        const { result, unmount } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => 'initial text',
++            onTextChange
++        }))
++
++        await act(() => result.current.toggle())
++        expect(result.current.status).toBe('connected')
++
++        act(() => {
++            result.current.stopAndSend('session-A', 'explicit initial text')
++        })
++
++        unmount()
++
++        await act(async () => {
++            resolveTranscribe?.({ text: 'voice payload' })
++        })
++
++        await waitFor(() => {
++            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload')
++        })
++    })
+ })
+diff --git a/web/src/hooks/useDictation.ts b/web/src/hooks/useDictation.ts
+index 9976b597daeac04ebd1a799a783b4fcc35466bf7..21034b5f2663402b2c35650f690c59b35d3648bb 100644
+--- a/web/src/hooks/useDictation.ts
++++ b/web/src/hooks/useDictation.ts
+@@ -59,6 +59,8 @@ export function useDictation(config: {
+     const operationRef = useRef(0)
+     const transcribingRef = useRef(false)
+ 
++    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
++
+     const stopTracks = useCallback(() => {
+         streamRef.current?.getTracks().forEach((track) => track.stop())
+         streamRef.current = null
+@@ -98,11 +100,15 @@ export function useDictation(config: {
+                 const blob = new Blob(chunksRef.current, { type })
+                 recorderRef.current = null
+                 chunksRef.current = []
+-                if (!mountedRef.current) return
++                const pendingSend = sendOnFinishRef.current
++                sendOnFinishRef.current = null
++
+                 if (!blob.size) {
+                     transcribingRef.current = false
+-                    setError('No audio was recorded')
+-                    setStatus('error')
++                    if (mountedRef.current) {
++                        setError('No audio was recorded')
++                        setStatus('error')
++                    }
+                     return
+                 }
+                 transcribingRef.current = true
+@@ -113,13 +119,23 @@ export function useDictation(config: {
+                         mode: 'standard',
+                         language
+                     })
+-                    if (!mountedRef.current) return
+-                    config.onTextChange(appendTranscript(config.getCurrentText(), result.text))
+-                    setStatus('disconnected')
++                    const transcribedText = result.text || ''
++                    if (pendingSend) {
++                        const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
++                        if (finalMessage.trim() && config.api) {
++                            await config.api.sendMessage(pendingSend.sessionId, finalMessage)
++                        }
++                    } else if (mountedRef.current) {
++                        config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))
++                    }
++                    if (mountedRef.current) {
++                        setStatus('disconnected')
++                    }
+                 } catch (transcriptionError) {
+-                    if (!mountedRef.current) return
+-                    setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
+-                    setStatus('error')
++                    if (mountedRef.current) {
++                        setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
++                        setStatus('error')
++                    }
+                 } finally {
+                     transcribingRef.current = false
+                 }
+@@ -148,6 +164,14 @@ export function useDictation(config: {
+         }
+     }, [stopTracks])
+ 
++    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
++        sendOnFinishRef.current = {
++            sessionId: targetSessionId,
++            initialText: initialText ?? config.getCurrentText()
++        }
++        await stop()
++    }, [config, stop])
++
+     const toggle = useCallback(async () => {
+         if (status === 'connected' || status === 'connecting') await stop()
+         else await start()
+@@ -166,6 +190,6 @@ export function useDictation(config: {
+     }, [stopTracks])
+ 
+     return config.mode === 'realtime'
+-        ? realtime
+-        : { supported: standardSupported, status, error, partialTranscript: '', toggle }
++        ? { ...realtime, stopAndSend: realtime.stopAndSend }
++        : { supported: standardSupported, status, error, partialTranscript: '', toggle, stopAndSend }
+ }
+diff --git a/web/src/hooks/useRealtimeDictation.ts b/web/src/hooks/useRealtimeDictation.ts
+index 8ed207e053baa5d8bbc75ac6e69e433db3d0a51f..04e9485c82c39a5af5b0bad0ecb6e9b4429859f2 100644
+--- a/web/src/hooks/useRealtimeDictation.ts
++++ b/web/src/hooks/useRealtimeDictation.ts
+@@ -7,6 +7,7 @@ import {
+ } from '@hapi/protocol/voice'
+ import type { ApiClient } from '@/api/client'
+ import type { ConversationStatus } from '@/realtime/types'
++import { appendTranscript } from './useDictation'
+ import {
+     startBrowserLocalTranscription,
+     startDeepgramRealtimeTranscription,
+@@ -53,12 +54,25 @@ export function useRealtimeDictation(config: {
+         if (mountedRef.current) setPartialTranscript(text)
+     }, [])
+ 
++    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
++
+     const finish = useCallback((text: string) => {
+-        if (!mountedRef.current) return
+-        updatePartial('')
+-        onFinalTranscriptRef.current(text)
+-        setStatus('disconnected')
+-    }, [updatePartial])
++        const pendingSend = sendOnFinishRef.current
++        sendOnFinishRef.current = null
++        if (pendingSend) {
++            const finalMessage = appendTranscript(pendingSend.initialText, text)
++            if (finalMessage.trim() && config.api) {
++                void config.api.sendMessage(pendingSend.sessionId, finalMessage)
++            }
++        } else if (mountedRef.current) {
++            updatePartial('')
++            onFinalTranscriptRef.current(text)
++            setStatus('disconnected')
++        }
++        if (mountedRef.current) {
++            setStatus('disconnected')
++        }
++    }, [config.api, updatePartial])
+ 
+     const fail = useCallback((value: unknown) => {
+         if (!mountedRef.current) return
+@@ -224,6 +238,11 @@ export function useRealtimeDictation(config: {
+         }
+     }, [elevenLabs, fail])
+ 
++    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
++        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '' }
++        await stop()
++    }, [stop])
++
+     const toggle = useCallback(async () => {
+         if (status === 'connected' || status === 'connecting') await stop()
+         else await start()
+@@ -244,5 +263,5 @@ export function useRealtimeDictation(config: {
+         }
+     }, [])
+ 
+-    return { supported, status, error, partialTranscript, toggle }
++    return { supported, status, error, partialTranscript, toggle, stopAndSend }
+ }
+diff --git a/web/src/realtime/realtimeClientTools.test.ts b/web/src/realtime/realtimeClientTools.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6c3e449072e9ae67ce6f954d1bd09af958a548e
+--- /dev/null
++++ b/web/src/realtime/realtimeClientTools.test.ts
+@@ -0,0 +1,50 @@
++import { describe, expect, it, vi } from 'vitest'
++import { realtimeClientTools, registerSessionStore } from './realtimeClientTools'
++import { updateCurrentSessionId } from './RealtimeSession'
++
++describe('realtimeClientTools', () => {
++    it('sends message to target sessionId via api.sendMessage when active session differs', async () => {
++        const mockApi = {
++            sendMessage: vi.fn(async (_sessionId: string, _message: string) => {})
++        }
++        const sessionBOnSend = vi.fn()
++
++        registerSessionStore({
++            getSession: (id) => (id === 'session-B' ? { agentState: {} } : null),
++            sendMessage: (sessionId, message) => {
++                if (sessionId === 'session-B') {
++                    sessionBOnSend(message)
++                } else {
++                    mockApi.sendMessage(sessionId, message)
++                }
++            },
++            approvePermission: async (_sessionId: string, _requestId: string) => {},
++            denyPermission: async (_sessionId: string, _requestId: string) => {}
++        })
++
++        updateCurrentSessionId('session-A')
++
++        const result = await realtimeClientTools.messageCodingAgent({ message: 'fix the bug' })
++
++        expect(result).toContain('sent')
++        expect(sessionBOnSend).not.toHaveBeenCalled()
++        expect(mockApi.sendMessage).toHaveBeenCalledWith('session-A', 'fix the bug')
++    })
++
++    it('returns error when sessionStore.sendMessage throws or rejects', async () => {
++        registerSessionStore({
++            getSession: () => null,
++            sendMessage: async () => {
++                throw new Error('Network error')
++            },
++            approvePermission: async (_sessionId: string, _requestId: string) => {},
++            denyPermission: async (_sessionId: string, _requestId: string) => {}
++        })
++
++        updateCurrentSessionId('session-A')
++
++        const result = await realtimeClientTools.messageCodingAgent({ message: 'do something' })
++
++        expect(result).toBe('error (failed to send message)')
++    })
++})
+diff --git a/web/src/realtime/realtimeClientTools.ts b/web/src/realtime/realtimeClientTools.ts
+index a2490ac81615006989fff5b36c92960057d5dbc8..c92b16e5ddfbf32c493eed032cd4107cbc8ae5bd 100644
+--- a/web/src/realtime/realtimeClientTools.ts
++++ b/web/src/realtime/realtimeClientTools.ts
+@@ -4,7 +4,7 @@ import { VOICE_CONFIG } from './voiceConfig'
+ // Store for session state and API client
+ let sessionStore: {
+     getSession: (sessionId: string) => { agentState?: { requests?: Record<string, unknown> } } | null
+-    sendMessage: (sessionId: string, message: string) => void
++    sendMessage: (sessionId: string, message: string) => Promise<void> | void
+     approvePermission: (sessionId: string, requestId: string) => Promise<void>
+     denyPermission: (sessionId: string, requestId: string) => Promise<void>
+ } | null = null
+@@ -50,8 +50,13 @@ export const realtimeClientTools = {
+             console.log('[Voice] Sending message to session:', sessionId)
+         }
+ 
+-        sessionStore.sendMessage(sessionId, message)
+-        return "sent [DO NOT say anything else, simply say 'sent']"
++        try {
++            await sessionStore.sendMessage(sessionId, message)
++            return "sent [DO NOT say anything else, simply say 'sent']"
++        } catch (sendError) {
++            console.error('[Voice] Failed to send message to session:', sendError)
++            return 'error (failed to send message)'
++        }
+     },
+ 
+     /**

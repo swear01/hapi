@@ -1,0 +1,415 @@
+diff --git a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx b/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx
+index 7f9efebb9c5eb8aa795c4587530c055503a685cd..7335d30aff88c6e738486542423eb010b279c2d5 100644
+--- a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx
++++ b/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx
+@@ -13,13 +13,14 @@ function renderSelector(props: Parameters<typeof CodexFamilyPermissionModeSelect
+ 
+ describe('CodexFamilyPermissionModeSelector', () => {
+     it('renders permission modes for copilot', () => {
+-        renderSelector({
++        const { container } = renderSelector({
+             agent: 'copilot',
+             value: 'default',
+             isDisabled: false,
+             onChange: vi.fn(),
+         })
+-        expect(screen.getByRole('combobox')).toBeTruthy()
++        expect(screen.getByRole('combobox')).toHaveClass('appearance-none', 'pr-10')
++        expect(container.querySelector('svg[aria-hidden="true"]')).toBeTruthy()
+         expect(screen.getByRole('option', { name: 'Yolo' })).toBeTruthy()
+     })
+ 
+diff --git a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx b/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx
+index 37543e5d6ba80db9962591a390d5c5e14d029a95..df699be9584a4dff50e93262c2b630785bdee744 100644
+--- a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx
++++ b/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx
+@@ -1,6 +1,7 @@
+ import { getPermissionModeOptionsForFlavor, type PermissionMode } from '@hapi/protocol'
+ import { useTranslation } from '@/lib/use-translation'
+ import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
++import { SelectControl } from '@/components/ui/select-control'
+ import type { AgentType } from './types'
+ 
+ export function CodexFamilyPermissionModeSelector(props: {
+@@ -22,18 +23,18 @@ export function CodexFamilyPermissionModeSelector(props: {
+             <label className="text-xs font-medium text-[var(--app-hint)]">
+                 {t('misc.permissionMode')}
+             </label>
+-            <select
++            <SelectControl
+                 value={props.value}
+                 onChange={(event) => props.onChange(event.target.value as PermissionMode)}
+                 disabled={props.isDisabled}
+-                className="w-full rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
++                className="py-2 pl-3 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
+             >
+                 {options.map((option) => (
+                     <option key={option.mode} value={option.mode}>
+                         {option.label}
+                     </option>
+                 ))}
+-            </select>
++            </SelectControl>
+         </div>
+     )
+ }
+diff --git a/web/src/components/NewSession/index.test.tsx b/web/src/components/NewSession/index.test.tsx
+index c8ab6ed272b9e7b378df27cd5ef5c1a131935fcf..3a6d46d4d5c2e8ee15d2518f8973d95b467550a6 100644
+--- a/web/src/components/NewSession/index.test.tsx
++++ b/web/src/components/NewSession/index.test.tsx
+@@ -6,7 +6,8 @@ import { saveNewSessionFormDraft } from './newSessionFormDraft'
+ import {
+     loadPreferredLaunchSettings,
+     savePreferredAgent,
+-    savePreferredLaunchSettings
++    savePreferredLaunchSettings,
++    savePreferredYoloMode
+ } from './preferences'
+ 
+ const mocks = vi.hoisted(() => ({
+@@ -161,7 +162,17 @@ vi.mock('./MachineSelector', () => ({
+ }))
+ vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
+ vi.mock('./GrokPermissionModeSelector', () => ({ GrokPermissionModeSelector: () => null }))
+-vi.mock('./CodexFamilyPermissionModeSelector', () => ({ CodexFamilyPermissionModeSelector: () => null }))
++vi.mock('./CodexFamilyPermissionModeSelector', () => ({
++    CodexFamilyPermissionModeSelector: (props: {
++        agent: string
++        value: string
++        onChange: (mode: string) => void
++    }) => props.agent === 'codex' || props.agent === 'copilot' ? (
++        <button type="button" data-testid="permission-mode" onClick={() => props.onChange('yolo')}>
++            {props.value}
++        </button>
++    ) : null
++}))
+ vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
+ vi.mock('./YoloToggle', () => ({ YoloToggle: () => null }))
+ vi.mock('./OpencodeModelSelector', () => ({ OpencodeModelSelector: () => null }))
+@@ -239,7 +250,8 @@ describe('NewSession launch preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            permissionMode: 'safe-yolo'
+         })
+ 
+         render(
+@@ -256,6 +268,49 @@ describe('NewSession launch preferences', () => {
+         await waitFor(() => {
+             expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-sol')
+             expect(screen.getByTestId('reasoning')).toHaveTextContent('xhigh')
++            expect(screen.getByTestId('permission-mode')).toHaveTextContent('safe-yolo')
++        })
++    })
++
++    it('does not migrate a legacy YOLO value owned by a non-Codex agent', async () => {
++        savePreferredAgent('claude')
++        savePreferredYoloMode(true)
++
++        render(
++            <NewSession
++                api={api}
++                machines={[machine]}
++                initialMachineId="machine-1"
++                initialDirectory="C:\\repo"
++                onSuccess={mocks.onSuccess}
++                onCancel={() => {}}
++            />
++        )
++
++        fireEvent.click(screen.getByDisplayValue('codex'))
++
++        await waitFor(() => {
++            expect(screen.getByTestId('permission-mode')).toHaveTextContent('default')
++        })
++    })
++
++    it('migrates a legacy YOLO value when Codex was the preferred agent', async () => {
++        savePreferredAgent('codex')
++        savePreferredYoloMode(true)
++
++        render(
++            <NewSession
++                api={api}
++                machines={[machine]}
++                initialMachineId="machine-1"
++                initialDirectory="C:\\repo"
++                onSuccess={mocks.onSuccess}
++                onCancel={() => {}}
++            />
++        )
++
++        await waitFor(() => {
++            expect(screen.getByTestId('permission-mode')).toHaveTextContent('yolo')
+         })
+     })
+ 
+@@ -389,15 +444,18 @@ describe('NewSession launch preferences', () => {
+         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toBeNull()
+         fireEvent.click(screen.getByTestId('model'))
+         fireEvent.click(screen.getByTestId('reasoning'))
++        fireEvent.click(screen.getByTestId('permission-mode'))
+         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toBeNull()
+         fireEvent.click(screen.getByTestId('create'))
+ 
+         await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-1'))
++        expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'yolo' }))
+         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toEqual({
+             model: 'gpt-5.6-terra',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'max'
++            modelReasoningEffort: 'max',
++            permissionMode: 'yolo'
+         })
+     })
+ 
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index f73b17e26ead9bdded45308672d6bc18d6d67a9c..a825a1142e6d99a84d3ed7e33f6cd83f53d04d90 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -100,6 +100,9 @@ export function NewSession(props: {
+     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
+     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
+     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
++    const [legacyCodexYolo] = useState(
++        () => loadPreferredAgent() === 'codex' && loadPreferredYoloMode()
++    )
+     const [model, setModel] = useState('auto')
+     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
+     const pendingCursorBaseRef = useRef<string | null>(null)
+@@ -670,20 +673,24 @@ export function NewSession(props: {
+ 
+         const preferred = resolvePreferredLaunchSettings(
+             agent,
+-            loadPreferredLaunchSettings(machineId, agent)
++            loadPreferredLaunchSettings(machineId, agent),
++            legacyCodexYolo
+         )
+ 
+         setModel(agent === 'opencode' ? 'auto' : preferred.model)
+         setCursorSelectedBase(preferred.cursorSelectedBase)
+         setEffort(preferred.effort)
+         setModelReasoningEffort(preferred.modelReasoningEffort)
++        if (usesCodexFamilyPermissionModes(agent)) {
++            setCodexFamilyPermissionMode(preferred.permissionMode ?? 'default')
++        }
+         setOpencodeSelectedModel(
+             agent === 'opencode' && preferred.model !== 'auto' ? preferred.model : null
+         )
+         setAgySelectedModel(
+             agent === 'agy' && preferred.model !== 'auto' ? preferred.model : null
+         )
+-    }, [agent, machineId])
++    }, [agent, legacyCodexYolo, machineId])
+ 
+     useEffect(() => {
+         if (
+@@ -1319,6 +1326,7 @@ export function NewSession(props: {
+             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
+                 ? modelReasoningEffort
+                 : undefined
++            const usesCodexFamilyPermissions = usesCodexFamilyPermissionModes(agent)
+             const preferredLaunchSettings = {
+                 model: agent === 'agy'
+                     ? (agySelectedModel ?? 'auto')
+@@ -1327,7 +1335,8 @@ export function NewSession(props: {
+                         : model,
+                 cursorSelectedBase,
+                 effort,
+-                modelReasoningEffort
++                modelReasoningEffort,
++                ...(usesCodexFamilyPermissions ? { permissionMode: codexFamilyPermissionMode } : {})
+             }
+             const resolvedServiceTier = agent === 'codex' && showCodexFastMode
+                 ? serviceTier
+@@ -1336,8 +1345,6 @@ export function NewSession(props: {
+                 ? collaborationMode
+                 : undefined
+ 
+-            const usesCodexFamilyPermissions = usesCodexFamilyPermissionModes(agent)
+-
+             if (agent === 'codex' && selectedCodexImportSession) {
+                 setIsImportingCodexSession(true)
+                 const result = await props.api.syncCodexSession({
+diff --git a/web/src/components/NewSession/preferences.test.ts b/web/src/components/NewSession/preferences.test.ts
+index c856514018ca01b6e129a23ca2b8c23183f36cdd..e489a3bc6fb8522567964218ee0c80c3b161970f 100644
+--- a/web/src/components/NewSession/preferences.test.ts
++++ b/web/src/components/NewSession/preferences.test.ts
+@@ -46,7 +46,8 @@ describe('NewSession preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            permissionMode: 'safe-yolo'
+         })
+         savePreferredLaunchSettings('machine-1', 'claude', {
+             model: 'opus',
+@@ -65,7 +66,8 @@ describe('NewSession preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            permissionMode: 'safe-yolo'
+         })
+         expect(loadPreferredLaunchSettings('machine-1', 'claude')).toEqual({
+             model: 'opus',
+@@ -140,15 +142,57 @@ describe('NewSession preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            permissionMode: 'read-only'
+         })).toEqual({
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            permissionMode: 'read-only'
+         })
+     })
+ 
++    it('falls back when a remembered permission mode is invalid for the agent', () => {
++        expect(resolvePreferredLaunchSettings('codex', {
++            model: 'auto',
++            cursorSelectedBase: 'auto',
++            effort: 'auto',
++            modelReasoningEffort: 'default',
++            permissionMode: 'bypassPermissions'
++        })).toEqual({
++            model: 'auto',
++            cursorSelectedBase: 'auto',
++            effort: 'auto',
++            modelReasoningEffort: 'default',
++            permissionMode: 'default'
++        })
++    })
++
++    it('migrates the legacy YOLO preference for Codex only', () => {
++        savePreferredYoloMode(true)
++
++        expect(resolvePreferredLaunchSettings('codex', null, true).permissionMode).toBe('yolo')
++        expect(resolvePreferredLaunchSettings('copilot', null, true).permissionMode).toBe('default')
++        expect(resolvePreferredLaunchSettings('codex', null, false).permissionMode).toBe('default')
++    })
++
++    it.each([
++        ['kimi', 'safe-yolo'],
++        ['opencode', 'plan']
++    ] as const)('restores remembered permission modes for %s', (agent, permissionMode) => {
++        savePreferredLaunchSettings('machine-1', agent, {
++            model: 'auto',
++            cursorSelectedBase: 'auto',
++            effort: 'auto',
++            modelReasoningEffort: 'default',
++            permissionMode
++        })
++
++        const preferred = loadPreferredLaunchSettings('machine-1', agent)
++        expect(resolvePreferredLaunchSettings(agent, preferred).permissionMode).toBe(permissionMode)
++    })
++
+     it('drops an OpenCode reasoning value that is not offered at launch', () => {
+         expect(resolvePreferredLaunchSettings('opencode', {
+             model: 'provider/model',
+@@ -159,7 +203,8 @@ describe('NewSession preferences', () => {
+             model: 'provider/model',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            permissionMode: 'default'
+         })
+     })
+ })
+diff --git a/web/src/components/NewSession/preferences.ts b/web/src/components/NewSession/preferences.ts
+index 1ba077274e69f5ed9e802215c91b36596f2c2e86..43415101c5c1af8566b5a507a812b72d7d49a5ae 100644
+--- a/web/src/components/NewSession/preferences.ts
++++ b/web/src/components/NewSession/preferences.ts
+@@ -1,4 +1,8 @@
+-import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
++import {
++    CREATABLE_AGENT_FLAVORS,
++    getPermissionModesForFlavor,
++    type PermissionMode
++} from '@hapi/protocol'
+ import {
+     CLAUDE_EFFORT_OPTIONS,
+     CODEX_REASONING_EFFORT_OPTIONS,
+@@ -7,6 +11,7 @@ import {
+     type CodexReasoningEffort,
+     type LaunchEffort
+ } from './types'
++import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
+ 
+ const AGENT_STORAGE_KEY = 'hapi:newSession:agent'
+ const YOLO_STORAGE_KEY = 'hapi:newSession:yolo'
+@@ -17,6 +22,7 @@ export type PreferredLaunchSettings = {
+     cursorSelectedBase: string
+     effort: LaunchEffort
+     modelReasoningEffort: CodexReasoningEffort
++    permissionMode?: PermissionMode
+ }
+ 
+ // Only launchable flavors are valid defaults; a stale 'gemini' preference
+@@ -76,6 +82,10 @@ export function loadPreferredLaunchSettings(
+         if (!parsed || typeof parsed !== 'object' || typeof parsed.model !== 'string') {
+             return null
+         }
++        const permissionMode = typeof parsed.permissionMode === 'string'
++            && getPermissionModesForFlavor(agent).includes(parsed.permissionMode as PermissionMode)
++            ? parsed.permissionMode as PermissionMode
++            : undefined
+         return {
+             model: parsed.model,
+             cursorSelectedBase: typeof parsed.cursorSelectedBase === 'string'
+@@ -84,7 +94,8 @@ export function loadPreferredLaunchSettings(
+             effort: typeof parsed.effort === 'string' ? parsed.effort : 'auto',
+             modelReasoningEffort: typeof parsed.modelReasoningEffort === 'string'
+                 ? parsed.modelReasoningEffort
+-                : 'default'
++                : 'default',
++            ...(permissionMode ? { permissionMode } : {})
+         }
+     } catch {
+         return null
+@@ -116,7 +127,8 @@ function resolvePreferredOptionValue(
+ 
+ export function resolvePreferredLaunchSettings(
+     agent: AgentType,
+-    preferred: PreferredLaunchSettings | null
++    preferred: PreferredLaunchSettings | null,
++    legacyCodexYolo = false
+ ): PreferredLaunchSettings {
+     const preferredModel = preferred?.model ?? 'auto'
+     const staticModelValues = MODEL_OPTIONS[agent].map((option) => option.value)
+@@ -139,11 +151,22 @@ export function resolvePreferredLaunchSettings(
+             'default'
+         )
+         : (preferred?.modelReasoningEffort ?? 'default')
++    const supportsCodexFamilyPermissionMode = usesCodexFamilyPermissionModes(agent)
++    const availablePermissionModes = getPermissionModesForFlavor(agent)
++    const preferredPermissionMode = preferred?.permissionMode
++    const permissionMode = supportsCodexFamilyPermissionMode
++        ? preferredPermissionMode && availablePermissionModes.includes(preferredPermissionMode)
++            ? preferredPermissionMode
++            : agent === 'codex' && legacyCodexYolo
++                ? 'yolo'
++                : 'default'
++        : undefined
+ 
+     return {
+         model,
+         cursorSelectedBase: preferred?.cursorSelectedBase ?? 'auto',
+         effort,
+-        modelReasoningEffort
++        modelReasoningEffort,
++        ...(permissionMode ? { permissionMode } : {})
+     }
+ }

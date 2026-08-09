@@ -1,0 +1,223 @@
+diff --git a/web/src/components/assistant-ui/markdown-file-anchor.test.tsx b/web/src/components/assistant-ui/markdown-file-anchor.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0445d99db90d9db1cf542cc6a78d4afd838d7e3
+--- /dev/null
++++ b/web/src/components/assistant-ui/markdown-file-anchor.test.tsx
+@@ -0,0 +1,62 @@
++import { fireEvent, render, screen } from '@testing-library/react'
++import React from 'react'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { defaultComponents, UriConfirmProvider } from '@/components/assistant-ui/markdown-text'
++import { I18nProvider } from '@/lib/i18n-context'
++import { encodeBase64 } from '@/lib/utils'
++
++const mocks = vi.hoisted(() => ({
++    navigate: vi.fn(),
++}))
++
++vi.mock('@tanstack/react-router', () => ({
++    useNavigate: () => mocks.navigate,
++}))
++
++vi.mock('@/components/AssistantChat/context', () => ({
++    useOptionalHappyChatContext: () => ({ sessionId: 'session-1' }),
++}))
++
++const AnchorComponent = (defaultComponents as Record<string, unknown>).a as React.ComponentType<
++    React.ComponentPropsWithoutRef<'a'>
++>
++
++function renderFileAnchor(filePath: string) {
++    return render(
++        <I18nProvider>
++            <UriConfirmProvider>
++                <AnchorComponent href={`hapi-file:${encodeURIComponent(filePath)}`}>
++                    {filePath}
++                </AnchorComponent>
++            </UriConfirmProvider>
++        </I18nProvider>
++    )
++}
++
++beforeEach(() => {
++    mocks.navigate.mockReset()
++})
++
++describe('chat file anchors', () => {
++    it('marks file previews as originating from chat for deterministic back navigation', () => {
++        const filePath = 'docs/guide.md'
++        renderFileAnchor(filePath)
++        const link = screen.getByRole('link', { name: filePath })
++        const href = new URL(link.getAttribute('href')!, 'https://hapi.example')
++
++        expect(href.pathname).toBe('/sessions/session-1/file')
++        expect(href.searchParams.get('path')).toBe(encodeBase64(filePath))
++        expect(href.searchParams.get('origin')).toBe('chat')
++
++        fireEvent.click(link)
++
++        expect(mocks.navigate).toHaveBeenCalledWith({
++            to: '/sessions/$sessionId/file',
++            params: { sessionId: 'session-1' },
++            search: {
++                path: encodeBase64(filePath),
++                origin: 'chat',
++            },
++        })
++    })
++})
+diff --git a/web/src/components/assistant-ui/markdown-text.tsx b/web/src/components/assistant-ui/markdown-text.tsx
+index ff709e7bab364f7111c84524a723926dda79f319..78129c3c263dc4faabc63ab9a5abc6458b4926a3 100644
+--- a/web/src/components/assistant-ui/markdown-text.tsx
++++ b/web/src/components/assistant-ui/markdown-text.tsx
+@@ -496,7 +496,10 @@ function Code(props: ComponentPropsWithoutRef<'code'>) {
+ function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: string; sessionId: string }) {
+     const navigate = useNavigate()
+     const rel = props.target === '_blank' ? (props.rel ?? 'noreferrer') : props.rel
+-    const search = new URLSearchParams({ path: encodeBase64(props.filePath) }).toString()
++    const search = new URLSearchParams({
++        path: encodeBase64(props.filePath),
++        origin: 'chat',
++    }).toString()
+     const href = `/sessions/${encodeURIComponent(props.sessionId)}/file?${search}`
+ 
+     const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+@@ -508,7 +511,10 @@ function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: strin
+         void navigate({
+             to: '/sessions/$sessionId/file',
+             params: { sessionId: props.sessionId },
+-            search: { path: encodeBase64(props.filePath) }
++            search: {
++                path: encodeBase64(props.filePath),
++                origin: 'chat',
++            }
+         })
+     }
+ 
+diff --git a/web/src/hooks/useAppGoBack.test.ts b/web/src/hooks/useAppGoBack.test.ts
+index 1bee2418764ff95f9c0a8589d60f42eb65bd5d20..fda578129713bb8f4f5c8da23caf4106cb3d4ca3 100644
+--- a/web/src/hooks/useAppGoBack.test.ts
++++ b/web/src/hooks/useAppGoBack.test.ts
+@@ -1,5 +1,29 @@
+-import { describe, expect, it } from 'vitest'
+-import { getSessionFilesBackSearch, getSettingsBackTarget } from './useAppGoBack'
++import { act, renderHook } from '@testing-library/react'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++const routerMocks = vi.hoisted(() => ({
++    navigate: vi.fn(),
++    historyBack: vi.fn(),
++    pathname: '/sessions',
++    search: {} as unknown,
++}))
++
++vi.mock('@tanstack/react-router', () => ({
++    useNavigate: () => routerMocks.navigate,
++    useRouter: () => ({ history: { back: routerMocks.historyBack } }),
++    useLocation: ({ select }: {
++        select: (location: { pathname: string; search: unknown }) => unknown
++    }) => select({ pathname: routerMocks.pathname, search: routerMocks.search }),
++}))
++
++import { getSessionFilesBackSearch, getSettingsBackTarget, useAppGoBack } from './useAppGoBack'
++
++beforeEach(() => {
++    routerMocks.navigate.mockReset()
++    routerMocks.historyBack.mockReset()
++    routerMocks.pathname = '/sessions'
++    routerMocks.search = {}
++})
+ 
+ describe('getSettingsBackTarget', () => {
+     it.each([
+@@ -37,3 +61,37 @@ describe('getSessionFilesBackSearch', () => {
+         expect(getSessionFilesBackSearch(null)).toEqual({})
+     })
+ })
++
++describe('useAppGoBack file preview navigation', () => {
++    it('returns directly to chat when the preview was opened from a chat link', () => {
++        routerMocks.pathname = '/sessions/session-1/file'
++        routerMocks.search = { path: 'encoded-path', origin: 'chat' }
++        const { result } = renderHook(() => useAppGoBack())
++
++        act(() => result.current())
++
++        expect(routerMocks.navigate).toHaveBeenCalledWith({
++            to: '/sessions/session-1',
++        })
++    })
++
++    it('keeps returning file-browser previews to their previous file context', () => {
++        routerMocks.pathname = '/sessions/session-1/file'
++        routerMocks.search = {
++            path: 'encoded-path',
++            tab: 'directories',
++            query: 'readme',
++        }
++        const { result } = renderHook(() => useAppGoBack())
++
++        act(() => result.current())
++
++        expect(routerMocks.navigate).toHaveBeenCalledWith({
++            to: '/sessions/session-1/files',
++            search: {
++                tab: 'directories',
++                query: 'readme',
++            },
++        })
++    })
++})
+diff --git a/web/src/hooks/useAppGoBack.ts b/web/src/hooks/useAppGoBack.ts
+index 51c099414fa9bd5e18f1f10d7441f603168e6661..d3b217b73664def8e6fed68dad2628adf2364003 100644
+--- a/web/src/hooks/useAppGoBack.ts
++++ b/web/src/hooks/useAppGoBack.ts
+@@ -43,8 +43,17 @@ export function useAppGoBack(): () => void {
+             return
+         }
+ 
+-        // For single file view, go back to files list
++        // Chat file links return to the conversation; file-browser previews
++        // retain their deterministic parent route and browsing context.
+         if (pathname.match(/^\/sessions\/[^/]+\/file$/)) {
++            const origin = search && typeof search === 'object' && 'origin' in search
++                ? (search as { origin?: unknown }).origin
++                : undefined
++            if (origin === 'chat') {
++                navigate({ to: pathname.replace(/\/file$/, '') })
++                return
++            }
++
+             const filesPath = pathname.replace(/\/file$/, '/files')
+             navigate({ to: filesPath, search: getSessionFilesBackSearch(search) })
+             return
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index eac164626332b96843ca8c05c36c0dd9c0551b9c..086492af0b1cb8a9c97118c9ccfadb3e4b3b3ed9 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -1059,6 +1059,7 @@ type SessionFileSearch = {
+     staged?: boolean
+     tab?: 'changes' | 'directories'
+     query?: string
++    origin?: 'chat'
+ }
+ 
+ const sessionFileRoute = createRoute({
+@@ -1081,6 +1082,7 @@ const sessionFileRoute = createRoute({
+         const query = typeof search.query === 'string' && search.query.length > 0
+             ? search.query
+             : undefined
++        const origin = search.origin === 'chat' ? 'chat' : undefined
+ 
+         const result: SessionFileSearch = { path }
+         if (staged !== undefined) {
+@@ -1092,6 +1094,9 @@ const sessionFileRoute = createRoute({
+         if (query !== undefined) {
+             result.query = query
+         }
++        if (origin !== undefined) {
++            result.origin = origin
++        }
+         return result
+     },
+     component: FilePage,

@@ -1,0 +1,251 @@
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index 72472287ef73789ad8230327d1f399e36fd098ee..51017f63e689d803ea6b12c864e8007ab2e6892e 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -1486,7 +1486,7 @@ describe('codexRemoteLauncher', () => {
+         });
+     });
+ 
+-    it('retries plan turns without collaborationMode when the runtime rejects the field', async () => {
++    it('does not retry plan turns as normal turns when the runtime rejects the field', async () => {
+         harness.startTurnErrors.push(new Error('unknown field collaborationMode'));
+         const { session, sessionEvents } = createSessionStub(['plan this'], {
+             permissionMode: 'default',
+@@ -1497,19 +1497,17 @@ describe('codexRemoteLauncher', () => {
+         const exitReason = await codexRemoteLauncher(session as never);
+ 
+         expect(exitReason).toBe('exit');
+-        expect(harness.startTurnParams).toHaveLength(2);
++        expect(harness.startTurnParams).toHaveLength(1);
+         expect(harness.startTurnParams[0]?.collaborationMode).toMatchObject({
+             mode: 'plan'
+         });
+-        expect(harness.startTurnParams[1]?.collaborationMode).toBeUndefined();
+-        expect(harness.startTurnParams[1]?.model).toBe('gpt-5.4');
+         expect(sessionEvents).toContainEqual({
+             type: 'message',
+-            message: 'Plan mode is not supported by this Codex runtime. Sent as a normal turn instead.'
++            message: 'Task failed: Plan mode is not supported by this Codex runtime.'
+         });
+     });
+ 
+-    it('retries plan turns when unsupported errors use spaced collaboration mode wording', async () => {
++    it('does not retry plan turns when unsupported errors use spaced collaboration mode wording', async () => {
+         harness.startTurnErrors.push(new Error('unsupported collaboration mode'));
+         const { session, sessionEvents } = createSessionStub(['plan this'], {
+             permissionMode: 'default',
+@@ -1520,14 +1518,13 @@ describe('codexRemoteLauncher', () => {
+         const exitReason = await codexRemoteLauncher(session as never);
+ 
+         expect(exitReason).toBe('exit');
+-        expect(harness.startTurnParams).toHaveLength(2);
++        expect(harness.startTurnParams).toHaveLength(1);
+         expect(harness.startTurnParams[0]?.collaborationMode).toMatchObject({
+             mode: 'plan'
+         });
+-        expect(harness.startTurnParams[1]?.collaborationMode).toBeUndefined();
+         expect(sessionEvents).toContainEqual({
+             type: 'message',
+-            message: 'Plan mode is not supported by this Codex runtime. Sent as a normal turn instead.'
++            message: 'Task failed: Plan mode is not supported by this Codex runtime.'
+         });
+     });
+ 
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index aee33e3ca905f1149bafab5628d9aee137584995..7636b7e03e62b95df575d811bff7501750d0ac56 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -72,6 +72,7 @@ const THROTTLED_AGENT_RUN_ACTIVITY_KINDS = new Set(['thinking']);
+ const CODEX_SPAWN_AGENT_FULL_HISTORY_ARGUMENT_ERROR =
+     'Full-history forked agents inherit the parent agent type, model, and reasoning effort; ' +
+     'omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.';
++const PLAN_MODE_NOT_SUPPORTED_MESSAGE = 'Plan mode is not supported by this Codex runtime.';
+ 
+ function formatCodexResumeError(error: unknown): string {
+     const info = extractErrorInfo(error);
+@@ -577,6 +578,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+         };
+ 
+         const permissionHandler = new CodexPermissionHandler(session.client, getCurrentCodexPermissionMode, {
++            getCollaborationMode: () => session.getCollaborationMode(),
+             onRequest: ({ id, toolName, input }) => {
+                 if (toolName === 'request_user_input') {
+                     session.sendAgentMessage({
+@@ -3815,10 +3817,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     mode.collaborationMode === 'plan'
+                     && !supportsTurnCollaborationMode
+                 ) {
+-                    session.sendSessionEvent({
+-                        type: 'message',
+-                        message: 'Plan mode is not supported by this Codex runtime. Sent as a normal turn instead.'
+-                    });
++                    throw new Error(PLAN_MODE_NOT_SUPPORTED_MESSAGE);
+                 }
+                 let turnResponse: unknown;
+                 try {
+@@ -3829,10 +3828,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     if (shouldSendCollaborationMode && shouldRetryWithoutCollaborationMode(error)) {
+                         supportsTurnCollaborationMode = false;
+                         if (mode.collaborationMode === 'plan') {
+-                            session.sendSessionEvent({
+-                                type: 'message',
+-                                message: 'Plan mode is not supported by this Codex runtime. Sent as a normal turn instead.'
+-                            });
++                            throw new Error(PLAN_MODE_NOT_SUPPORTED_MESSAGE);
+                         }
+                         turnResponse = await appServerClient.startTurn(buildParams(true), {
+                             signal: this.abortController.signal
+@@ -3878,6 +3874,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 if (isAbortError) {
+                     messageBuffer.addMessage('Aborted by user', 'status');
+                     session.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
++                } else if (error instanceof Error && error.message === PLAN_MODE_NOT_SUPPORTED_MESSAGE) {
++                    const message = `Task failed: ${PLAN_MODE_NOT_SUPPORTED_MESSAGE}`;
++                    messageBuffer.addMessage(message, 'status');
++                    session.sendSessionEvent({ type: 'message', message });
+                 } else {
+                     messageBuffer.addMessage('Process exited unexpectedly', 'status');
+                     session.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
+diff --git a/cli/src/codex/utils/appServerConfig.test.ts b/cli/src/codex/utils/appServerConfig.test.ts
+index 4ffd1ee661d299a99d3540ebe907d66c7c8967bc..af2b25f52dcc1510a04c6dd9f1b379def8b626ae 100644
+--- a/cli/src/codex/utils/appServerConfig.test.ts
++++ b/cli/src/codex/utils/appServerConfig.test.ts
+@@ -399,13 +399,13 @@ describe('appServerConfig', () => {
+         expect(params.collaborationMode).toBeUndefined();
+     });
+ 
+-    it('puts collaboration mode in turn params with model settings', () => {
++    it('keeps yolo access while using Codex built-in plan instructions', () => {
+         const params = buildTurnStartParams({
+             threadId: 'thread-1',
+             message: 'hello',
+             cwd: '/workspace/project',
+             mode: {
+-                permissionMode: 'default',
++                permissionMode: 'yolo',
+                 model: 'o3',
+                 modelReasoningEffort: 'high',
+                 collaborationMode: 'plan'
+@@ -417,13 +417,14 @@ describe('appServerConfig', () => {
+             settings: {
+                 model: 'o3',
+                 reasoning_effort: 'high',
+-                developer_instructions: withCollaborationInstructions(codexSystemPrompt)
++                developer_instructions: null
+             }
+         });
++        expect(params.sandboxPolicy).toEqual({ type: 'dangerFullAccess' });
+         expect(params.model).toBeUndefined();
+     });
+ 
+-    it('carries custom developer instructions into collaboration mode settings', () => {
++    it('does not override Codex built-in plan instructions', () => {
+         const params = buildTurnStartParams({
+             threadId: 'thread-1',
+             message: 'hello',
+@@ -436,7 +437,7 @@ describe('appServerConfig', () => {
+             mode: 'plan',
+             settings: {
+                 model: 'o3',
+-                developer_instructions: withCollaborationInstructions(`${codexSystemPrompt}\n\nOnly respond in Chinese.`)
++                developer_instructions: null
+             }
+         });
+         expect(params.collaborationMode?.settings).not.toHaveProperty('reasoning_effort');
+diff --git a/cli/src/codex/utils/appServerConfig.ts b/cli/src/codex/utils/appServerConfig.ts
+index 0aca1cf42f2440770618b4c264b73004cf524b52..083be9820905a66c215a62ac97361147f738d417 100644
+--- a/cli/src/codex/utils/appServerConfig.ts
++++ b/cli/src/codex/utils/appServerConfig.ts
+@@ -298,13 +298,14 @@ export function buildTurnStartParams(args: {
+         if (!model) {
+             throw new Error(`Collaboration mode '${collaborationMode}' requires a resolved model`);
+         }
+-        const { developerInstructions } = resolveInstructions(args);
+         params.collaborationMode = {
+             mode: collaborationMode,
+             settings: {
+                 model,
+                 ...(modelReasoningEffort !== undefined ? { reasoning_effort: modelReasoningEffort } : {}),
+-                developer_instructions: appendCollaborationInstructions(developerInstructions, args.mode?.proactiveMultiAgent)
++                developer_instructions: collaborationMode === 'plan'
++                    ? null
++                    : appendCollaborationInstructions(resolveInstructions(args).developerInstructions, args.mode?.proactiveMultiAgent)
+             }
+         };
+     } else if (model) {
+diff --git a/cli/src/codex/utils/permissionHandler.test.ts b/cli/src/codex/utils/permissionHandler.test.ts
+index f141b66133dfca0b58a9074e731f7e8ae653fa54..8367a5f8564ddd2d98a4a182f40e1eab65e34089 100644
+--- a/cli/src/codex/utils/permissionHandler.test.ts
++++ b/cli/src/codex/utils/permissionHandler.test.ts
+@@ -7,7 +7,10 @@ type FakeAgentState = {
+     completedRequests: Record<string, unknown>;
+ };
+ 
+-function createHarness(mode: 'default' | 'read-only' | 'safe-yolo' | 'yolo') {
++function createHarness(
++    mode: 'default' | 'read-only' | 'safe-yolo' | 'yolo',
++    collaborationMode?: 'default' | 'plan'
++) {
+     let agentState: FakeAgentState = {
+         requests: {},
+         completedRequests: {}
+@@ -25,7 +28,9 @@ function createHarness(mode: 'default' | 'read-only' | 'safe-yolo' | 'yolo') {
+         }
+     } as unknown as ApiSessionClient;
+ 
+-    const handler = new CodexPermissionHandler(session, () => mode);
++    const handler = new CodexPermissionHandler(session, () => mode, {
++        getCollaborationMode: () => collaborationMode
++    });
+ 
+     return {
+         handler,
+@@ -69,6 +74,23 @@ describe('CodexPermissionHandler', () => {
+         });
+     });
+ 
++    it('keeps plan exit pending in yolo until the user approves it', async () => {
++        const { handler, rpcHandlers, getAgentState } = createHarness('yolo', 'plan');
++        const resultPromise = handler.handleToolCall('plan-exit', 'exit_plan_mode', { plan: '1. Implement' });
++
++        expect(getAgentState().requests).toMatchObject({
++            'plan-exit': { tool: 'exit_plan_mode' }
++        });
++
++        await rpcHandlers.get('permission')?.({
++            id: 'plan-exit',
++            approved: true,
++            decision: 'approved'
++        });
++
++        await expect(resultPromise).resolves.toMatchObject({ decision: 'approved' });
++    });
++
+     it('auto-approves safe-yolo requests once', async () => {
+         const { handler, getAgentState } = createHarness('safe-yolo');
+ 
+diff --git a/cli/src/codex/utils/permissionHandler.ts b/cli/src/codex/utils/permissionHandler.ts
+index e37fd39b126ab8acc674da3f5319d5b79b68a3aa..66a6c977cfb877fd570533dfef4aaba6cd7b1f92 100644
+--- a/cli/src/codex/utils/permissionHandler.ts
++++ b/cli/src/codex/utils/permissionHandler.ts
+@@ -35,6 +35,7 @@ type UserInputResult = {
+ type PermissionResult = ToolPermissionResult | UserInputResult;
+ 
+ type CodexPermissionHandlerOptions = {
++    getCollaborationMode?: () => 'default' | 'plan' | undefined;
+     onRequest?: (request: { id: string; toolName: string; input: unknown }) => void;
+     onComplete?: (result: {
+         id: string;
+@@ -110,7 +111,11 @@ export class CodexPermissionHandler extends BasePermissionHandler<PermissionResp
+         input: unknown
+     ): Promise<ToolPermissionResult> {
+         const mode = this.getPermissionMode() ?? 'default';
+-        const autoDecision = this.resolveAutoApprovalDecision(mode, toolName, toolCallId);
++        const requiresPlanApproval = this.options?.getCollaborationMode?.() === 'plan'
++            && (toolName === 'exit_plan_mode' || toolName === 'ExitPlanMode');
++        const autoDecision = requiresPlanApproval
++            ? null
++            : this.resolveAutoApprovalDecision(mode, toolName, toolCallId);
+         if (autoDecision) {
+             return Promise.resolve(this.completeAutoApproval(toolCallId, toolName, input, autoDecision));
+         }

@@ -1,0 +1,4082 @@
+diff --git a/README.md b/README.md
+index 1dc8d858d579ae35c1cf962d9cac5b63f3671d7e..60131f9360e5d3d51daad658293da43e99fe57a4 100644
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,7 @@ Run official Claude Code / Codex / Cursor Agent / Grok Build / OpenCode sessions
+ - **Terminal Anywhere** - Run commands from your phone or browser, directly connected to the working machine.
+ - **Voice Control** - Talk to your AI agent hands-free using the built-in voice assistant.
+ - **Workspace Browser** - Opt-in via one or more `hapi runner start --workspace-root <path>` flags: browse scoped file trees from the web and start sessions in allowed subdirectories.
++- **Managed API Providers** - Configure machine-local API profiles, provider health checks, and model choices for supported coding agents.
+ 
+ ## Demo
+ 
+@@ -40,6 +41,7 @@ For self-hosted options (Cloudflare Tunnel, Tailscale), see [Installation](docs/
+ - [Cursor Agent](docs/guide/cursor.md)
+ - [Grok Build](docs/guide/grok.md)
+ - [Voice Assistant](docs/guide/voice-assistant.md)
++- [API Providers](docs/guide/api-providers.md)
+ - [Why HAPI](docs/guide/why-hapi.md)
+ - [FAQ](docs/guide/faq.md)
+ 
+diff --git a/cli/README.md b/cli/README.md
+index 8824b8022523d38e8568b2faa12def6158e8e3e8..d966585042b527045924415b6e89956c1d17d5c0 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -122,9 +122,12 @@ See `src/configuration.ts` for all options.
+ Data is stored in `~/.hapi/` (or `$HAPI_HOME`):
+ 
+ - `settings.json` - User settings (machineId, token, onboarding flag). See `src/persistence.ts`.
++- `providers.json` - Namespace-partitioned Claude Code, Codex, and Grok Build provider profiles and secrets (mode `0600`).
+ - `runner.state.json` - Runner state (pid, port, version, heartbeat).
+ - `logs/` - Log files.
+ 
++Managed provider defaults apply to new terminal and runner sessions. Use `--hapi-provider <uuid>` or `--hapi-provider system` to override a Claude Code, Codex, or Grok Build launch.
++
+ ## Requirements
+ 
+ - Claude CLI installed and logged in (`claude` on PATH).
+diff --git a/cli/src/agent/sessionFactory.test.ts b/cli/src/agent/sessionFactory.test.ts
+index cf6fcb0158158cac68b6ae2b70990c48eda2df83..1c273f20e1d7c15c9098fda2482b63a9de197e14 100644
+--- a/cli/src/agent/sessionFactory.test.ts
++++ b/cli/src/agent/sessionFactory.test.ts
+@@ -1,4 +1,4 @@
+-import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import type { Session } from '@/api/types'
+ 
+ const {
+@@ -52,6 +52,10 @@ vi.mock('@/ui/logger', () => ({
+ 
+ import { bootstrapExistingSession, bootstrapLazySession, buildSessionMetadata } from './sessionFactory'
+ 
++afterEach(() => {
++    vi.unstubAllEnvs()
++})
++
+ function createSession(): Session {
+     return {
+         id: 'hapi-session-1',
+@@ -201,6 +205,45 @@ describe('bootstrapExistingSession', () => {
+ 
+         expect(metadata.capabilities?.terminal).toBe(true)
+     })
++
++    it('records managed provider identity without persisting its secret', () => {
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_ID', '11111111-1111-4111-8111-111111111111')
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_NAME', 'Codex proxy')
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_REVISION', '3')
++        vi.stubEnv('HAPI_CODEX_PROVIDER_API_KEY', 'do-not-persist')
++
++        const metadata = buildSessionMetadata({
++            flavor: 'codex',
++            startedBy: 'runner',
++            workingDirectory: '/tmp/project',
++            machineId: 'machine-1'
++        })
++
++        expect(metadata).toMatchObject({
++            providerProfileId: '11111111-1111-4111-8111-111111111111',
++            providerProfileName: 'Codex proxy',
++            providerProfileRevision: 3
++        })
++        expect(JSON.stringify(metadata)).not.toContain('do-not-persist')
++    })
++
++    it('records an explicit system-provider selection without stale managed metadata', () => {
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_SYSTEM', '1')
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_ID', '11111111-1111-4111-8111-111111111111')
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_NAME', 'Stale profile')
++        vi.stubEnv('HAPI_PROVIDER_PROFILE_REVISION', '2')
++
++        const metadata = buildSessionMetadata({
++            flavor: 'claude',
++            startedBy: 'runner',
++            workingDirectory: '/tmp/project',
++            machineId: 'machine-1'
++        })
++
++        expect(metadata.providerProfileId).toBeNull()
++        expect(metadata.providerProfileName).toBeUndefined()
++        expect(metadata.providerProfileRevision).toBeUndefined()
++    })
+ })
+ 
+ describe('bootstrapLazySession', () => {
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index a425421f304812100b32462dc86eaeaa8881fed9..75e7979b8debf94254892a5b8489fe4cd45c67eb 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -61,6 +61,10 @@ export function buildSessionMetadata(options: {
+     const happyLibDir = runtimePath()
+     const worktreeInfo = readWorktreeEnv()
+     const now = options.now ?? Date.now()
++    const providerProfileId = process.env.HAPI_PROVIDER_PROFILE_ID?.trim()
++    const providerProfileName = process.env.HAPI_PROVIDER_PROFILE_NAME?.trim()
++    const providerProfileRevision = Number(process.env.HAPI_PROVIDER_PROFILE_REVISION)
++    const usesSystemProvider = process.env.HAPI_PROVIDER_PROFILE_SYSTEM === '1'
+ 
+     return {
+         path: options.workingDirectory,
+@@ -78,6 +82,13 @@ export function buildSessionMetadata(options: {
+         lifecycleState: 'running',
+         lifecycleStateSince: now,
+         flavor: options.flavor,
++        providerProfileId: usesSystemProvider
++            ? null
++            : (providerProfileId || undefined),
++        providerProfileName: usesSystemProvider ? undefined : (providerProfileName || undefined),
++        providerProfileRevision: !usesSystemProvider && Number.isInteger(providerProfileRevision) && providerProfileRevision > 0
++            ? providerProfileRevision
++            : undefined,
+         capabilities: {
+             terminal: true
+         },
+diff --git a/cli/src/api/apiMachine.ts b/cli/src/api/apiMachine.ts
+index 6247c0b70be56cce371f5a0478937e359ff95c96..8da7480caa1ed08cf9b8b9f17001003550550ffc 100644
+--- a/cli/src/api/apiMachine.ts
++++ b/cli/src/api/apiMachine.ts
+@@ -43,6 +43,7 @@ import { collectMachineHealth } from '@/utils/machineHealth'
+ import { inspectCursorChatStore } from '@/cursor/cursorChatStoreStatus'
+ import { homedir } from 'node:os'
+ import type { CursorChatStoreStatus } from '@hapi/protocol/apiTypes'
++import { registerProviderHandlers } from '@/host/registerProviderHandlers'
+ 
+ type MachineRpcHandlers = {
+     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
+@@ -126,6 +127,7 @@ export class ApiMachineClient {
+         })
+ 
+         registerCommonHandlers(this.rpcHandlerManager, getInvokedCwd())
++        registerProviderHandlers({ rpcHandlerManager: this.rpcHandlerManager })
+ 
+         this.rpcHandlerManager.registerHandler<PathExistsRequest, PathExistsResponse>(RPC_METHODS.PathExists, async (params) => {
+             const rawPaths = Array.isArray(params?.paths) ? params.paths : []
+@@ -357,7 +359,7 @@ export class ApiMachineClient {
+ 
+     setRPCHandlers({ spawnSession, stopSession, requestShutdown }: MachineRpcHandlers): void {
+         this.rpcHandlerManager.registerHandler(RPC_METHODS.SpawnHappySession, async (params: any) => {
+-            const { directory, sessionId, existingSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, token, sessionType, worktreeName } = params || {}
++            const { directory, sessionId, existingSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, providerProfileId, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, token, sessionType, worktreeName } = params || {}
+ 
+             if (!directory) {
+                 throw new Error('Directory is required')
+@@ -376,6 +378,7 @@ export class ApiMachineClient {
+                 machineId,
+                 approvedNewDirectoryCreation,
+                 agent,
++                providerProfileId,
+                 model,
+                 effort,
+                 modelReasoningEffort,
+diff --git a/cli/src/claude/sdk/query.ts b/cli/src/claude/sdk/query.ts
+index 246fb32afc812e0969ff657f2325f14055373a88..9f235589baa6c65d8812ed1b008127e4f7296901 100644
+--- a/cli/src/claude/sdk/query.ts
++++ b/cli/src/claude/sdk/query.ts
+@@ -29,6 +29,7 @@ import { stripNewlinesForWindowsShellArg } from '@/utils/shellEscape'
+ import type { Writable } from 'node:stream'
+ import { logger } from '@/ui/logger'
+ import { appendMcpConfigArg } from '../utils/mcpConfig'
++import { resolveManagedProviderWireModel } from '@/host/providerModel'
+ 
+ const DEFAULT_PROMPT_FAILURE_CLEANUP_TIMEOUT_MS = 3_000
+ 
+@@ -331,7 +332,8 @@ export function query(config: {
+     if (customSystemPrompt) args.push('--system-prompt', stripNewlinesForWindowsShellArg(customSystemPrompt))
+     if (appendSystemPrompt) args.push('--append-system-prompt', stripNewlinesForWindowsShellArg(appendSystemPrompt))
+     if (maxTurns) args.push('--max-turns', maxTurns.toString())
+-    if (model) args.push('--model', model)
++    const wireModel = resolveManagedProviderWireModel(model)
++    if (wireModel) args.push('--model', wireModel)
+     if (effort) args.push('--effort', effort)
+     if (canCallTool) {
+         if (typeof prompt === 'string') {
+diff --git a/cli/src/codex/codexAppServerClient.ts b/cli/src/codex/codexAppServerClient.ts
+index e8ebd2e6343612712a7a286d8b8074e2edec2f90..d73d43db82619392a0aaff3c286bf97cf3def68a 100644
+--- a/cli/src/codex/codexAppServerClient.ts
++++ b/cli/src/codex/codexAppServerClient.ts
+@@ -1,6 +1,8 @@
+ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+ import { existsSync } from 'node:fs';
+ import { logger } from '@/ui/logger';
++import { readCodexProviderConfigArgs } from './utils/providerConfigArgs';
++import { resolveCodexCommand } from './utils/codexExecutable';
+ import { JsonLineParser } from '@/utils/jsonLineParser';
+ import { killProcessByChildProcess } from '@/utils/process';
+ import type {
+@@ -77,6 +79,7 @@ function createAbortError(): Error {
+ 
+ type CodexCommandCandidate = {
+     command: string;
++    args: string[];
+     source: 'desktop' | 'path';
+     version: number[] | null;
+ };
+@@ -87,9 +90,9 @@ function parseCodexVersion(output: string): number[] | null {
+     return [Number(match[1]), Number(match[2]), Number(match[3])];
+ }
+ 
+-function getCodexVersion(command: string): number[] | null {
++function getCodexVersion(command: string, args: string[] = []): number[] | null {
+     try {
+-        const output = execFileSync(command, ['--version'], {
++        const output = execFileSync(command, [...args, '--version'], {
+             encoding: 'utf8',
+             timeout: 3_000,
+             stdio: ['ignore', 'pipe', 'ignore']
+@@ -111,15 +114,17 @@ function compareVersion(a: number[] | null, b: number[] | null): number {
+     return 0;
+ }
+ 
+-function resolveCodexAppServerCommand(): string {
++function resolveCodexAppServerCommand(): { command: string; args: string[] } {
+     if (process.env.HAPI_CODEX_APP_SERVER_BIN) {
+-        return process.env.HAPI_CODEX_APP_SERVER_BIN;
++        return { command: process.env.HAPI_CODEX_APP_SERVER_BIN, args: [] };
+     }
+ 
++    const pathCommand = resolveCodexCommand();
+     const candidates: CodexCommandCandidate[] = [{
+-        command: 'codex',
++        command: pathCommand.command,
++        args: pathCommand.args,
+         source: 'path',
+-        version: getCodexVersion('codex')
++        version: getCodexVersion(pathCommand.command, pathCommand.args)
+     }];
+ 
+     if (process.platform === 'darwin') {
+@@ -127,6 +132,7 @@ function resolveCodexAppServerCommand(): string {
+         if (existsSync(desktopCodex)) {
+             candidates.push({
+                 command: desktopCodex,
++                args: [],
+                 source: 'desktop',
+                 version: getCodexVersion(desktopCodex)
+             });
+@@ -143,14 +149,14 @@ function resolveCodexAppServerCommand(): string {
+     })[0];
+ 
+     logger.debug('[CodexAppServer] Resolved codex command', {
+-        selected: best.command,
++        selected: [best.command, ...best.args].join(' '),
+         candidates: candidates.map((candidate) => ({
+-            command: candidate.command,
++            command: [candidate.command, ...candidate.args].join(' '),
+             source: candidate.source,
+             version: candidate.version?.join('.') ?? null
+         }))
+     });
+-    return best.command;
++    return { command: best.command, args: best.args };
+ }
+ 
+ export class CodexAppServerClient extends JsonLineParser {
+@@ -175,15 +181,15 @@ export class CodexAppServerClient extends JsonLineParser {
+         }
+ 
+         const codexCommand = resolveCodexAppServerCommand();
+-        logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
+-        this.process = spawn(codexCommand, ['app-server'], {
++        logger.debug(`[CodexAppServer] Starting ${[codexCommand.command, ...codexCommand.args].join(' ')} app-server`);
++        this.process = spawn(codexCommand.command, [...codexCommand.args, ...readCodexProviderConfigArgs(), 'app-server'], {
+             env: Object.keys(process.env).reduce((acc, key) => {
+                 const value = process.env[key];
+                 if (typeof value === 'string') acc[key] = value;
+                 return acc;
+             }, {} as Record<string, string>),
+             stdio: ['pipe', 'pipe', 'pipe'],
+-            shell: process.platform === 'win32',
++            shell: false,
+             windowsHide: process.platform === 'win32'
+         });
+ 
+diff --git a/cli/src/codex/codexLocal.ts b/cli/src/codex/codexLocal.ts
+index e60e3a87aa23dbd779255a8b58bae85b26aeb2fa..1ea1868bbfc2de07d8ec8832491a0fa53e82e57f 100644
+--- a/cli/src/codex/codexLocal.ts
++++ b/cli/src/codex/codexLocal.ts
+@@ -10,6 +10,8 @@ import { codexSystemPrompt } from './utils/systemPrompt';
+ import type { ReasoningEffort } from './appServerTypes';
+ import { resolveCodexCommand } from './utils/codexExecutable';
+ import type { McpServersConfig } from './utils/buildHapiMcpBridge';
++import { readCodexProviderConfigArgs } from './utils/providerConfigArgs';
++import { resolveManagedProviderWireModel } from '@/host/providerModel';
+ 
+ /**
+  * Filter out 'resume' subcommand which is managed internally by hapi.
+@@ -52,8 +54,9 @@ export async function codexLocal(opts: {
+         opts.onSessionFound(opts.sessionId);
+     }
+ 
+-    if (opts.model) {
+-        args.push('--model', opts.model);
++    const wireModel = resolveManagedProviderWireModel(opts.model);
++    if (wireModel) {
++        args.push('--model', wireModel);
+     }
+ 
+     if (opts.modelReasoningEffort) {
+@@ -89,10 +92,11 @@ export async function codexLocal(opts: {
+     }
+ 
+     const codexCommand = resolveCodexCommand();
++    const providerConfigArgs = readCodexProviderConfigArgs();
+ 
+     await spawnWithTerminalGuard({
+         command: codexCommand.command,
+-        args: [...codexCommand.args, ...args],
++        args: [...codexCommand.args, ...providerConfigArgs, ...args],
+         cwd: opts.path,
+         env: process.env,
+         signal: opts.abort,
+diff --git a/cli/src/codex/utils/appServerConfig.ts b/cli/src/codex/utils/appServerConfig.ts
+index 13bbc8c006587a0fd6c7cacf82721a747e1e7d1e..b6beef217b5b8013acf10aa939c82b6c4179a599 100644
+--- a/cli/src/codex/utils/appServerConfig.ts
++++ b/cli/src/codex/utils/appServerConfig.ts
+@@ -10,6 +10,7 @@ import type {
+     TurnStartParams
+ } from '../appServerTypes';
+ import { resolveCodexPermissionModeConfig } from './permissionModeConfig';
++import { resolveManagedProviderWireModel } from '@/host/providerModel';
+ 
+ export const codexCollaborationSpawnAgentInstructions = [
+     'Codex sub-agent spawning rules:',
+@@ -162,8 +163,9 @@ export function buildThreadStartParams(args: {
+         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
+     };
+ 
+-    if (args.mode.model) {
+-        params.model = args.mode.model;
++    const wireModel = resolveManagedProviderWireModel(args.mode.model);
++    if (wireModel) {
++        params.model = wireModel;
+     }
+ 
+     const threadServiceTier = toAppServerServiceTier(args.mode.serviceTier);
+diff --git a/cli/src/codex/utils/providerConfigArgs.ts b/cli/src/codex/utils/providerConfigArgs.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..59c5eb4df9376ffdad6b18c07fdd501f3245fe9f
+--- /dev/null
++++ b/cli/src/codex/utils/providerConfigArgs.ts
+@@ -0,0 +1,12 @@
++export function readCodexProviderConfigArgs(env: NodeJS.ProcessEnv = process.env): string[] {
++    const raw = env.HAPI_CODEX_PROVIDER_ARGS
++    if (!raw) return []
++    try {
++        const parsed = JSON.parse(raw) as unknown
++        return Array.isArray(parsed) && parsed.every((value) => typeof value === 'string')
++            ? parsed
++            : []
++    } catch {
++        return []
++    }
++}
+diff --git a/cli/src/commands/claude.ts b/cli/src/commands/claude.ts
+index 367a0d12d6e33fccb8e498040c5122a98ef7dc34..04794d6c11d6c7984ef795029e2fb9e98d3129b9 100644
+--- a/cli/src/commands/claude.ts
++++ b/cli/src/commands/claude.ts
+@@ -14,6 +14,7 @@ import { maybeAutoStartServer } from '@/utils/autoStartServer'
+ import { withBunRuntimeEnv } from '@/utils/bunRuntime'
+ import { extractErrorInfo } from '@/utils/errorUtils'
+ import type { CommandDefinition } from './types'
++import { applyProviderSelection } from '@/host/applyProviderSelection'
+ 
+ export const claudeCommand: CommandDefinition = {
+     name: 'default',
+@@ -29,6 +30,7 @@ export const claudeCommand: CommandDefinition = {
+         let showHelp = false
+         const unknownArgs: string[] = []
+         let hasExplicitPermissionMode = false
++        let providerProfileId: string | null | undefined
+ 
+         for (let i = 0; i < args.length; i++) {
+             const arg = args[i]
+@@ -45,6 +47,10 @@ export const claudeCommand: CommandDefinition = {
+                 }
+                 options.permissionMode = mode as StartOptions['permissionMode']
+                 hasExplicitPermissionMode = true
++            } else if (arg === '--hapi-provider') {
++                const provider = args[++i]
++                if (!provider) throw new Error('Missing --hapi-provider value')
++                providerProfileId = provider === 'system' ? null : provider
+             } else if (arg === '--yolo' && !hasExplicitPermissionMode) {
+                 options.permissionMode = 'bypassPermissions'
+                 unknownArgs.push('--dangerously-skip-permissions')
+@@ -105,6 +111,7 @@ ${chalk.bold('Examples:')}
+   hapi auth login         Configure CLI_API_TOKEN interactively
+   hapi --yolo             Start with bypassing permissions
+                             hapi sugar for --dangerously-skip-permissions
++  hapi --hapi-provider ID Use a managed provider profile (or "system")
+   hapi auth status        Show direct-connect status
+   hapi doctor             Run diagnostics
+ 
+@@ -155,6 +162,11 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
+             await new Promise(resolve => setTimeout(resolve, 200))
+         }
+ 
++        // Resolve credentials only after background processes have started so
++        // a session-scoped provider secret is never inherited by the runner.
++        const providerLaunch = await applyProviderSelection('claude', providerProfileId)
++        if (!options.model && providerLaunch?.defaultModel) options.model = providerLaunch.defaultModel
++
+         try {
+             const { runClaude } = await import('@/claude/runClaude')
+             await runClaude(options)
+diff --git a/cli/src/commands/codex.test.ts b/cli/src/commands/codex.test.ts
+index 058b2420206934f758dc9e176c39f666455ce674..138b83b6a963d5f8e40c7794ca439d16641d5021 100644
+--- a/cli/src/commands/codex.test.ts
++++ b/cli/src/commands/codex.test.ts
+@@ -5,12 +5,19 @@ const {
+     maybeAutoStartServerMock,
+     authAndSetupMachineIfNeededMock,
+     assertCodexLocalSupportedMock,
++    applyProviderSelectionMock,
+     runCodexMock
+ } = vi.hoisted(() => ({
+     initializeTokenMock: vi.fn(async () => {}),
+     maybeAutoStartServerMock: vi.fn(async () => {}),
+     authAndSetupMachineIfNeededMock: vi.fn(async () => {}),
+     assertCodexLocalSupportedMock: vi.fn(),
++    applyProviderSelectionMock: vi.fn(async (): Promise<null | {
++        env: Record<string, string>
++        args: string[]
++        defaultModel?: string
++        profile: { id: string; name: string; revision: number }
++    }> => null),
+     runCodexMock: vi.fn(async () => {})
+ }))
+ 
+@@ -34,6 +41,10 @@ vi.mock('@/codex/runCodex', () => ({
+     runCodex: runCodexMock
+ }))
+ 
++vi.mock('@/host/applyProviderSelection', () => ({
++    applyProviderSelection: applyProviderSelectionMock
++}))
++
+ import { codexCommand } from './codex'
+ 
+ function createCommandContext(commandArgs: string[]) {
+@@ -49,6 +60,8 @@ describe('codexCommand', () => {
+         maybeAutoStartServerMock.mockClear()
+         authAndSetupMachineIfNeededMock.mockClear()
+         assertCodexLocalSupportedMock.mockClear()
++        applyProviderSelectionMock.mockReset()
++        applyProviderSelectionMock.mockResolvedValue(null)
+         runCodexMock.mockClear()
+     })
+ 
+@@ -103,6 +116,30 @@ describe('codexCommand', () => {
+         })
+     })
+ 
++    it('selects a managed provider and uses its default model', async () => {
++        applyProviderSelectionMock.mockResolvedValueOnce({
++            env: {},
++            args: [],
++            defaultModel: 'provider-model',
++            profile: { id: '11111111-1111-4111-8111-111111111111', name: 'Provider', revision: 1 }
++        })
++
++        await codexCommand.run(createCommandContext([
++            '--hapi-provider',
++            '11111111-1111-4111-8111-111111111111'
++        ]))
++
++        expect(applyProviderSelectionMock).toHaveBeenCalledWith('codex', '11111111-1111-4111-8111-111111111111')
++        expect(runCodexMock).toHaveBeenCalledWith({ model: 'provider-model' })
++    })
++
++    it('allows an explicit system-provider selection', async () => {
++        await codexCommand.run(createCommandContext(['--hapi-provider', 'system']))
++
++        expect(applyProviderSelectionMock).toHaveBeenCalledWith('codex', null)
++        expect(runCodexMock).toHaveBeenCalledWith({})
++    })
++
+     it('rejects an unsupported --service-tier value', async () => {
+         const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+         const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+diff --git a/cli/src/commands/codex.ts b/cli/src/commands/codex.ts
+index 85e89f6dd9e0af040ec665a92b1d395d2ff2a1ca..39193d73b183340d65de599803992e2a5b378b81 100644
+--- a/cli/src/commands/codex.ts
++++ b/cli/src/commands/codex.ts
+@@ -8,6 +8,7 @@ import type { CodexPermissionMode } from '@hapi/protocol/types'
+ import type { ReasoningEffort } from '@/codex/appServerTypes'
+ import { assertCodexLocalSupported } from '@/codex/utils/codexVersion'
+ import { parseReasoningEffortValue } from '@/codex/utils/reasoningEffort'
++import { applyProviderSelection } from '@/host/applyProviderSelection'
+ 
+ // Mirror the web /service-tier endpoint's enum so the internal resume spawn
+ // path can never seed/persist an unsupported tier string.
+@@ -38,6 +39,7 @@ export const codexCommand: CommandDefinition = {
+             } = {}
+             const unknownArgs: string[] = []
+             let hasExplicitPermissionMode = false
++            let providerProfileId: string | null | undefined
+ 
+             for (let i = 0; i < commandArgs.length; i++) {
+                 const arg = commandArgs[i]
+@@ -52,6 +54,10 @@ export const codexCommand: CommandDefinition = {
+                 }
+                 if (arg === '--started-by') {
+                     options.startedBy = commandArgs[++i] as 'runner' | 'terminal'
++                } else if (arg === '--hapi-provider') {
++                    const provider = commandArgs[++i]
++                    if (!provider) throw new Error('Missing --hapi-provider value')
++                    providerProfileId = provider === 'system' ? null : provider
+                 } else if (arg === '--existing-session-id') {
+                     const sessionId = commandArgs[++i]
+                     if (!sessionId) {
+@@ -106,6 +112,8 @@ export const codexCommand: CommandDefinition = {
+                 void maybeAutoStartServer({ waitForReady: false, quiet: true })
+             }
+             await authAndSetupMachineIfNeeded()
++            const providerLaunch = await applyProviderSelection('codex', providerProfileId)
++            if (!options.model && providerLaunch?.defaultModel) options.model = providerLaunch.defaultModel
+             await runCodex(options)
+         } catch (error) {
+             console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
+diff --git a/cli/src/commands/grok.ts b/cli/src/commands/grok.ts
+index 7edbd7b6000255c3b2a1866ca55d5c8855f70799..7c3998356473291112e2fd712644df6cd07280b5 100644
+--- a/cli/src/commands/grok.ts
++++ b/cli/src/commands/grok.ts
+@@ -5,16 +5,29 @@ import { maybeAutoStartServer } from '@/utils/autoStartServer'
+ import type { CommandDefinition } from './types'
+ import { GROK_PERMISSION_MODES } from '@hapi/protocol/modes'
+ import { parseRemoteAgentCommandOptions } from './agentCommandOptions'
++import { applyProviderSelection } from '@/host/applyProviderSelection'
+ 
+ export const grokCommand: CommandDefinition = {
+     name: 'grok',
+     requiresRuntimeAssets: true,
+     run: async ({ commandArgs }) => {
+         try {
+-            const hasExplicitPermissionMode = commandArgs.includes('--permission-mode')
++            let providerProfileId: string | null | undefined
++            const argsWithoutProvider: string[] = []
++            for (let index = 0; index < commandArgs.length; index += 1) {
++                const arg = commandArgs[index]
++                if (arg === '--hapi-provider') {
++                    const value = commandArgs[++index]
++                    if (!value) throw new Error('Missing --hapi-provider value')
++                    providerProfileId = value === 'system' ? null : value
++                    continue
++                }
++                argsWithoutProvider.push(arg)
++            }
++            const hasExplicitPermissionMode = argsWithoutProvider.includes('--permission-mode')
+             const normalizedArgs = hasExplicitPermissionMode
+-                ? commandArgs
+-                : commandArgs.flatMap((arg) => arg === '--yolo'
++                ? argsWithoutProvider
++                : argsWithoutProvider.flatMap((arg) => arg === '--yolo'
+                     ? ['--permission-mode', 'bypassPermissions']
+                     : [arg])
+             const options = parseRemoteAgentCommandOptions(normalizedArgs, GROK_PERMISSION_MODES)
+@@ -22,6 +35,8 @@ export const grokCommand: CommandDefinition = {
+             await initializeToken()
+             await maybeAutoStartServer()
+             await authAndSetupMachineIfNeeded()
++            const providerLaunch = await applyProviderSelection('grok', providerProfileId)
++            if (!options.model && providerLaunch?.defaultModel) options.model = providerLaunch.defaultModel
+ 
+             const { runGrok } = await import('@/grok/runGrok')
+             await runGrok(options)
+diff --git a/cli/src/commands/resume.test.ts b/cli/src/commands/resume.test.ts
+index c97553d00d73c1ba66205abbf312b928bf121397..1aed90a1e7b3479d2fd03e9892cac3ab44aa55b0 100644
+--- a/cli/src/commands/resume.test.ts
++++ b/cli/src/commands/resume.test.ts
+@@ -12,6 +12,7 @@ const {
+     runClaudeMock,
+     runGrokMock,
+     runPiMock,
++    applyProviderSelectionMock,
+     assertCodexLocalSupportedMock,
+     existsSyncMock
+ } = vi.hoisted(() => ({
+@@ -26,6 +27,7 @@ const {
+     runClaudeMock: vi.fn(async () => {}),
+     runGrokMock: vi.fn(async () => {}),
+     runPiMock: vi.fn(async () => {}),
++    applyProviderSelectionMock: vi.fn(async () => null),
+     assertCodexLocalSupportedMock: vi.fn(),
+     existsSyncMock: vi.fn(() => true)
+ }))
+@@ -50,6 +52,7 @@ vi.mock('@/codex/runCodex', () => ({ runCodex: runCodexMock }))
+ vi.mock('@/claude/runClaude', () => ({ runClaude: runClaudeMock }))
+ vi.mock('@/grok/runGrok', () => ({ runGrok: runGrokMock }))
+ vi.mock('@/pi/runPi', () => ({ runPi: runPiMock }))
++vi.mock('@/host/applyProviderSelection', () => ({ applyProviderSelection: applyProviderSelectionMock }))
+ vi.mock('@/codex/utils/codexVersion', () => ({ assertCodexLocalSupported: assertCodexLocalSupportedMock }))
+ vi.mock('node:fs', () => ({ existsSync: existsSyncMock }))
+ 
+@@ -80,6 +83,8 @@ describe('resumeCommand', () => {
+         runClaudeMock.mockClear()
+         runGrokMock.mockClear()
+         runPiMock.mockClear()
++        applyProviderSelectionMock.mockReset()
++        applyProviderSelectionMock.mockResolvedValue(null)
+         assertCodexLocalSupportedMock.mockClear()
+         existsSyncMock.mockReturnValue(true)
+     })
+@@ -94,6 +99,7 @@ describe('resumeCommand', () => {
+             thinking: false,
+             controlledByUser: false,
+             agentSessionId: 'codex-thread-1',
++            providerProfileId: '11111111-1111-4111-8111-111111111111',
+             model: 'gpt-5.4',
+             modelReasoningEffort: 'xhigh',
+             permissionMode: 'default',
+@@ -104,6 +110,7 @@ describe('resumeCommand', () => {
+ 
+         expect(handoffSessionToLocalMock).toHaveBeenCalledWith('hapi-session-1')
+         expect(assertCodexLocalSupportedMock).toHaveBeenCalledOnce()
++        expect(applyProviderSelectionMock).toHaveBeenCalledWith('codex', '11111111-1111-4111-8111-111111111111')
+         expect(runCodexMock).toHaveBeenCalledWith({
+             existingSessionId: 'hapi-session-1',
+             workingDirectory: '/tmp/project',
+@@ -146,6 +153,25 @@ describe('resumeCommand', () => {
+         })
+     })
+ 
++    it('passes an explicit system provider selection to a local resume', async () => {
++        getLocalResumeTargetMock.mockResolvedValue({
++            sessionId: 'hapi-session-system',
++            flavor: 'claude',
++            directory: '/tmp/project',
++            machineId: 'machine-1',
++            active: false,
++            thinking: false,
++            controlledByUser: false,
++            agentSessionId: 'claude-session-1',
++            providerProfileId: null,
++            permissionMode: 'default'
++        })
++
++        await resumeCommand.run(createContext(['hapi-session-system']))
++
++        expect(applyProviderSelectionMock).toHaveBeenCalledWith('claude', null)
++    })
++
+     it('resumes a Grok target in the native local TUI', async () => {
+         getLocalResumeTargetMock.mockResolvedValue({
+             sessionId: 'hapi-session-grok',
+diff --git a/cli/src/commands/resume.ts b/cli/src/commands/resume.ts
+index 50b18223f7fce51ba29c3d8cc7cd27c75cd7d51e..44857cc9fbc92fffdde62b964408c33c6a740cd9 100644
+--- a/cli/src/commands/resume.ts
++++ b/cli/src/commands/resume.ts
+@@ -19,6 +19,7 @@ import { maybeAutoStartServer } from '@/utils/autoStartServer'
+ import { assertCodexLocalSupported } from '@/codex/utils/codexVersion'
+ import { ResumeSessionPicker } from '@/ui/ink/ResumeSessionPicker'
+ import type { CommandDefinition } from './types'
++import { applyProviderSelection } from '@/host/applyProviderSelection'
+ 
+ function formatSessionLine(session: ResumableSession, index: number): string {
+     const name = session.name ?? session.summary ?? session.sessionId
+@@ -72,6 +73,10 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
+         permissionMode: target.permissionMode
+     }
+ 
++    const providerLaunch = target.flavor === 'claude' || target.flavor === 'codex' || target.flavor === 'grok'
++        ? await applyProviderSelection(target.flavor, target.providerProfileId)
++        : null
++
+     if (target.flavor === 'claude') {
+         const { runClaude } = await import('@/claude/runClaude')
+         await runClaude({
+@@ -81,7 +86,7 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
+             startedBy: base.startedBy,
+             permissionMode: base.permissionMode as ClaudePermissionMode | undefined,
+             startingMode: 'local',
+-            model: target.model ?? undefined,
++            model: target.model ?? providerLaunch?.defaultModel,
+             effort: target.effort ?? undefined
+         })
+         return
+@@ -96,7 +101,7 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
+             resumeSessionId: base.resumeSessionId,
+             startedBy: base.startedBy,
+             permissionMode: base.permissionMode as CodexPermissionMode | undefined,
+-            model: target.model ?? undefined,
++            model: target.model ?? providerLaunch?.defaultModel,
+             modelReasoningEffort: (target.modelReasoningEffort ?? undefined) as ReasoningEffort | undefined,
+             collaborationMode: target.collaborationMode
+         })
+@@ -130,7 +135,7 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
+             startedBy: base.startedBy,
+             permissionMode: base.permissionMode as GrokPermissionMode | undefined,
+             startingMode: 'local',
+-            model: target.model ?? undefined,
++            model: target.model ?? providerLaunch?.defaultModel,
+             effort: target.effort ?? undefined
+         })
+         return
+diff --git a/cli/src/grok/grokLocal.ts b/cli/src/grok/grokLocal.ts
+index 0f5b853ee9a7d63b14446eb40c302bb5ea95c0e6..b4ccd894f2629a12d3a77e38f19fd15344531a65 100644
+--- a/cli/src/grok/grokLocal.ts
++++ b/cli/src/grok/grokLocal.ts
+@@ -2,6 +2,7 @@ import { logger } from '@/ui/logger'
+ import { spawnWithTerminalGuard } from '@/utils/spawnWithTerminalGuard'
+ import type { PermissionMode } from './types'
+ import { assertSafeWindowsShellArg } from './utils/windowsShellArgs'
++import { resolveManagedProviderWireModel } from '@/host/providerModel'
+ 
+ type GrokLocalOptions = {
+     sessionId: string
+@@ -13,7 +14,8 @@ type GrokLocalOptions = {
+ 
+ export function buildGrokLocalArgs(opts: GrokLocalOptions): string[] {
+     assertSafeWindowsShellArg(opts.sessionId, 'sessionId')
+-    if (opts.model) assertSafeWindowsShellArg(opts.model, 'model')
++    const wireModel = resolveManagedProviderWireModel(opts.model)
++    if (wireModel) assertSafeWindowsShellArg(wireModel, 'model')
+     if (opts.effort) assertSafeWindowsShellArg(opts.effort, 'effort')
+ 
+     const args: string[] = []
+@@ -23,8 +25,8 @@ export function buildGrokLocalArgs(opts: GrokLocalOptions): string[] {
+     } else {
+         args.push('--session-id', opts.sessionId)
+     }
+-    if (opts.model) {
+-        args.push('--model', opts.model)
++    if (wireModel) {
++        args.push('--model', wireModel)
+     }
+     if (opts.effort) {
+         args.push('--reasoning-effort', opts.effort)
+diff --git a/cli/src/grok/grokRemoteLauncher.ts b/cli/src/grok/grokRemoteLauncher.ts
+index 6ac0de4df20ab45eb314a490143b879246337614..25a2ac7297b69d2b852cbdb58f7417d0142b2ca2 100644
+--- a/cli/src/grok/grokRemoteLauncher.ts
++++ b/cli/src/grok/grokRemoteLauncher.ts
+@@ -1,6 +1,7 @@
+ import { randomUUID } from 'node:crypto'
+ import React from 'react'
+ import { logger } from '@/ui/logger'
++import { resolveManagedProviderWireModel } from '@/host/providerModel'
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge'
+ import { convertAgentMessage } from '@/agent/messageConverter'
+ import type { AgentMessage, McpServerStdio, PromptContent } from '@/agent/types'
+@@ -191,7 +192,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
+                 : batch.mode.model
+             if (requestedModel && requestedModel !== this.currentBackendModel) {
+                 try {
+-                    await backend.setModel(acpSessionId, requestedModel, { flavor: 'grok' })
++                    await backend.setModel(acpSessionId, resolveManagedProviderWireModel(requestedModel)!, { flavor: 'grok' })
+                     this.currentBackendModel = requestedModel
+                     batch.mode.model = requestedModel
+                 } catch (error) {
+diff --git a/cli/src/grok/utils/grokBackend.ts b/cli/src/grok/utils/grokBackend.ts
+index 66d8478365b06237056bd90b37cfd22227fbbbe7..0aee110a52e98fd2edc8b8f41106a2e08122397c 100644
+--- a/cli/src/grok/utils/grokBackend.ts
++++ b/cli/src/grok/utils/grokBackend.ts
+@@ -1,5 +1,6 @@
+ import { AcpSdkBackend } from '@/agent/backends/acp'
+ import { assertSafeWindowsShellArg } from './windowsShellArgs'
++import { resolveManagedProviderWireModel } from '@/host/providerModel'
+ 
+ const ANSI_SGR_PATTERN = /\u001b\[[0-9;]*m/g
+ 
+@@ -19,15 +20,16 @@ function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+ 
+ export function buildGrokAgentArgs(opts: { cwd: string; model?: string; effort?: string }): string[] {
+     assertSafeWindowsShellArg(opts.cwd, 'cwd')
+-    if (opts.model) assertSafeWindowsShellArg(opts.model, 'model')
++    const wireModel = resolveManagedProviderWireModel(opts.model)
++    if (wireModel) assertSafeWindowsShellArg(wireModel, 'model')
+     if (opts.effort) assertSafeWindowsShellArg(opts.effort, 'effort')
+ 
+     // --cwd is a top-level Grok flag and must precede the `agent` subcommand.
+     // session/new also carries cwd, but setting it at process start ensures
+     // Grok discovers the correct project rules/plugins before initialization.
+     const args = ['--cwd', opts.cwd, 'agent']
+-    if (opts.model) {
+-        args.push('--model', opts.model)
++    if (wireModel) {
++        args.push('--model', wireModel)
+     }
+     if (opts.effort) {
+         args.push('--reasoning-effort', opts.effort)
+diff --git a/cli/src/host/applyProviderSelection.test.ts b/cli/src/host/applyProviderSelection.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..926a0f6c0075f89caeae82c0365077d5cc7ec70f
+--- /dev/null
++++ b/cli/src/host/applyProviderSelection.test.ts
+@@ -0,0 +1,32 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { applyProviderSelection } from './applyProviderSelection'
++
++const systemAgents = [
++    { agent: 'claude' as const, credential: 'ANTHROPIC_API_KEY' },
++    { agent: 'codex' as const, credential: 'OPENAI_API_KEY' },
++    { agent: 'grok' as const, credential: 'XAI_API_KEY' }
++]
++
++afterEach(() => {
++    vi.unstubAllEnvs()
++})
++
++describe('applyProviderSelection', () => {
++    for (const { agent, credential } of systemAgents) {
++        it(`preserves native ${agent} credentials for an explicit system selection`, async () => {
++            vi.stubEnv(credential, 'native-credential')
++            vi.stubEnv('HAPI_PROVIDER_PROFILE_ID', '11111111-1111-4111-8111-111111111111')
++            vi.stubEnv('HAPI_PROVIDER_PROFILE_NAME', 'Managed profile')
++            vi.stubEnv('HAPI_PROVIDER_PROFILE_REVISION', '1')
++
++            const launch = await applyProviderSelection(agent, null)
++
++            expect(launch).toBeNull()
++            expect(process.env[credential]).toBe('native-credential')
++            expect(process.env.HAPI_PROVIDER_PROFILE_SYSTEM).toBe('1')
++            expect(process.env.HAPI_PROVIDER_PROFILE_ID).toBeUndefined()
++            expect(process.env.HAPI_PROVIDER_PROFILE_NAME).toBeUndefined()
++            expect(process.env.HAPI_PROVIDER_PROFILE_REVISION).toBeUndefined()
++        })
++    }
++})
+diff --git a/cli/src/host/applyProviderSelection.ts b/cli/src/host/applyProviderSelection.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..047eecaf76900607b2040f8f39b7086d2cecaf54
+--- /dev/null
++++ b/cli/src/host/applyProviderSelection.ts
+@@ -0,0 +1,68 @@
++import type { AgentProvider } from '@hapi/protocol'
++import { ProviderRegistry } from './providerRegistry'
++import { resolveProviderLaunch, type AgentLaunchConfiguration } from './providerAdapters'
++
++function clearConflictingCredentials(agent: AgentProvider): void {
++    if (agent === 'claude') {
++        delete process.env.CLAUDE_CODE_OAUTH_TOKEN
++        delete process.env.ANTHROPIC_API_KEY
++        delete process.env.ANTHROPIC_AUTH_TOKEN
++        delete process.env.ANTHROPIC_BASE_URL
++    } else if (agent === 'codex') {
++        delete process.env.OPENAI_API_KEY
++        delete process.env.HAPI_CODEX_PROVIDER_API_KEY
++        delete process.env.HAPI_CODEX_PROVIDER_ARGS
++    } else if (agent === 'grok') {
++        delete process.env.XAI_API_KEY
++        delete process.env.XAI_BASE_URL
++    }
++}
++
++function clearProviderMetadata(): void {
++    delete process.env.HAPI_PROVIDER_PROFILE_ID
++    delete process.env.HAPI_PROVIDER_PROFILE_NAME
++    delete process.env.HAPI_PROVIDER_PROFILE_REVISION
++    delete process.env.HAPI_PROVIDER_PROFILE_SYSTEM
++    delete process.env.HAPI_CODEX_PROVIDER_ARGS
++    delete process.env.HAPI_CODEX_PROVIDER_API_KEY
++}
++
++export async function applyProviderSelection(
++    agent: AgentProvider,
++    requestedId?: string | null
++): Promise<AgentLaunchConfiguration | null> {
++    if (requestedId !== undefined) {
++        clearProviderMetadata()
++        if (requestedId === null) {
++            process.env.HAPI_PROVIDER_PROFILE_SYSTEM = '1'
++            return null
++        }
++    } else if (process.env.HAPI_PROVIDER_PROFILE_SYSTEM === '1') {
++        delete process.env.HAPI_PROVIDER_PROFILE_ID
++        delete process.env.HAPI_PROVIDER_PROFILE_NAME
++        delete process.env.HAPI_PROVIDER_PROFILE_REVISION
++        delete process.env.HAPI_CODEX_PROVIDER_ARGS
++        delete process.env.HAPI_CODEX_PROVIDER_API_KEY
++        return null
++    } else if (process.env.HAPI_PROVIDER_PROFILE_ID) {
++        return null
++    }
++
++    const profile = await new ProviderRegistry().resolve(agent, requestedId)
++    if (!profile) {
++        return null
++    }
++
++    const launch = resolveProviderLaunch(agent, profile)
++    clearProviderMetadata()
++    clearConflictingCredentials(agent)
++    Object.assign(process.env, launch.env, {
++        HAPI_PROVIDER_PROFILE_ID: launch.profile.id,
++        HAPI_PROVIDER_PROFILE_NAME: launch.profile.name,
++        HAPI_PROVIDER_PROFILE_REVISION: String(launch.profile.revision)
++    })
++    if (agent === 'codex' && launch.args.length > 0) {
++        process.env.HAPI_CODEX_PROVIDER_ARGS = JSON.stringify(launch.args)
++    }
++    return launch
++}
+diff --git a/cli/src/host/providerAdapters.ts b/cli/src/host/providerAdapters.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3025d0a6dd8c110709ae41ad7960bc3772e8ffc0
+--- /dev/null
++++ b/cli/src/host/providerAdapters.ts
+@@ -0,0 +1,77 @@
++import type { AgentProvider, ProviderProfileView } from '@hapi/protocol'
++import type { ResolvedProviderProfile } from './providerRegistry'
++
++export type AgentLaunchConfiguration = {
++    env: Record<string, string>
++    args: string[]
++    defaultModel?: string
++    profile: Pick<ProviderProfileView, 'id' | 'name' | 'revision'>
++}
++
++function tomlString(value: string): string {
++    return JSON.stringify(value)
++}
++
++function profileReference(profile: ResolvedProviderProfile): AgentLaunchConfiguration['profile'] {
++    return { id: profile.id, name: profile.name, revision: profile.revision }
++}
++
++export function resolveProviderLaunch(
++    agent: AgentProvider,
++    profile: ResolvedProviderProfile
++): AgentLaunchConfiguration {
++    if (profile.agent !== agent) throw new Error('Provider profile does not support this agent')
++
++    if (agent === 'claude') {
++        const credentialName = profile.credentialType === 'auth-token'
++            ? 'ANTHROPIC_AUTH_TOKEN'
++            : 'ANTHROPIC_API_KEY'
++        return {
++            env: {
++                [credentialName]: profile.apiKey,
++                ...(profile.baseUrl ? { ANTHROPIC_BASE_URL: profile.baseUrl } : {})
++            },
++            args: [],
++            ...(profile.defaultModel ? { defaultModel: profile.defaultModel } : {}),
++            profile: profileReference(profile)
++        }
++    }
++
++    if (agent === 'grok') {
++        return {
++            env: {
++                XAI_API_KEY: profile.apiKey,
++                ...(profile.baseUrl ? { XAI_BASE_URL: profile.baseUrl } : {})
++            },
++            args: [],
++            ...(profile.defaultModel ? { defaultModel: profile.defaultModel } : {}),
++            profile: profileReference(profile)
++        }
++    }
++
++    if (!profile.baseUrl) {
++        return {
++            env: { OPENAI_API_KEY: profile.apiKey },
++            args: [],
++            ...(profile.defaultModel ? { defaultModel: profile.defaultModel } : {}),
++            profile: profileReference(profile)
++        }
++    }
++
++    const providerId = `hapi_${profile.id.replace(/-/g, '')}`
++    const secretEnvName = 'HAPI_CODEX_PROVIDER_API_KEY'
++    return {
++        env: { [secretEnvName]: profile.apiKey },
++        args: [
++            '-c', `model_provider=${tomlString(providerId)}`,
++            '-c', `model_providers.${providerId}.name=${tomlString(profile.name)}`,
++            '-c', `model_providers.${providerId}.base_url=${tomlString(profile.baseUrl)}`,
++            '-c', `model_providers.${providerId}.env_key=${tomlString(secretEnvName)}`,
++            '-c', `model_providers.${providerId}.wire_api=${tomlString(
++                profile.protocol === 'openai-chat-completions' ? 'chat' : 'responses'
++            )}`
++        ],
++        ...(profile.defaultModel ? { defaultModel: profile.defaultModel } : {}),
++        profile: profileReference(profile)
++    }
++}
+diff --git a/cli/src/host/providerHealth.test.ts b/cli/src/host/providerHealth.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8fab1f68beee356fc9c09b9393d49793473b2ac
+--- /dev/null
++++ b/cli/src/host/providerHealth.test.ts
+@@ -0,0 +1,77 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { checkProviderHealth } from './providerHealth'
++import type { ResolvedProviderProfile } from './providerRegistry'
++
++const originalFetch = globalThis.fetch
++
++function profile(overrides: Partial<ResolvedProviderProfile> = {}): ResolvedProviderProfile {
++    return {
++        id: '11111111-1111-4111-8111-111111111111',
++        name: 'Test provider',
++        agent: 'codex',
++        protocol: 'openai-chat-completions',
++        baseUrl: 'https://proxy.example/v1',
++        credentialType: 'api-key',
++        apiKey: 'secret-value',
++        models: [],
++        health: { status: 'unverified' },
++        enabled: true,
++        revision: 1,
++        createdAt: 1,
++        updatedAt: 1,
++        ...overrides
++    }
++}
++
++afterEach(() => {
++    globalThis.fetch = originalFetch
++})
++
++describe('checkProviderHealth', () => {
++    it('uses the selected protocol model endpoint and normalizes discovered models', async () => {
++        const fetchMock = vi.fn(async () => new Response(JSON.stringify({
++            data: [{ id: 'glm-5.2' }, { id: 'qwen-coder' }]
++        }), { status: 200 }))
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        const result = await checkProviderHealth(profile())
++
++        expect(result).toMatchObject({ success: true, status: 'healthy' })
++        expect(result.models).toEqual([
++            { id: 'glm-5.2', contextWindow: 200_000, source: 'provider' },
++            { id: 'qwen-coder', contextWindow: 200_000, source: 'provider' }
++        ])
++        expect(fetchMock).toHaveBeenCalledWith(
++            'https://proxy.example/v1/models',
++            expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer secret-value' }) })
++        )
++    })
++
++    it('reports a failed health check without echoing the credential', async () => {
++        globalThis.fetch = vi.fn(async () => new Response('invalid credential', { status: 401 })) as unknown as typeof fetch
++
++        const result = await checkProviderHealth(profile())
++
++        expect(result.success).toBe(false)
++        expect(result.status).toBe('unhealthy')
++        expect(JSON.stringify(result)).not.toContain('secret-value')
++    })
++
++    it('uses Anthropic headers and endpoint for Claude profiles', async () => {
++        const fetchMock = vi.fn(async () => new Response(JSON.stringify({
++            data: [{ id: 'claude-sonnet-4-5' }]
++        }), { status: 200 }))
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        await checkProviderHealth(profile({
++            agent: 'claude',
++            protocol: 'anthropic-messages',
++            baseUrl: 'https://anthropic.example'
++        }))
++
++        expect(fetchMock).toHaveBeenCalledWith(
++            'https://anthropic.example/v1/models',
++            expect.objectContaining({ headers: expect.objectContaining({ 'x-api-key': 'secret-value' }) })
++        )
++    })
++})
+diff --git a/cli/src/host/providerHealth.ts b/cli/src/host/providerHealth.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7cd1b0e9ca21418f4e3d4344be31552cc45025b
+--- /dev/null
++++ b/cli/src/host/providerHealth.ts
+@@ -0,0 +1,95 @@
++import type { ProviderHealthCheckResponse, ProviderModel, ProviderProtocol } from '@hapi/protocol'
++import type { ResolvedProviderProfile } from './providerRegistry'
++
++const DEFAULT_ENDPOINTS: Record<ProviderProtocol, string> = {
++    'anthropic-messages': 'https://api.anthropic.com',
++    'openai-responses': 'https://api.openai.com',
++    'openai-chat-completions': 'https://api.openai.com',
++    'gemini-generative-ai': 'https://generativelanguage.googleapis.com'
++}
++
++function modelsUrl(profile: ResolvedProviderProfile): URL {
++    const base = new URL(profile.baseUrl ?? DEFAULT_ENDPOINTS[profile.protocol])
++    const normalizedPath = base.pathname.replace(/\/+$/, '')
++    if (profile.protocol === 'gemini-generative-ai') {
++        base.pathname = `${normalizedPath || ''}/v1beta/models`.replace(/\/+/g, '/')
++        base.searchParams.set('key', profile.apiKey)
++        return base
++    }
++    const hasVersionPath = /\/v\d+(?:\.\d+)?$/i.test(normalizedPath)
++    base.pathname = `${normalizedPath || ''}/${hasVersionPath ? 'models' : 'v1/models'}`.replace(/\/+/g, '/')
++    return base
++}
++
++function headersFor(profile: ResolvedProviderProfile): Record<string, string> {
++    if (profile.protocol === 'anthropic-messages') {
++        return {
++            'x-api-key': profile.apiKey,
++            'anthropic-version': '2023-06-01'
++        }
++    }
++    return { Authorization: `Bearer ${profile.apiKey}` }
++}
++
++function readModelIds(protocol: ProviderProtocol, payload: unknown): string[] {
++    if (!payload || typeof payload !== 'object') return []
++    if (protocol === 'gemini-generative-ai') {
++        const models = (payload as { models?: unknown }).models
++        if (!Array.isArray(models)) return []
++        return models.flatMap((model) => {
++            if (!model || typeof model !== 'object') return []
++            const name = (model as { name?: unknown }).name
++            if (typeof name !== 'string' || !name.trim()) return []
++            return [name.replace(/^models\//, '')]
++        })
++    }
++    const data = (payload as { data?: unknown }).data
++    if (!Array.isArray(data)) return []
++    return data.flatMap((model) => {
++        if (!model || typeof model !== 'object') return []
++        const id = (model as { id?: unknown }).id
++        return typeof id === 'string' && id.trim() ? [id.trim()] : []
++    })
++}
++
++function toProviderModels(ids: string[]): ProviderModel[] {
++    return Array.from(new Set(ids)).sort((left, right) => left.localeCompare(right)).map((id) => ({
++        id,
++        contextWindow: 200_000,
++        source: 'provider'
++    }))
++}
++
++function errorMessage(response: Response): string {
++    if (response.status === 401 || response.status === 403) return 'Provider rejected the configured credential'
++    return `Provider health check failed with HTTP ${response.status}`
++}
++
++export async function checkProviderHealth(profile: ResolvedProviderProfile): Promise<ProviderHealthCheckResponse> {
++    const checkedAt = Date.now()
++    const controller = new AbortController()
++    const timeout = setTimeout(() => controller.abort(), 15_000)
++    try {
++        const response = await fetch(modelsUrl(profile).toString(), {
++            headers: headersFor(profile),
++            signal: controller.signal
++        })
++        if (!response.ok) {
++            return { success: false, status: 'unhealthy', checkedAt, error: errorMessage(response) }
++        }
++        const payload = await response.json().catch(() => null)
++        return {
++            success: true,
++            status: 'healthy',
++            checkedAt,
++            models: toProviderModels(readModelIds(profile.protocol, payload))
++        }
++    } catch (error) {
++        const message = error instanceof Error && error.name === 'AbortError'
++            ? 'Provider health check timed out'
++            : 'Unable to connect to provider'
++        return { success: false, status: 'unhealthy', checkedAt, error: message }
++    } finally {
++        clearTimeout(timeout)
++    }
++}
+diff --git a/cli/src/host/providerModel.test.ts b/cli/src/host/providerModel.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9431b24245822509001668841b5c7792753371cd
+--- /dev/null
++++ b/cli/src/host/providerModel.test.ts
+@@ -0,0 +1,22 @@
++import { afterEach, describe, expect, it } from 'vitest'
++import { resolveManagedProviderWireModel } from './providerModel'
++
++const originalProfileId = process.env.HAPI_PROVIDER_PROFILE_ID
++
++afterEach(() => {
++    if (originalProfileId === undefined) delete process.env.HAPI_PROVIDER_PROFILE_ID
++    else process.env.HAPI_PROVIDER_PROFILE_ID = originalProfileId
++})
++
++describe('resolveManagedProviderWireModel', () => {
++    it('keeps native model selections intact', () => {
++        delete process.env.HAPI_PROVIDER_PROFILE_ID
++        expect(resolveManagedProviderWireModel('opus[1m]')).toBe('opus[1m]')
++    })
++
++    it('removes HAPI 1M display markers for managed provider requests', () => {
++        process.env.HAPI_PROVIDER_PROFILE_ID = 'profile-1'
++        expect(resolveManagedProviderWireModel('glm-5.2[1M]')).toBe('glm-5.2')
++        expect(resolveManagedProviderWireModel('glm-5.2')).toBe('glm-5.2')
++    })
++})
+diff --git a/cli/src/host/providerModel.ts b/cli/src/host/providerModel.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8720392a874e4ba1040da0de031bc03ca1b209d
+--- /dev/null
++++ b/cli/src/host/providerModel.ts
+@@ -0,0 +1,13 @@
++import { parseProviderModelReference } from '@hapi/protocol'
++
++/**
++ * `[1M]` is HAPI's session-selection marker, not part of a compatible
++ * provider's model identifier. Native Claude presets keep their suffixes;
++ * managed provider profiles are the only launches that strip the marker.
++ */
++export function resolveManagedProviderWireModel(model: string | null | undefined): string | null | undefined {
++    if (!model || !process.env.HAPI_PROVIDER_PROFILE_ID || !/\[1m\]\s*$/i.test(model)) {
++        return model
++    }
++    return parseProviderModelReference(model).id
++}
+diff --git a/cli/src/host/providerRegistry.test.ts b/cli/src/host/providerRegistry.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7affe3871df75b7eed26435ae14dfa29f2549fa
+--- /dev/null
++++ b/cli/src/host/providerRegistry.test.ts
+@@ -0,0 +1,176 @@
++import { afterEach, describe, expect, it } from 'vitest'
++import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { ProviderRegistry } from './providerRegistry'
++import { resolveProviderLaunch } from './providerAdapters'
++
++const created: string[] = []
++
++afterEach(async () => {
++    await Promise.all(created.splice(0).map((path) => rm(path, { recursive: true, force: true })))
++})
++
++describe('ProviderRegistry', () => {
++    it('stores secrets locally while returning only redacted views', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-'))
++        created.push(directory)
++        const filePath = join(directory, 'providers.json')
++        const registry = new ProviderRegistry({ filePath, namespace: 'alice' })
++        const createdProfile = await registry.create({
++            name: 'Claude proxy',
++            agent: 'claude',
++            protocol: 'anthropic-messages',
++            baseUrl: 'https://example.com',
++            credentialType: 'api-key',
++            apiKey: 'secret-value-1234',
++            enabled: true
++        })
++
++        expect(createdProfile).toMatchObject({ hasSecret: true, secretHint: '••••1234' })
++        expect(createdProfile).not.toHaveProperty('apiKey')
++        expect(await readFile(filePath, 'utf8')).toContain('secret-value-1234')
++        if (process.platform !== 'win32') expect((await stat(filePath)).mode & 0o777).toBe(0o600)
++
++        const resolved = await registry.resolve('claude')
++        expect(resolved?.id).toBe(createdProfile.id)
++        expect(await registry.resolve('claude', null)).toBeNull()
++    })
++
++    it('updates profiles without erasing an omitted secret and builds agent-specific launch config', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-update-'))
++        created.push(directory)
++        const registry = new ProviderRegistry({ filePath: join(directory, 'providers.json'), namespace: 'default' })
++        const view = await registry.create({
++            name: 'Codex proxy',
++            agent: 'codex',
++            protocol: 'openai-responses',
++            baseUrl: 'https://codex.example/v1',
++            credentialType: 'api-key',
++            apiKey: 'codex-secret',
++            codexWireApi: 'responses',
++            enabled: true
++        })
++        await registry.update(view.id, { name: 'Renamed' })
++        const resolved = await registry.resolve('codex', view.id)
++        expect(resolved?.apiKey).toBe('codex-secret')
++        const launch = resolveProviderLaunch('codex', resolved!)
++        expect(launch.env.HAPI_CODEX_PROVIDER_API_KEY).toBe('codex-secret')
++        expect(launch.args.join(' ')).toContain('model_provider')
++        expect(launch.args.join(' ')).not.toContain('codex-secret')
++    })
++
++    it('isolates profiles by namespace', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-namespace-'))
++        created.push(directory)
++        const filePath = join(directory, 'providers.json')
++        const alice = new ProviderRegistry({ filePath, namespace: 'alice' })
++        const bob = new ProviderRegistry({ filePath, namespace: 'bob' })
++        await alice.create({
++            name: 'Alice only',
++            agent: 'claude',
++            protocol: 'anthropic-messages',
++            credentialType: 'api-key',
++            apiKey: 'alice-secret',
++            enabled: true
++        })
++        expect((await alice.list()).profiles).toHaveLength(1)
++        expect((await bob.list()).profiles).toHaveLength(0)
++    })
++
++    it('does not leave a disabled profile selected as the machine default', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-default-'))
++        created.push(directory)
++        const registry = new ProviderRegistry({ filePath: join(directory, 'providers.json'), namespace: 'default' })
++        const disabled = await registry.create({
++            name: 'Disabled',
++            agent: 'claude',
++            protocol: 'anthropic-messages',
++            credentialType: 'api-key',
++            apiKey: 'secret',
++            enabled: false
++        })
++        expect((await registry.list()).defaults?.claude).toBeNull()
++
++        const enabled = await registry.create({
++            name: 'Enabled',
++            agent: 'claude',
++            protocol: 'anthropic-messages',
++            credentialType: 'api-key',
++            apiKey: 'secret',
++            enabled: true
++        })
++        expect((await registry.list()).defaults?.claude).toBe(enabled.id)
++        await registry.update(enabled.id, { enabled: false })
++        expect((await registry.list()).defaults?.claude).toBeNull()
++        expect(await registry.resolve('claude')).toBeNull()
++        expect(disabled.enabled).toBe(false)
++    })
++
++    it('rejects unsupported Codex auth-token credentials', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-credential-'))
++        created.push(directory)
++        const registry = new ProviderRegistry({ filePath: join(directory, 'providers.json'), namespace: 'default' })
++        await expect(registry.create({
++            name: 'Invalid Codex profile',
++            agent: 'codex',
++            protocol: 'openai-responses',
++            credentialType: 'auth-token',
++            apiKey: 'secret',
++            enabled: true
++        })).rejects.toThrow(/credential type/)
++    })
++
++    it('preserves custom context declarations when health checks refresh discovered models', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-models-'))
++        created.push(directory)
++        const registry = new ProviderRegistry({ filePath: join(directory, 'providers.json'), namespace: 'default' })
++        const profile = await registry.create({
++            name: 'Compatible proxy',
++            agent: 'codex',
++            protocol: 'openai-chat-completions',
++            credentialType: 'api-key',
++            apiKey: 'secret',
++            defaultModel: 'glm-5.2[1M]',
++            models: ['glm-5.2[1M]'],
++            enabled: true
++        })
++
++        await registry.recordHealthCheck(profile.id, {
++            success: true,
++            status: 'healthy',
++            checkedAt: 123,
++            models: [
++                { id: 'gpt-5', contextWindow: 200_000, source: 'provider' },
++                { id: 'glm-5.2', contextWindow: 200_000, source: 'provider' }
++            ]
++        })
++
++        const listed = (await registry.list()).profiles?.[0]
++        expect(listed?.defaultModel).toBe('glm-5.2[1M]')
++        expect(listed?.models).toEqual(expect.arrayContaining([
++            expect.objectContaining({ id: 'glm-5.2', contextWindow: 1_000_000, source: 'custom' }),
++            expect.objectContaining({ id: 'gpt-5', contextWindow: 200_000, source: 'provider', refreshedAt: 123 })
++        ]))
++        expect((await registry.resolve('codex', profile.id))?.defaultModel).toBe('glm-5.2[1M]')
++    })
++
++    it('maps the selected protocol to launch-time credentials without exposing a model display tag', async () => {
++        const directory = await mkdtemp(join(tmpdir(), 'hapi-providers-grok-'))
++        created.push(directory)
++        const registry = new ProviderRegistry({ filePath: join(directory, 'providers.json'), namespace: 'default' })
++        const profile = await registry.create({
++            name: 'Grok official',
++            agent: 'grok',
++            protocol: 'openai-chat-completions',
++            credentialType: 'api-key',
++            apiKey: 'xai-secret',
++            defaultModel: 'grok-4.1[1M]',
++            enabled: true
++        })
++
++        const launch = resolveProviderLaunch('grok', (await registry.resolve('grok', profile.id))!)
++        expect(launch.env.XAI_API_KEY).toBe('xai-secret')
++        expect(launch.defaultModel).toBe('grok-4.1[1M]')
++    })
++})
+diff --git a/cli/src/host/providerRegistry.ts b/cli/src/host/providerRegistry.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1dc55b532ddfec4195cfc2b3b0928b0c16bbf913
+--- /dev/null
++++ b/cli/src/host/providerRegistry.ts
+@@ -0,0 +1,361 @@
++import { randomUUID } from 'node:crypto'
++import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
++import { dirname, join } from 'node:path'
++import { z } from 'zod'
++import {
++    AgentProviderSchema,
++    CodexWireApiSchema,
++    ProviderHealthSummarySchema,
++    ProviderProfileInputSchema,
++    ProviderCredentialTypeSchema,
++    ProviderModelSchema,
++    ProviderProfileUpdateSchema,
++    ProviderProtocolSchema,
++    formatProviderModelReference,
++    parseProviderModelReference,
++    type AgentProvider,
++    type ProviderHealthCheckResponse,
++    type ProviderListResponse,
++    type ProviderModel,
++    type ProviderProfileInput,
++    type ProviderProfileUpdate,
++    type ProviderProfileView
++} from '@hapi/protocol'
++import { configuration } from '@/configuration'
++
++const StoredProfileSchema = z.object({
++    id: z.string().uuid(),
++    name: z.string(),
++    agent: AgentProviderSchema,
++    protocol: ProviderProtocolSchema,
++    baseUrl: z.string().optional(),
++    credentialType: ProviderCredentialTypeSchema,
++    apiKey: z.string(),
++    defaultModel: z.string().optional(),
++    models: z.array(ProviderModelSchema).default([]),
++    health: ProviderHealthSummarySchema.default({ status: 'unverified' }),
++    codexWireApi: CodexWireApiSchema.optional(),
++    enabled: z.boolean(),
++    revision: z.number().int().positive(),
++    createdAt: z.number().int(),
++    updatedAt: z.number().int()
++})
++
++type StoredProfile = z.infer<typeof StoredProfileSchema>
++type NamespaceStore = {
++    profiles: StoredProfile[]
++    defaults: Record<AgentProvider, string | null>
++}
++type ProviderDocument = {
++    version: 1
++    namespaces: Record<string, NamespaceStore>
++}
++
++const EmptyDefaults: Record<AgentProvider, null> = {
++    claude: null,
++    codex: null,
++    cursor: null,
++    grok: null,
++    kimi: null,
++    opencode: null,
++    pi: null
++}
++
++function namespaceFromToken(token: string): string {
++    const trimmed = token.trim()
++    const separator = trimmed.lastIndexOf(':')
++    if (separator <= 0 || separator === trimmed.length - 1) return 'default'
++    return trimmed.slice(separator + 1)
++}
++
++function emptyDocument(): ProviderDocument {
++    return { version: 1, namespaces: {} }
++}
++
++function mergeModels(discovered: ProviderModel[], custom: ProviderModel[]): ProviderModel[] {
++    const byId = new Map<string, ProviderModel>()
++    for (const model of discovered) byId.set(model.id, model)
++    for (const model of custom) byId.set(model.id, model)
++    return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id))
++}
++
++function publicView(profile: StoredProfile): ProviderProfileView {
++    const secret = profile.apiKey.trim()
++    return {
++        id: profile.id,
++        name: profile.name,
++        agent: profile.agent,
++        protocol: profile.protocol,
++        ...(profile.baseUrl ? { baseUrl: profile.baseUrl } : {}),
++        credentialType: profile.credentialType,
++        ...(profile.defaultModel ? { defaultModel: profile.defaultModel } : {}),
++        models: profile.models,
++        health: profile.health,
++        ...(profile.codexWireApi ? { codexWireApi: profile.codexWireApi } : {}),
++        enabled: profile.enabled,
++        revision: profile.revision,
++        hasSecret: secret.length > 0,
++        ...(secret.length >= 4 ? { secretHint: `••••${secret.slice(-4)}` } : {}),
++        createdAt: profile.createdAt,
++        updatedAt: profile.updatedAt
++    }
++}
++
++export type ResolvedProviderProfile = StoredProfile
++
++export class ProviderRegistry {
++    private readonly filePath: string
++    private readonly namespace: string
++
++    constructor(options?: { filePath?: string; namespace?: string }) {
++        this.filePath = options?.filePath ?? join(configuration.happyHomeDir, 'providers.json')
++        this.namespace = options?.namespace ?? namespaceFromToken(configuration.cliApiToken)
++    }
++
++    async list(agent?: AgentProvider): Promise<ProviderListResponse> {
++        const store = this.getNamespace(await this.readDocument())
++        return {
++            success: true,
++            profiles: store.profiles.filter((profile) => !agent || profile.agent === agent).map(publicView),
++            defaults: { ...store.defaults }
++        }
++    }
++
++    async create(input: ProviderProfileInput): Promise<ProviderProfileView> {
++        const parsedInput = ProviderProfileInputSchema.parse(input)
++        let created: StoredProfile | null = null
++        await this.updateDocument((document) => {
++            const store = this.getNamespace(document)
++            const now = Date.now()
++            created = {
++                id: randomUUID(),
++                name: parsedInput.name,
++                agent: parsedInput.agent,
++                protocol: parsedInput.protocol,
++                ...(parsedInput.baseUrl ? { baseUrl: parsedInput.baseUrl } : {}),
++                credentialType: parsedInput.credentialType,
++                apiKey: parsedInput.apiKey,
++                ...(parsedInput.defaultModel ? { defaultModel: formatProviderModelReference(parseProviderModelReference(parsedInput.defaultModel)) } : {}),
++                models: parsedInput.models.map((value) => ({
++                    ...parseProviderModelReference(value),
++                    source: 'custom' as const
++                })),
++                health: { status: 'unverified' as const },
++                ...(parsedInput.codexWireApi ? { codexWireApi: parsedInput.codexWireApi } : {}),
++                enabled: parsedInput.enabled,
++                revision: 1,
++                createdAt: now,
++                updatedAt: now
++            }
++            store.profiles.push(created)
++            if (parsedInput.enabled && !store.defaults[parsedInput.agent]) store.defaults[parsedInput.agent] = created.id
++        })
++        if (!created) throw new Error('Failed to create provider profile')
++        return publicView(created)
++    }
++
++    async update(id: string, patch: ProviderProfileUpdate): Promise<ProviderProfileView> {
++        const parsedPatch = ProviderProfileUpdateSchema.parse(patch)
++        let updated: StoredProfile | null = null
++        await this.updateDocument((document) => {
++            const store = this.getNamespace(document)
++            const index = store.profiles.findIndex((profile) => profile.id === id)
++            if (index === -1) throw new Error('Provider profile not found')
++            const current = store.profiles[index]
++            const nextAgent = parsedPatch.agent ?? current.agent
++            const nextProtocol = parsedPatch.protocol ?? current.protocol
++            const nextCredentialType = parsedPatch.credentialType ?? current.credentialType
++            const nextCustomModels = parsedPatch.models === undefined
++                ? current.models.filter((model) => model.source === 'custom')
++                : (parsedPatch.models ?? []).map((value) => ({
++                    ...parseProviderModelReference(value),
++                    source: 'custom' as const
++                }))
++            ProviderProfileInputSchema.parse({
++                name: parsedPatch.name ?? current.name,
++                agent: nextAgent,
++                protocol: nextProtocol,
++                baseUrl: parsedPatch.baseUrl === null ? undefined : parsedPatch.baseUrl ?? current.baseUrl,
++                credentialType: nextCredentialType,
++                apiKey: parsedPatch.apiKey ?? current.apiKey,
++                defaultModel: parsedPatch.defaultModel === null ? undefined : parsedPatch.defaultModel ?? current.defaultModel,
++                models: nextCustomModels.map(formatProviderModelReference),
++                codexWireApi: parsedPatch.codexWireApi === null ? undefined : parsedPatch.codexWireApi ?? current.codexWireApi,
++                enabled: parsedPatch.enabled ?? current.enabled
++            })
++            const {
++                baseUrl,
++                defaultModel,
++                codexWireApi,
++                models,
++                apiKey,
++                ...simplePatch
++            } = parsedPatch
++            const next: StoredProfile = {
++                ...current,
++                ...simplePatch,
++                agent: nextAgent,
++                protocol: nextProtocol,
++                apiKey: apiKey ?? current.apiKey,
++                revision: current.revision + 1,
++                updatedAt: Date.now()
++            }
++            if (baseUrl === null) delete next.baseUrl
++            else if (baseUrl !== undefined) next.baseUrl = baseUrl
++            if (defaultModel === null) delete next.defaultModel
++            else if (defaultModel !== undefined) next.defaultModel = formatProviderModelReference(parseProviderModelReference(defaultModel))
++            if (models !== undefined) {
++                const discovered = current.models.filter((model) => model.source === 'provider')
++                next.models = mergeModels(discovered, nextCustomModels)
++            }
++            if (codexWireApi === null) delete next.codexWireApi
++            else if (codexWireApi !== undefined) next.codexWireApi = codexWireApi
++            if (nextAgent !== 'codex') delete next.codexWireApi
++            store.profiles[index] = next
++            updated = next
++            if (current.agent !== nextAgent && store.defaults[current.agent] === id) {
++                store.defaults[current.agent] = null
++            }
++            if (!next.enabled && store.defaults[nextAgent] === id) {
++                store.defaults[nextAgent] = null
++            }
++        })
++        if (!updated) throw new Error('Failed to update provider profile')
++        return publicView(updated)
++    }
++
++    async setDefault(agent: AgentProvider, id: string | null): Promise<void> {
++        await this.updateDocument((document) => {
++            const store = this.getNamespace(document)
++            if (id) {
++                const profile = store.profiles.find((candidate) => candidate.id === id)
++                if (!profile || profile.agent !== agent) throw new Error('Provider profile not found for this agent')
++                if (!profile.enabled) throw new Error('Disabled provider profiles cannot be selected as default')
++            }
++            store.defaults[agent] = id
++        })
++    }
++
++    async resolve(agent: AgentProvider, requestedId?: string | null): Promise<ResolvedProviderProfile | null> {
++        if (requestedId === null) return null
++        const store = this.getNamespace(await this.readDocument())
++        const id = requestedId ?? store.defaults[agent]
++        if (!id) return null
++        const profile = store.profiles.find((candidate) => candidate.id === id && candidate.agent === agent)
++        if (!profile) throw new Error('Selected provider profile no longer exists')
++        if (!profile.enabled) throw new Error('Selected provider profile is disabled')
++        return profile
++    }
++
++    async get(id: string): Promise<ResolvedProviderProfile | null> {
++        const store = this.getNamespace(await this.readDocument())
++        return store.profiles.find((profile) => profile.id === id) ?? null
++    }
++
++    async recordHealthCheck(id: string, result: ProviderHealthCheckResponse): Promise<ProviderProfileView> {
++        let updated: StoredProfile | null = null
++        await this.updateDocument((document) => {
++            const store = this.getNamespace(document)
++            const index = store.profiles.findIndex((profile) => profile.id === id)
++            if (index === -1) throw new Error('Provider profile not found')
++            const current = store.profiles[index]
++            const discovered = result.models?.map((model) => ({
++                ...parseProviderModelReference(model.id),
++                source: 'provider' as const,
++                refreshedAt: result.checkedAt
++            })) ?? current.models.filter((model) => model.source === 'provider')
++            const next: StoredProfile = {
++                ...current,
++                models: mergeModels(discovered, current.models.filter((model) => model.source === 'custom')),
++                health: {
++                    status: result.status,
++                    checkedAt: result.checkedAt,
++                    ...(result.error ? { error: result.error } : {})
++                },
++                revision: current.revision + 1,
++                updatedAt: Date.now()
++            }
++            store.profiles[index] = next
++            updated = next
++        })
++        if (!updated) throw new Error('Failed to update provider profile')
++        return publicView(updated)
++    }
++
++    private getNamespace(document: ProviderDocument): NamespaceStore {
++        const existing = document.namespaces[this.namespace]
++        if (existing) return existing
++        const created: NamespaceStore = { profiles: [], defaults: { ...EmptyDefaults } }
++        document.namespaces[this.namespace] = created
++        return created
++    }
++
++    private async readDocument(): Promise<ProviderDocument> {
++        try {
++            const value = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<ProviderDocument>
++            const document = emptyDocument()
++            if (value.version !== 1 || !value.namespaces || typeof value.namespaces !== 'object') return document
++            for (const [namespace, rawStore] of Object.entries(value.namespaces)) {
++                if (!rawStore || typeof rawStore !== 'object') continue
++                const candidate = rawStore as Partial<NamespaceStore>
++                const profiles = z.array(StoredProfileSchema).safeParse(candidate.profiles)
++                if (!profiles.success) continue
++                document.namespaces[namespace] = {
++                    profiles: profiles.data,
++                    defaults: {
++                        claude: typeof candidate.defaults?.claude === 'string' ? candidate.defaults.claude : null,
++                        codex: typeof candidate.defaults?.codex === 'string' ? candidate.defaults.codex : null,
++                        cursor: typeof candidate.defaults?.cursor === 'string' ? candidate.defaults.cursor : null,
++                        grok: typeof candidate.defaults?.grok === 'string' ? candidate.defaults.grok : null,
++                        kimi: typeof candidate.defaults?.kimi === 'string' ? candidate.defaults.kimi : null,
++                        opencode: typeof candidate.defaults?.opencode === 'string' ? candidate.defaults.opencode : null,
++                        pi: typeof candidate.defaults?.pi === 'string' ? candidate.defaults.pi : null
++                    }
++                }
++            }
++            return document
++        } catch (error) {
++            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyDocument()
++            throw new Error('Failed to read provider profiles')
++        }
++    }
++
++    private async updateDocument(update: (document: ProviderDocument) => void): Promise<void> {
++        await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 })
++        const lockPath = `${this.filePath}.lock`
++        const tempPath = `${this.filePath}.${process.pid}.tmp`
++        let lock: Awaited<ReturnType<typeof open>> | null = null
++        for (let attempt = 0; attempt < 50; attempt += 1) {
++            try {
++                lock = await open(lockPath, 'wx', 0o600)
++                break
++            } catch (error) {
++                if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
++                try {
++                    const lockInfo = await stat(lockPath)
++                    if (Date.now() - lockInfo.mtimeMs > 10_000) {
++                        await unlink(lockPath)
++                        continue
++                    }
++                } catch {
++                    // Lock disappeared between checks; retry immediately.
++                }
++                await new Promise((resolve) => setTimeout(resolve, 50))
++            }
++        }
++        if (!lock) throw new Error('Provider profile store is busy')
++
++        try {
++            const document = await this.readDocument()
++            update(document)
++            await writeFile(tempPath, JSON.stringify(document, null, 2), { mode: 0o600 })
++            await chmod(tempPath, 0o600)
++            await rename(tempPath, this.filePath)
++            await chmod(this.filePath, 0o600)
++        } finally {
++            await lock.close()
++            await unlink(lockPath).catch(() => {})
++            await unlink(tempPath).catch(() => {})
++        }
++    }
++}
+diff --git a/cli/src/host/registerProviderHandlers.ts b/cli/src/host/registerProviderHandlers.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ade354e9c165da9261d60e4144aa1a2f121e7741
+--- /dev/null
++++ b/cli/src/host/registerProviderHandlers.ts
+@@ -0,0 +1,88 @@
++import {
++    ProviderCreateRequestSchema,
++    ProviderHealthCheckRequestSchema,
++    ProviderListRequestSchema,
++    ProviderSetDefaultRequestSchema,
++    ProviderUpdateRequestSchema,
++    type ProviderHealthCheckResponse,
++    type ProviderListResponse,
++    type ProviderMutationResponse
++} from '@hapi/protocol'
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
++import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
++import { checkProviderHealth } from './providerHealth'
++import { ProviderRegistry } from './providerRegistry'
++
++function errorMessage(error: unknown): string {
++    return error instanceof Error ? error.message : 'Operation failed'
++}
++
++export function registerProviderHandlers(options: {
++    rpcHandlerManager: RpcHandlerManager
++    providerRegistry?: ProviderRegistry
++}): void {
++    const { rpcHandlerManager } = options
++    const registry = options.providerRegistry ?? new ProviderRegistry()
++
++    rpcHandlerManager.registerHandler<unknown, ProviderListResponse>(RPC_METHODS.ProviderList, async (raw) => {
++        const parsed = ProviderListRequestSchema.safeParse(raw ?? {})
++        if (!parsed.success) return { success: false, error: 'Invalid provider list request' }
++        try {
++            return await registry.list(parsed.data.agent)
++        } catch (error) {
++            return { success: false, error: errorMessage(error) }
++        }
++    })
++
++    rpcHandlerManager.registerHandler<unknown, ProviderMutationResponse>(RPC_METHODS.ProviderCreate, async (raw) => {
++        const parsed = ProviderCreateRequestSchema.safeParse(raw)
++        if (!parsed.success) return { success: false, error: 'Invalid provider profile' }
++        try {
++            return { success: true, profile: await registry.create(parsed.data) }
++        } catch (error) {
++            return { success: false, error: errorMessage(error) }
++        }
++    })
++
++    rpcHandlerManager.registerHandler<unknown, ProviderMutationResponse>(RPC_METHODS.ProviderUpdate, async (raw) => {
++        const parsed = ProviderUpdateRequestSchema.safeParse(raw)
++        if (!parsed.success) return { success: false, error: 'Invalid provider update' }
++        try {
++            return { success: true, profile: await registry.update(parsed.data.id, parsed.data.patch) }
++        } catch (error) {
++            return { success: false, error: errorMessage(error) }
++        }
++    })
++
++    rpcHandlerManager.registerHandler<unknown, ProviderMutationResponse>(RPC_METHODS.ProviderSetDefault, async (raw) => {
++        const parsed = ProviderSetDefaultRequestSchema.safeParse(raw)
++        if (!parsed.success) return { success: false, error: 'Invalid default provider request' }
++        try {
++            await registry.setDefault(parsed.data.agent, parsed.data.id)
++            return { success: true }
++        } catch (error) {
++            return { success: false, error: errorMessage(error) }
++        }
++    })
++
++    rpcHandlerManager.registerHandler<unknown, ProviderHealthCheckResponse>(RPC_METHODS.ProviderHealthCheck, async (raw) => {
++        const parsed = ProviderHealthCheckRequestSchema.safeParse(raw)
++        if (!parsed.success) {
++            return { success: false, status: 'unhealthy', checkedAt: Date.now(), error: 'Invalid provider health request' }
++        }
++        try {
++            const profile = await registry.get(parsed.data.id)
++            if (!profile) {
++                return { success: false, status: 'unhealthy', checkedAt: Date.now(), error: 'Provider profile not found' }
++            }
++            const checked = await checkProviderHealth(profile)
++            const updated = await registry.recordHealthCheck(profile.id, checked)
++            return {
++                ...checked,
++                models: parsed.data.refreshModels ? updated.models : undefined
++            }
++        } catch (error) {
++            return { success: false, status: 'unhealthy', checkedAt: Date.now(), error: errorMessage(error) }
++        }
++    })
++}
+diff --git a/cli/src/modules/common/rpcTypes.ts b/cli/src/modules/common/rpcTypes.ts
+index 4bff5be8806239d454fef476a042bad84a879a68..08c0c3c639a1f62c27e322607355b14a26df048a 100644
+--- a/cli/src/modules/common/rpcTypes.ts
++++ b/cli/src/modules/common/rpcTypes.ts
+@@ -8,6 +8,7 @@ export interface SpawnSessionOptions {
+     resumeSessionId?: string
+     approvedNewDirectoryCreation?: boolean
+     agent?: AgentFlavor
++    providerProfileId?: string | null
+     model?: string
+     effort?: string
+     modelReasoningEffort?: string
+diff --git a/cli/src/runner/run.ts b/cli/src/runner/run.ts
+index 2c0868a4a7a005eb8dab406756d8d508958c66e9..abc96f60cd91d2eeb163b8ef5c3d06439975c403 100644
+--- a/cli/src/runner/run.ts
++++ b/cli/src/runner/run.ts
+@@ -27,6 +27,8 @@ import { buildMachineMetadata } from '@/agent/sessionFactory';
+ import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
+ import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
+ import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
++import { ProviderRegistry } from '@/host/providerRegistry';
++import { resolveProviderLaunch } from '@/host/providerAdapters';
+ 
+ export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
+   // We don't have cleanup function at the time of server construction
+@@ -388,9 +390,36 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+ 
+       try {
+ 
+-        // Resolve authentication token if provided
++        // Resolve the selected machine-local provider. Secrets remain inside
++        // the runner and are injected only into the spawned agent process.
+         let extraEnv: Record<string, string> = {};
+-        if (options.token) {
++        let managedProvider = false;
++        let effectiveOptions = options;
++        if (agent === 'claude' || agent === 'codex' || agent === 'grok') {
++          const profile = await new ProviderRegistry().resolve(agent, options.providerProfileId);
++          if (profile) {
++            managedProvider = true;
++            const launch = resolveProviderLaunch(agent, profile);
++            extraEnv = {
++              ...launch.env,
++              HAPI_PROVIDER_PROFILE_ID: launch.profile.id,
++              HAPI_PROVIDER_PROFILE_NAME: launch.profile.name,
++              HAPI_PROVIDER_PROFILE_REVISION: String(launch.profile.revision),
++              ...(agent === 'codex' && launch.args.length > 0
++                ? { HAPI_CODEX_PROVIDER_ARGS: JSON.stringify(launch.args) }
++                : {})
++            };
++            if (!options.model && launch.defaultModel) {
++              effectiveOptions = { ...options, model: launch.defaultModel };
++            }
++          } else if (options.providerProfileId === null) {
++            extraEnv.HAPI_PROVIDER_PROFILE_SYSTEM = '1';
++          }
++        }
++
++        // Legacy one-shot token injection. Retained for internal callers, but
++        // managed provider profiles take precedence and do not replace CODEX_HOME.
++        if (options.token && !managedProvider) {
+           if (options.agent === 'codex') {
+ 
+             // Create a temporary directory for Codex
+@@ -401,10 +430,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+ 
+             // Set the environment variable for Codex
+             extraEnv = {
++              ...extraEnv,
+               CODEX_HOME: codexHomeDir
+             };
+           } else if (options.agent === 'claude' || !options.agent) {
+             extraEnv = {
++              ...extraEnv,
+               CLAUDE_CODE_OAUTH_TOKEN: options.token
+             };
+           }
+@@ -421,7 +452,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           };
+         }
+ 
+-        const args = buildCliArgs(agent, options, yolo);
++        const args = buildCliArgs(agent, effectiveOptions, yolo);
+ 
+         // sessionId reserved for future use
+         const MAX_TAIL_CHARS = 4000;
+@@ -446,10 +477,29 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}):
+           cwd: spawnDirectory,
+           detached: true,  // Sessions stay alive when runner stops
+           stdio: ['ignore', 'pipe', 'pipe'],  // Capture stdout/stderr for debugging
+-          env: {
+-            ...process.env,
+-            ...extraEnv
+-          }
++          env: (() => {
++            const env = { ...process.env };
++            delete env.HAPI_PROVIDER_PROFILE_ID;
++            delete env.HAPI_PROVIDER_PROFILE_NAME;
++            delete env.HAPI_PROVIDER_PROFILE_REVISION;
++            delete env.HAPI_PROVIDER_PROFILE_SYSTEM;
++            delete env.HAPI_CODEX_PROVIDER_API_KEY;
++            delete env.HAPI_CODEX_PROVIDER_ARGS;
++            if (managedProvider && agent === 'claude') {
++              delete env.CLAUDE_CODE_OAUTH_TOKEN;
++              delete env.ANTHROPIC_API_KEY;
++              delete env.ANTHROPIC_AUTH_TOKEN;
++              delete env.ANTHROPIC_BASE_URL;
++            } else if (managedProvider && agent === 'codex') {
++                delete env.OPENAI_API_KEY;
++                delete env.HAPI_CODEX_PROVIDER_API_KEY;
++                delete env.HAPI_CODEX_PROVIDER_ARGS;
++            } else if (managedProvider && agent === 'grok') {
++              delete env.XAI_API_KEY;
++              delete env.XAI_BASE_URL;
++            }
++            return { ...env, ...extraEnv };
++          })()
+         });
+ 
+         happyProcess.stderr?.on('data', (data) => {
+diff --git a/docs/.vitepress/config.ts b/docs/.vitepress/config.ts
+index 676e04af85babaa9d0284b39b946461dcd45e9ac..74b8fe91a94e3c445ff0f3e2264c25f2f456ca76 100644
+--- a/docs/.vitepress/config.ts
++++ b/docs/.vitepress/config.ts
+@@ -25,6 +25,7 @@ export default defineConfig({
+       { text: 'Cursor Agent', link: '/guide/cursor' },
+       { text: 'Grok Build', link: '/guide/grok' },
+       { text: 'Voice Assistant', link: '/guide/voice-assistant' },
++      { text: 'API Providers', link: '/guide/api-providers' },
+       { text: 'Why HAPI', link: '/guide/why-hapi' },
+       { text: 'FAQ', link: '/guide/faq' }
+     ],
+diff --git a/docs/guide/api-providers.md b/docs/guide/api-providers.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1a1f50b74a87b27547d17c11d1623bdee0279da
+--- /dev/null
++++ b/docs/guide/api-providers.md
+@@ -0,0 +1,53 @@
++# API providers
++
++HAPI can manage machine-local API provider profiles for Claude Code, Codex, and Grok Build. Profiles select a protocol, credentials, endpoint, and models for one Agent on one runner machine.
++
++## Configure a profile
++
++Open **Settings → API Providers**, choose a machine, then choose an Agent. Add a profile with:
++
++- a display name;
++- an Agent-compatible API protocol;
++- an optional API base URL;
++- an API key, or a Claude-specific auth token;
++- an optional default model and custom model entries.
++
++The selected protocol is validated against the Agent. Claude Code supports the Anthropic Messages protocol. Codex supports OpenAI Responses and OpenAI Chat Completions. Grok Build supports OpenAI Chat Completions.
++
++Profiles and secrets are stored only on the selected machine in `$HAPI_HOME/providers.json` with private file permissions. The Hub does not persist provider secrets, profile list responses never return them, and secrets are injected only into the selected Agent process.
++
++## Check a provider and choose models
++
++Use **Test** to check the profile and refresh its available model list. A failed check does not discard the form, so a profile can be saved as unverified and retried later.
++
++Native Agent models and provider models are available while starting compatible sessions. You can also add a custom model. A model normally represents a 200K context window. To declare 1M context support, enable it for that model in the profile editor or append `[1M]` to the model name:
++
++```text
++example-model
++example-model[1M]
++```
++
++This creates a normal 200K choice and a 1M choice. The suffix is only a HAPI selection marker; the provider receives the base model ID.
++
++## Choose when it applies
++
++Set a machine default to use a profile whenever that Agent starts on the selected machine. **Machine default** uses that profile when one is configured and otherwise falls back to the Agent's existing login. **System / agent login** always bypasses managed profiles and uses the Agent's existing login and environment.
++
++You can override the choice while creating a session. A running session can select models that its Agent exposes; applying another provider requires a new or restarted session.
++
++Terminal launches use the machine default too. Override it without exposing credentials in command history:
++
++```bash
++hapi --hapi-provider <profile-uuid>
++hapi codex --hapi-provider <profile-uuid>
++hapi grok --hapi-provider <profile-uuid>
++```
++
++Use `--hapi-provider system` to bypass the managed default.
++
++## Security
++
++- Never place credentials in an API URL.
++- Provider list and health-check responses redact secrets.
++- Use HTTPS for remote endpoints when possible.
++- Keep the selected runner machine and its `$HAPI_HOME` directory protected.
+diff --git a/hub/README.md b/hub/README.md
+index b224b5df7853b022bb75af94583019bab8b87b43..2de2a7ea5a24a2d0a3f7c4accd9504f9d6a90c12 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -109,6 +109,10 @@ See `src/web/routes/` for all endpoints.
+ - `GET /api/machines` - List online machines.
+ - `POST /api/machines/:id/spawn` - Spawn new session on machine.
+ - `POST /api/machines/:id/paths/exists` - Check if path exists.
++- `GET|POST /api/machines/:id/providers` - List or create machine-local provider profiles.
++- `PATCH /api/machines/:id/providers/:providerId` - Update a provider profile.
++- `POST /api/machines/:id/providers/default` - Select an Agent default provider.
++- `POST /api/machines/:id/providers/:providerId/health` - Check a provider and refresh its model list.
+ 
+ ### Git/Files (`src/web/routes/git.ts`)
+ 
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index e79d770524acecad11d1a722cff40f92bda4a693..57600668d6dfbdcc1308d2c3171b98246a6004ec 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -30,6 +30,14 @@ import type {
+ } from '@hapi/protocol/apiTypes'
+ import type { Server } from 'socket.io'
+ import type { RpcRegistry } from '../socket/rpcRegistry'
++import type {
++    AgentProvider,
++    ProviderListResponse,
++    ProviderHealthCheckResponse,
++    ProviderMutationResponse,
++    ProviderProfileInput,
++    ProviderProfileUpdate
++} from '@hapi/protocol'
+ 
+ const DEFAULT_RPC_TIMEOUT_MS = 30_000
+ const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
+@@ -155,13 +163,14 @@ export class RpcGateway {
+         effort?: string,
+         permissionMode?: PermissionMode,
+         serviceTier?: string,
++        providerProfileId?: string | null,
+         existingSessionId?: string
+     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
+         try {
+             const result = await this.machineRpc(
+                 machineId,
+                 RPC_METHODS.SpawnHappySession,
+-                { type: 'spawn-in-directory', directory, agent, model, modelReasoningEffort, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode, serviceTier, existingSessionId, sessionId: existingSessionId }
++                { type: 'spawn-in-directory', directory, agent, providerProfileId, model, modelReasoningEffort, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode, serviceTier, existingSessionId, sessionId: existingSessionId }
+             )
+             if (result && typeof result === 'object') {
+                 const obj = result as Record<string, unknown>
+@@ -222,6 +231,26 @@ export class RpcGateway {
+         return exists
+     }
+ 
++    async listProviderProfiles(machineId: string, agent?: AgentProvider): Promise<ProviderListResponse> {
++        return await this.machineRpc(machineId, RPC_METHODS.ProviderList, { agent }) as ProviderListResponse
++    }
++
++    async createProviderProfile(machineId: string, input: ProviderProfileInput): Promise<ProviderMutationResponse> {
++        return await this.machineRpc(machineId, RPC_METHODS.ProviderCreate, input) as ProviderMutationResponse
++    }
++
++    async updateProviderProfile(machineId: string, id: string, patch: ProviderProfileUpdate): Promise<ProviderMutationResponse> {
++        return await this.machineRpc(machineId, RPC_METHODS.ProviderUpdate, { id, patch }) as ProviderMutationResponse
++    }
++
++    async setDefaultProvider(machineId: string, agent: AgentProvider, id: string | null): Promise<ProviderMutationResponse> {
++        return await this.machineRpc(machineId, RPC_METHODS.ProviderSetDefault, { agent, id }) as ProviderMutationResponse
++    }
++
++    async checkProviderHealth(machineId: string, id: string, refreshModels: boolean): Promise<ProviderHealthCheckResponse> {
++        return await this.machineRpc(machineId, RPC_METHODS.ProviderHealthCheck, { id, refreshModels }) as ProviderHealthCheckResponse
++    }
++
+     async getCursorChatStoreStatus(
+         machineId: string,
+         workspacePath: string,
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 4e4451e9d880ddf77877fc5387aadf22b8d273c5..a592b2b25d15ccef8c5e6985405209a322b53340 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -809,6 +809,7 @@ export class SyncEngine {
+         effort?: string,
+         permissionMode?: PermissionMode,
+         serviceTier?: string,
++        providerProfileId?: string | null,
+         existingSessionId?: string
+     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
+         return await this.rpcGateway.spawnSession(
+@@ -824,10 +825,31 @@ export class SyncEngine {
+             effort,
+             permissionMode,
+             serviceTier,
++            providerProfileId,
+             existingSessionId
+         )
+     }
+ 
++    async listProviderProfiles(machineId: string, agent?: import('@hapi/protocol').AgentProvider) {
++        return await this.rpcGateway.listProviderProfiles(machineId, agent)
++    }
++
++    async createProviderProfile(machineId: string, input: import('@hapi/protocol').ProviderProfileInput) {
++        return await this.rpcGateway.createProviderProfile(machineId, input)
++    }
++
++    async updateProviderProfile(machineId: string, id: string, patch: import('@hapi/protocol').ProviderProfileUpdate) {
++        return await this.rpcGateway.updateProviderProfile(machineId, id, patch)
++    }
++
++    async setDefaultProvider(machineId: string, agent: import('@hapi/protocol').AgentProvider, id: string | null) {
++        return await this.rpcGateway.setDefaultProvider(machineId, agent, id)
++    }
++
++    async checkProviderHealth(machineId: string, id: string, refreshModels: boolean) {
++        return await this.rpcGateway.checkProviderHealth(machineId, id, refreshModels)
++    }
++
+     private resolveFlavor(session: Session): AgentFlavor {
+         const flavor = session.metadata?.flavor
+         return isKnownFlavor(flavor) ? flavor : 'claude'
+@@ -888,6 +910,7 @@ export class SyncEngine {
+                 thinking: session.thinking,
+                 controlledByUser: session.agentState?.controlledByUser === true,
+                 agentSessionId,
++                providerProfileId: metadata.providerProfileId,
+                 model: session.model ?? null,
+                 effort: session.effort ?? null,
+                 modelReasoningEffort: session.modelReasoningEffort ?? null,
+@@ -1296,6 +1319,7 @@ export class SyncEngine {
+             session.effort ?? undefined,
+             preferredPermissionMode,
+             session.serviceTier ?? undefined,
++            metadata.providerProfileId,
+             access.sessionId
+         )
+ 
+diff --git a/hub/src/web/routes/machines.test.ts b/hub/src/web/routes/machines.test.ts
+index 6c0308cca3dc8d738c168052c47aa111b7f49916..e9a68a8865e28e4356087a80eba578d9ea49337e 100644
+--- a/hub/src/web/routes/machines.test.ts
++++ b/hub/src/web/routes/machines.test.ts
+@@ -26,6 +26,130 @@ function createMachine(overrides?: Partial<Machine>): Machine {
+ }
+ 
+ describe('machines routes', () => {
++    it('forwards provider selection when spawning', async () => {
++        const machine = createMachine()
++        let capturedProvider: string | null | undefined
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            spawnSession: async (...args: unknown[]) => {
++                capturedProvider = args[12] as string | null | undefined
++                return { type: 'success' as const, sessionId: 'session-provider' }
++            }
++        } as Partial<SyncEngine>
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++
++        const response = await app.request('/api/machines/machine-1/spawn', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({
++                directory: '/tmp/project',
++                agent: 'codex',
++                providerProfileId: '11111111-1111-4111-8111-111111111111'
++            })
++        })
++
++        expect(response.status).toBe(200)
++        expect(capturedProvider).toBe('11111111-1111-4111-8111-111111111111')
++    })
++
++    it('validates provider credentials before forwarding them to a machine', async () => {
++        const machine = createMachine()
++        const calls: unknown[] = []
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            createProviderProfile: async (_machineId: string, input: unknown) => {
++                calls.push(input)
++                return { success: true }
++            }
++        } as Partial<SyncEngine>
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++
++        const invalid = await app.request('/api/machines/machine-1/providers', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({
++                name: 'Invalid Codex token',
++                agent: 'codex',
++                protocol: 'openai-responses',
++                credentialType: 'auth-token',
++                apiKey: 'secret'
++            })
++        })
++        const valid = await app.request('/api/machines/machine-1/providers', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({
++                name: 'Codex proxy',
++                agent: 'codex',
++                protocol: 'openai-responses',
++                baseUrl: 'https://example.com/v1',
++                credentialType: 'api-key',
++                apiKey: 'secret'
++            })
++        })
++
++        expect(invalid.status).toBe(400)
++        expect(valid.status).toBe(200)
++        expect(calls).toHaveLength(1)
++        expect(calls[0]).toMatchObject({ name: 'Codex proxy', credentialType: 'api-key' })
++    })
++
++    it('forwards a provider health check without exposing its credential to the hub', async () => {
++        const machine = createMachine()
++        const calls: unknown[] = []
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            checkProviderHealth: async (_machineId: string, id: string, refreshModels: boolean) => {
++                calls.push({ id, refreshModels })
++                return { success: true, status: 'healthy', checkedAt: 1, models: [] }
++            }
++        } as Partial<SyncEngine>
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++
++        const response = await app.request('/api/machines/machine-1/providers/11111111-1111-4111-8111-111111111111/health', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ refreshModels: true })
++        })
++
++        expect(response.status).toBe(200)
++        expect(calls).toEqual([{ id: '11111111-1111-4111-8111-111111111111', refreshModels: true }])
++    })
++
++    it('forwards only explicitly supplied provider update fields', async () => {
++        const machine = createMachine()
++        const calls: unknown[] = []
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            updateProviderProfile: async (_machineId: string, _id: string, patch: unknown) => {
++                calls.push(patch)
++                return { success: true }
++            }
++        } as Partial<SyncEngine>
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++
++        const response = await app.request('/api/machines/machine-1/providers/11111111-1111-4111-8111-111111111111', {
++            method: 'PATCH',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ name: 'Renamed' })
++        })
++
++        expect(response.status).toBe(200)
++        expect(calls).toEqual([{ name: 'Renamed' }])
++    })
++
+     it('forwards Grok Auto permission mode when spawning', async () => {
+         const machine = createMachine()
+         let capturedPermissionMode: string | undefined
+diff --git a/hub/src/web/routes/machines.ts b/hub/src/web/routes/machines.ts
+index 280695a17818597784df588a847da66207670b28..be815fd44ce4bc8b72c85b70c22119050f3033ea 100644
+--- a/hub/src/web/routes/machines.ts
++++ b/hub/src/web/routes/machines.ts
+@@ -1,6 +1,11 @@
+ import {
++    AgentProviderSchema,
+     MachineListDirectoryRequestSchema,
+     MachinePathsExistsRequestSchema,
++    ProviderCreateRequestSchema,
++    ProviderHealthCheckRequestSchema,
++    ProviderSetDefaultRequestSchema,
++    ProviderProfileUpdateSchema,
+     SpawnSessionRequestSchema
+ } from '@hapi/protocol'
+ import { Hono } from 'hono'
+@@ -51,7 +56,9 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             parsed.data.worktreeName,
+             undefined,
+             parsed.data.effort,
+-            parsed.data.permissionMode
++            parsed.data.permissionMode,
++            undefined,
++            parsed.data.providerProfileId
+         )
+         return c.json(result)
+     })
+@@ -82,6 +89,66 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         }
+     })
+ 
++    app.get('/machines/:id/providers', async (c) => {
++        const engine = getSyncEngine()
++        if (!engine) return c.json({ error: 'Not connected' }, 503)
++        const machineId = c.req.param('id')
++        const machine = requireMachine(c, engine, machineId)
++        if (machine instanceof Response) return machine
++        const rawAgent = c.req.query('agent')
++        const parsedAgent = rawAgent ? AgentProviderSchema.safeParse(rawAgent) : null
++        if (parsedAgent && !parsedAgent.success) return c.json({ error: 'Invalid agent' }, 400)
++        return c.json(await engine.listProviderProfiles(machineId, parsedAgent?.data))
++    })
++
++    app.post('/machines/:id/providers', async (c) => {
++        const engine = getSyncEngine()
++        if (!engine) return c.json({ error: 'Not connected' }, 503)
++        const machineId = c.req.param('id')
++        const machine = requireMachine(c, engine, machineId)
++        if (machine instanceof Response) return machine
++        const parsed = ProviderCreateRequestSchema.safeParse(await c.req.json().catch(() => null))
++        if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
++        return c.json(await engine.createProviderProfile(machineId, parsed.data))
++    })
++
++    app.patch('/machines/:id/providers/:providerId', async (c) => {
++        const engine = getSyncEngine()
++        if (!engine) return c.json({ error: 'Not connected' }, 503)
++        const machineId = c.req.param('id')
++        const machine = requireMachine(c, engine, machineId)
++        if (machine instanceof Response) return machine
++        const parsed = ProviderProfileUpdateSchema.safeParse(await c.req.json().catch(() => null))
++        if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
++        return c.json(await engine.updateProviderProfile(machineId, c.req.param('providerId'), parsed.data))
++    })
++
++    app.post('/machines/:id/providers/default', async (c) => {
++        const engine = getSyncEngine()
++        if (!engine) return c.json({ error: 'Not connected' }, 503)
++        const machineId = c.req.param('id')
++        const machine = requireMachine(c, engine, machineId)
++        if (machine instanceof Response) return machine
++        const parsed = ProviderSetDefaultRequestSchema.safeParse(await c.req.json().catch(() => null))
++        if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
++        return c.json(await engine.setDefaultProvider(machineId, parsed.data.agent, parsed.data.id))
++    })
++
++    app.post('/machines/:id/providers/:providerId/health', async (c) => {
++        const engine = getSyncEngine()
++        if (!engine) return c.json({ error: 'Not connected' }, 503)
++        const machineId = c.req.param('id')
++        const machine = requireMachine(c, engine, machineId)
++        if (machine instanceof Response) return machine
++        const body = await c.req.json().catch(() => ({}))
++        const parsed = ProviderHealthCheckRequestSchema.safeParse({
++            ...(body && typeof body === 'object' ? body : {}),
++            id: c.req.param('providerId')
++        })
++        if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
++        return c.json(await engine.checkProviderHealth(machineId, parsed.data.id, parsed.data.refreshModels))
++    })
++
+     app.post('/machines/:id/paths/exists', async (c) => {
+         const engine = getSyncEngine()
+         if (!engine) {
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 10af48609a221895b5839111f07877b2f09892f1..f15b22fa36f34f7e89b78f3f1993380aa25f928d 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -320,6 +320,7 @@ export type QueuedStateResponse = {
+ export const SpawnSessionRequestSchema = z.object({
+     directory: z.string().min(1),
+     agent: AgentFlavorSchema.optional(),
++    providerProfileId: z.string().uuid().nullable().optional(),
+     model: z.string().optional(),
+     effort: z.string().optional(),
+     modelReasoningEffort: z.string().optional(),
+diff --git a/shared/src/index.ts b/shared/src/index.ts
+index 0aaf85f2aa01bb5c5c3192d0d1ee9d766d1ec4e6..1b5eef0f86e1e3b4b8c46dd584d848f9f46dc5a7 100644
+--- a/shared/src/index.ts
++++ b/shared/src/index.ts
+@@ -4,6 +4,7 @@ export * from './messages'
+ export * from './buildInfo'
+ export * from './effort'
+ export * from './flavors'
++export * from './providerManagement'
+ export * from './models'
+ export * from './modes'
+ export * from './resume'
+diff --git a/shared/src/providerManagement.test.ts b/shared/src/providerManagement.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f5324f5d8e3652ec855888966e8930f188390417
+--- /dev/null
++++ b/shared/src/providerManagement.test.ts
+@@ -0,0 +1,90 @@
++import { describe, expect, it } from 'vitest'
++import {
++    ProviderProfileInputSchema,
++    ProviderProfileUpdateSchema,
++    parseProviderModelReference
++} from './providerManagement'
++
++describe('provider profile schemas', () => {
++    it('allows Claude auth tokens but requires API keys for Codex', () => {
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Claude token',
++            agent: 'claude',
++            protocol: 'anthropic-messages',
++            credentialType: 'auth-token',
++            apiKey: 'secret'
++        }).success).toBe(true)
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Codex token',
++            agent: 'codex',
++            protocol: 'openai-responses',
++            credentialType: 'auth-token',
++            apiKey: 'secret'
++        }).success).toBe(false)
++    })
++
++    it('rejects Codex-only fields on explicit Claude updates', () => {
++        expect(ProviderProfileUpdateSchema.safeParse({}).success).toBe(false)
++        expect(ProviderProfileUpdateSchema.parse({ name: 'Renamed' })).toEqual({ name: 'Renamed' })
++        expect(ProviderProfileUpdateSchema.safeParse({
++            agent: 'claude',
++            codexWireApi: 'responses'
++        }).success).toBe(false)
++        expect(ProviderProfileUpdateSchema.safeParse({
++            agent: 'claude',
++            codexWireApi: null
++        }).success).toBe(true)
++    })
++
++    it('limits provider base URLs to HTTP endpoints', () => {
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Local proxy',
++            agent: 'codex',
++            protocol: 'openai-responses',
++            baseUrl: 'http://127.0.0.1:8080/v1',
++            credentialType: 'api-key',
++            apiKey: 'secret'
++        }).success).toBe(true)
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Invalid proxy',
++            agent: 'codex',
++            protocol: 'openai-responses',
++            baseUrl: 'file:///tmp/provider',
++            credentialType: 'api-key',
++            apiKey: 'secret'
++        }).success).toBe(false)
++    })
++
++    it('requires an Agent-compatible protocol and allows Grok provider profiles', () => {
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Grok compatible',
++            agent: 'grok',
++            protocol: 'openai-chat-completions',
++            apiKey: 'secret'
++        }).success).toBe(true)
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Wrong Claude protocol',
++            agent: 'claude',
++            protocol: 'openai-chat-completions',
++            apiKey: 'secret'
++        }).success).toBe(false)
++        expect(ProviderProfileInputSchema.safeParse({
++            name: 'Cursor cannot use arbitrary endpoints',
++            agent: 'cursor',
++            protocol: 'openai-chat-completions',
++            apiKey: 'secret'
++        }).success).toBe(false)
++    })
++
++    it('normalizes 1M model declarations without leaking the display suffix into the API model id', () => {
++        expect(parseProviderModelReference('glm-5.2[1M]')).toEqual({
++            id: 'glm-5.2',
++            contextWindow: 1_000_000
++        })
++        expect(parseProviderModelReference('glm-5.2')).toEqual({
++            id: 'glm-5.2',
++            contextWindow: 200_000
++        })
++    })
++
++})
+diff --git a/shared/src/providerManagement.ts b/shared/src/providerManagement.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e58218ea04be0935182cd40cba24d6c05007d81a
+--- /dev/null
++++ b/shared/src/providerManagement.ts
+@@ -0,0 +1,257 @@
++import { z } from 'zod'
++
++export const AgentProviderSchema = z.enum(['claude', 'codex', 'cursor', 'grok', 'kimi', 'opencode', 'pi'])
++export type AgentProvider = z.infer<typeof AgentProviderSchema>
++
++export const ProviderProtocolSchema = z.enum([
++    'anthropic-messages',
++    'openai-responses',
++    'openai-chat-completions',
++    'gemini-generative-ai'
++])
++export type ProviderProtocol = z.infer<typeof ProviderProtocolSchema>
++
++export type ProviderAgentCapability = {
++    managed: boolean
++    protocols: readonly ProviderProtocol[]
++    credentialTypes: readonly ProviderCredentialType[]
++    reason?: string
++}
++
++export const ProviderCredentialTypeSchema = z.enum(['api-key', 'auth-token'])
++export type ProviderCredentialType = z.infer<typeof ProviderCredentialTypeSchema>
++
++export const AGENT_PROVIDER_CAPABILITIES: Record<AgentProvider, ProviderAgentCapability> = {
++    claude: {
++        managed: true,
++        protocols: ['anthropic-messages'],
++        credentialTypes: ['api-key', 'auth-token']
++    },
++    codex: {
++        managed: true,
++        protocols: ['openai-responses', 'openai-chat-completions'],
++        credentialTypes: ['api-key']
++    },
++    grok: {
++        managed: true,
++        protocols: ['openai-chat-completions'],
++        credentialTypes: ['api-key']
++    },
++    cursor: {
++        managed: false,
++        protocols: [],
++        credentialTypes: [],
++        reason: 'Cursor uses its native login or API key configuration'
++    },
++    kimi: {
++        managed: false,
++        protocols: [],
++        credentialTypes: [],
++        reason: 'Kimi uses its native configuration file'
++    },
++    opencode: {
++        managed: false,
++        protocols: [],
++        credentialTypes: [],
++        reason: 'OpenCode provider configuration will be enabled by a dedicated adapter'
++    },
++    pi: {
++        managed: false,
++        protocols: [],
++        credentialTypes: [],
++        reason: 'Pi provider configuration will be enabled by a dedicated adapter'
++    }
++}
++
++export function getProviderAgentCapability(agent: AgentProvider): ProviderAgentCapability {
++    return AGENT_PROVIDER_CAPABILITIES[agent]
++}
++
++export const CodexWireApiSchema = z.enum(['responses', 'chat'])
++export type CodexWireApi = z.infer<typeof CodexWireApiSchema>
++
++export const ProviderModelSourceSchema = z.enum(['provider', 'custom'])
++export type ProviderModelSource = z.infer<typeof ProviderModelSourceSchema>
++
++export const ProviderModelSchema = z.object({
++    id: z.string().trim().min(1).max(200),
++    contextWindow: z.union([z.literal(200_000), z.literal(1_000_000)]),
++    source: ProviderModelSourceSchema,
++    refreshedAt: z.number().int().nonnegative().optional()
++})
++export type ProviderModel = z.infer<typeof ProviderModelSchema>
++
++export const ProviderHealthStatusSchema = z.enum(['unverified', 'healthy', 'unhealthy'])
++export type ProviderHealthStatus = z.infer<typeof ProviderHealthStatusSchema>
++
++export const ProviderHealthSummarySchema = z.object({
++    status: ProviderHealthStatusSchema,
++    checkedAt: z.number().int().nonnegative().optional(),
++    error: z.string().optional()
++})
++export type ProviderHealthSummary = z.infer<typeof ProviderHealthSummarySchema>
++
++export function parseProviderModelReference(value: string): Pick<ProviderModel, 'id' | 'contextWindow'> {
++    const trimmed = value.trim()
++    const match = /^(.*?)(?:\s*\[1m\])?$/i.exec(trimmed)
++    const id = match?.[1]?.trim() ?? ''
++    if (!id) throw new Error('Model id is required')
++    return {
++        id,
++        contextWindow: /\[1m\]\s*$/i.test(trimmed) ? 1_000_000 : 200_000
++    }
++}
++
++export function formatProviderModelReference(model: Pick<ProviderModel, 'id' | 'contextWindow'>): string {
++    return model.contextWindow === 1_000_000 ? `${model.id}[1M]` : model.id
++}
++
++const ProviderModelReferenceInputSchema = z.string().trim().min(1).max(220)
++
++function validateProviderInput(value: {
++    agent?: AgentProvider
++    protocol?: ProviderProtocol | null
++    credentialType?: ProviderCredentialType
++    baseUrl?: string | null
++    codexWireApi?: CodexWireApi | null
++    models?: string[] | null
++}, context: z.RefinementCtx): void {
++    if (value.agent) {
++        const capability = getProviderAgentCapability(value.agent)
++        if (!capability.managed) {
++            context.addIssue({ code: 'custom', path: ['agent'], message: capability.reason ?? 'This agent only supports its native login' })
++        }
++        if (value.protocol && !capability.protocols.includes(value.protocol)) {
++            context.addIssue({ code: 'custom', path: ['protocol'], message: 'This protocol is not supported by the selected agent' })
++        }
++        if (value.credentialType && !capability.credentialTypes.includes(value.credentialType)) {
++            context.addIssue({ code: 'custom', path: ['credentialType'], message: 'This credential type is not supported by the selected agent' })
++        }
++        if (value.agent === 'claude' && value.codexWireApi !== undefined && value.codexWireApi !== null) {
++            context.addIssue({ code: 'custom', path: ['codexWireApi'], message: 'codexWireApi is only valid for Codex profiles' })
++        }
++    }
++    if (value.baseUrl && !/^https?:\/\//i.test(value.baseUrl)) {
++        context.addIssue({ code: 'custom', path: ['baseUrl'], message: 'baseUrl must use HTTP or HTTPS' })
++    }
++    for (const [index, model] of (value.models ?? []).entries()) {
++        try {
++            parseProviderModelReference(model)
++        } catch {
++            context.addIssue({ code: 'custom', path: ['models', index], message: 'Invalid model reference' })
++        }
++    }
++}
++
++export const ProviderProfileInputSchema = z.object({
++    name: z.string().trim().min(1).max(100),
++    agent: AgentProviderSchema,
++    protocol: ProviderProtocolSchema,
++    baseUrl: z.string().trim().url().optional(),
++    credentialType: ProviderCredentialTypeSchema.default('api-key'),
++    apiKey: z.string().trim().min(1).max(20_000),
++    defaultModel: z.string().trim().min(1).max(200).optional(),
++    models: z.array(ProviderModelReferenceInputSchema).max(500).default([]),
++    codexWireApi: CodexWireApiSchema.optional(),
++    enabled: z.boolean().default(true)
++}).superRefine((value, context) => {
++    validateProviderInput(value, context)
++})
++export type ProviderProfileInput = z.input<typeof ProviderProfileInputSchema>
++
++export const ProviderProfileUpdateSchema = z.object({
++    name: z.string().trim().min(1).max(100).optional(),
++    agent: AgentProviderSchema.optional(),
++    protocol: ProviderProtocolSchema.optional(),
++    baseUrl: z.string().trim().url().nullable().optional(),
++    credentialType: ProviderCredentialTypeSchema.optional(),
++    apiKey: z.string().trim().min(1).max(20_000).optional(),
++    defaultModel: z.string().trim().min(1).max(200).nullable().optional(),
++    models: z.array(ProviderModelReferenceInputSchema).max(500).nullable().optional(),
++    codexWireApi: CodexWireApiSchema.nullable().optional(),
++    enabled: z.boolean().optional()
++}).superRefine((value, context) => {
++    if (Object.keys(value).length === 0) {
++        context.addIssue({ code: 'custom', message: 'At least one provider field is required' })
++    }
++    validateProviderInput(value, context)
++})
++export type ProviderProfileUpdate = z.input<typeof ProviderProfileUpdateSchema>
++
++export const ProviderProfileViewSchema = z.object({
++    id: z.string().uuid(),
++    name: z.string(),
++    agent: AgentProviderSchema,
++    protocol: ProviderProtocolSchema,
++    baseUrl: z.string().optional(),
++    credentialType: ProviderCredentialTypeSchema,
++    defaultModel: z.string().optional(),
++    models: z.array(ProviderModelSchema).default([]),
++    health: ProviderHealthSummarySchema.default({ status: 'unverified' }),
++    codexWireApi: CodexWireApiSchema.optional(),
++    enabled: z.boolean(),
++    revision: z.number().int().positive(),
++    hasSecret: z.boolean(),
++    secretHint: z.string().optional(),
++    createdAt: z.number().int(),
++    updatedAt: z.number().int()
++})
++export type ProviderProfileView = z.infer<typeof ProviderProfileViewSchema>
++
++export const ProviderListRequestSchema = z.object({ agent: AgentProviderSchema.optional() })
++export type ProviderListRequest = z.infer<typeof ProviderListRequestSchema>
++
++const ProviderDefaultsSchema = z.object({
++    claude: z.string().uuid().nullable(),
++    codex: z.string().uuid().nullable(),
++    cursor: z.string().uuid().nullable(),
++    grok: z.string().uuid().nullable(),
++    kimi: z.string().uuid().nullable(),
++    opencode: z.string().uuid().nullable(),
++    pi: z.string().uuid().nullable()
++})
++
++export const ProviderListResponseSchema = z.object({
++    success: z.boolean(),
++    profiles: z.array(ProviderProfileViewSchema).optional(),
++    defaults: ProviderDefaultsSchema.optional(),
++    error: z.string().optional()
++})
++export type ProviderListResponse = z.infer<typeof ProviderListResponseSchema>
++
++export const ProviderCreateRequestSchema = ProviderProfileInputSchema
++export type ProviderCreateRequest = z.infer<typeof ProviderCreateRequestSchema>
++
++export const ProviderUpdateRequestSchema = z.object({
++    id: z.string().uuid(),
++    patch: ProviderProfileUpdateSchema
++})
++export type ProviderUpdateRequest = z.infer<typeof ProviderUpdateRequestSchema>
++
++export const ProviderSetDefaultRequestSchema = z.object({
++    agent: AgentProviderSchema,
++    id: z.string().uuid().nullable()
++})
++export type ProviderSetDefaultRequest = z.infer<typeof ProviderSetDefaultRequestSchema>
++
++export const ProviderHealthCheckRequestSchema = z.object({
++    id: z.string().uuid(),
++    refreshModels: z.boolean().default(true)
++})
++export type ProviderHealthCheckRequest = z.infer<typeof ProviderHealthCheckRequestSchema>
++
++export const ProviderHealthCheckResponseSchema = z.object({
++    success: z.boolean(),
++    status: ProviderHealthStatusSchema,
++    checkedAt: z.number().int().nonnegative(),
++    models: z.array(ProviderModelSchema).optional(),
++    error: z.string().optional()
++})
++export type ProviderHealthCheckResponse = z.infer<typeof ProviderHealthCheckResponseSchema>
++
++export const ProviderMutationResponseSchema = z.object({
++    success: z.boolean(),
++    profile: ProviderProfileViewSchema.optional(),
++    error: z.string().optional()
++})
++export type ProviderMutationResponse = z.infer<typeof ProviderMutationResponseSchema>
+diff --git a/shared/src/resume.ts b/shared/src/resume.ts
+index 84af8af59e9b50821f07a7c013dc2300684a6bec..292afb597c3cdd55c3ead664f9a4e8ee0b494ec0 100644
+--- a/shared/src/resume.ts
++++ b/shared/src/resume.ts
+@@ -12,6 +12,7 @@ export const LocalResumeTargetSchema = z.object({
+     thinking: z.boolean(),
+     controlledByUser: z.boolean(),
+     agentSessionId: z.string().min(1),
++    providerProfileId: z.string().uuid().nullable().optional(),
+     model: z.string().nullable().optional(),
+     effort: z.string().nullable().optional(),
+     modelReasoningEffort: z.string().nullable().optional(),
+diff --git a/shared/src/rpcMethods.ts b/shared/src/rpcMethods.ts
+index c6a195a8b4f6c76768d2c150a0a21a0b501cc72c..fc50f7dfcd8bbd9f4c01faf63d526b149eb5ad35 100644
+--- a/shared/src/rpcMethods.ts
++++ b/shared/src/rpcMethods.ts
+@@ -10,6 +10,11 @@ export const RPC_METHODS = {
+     StopRunner: 'stop-runner',
+     ListMachineDirectory: 'list-directory',
+     PathExists: 'path-exists',
++    ProviderList: 'provider-list',
++    ProviderCreate: 'provider-create',
++    ProviderUpdate: 'provider-update',
++    ProviderSetDefault: 'provider-set-default',
++    ProviderHealthCheck: 'provider-health-check',
+     CursorChatStoreStatus: 'cursor-chat-store-status',
+     GitStatus: 'git-status',
+     GitDiffNumstat: 'git-diff-numstat',
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 38babfc2790c568d28b358db464410ca62aaac9c..4f32c0ada656503e6b32977fde5365307f2e63e3 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -68,6 +68,9 @@ export const MetadataSchema = z.object({
+     archiveReason: z.string().optional(),
+     preferredPermissionMode: PermissionModeSchema.optional(),
+     flavor: z.string().nullish(),
++    providerProfileId: z.string().uuid().nullable().optional(),
++    providerProfileName: z.string().optional(),
++    providerProfileRevision: z.number().int().positive().optional(),
+     capabilities: SessionCapabilitiesSchema.optional(),
+     worktree: WorktreeMetadataSchema.optional(),
+     // Cached Pi model list — written by CLI, read by web (inactive session fallback).
+diff --git a/shared/src/version.ts b/shared/src/version.ts
+index bc1013c31c09c0a1464ee2ca2144f62e82571964..0f1ae111716c915ae2cf2efcea180e9c55ed300b 100644
+--- a/shared/src/version.ts
++++ b/shared/src/version.ts
+@@ -1,2 +1,2 @@
+ /** Bump when CLI↔Server REST/Socket API changes in a breaking way. */
+-export const PROTOCOL_VERSION = 1
++export const PROTOCOL_VERSION = 2
+diff --git a/web/README.md b/web/README.md
+index 3498263f4a1e986500fb9e010281d4cce21fc6a3..354e4b38393a9dd5c58ac4b60941b4cc903cfbed 100644
+--- a/web/README.md
++++ b/web/README.md
+@@ -32,6 +32,7 @@ See `src/router.tsx` for route definitions.
+ - `/sessions/$sessionId/terminal` - Terminal interface.
+ - `/settings` - Settings category hub (mobile) and responsive master-detail shell.
+ - `/settings/general` - Language preferences.
++- `/settings/providers` - Machine-local Claude Code, Codex, and Grok Build API providers.
+ - `/settings/display` - Appearance, typography, colors, and session list preferences.
+ - `/settings/chat` - Message input, tool card, and conversation color preferences.
+ - `/settings/voice` - Everyday voice assistant preferences.
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 3edab78826da291169ba6b2b455ca8362acf01e5..53e3235145248e361f638f508b2818ac1f09c075 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -44,7 +44,15 @@ import type {
+     ReopenSessionResponse,
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
+-import type { AgentFlavor } from '@hapi/protocol'
++import type {
++    AgentFlavor,
++    AgentProvider,
++    ProviderListResponse,
++    ProviderHealthCheckResponse,
++    ProviderMutationResponse,
++    ProviderProfileInput,
++    ProviderProfileUpdate
++} from '@hapi/protocol'
+ import type { CancelMessageResponse } from '@hapi/protocol/schemas'
+ 
+ type ApiClientOptions = {
+@@ -606,6 +614,39 @@ export class ApiClient {
+         )
+     }
+ 
++    async listProviderProfiles(machineId: string, agent?: AgentProvider): Promise<ProviderListResponse> {
++        const query = agent ? `?agent=${encodeURIComponent(agent)}` : ''
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers${query}`)
++    }
++
++    async createProviderProfile(machineId: string, input: ProviderProfileInput): Promise<ProviderMutationResponse> {
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers`, {
++            method: 'POST',
++            body: JSON.stringify(input)
++        })
++    }
++
++    async updateProviderProfile(machineId: string, id: string, patch: ProviderProfileUpdate): Promise<ProviderMutationResponse> {
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(id)}`, {
++            method: 'PATCH',
++            body: JSON.stringify(patch)
++        })
++    }
++
++    async setDefaultProvider(machineId: string, agent: AgentProvider, id: string | null): Promise<ProviderMutationResponse> {
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/default`, {
++            method: 'POST',
++            body: JSON.stringify({ agent, id })
++        })
++    }
++
++    async checkProviderHealth(machineId: string, id: string, refreshModels = true): Promise<ProviderHealthCheckResponse> {
++        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(id)}/health`, {
++            method: 'POST',
++            body: JSON.stringify({ refreshModels })
++        })
++    }
++
+     async checkMachinePathsExists(
+         machineId: string,
+         paths: string[]
+@@ -629,7 +670,8 @@ export class ApiClient {
+         sessionType?: 'simple' | 'worktree',
+         worktreeName?: string,
+         effort?: string,
+-        permissionMode?: PermissionMode
++        permissionMode?: PermissionMode,
++        providerProfileId?: string | null
+     ): Promise<SpawnResponse> {
+         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
+             method: 'POST',
+@@ -642,7 +684,8 @@ export class ApiClient {
+                 sessionType,
+                 worktreeName,
+                 effort,
+-                permissionMode
++                permissionMode,
++                providerProfileId
+             })
+         })
+     }
+diff --git a/web/src/chat/modelConfig.test.ts b/web/src/chat/modelConfig.test.ts
+index d270fb5128370d742a46db0a7c4a695859463ebd..cf408b215b6481b2fc1d8276d19e4c95a83a0a77 100644
+--- a/web/src/chat/modelConfig.test.ts
++++ b/web/src/chat/modelConfig.test.ts
+@@ -18,6 +18,10 @@ describe('getContextBudgetTokens', () => {
+         expect(getContextBudgetTokens('gpt-5.4', 'codex')).toBe(248_400)
+     })
+ 
++    it('honors an explicit managed-provider 1M variant for Codex', () => {
++        expect(getContextBudgetTokens('glm-5.2[1M]', 'codex')).toBe(990_000)
++    })
++
+     it('parses context budget from Cursor wire ids', () => {
+         expect(getContextBudgetTokens('composer-2.5-fast[context=300k]', 'cursor')).toBe(290_000)
+     })
+diff --git a/web/src/chat/modelConfig.ts b/web/src/chat/modelConfig.ts
+index b6d9b427a53dea7b99908a568108c81c767289e0..832571a14fd47fe6f959c028a167ba1390722783 100644
+--- a/web/src/chat/modelConfig.ts
++++ b/web/src/chat/modelConfig.ts
+@@ -48,6 +48,14 @@ function parseCursorWireContextWindow(model: string): number | null {
+ }
+ 
+ export function getContextBudgetTokens(model: string | null | undefined, flavor?: string | null): number | null {
++    const trimmedModel = model?.trim()
++    // Managed-provider 1M variants are stored as `<raw-model>[1M]`. Check
++    // this before flavor defaults so Codex and Grok provider sessions retain
++    // the explicit capacity the operator selected.
++    if (/\[1m\]$/i.test(trimmedModel ?? '')) {
++        return Math.max(1, LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS - CONTEXT_HEADROOM_TOKENS)
++    }
++
+     if (flavor === 'codex') {
+         return Math.max(1, DEFAULT_CODEX_CONTEXT_WINDOW_TOKENS - CONTEXT_HEADROOM_TOKENS)
+     }
+@@ -57,7 +65,6 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
+     }
+ 
+     if (flavor === 'cursor') {
+-        const trimmedModel = model?.trim()
+         const windowTokens = trimmedModel ? parseCursorWireContextWindow(trimmedModel) : null
+         if (!windowTokens) {
+             return null
+@@ -69,7 +76,6 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
+         return null
+     }
+ 
+-    const trimmedModel = model?.trim()
+     const windowTokens = (() => {
+         if (!trimmedModel) {
+             return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 9e28c9a71e66067eeabbffa6e7456945e442cd42..f3d17ce474e580ef5420909846f6ea041d72dadc 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -1009,38 +1009,42 @@ export function HappyComposer(props: {
+                                         </div>
+                                     ))
+                                 ) : (
+-                                    modelOptions.map((option) => {
++                                    modelOptions.map((option, index) => {
+                                         const isSelected = selectedModelBase !== undefined
+                                             ? selectedModelBase === option.value
+                                             : model === option.value
+                                         return (
+-                                        <button
+-                                            key={option.value ?? 'auto'}
+-                                            type="button"
+-                                            disabled={controlsDisabled}
+-                                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+-                                                controlsDisabled
+-                                                    ? 'cursor-not-allowed opacity-50'
+-                                                    : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+-                                            }`}
+-                                            onClick={() => handleModelChange(option.value)}
+-                                            onMouseDown={(e) => e.preventDefault()}
+-                                        >
+-                                            <div
+-                                                className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+-                                                    isSelected
+-                                                        ? 'border-[var(--app-link)]'
+-                                                        : 'border-[var(--app-hint)]'
+-                                                }`}
+-                                            >
+-                                                {isSelected && (
+-                                                    <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+-                                                )}
++                                            <div key={option.value ?? 'auto'}>
++                                                {option.group && option.group !== modelOptions[index - 1]?.group ? (
++                                                    <div className="px-3 pt-2 pb-0.5 text-xs font-medium text-[var(--app-hint)]">{option.group}</div>
++                                                ) : null}
++                                                <button
++                                                    type="button"
++                                                    disabled={controlsDisabled}
++                                                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
++                                                        controlsDisabled
++                                                            ? 'cursor-not-allowed opacity-50'
++                                                            : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
++                                                    }`}
++                                                    onClick={() => handleModelChange(option.value)}
++                                                    onMouseDown={(e) => e.preventDefault()}
++                                                >
++                                                    <div
++                                                        className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
++                                                            isSelected
++                                                                ? 'border-[var(--app-link)]'
++                                                                : 'border-[var(--app-hint)]'
++                                                        }`}
++                                                    >
++                                                        {isSelected && (
++                                                            <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
++                                                        )}
++                                                    </div>
++                                                    <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
++                                                        {option.label}
++                                                    </span>
++                                                </button>
+                                             </div>
+-                                            <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+-                                                {option.label}
+-                                            </span>
+-                                        </button>
+                                         )
+                                     })
+                                 )}
+diff --git a/web/src/components/AssistantChat/claudeModelOptions.ts b/web/src/components/AssistantChat/claudeModelOptions.ts
+index 086cc5dc53a429f6d0fbe2d927d5aebd784e65c3..4a7b255db33b2cab496596243d386b4c41ff7084 100644
+--- a/web/src/components/AssistantChat/claudeModelOptions.ts
++++ b/web/src/components/AssistantChat/claudeModelOptions.ts
+@@ -3,6 +3,7 @@ import { CLAUDE_MODEL_PRESETS, getClaudeModelLabel } from '@hapi/protocol'
+ export type ClaudeComposerModelOption = {
+     value: string | null
+     label: string
++    group?: string
+ }
+ 
+ function normalizeClaudeComposerModel(model?: string | null): string | null {
+diff --git a/web/src/components/NewSession/ModelSelector.tsx b/web/src/components/NewSession/ModelSelector.tsx
+index 248b1193508615766c225944999c1a12f4e78636..0cd7a55892f6400b6641c4be0aa5e7cc5e09d7e3 100644
+--- a/web/src/components/NewSession/ModelSelector.tsx
++++ b/web/src/components/NewSession/ModelSelector.tsx
+@@ -1,19 +1,20 @@
+ import type { AgentType } from './types'
+ import { MODEL_OPTIONS } from './types'
+ import { useTranslation } from '@/lib/use-translation'
++import type { GroupedModelOption } from '@/lib/provider-models'
+ 
+ export function ModelSelector(props: {
+     agent: AgentType
+     model: string
+     label?: string
+-    options?: Array<{ value: string; label: string }>
++    options?: GroupedModelOption[]
+     isDisabled: boolean
+     isLoading?: boolean
+     error?: string | null
+     onModelChange: (value: string) => void
+ }) {
+     const { t } = useTranslation()
+-    const options = props.options ?? MODEL_OPTIONS[props.agent]
++    const options: GroupedModelOption[] = props.options ?? MODEL_OPTIONS[props.agent]
+     if (options.length === 0) {
+         return null
+     }
+@@ -32,11 +33,12 @@ export function ModelSelector(props: {
+                 disabled={props.isDisabled || props.isLoading}
+                 className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
+             >
+-                {options.map((option) => (
+-                    <option key={option.value} value={option.value}>
+-                        {option.label}
+-                    </option>
+-                ))}
++                {Object.entries(Object.groupBy(options, (option) => option.group ?? ''))
++                    .map(([group, grouped]) => group ? (
++                        <optgroup key={group} label={group}>
++                            {grouped?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
++                        </optgroup>
++                    ) : grouped?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>))}
+             </select>
+             {props.error ? (
+                 <div className="text-xs text-red-600">
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index b7ae89d8cda8841c2ca33470ab85e838b4846f48..a0182e9fa27167e7d8e2ebc13b664866cf96122c 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -1,6 +1,8 @@
+ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+ import type { ApiClient } from '@/api/client'
+ import type { CodexLocalSessionSummary, Machine } from '@/types/api'
++import type { AgentProvider, ProviderProfileView } from '@/types/api'
++import { AGENT_PROVIDER_CAPABILITIES } from '@hapi/protocol'
+ import type { GrokPermissionMode } from '@hapi/protocol'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
+@@ -32,7 +34,7 @@ import {
+     saveNewSessionFormDraft,
+     shouldRestoreNewSessionFormDraft
+ } from './newSessionFormDraft'
+-import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
++import { MODEL_OPTIONS, type AgentType, type LaunchEffort, type CodexReasoningEffort, type SessionType } from './types'
+ import { ActionButtons } from './ActionButtons'
+ import { AgentSelector } from './AgentSelector'
+ import { DirectorySection } from './DirectorySection'
+@@ -54,6 +56,7 @@ import { SessionTypeSelector } from './SessionTypeSelector'
+ import { YoloToggle } from './YoloToggle'
+ import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
+ import { formatRunnerSpawnError } from '../../utils/formatRunnerSpawnError'
++import { activeProviderProfile, mergeModelOptions } from '@/lib/provider-models'
+ import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
+ 
+ 
+@@ -119,6 +122,10 @@ export function NewSession(props: {
+     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
+     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
+     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
++    const [providerProfileId, setProviderProfileId] = useState<string | null | undefined>(undefined)
++    const [providerProfiles, setProviderProfiles] = useState<ProviderProfileView[]>([])
++    const [providerDefaults, setProviderDefaults] = useState<Partial<Record<AgentProvider, string | null>>>({})
++    const [providersLoading, setProvidersLoading] = useState(false)
+     const [model, setModel] = useState('auto')
+     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
+     const pendingCursorBaseRef = useRef<string | null>(null)
+@@ -156,6 +163,25 @@ export function NewSession(props: {
+         }
+     }, [agent])
+ 
++    useEffect(() => {
++        setProviderProfileId(undefined)
++        setProviderProfiles([])
++        setProviderDefaults({})
++        const providerAgent = agent === 'gemini' ? null : agent as AgentProvider
++        if (!machineId || !providerAgent || !AGENT_PROVIDER_CAPABILITIES[providerAgent].managed) return
++        let cancelled = false
++        setProvidersLoading(true)
++        void props.api.listProviderProfiles(machineId, providerAgent).then((result) => {
++            if (!cancelled && result.success) {
++                setProviderProfiles(result.profiles ?? [])
++                setProviderDefaults(result.defaults ?? {})
++            }
++        }).finally(() => {
++            if (!cancelled) setProvidersLoading(false)
++        })
++        return () => { cancelled = true }
++    }, [agent, machineId, props.api])
++
+     useEffect(() => {
+         savePreferredAgent(agent)
+     }, [agent])
+@@ -267,6 +293,14 @@ export function NewSession(props: {
+         }
+         return options
+     }, [codexModelsState.models, model])
++    const providerAgent = agent === 'gemini' ? null : agent as AgentProvider
++    const providerCapability = providerAgent ? AGENT_PROVIDER_CAPABILITIES[providerAgent] : null
++    const selectedProviderProfile = useMemo(() => activeProviderProfile({
++        agent: providerAgent,
++        profiles: providerProfiles,
++        defaults: providerDefaults,
++        requestedId: providerProfileId
++    }), [providerAgent, providerDefaults, providerProfileId, providerProfiles])
+     const codexSupportedReasoningEfforts = useMemo(
+         () => getCodexModelReasoningEfforts(codexModelsState.models, model),
+         [codexModelsState.models, model]
+@@ -446,6 +480,17 @@ export function NewSession(props: {
+         () => buildGrokModelOptions(grokModelsState.availableModels),
+         [grokModelsState.availableModels]
+     )
++    const providerModelOptions = useMemo(() => {
++        if (!providerCapability?.managed) return undefined
++        const native = agent === 'codex'
++            ? codexModelOptions
++            : agent === 'grok'
++                ? grokModelOptions
++                : agent === 'claude'
++                    ? MODEL_OPTIONS.claude
++                    : []
++        return mergeModelOptions(native.map((option) => ({ ...option, group: 'Native' })), selectedProviderProfile, model)
++    }, [agent, codexModelOptions, grokModelOptions, model, providerCapability?.managed, selectedProviderProfile])
+     const grokEffortOptions = useMemo(
+         () => buildGrokEffortOptions(
+             grokModelsState.availableModels,
+@@ -775,6 +820,7 @@ export function NewSession(props: {
+                 machineId,
+                 directory: trimmedDirectory,
+                 agent,
++                providerProfileId,
+                 model: resolvedModel,
+                 effort: resolvedEffort,
+                 modelReasoningEffort: resolvedModelReasoningEffort,
+@@ -847,6 +893,36 @@ export function NewSession(props: {
+                 isDisabled={isFormDisabled}
+                 onAgentChange={setAgent}
+             />
++            {providerCapability?.managed ? (
++                <div className="px-3 pb-3">
++                    <label className="mb-1.5 block text-sm font-medium text-[var(--app-fg)]" htmlFor="new-session-provider">
++                        {t('newSession.provider.label')}
++                    </label>
++                    <select
++                        id="new-session-provider"
++                        value={providerProfileId === undefined ? '__default__' : providerProfileId === null ? '__system__' : providerProfileId}
++                        onChange={(event) => {
++                            const value = event.target.value
++                            setProviderProfileId(value === '__default__' ? undefined : value === '__system__' ? null : value)
++                        }}
++                        disabled={isFormDisabled || providersLoading}
++                        className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 text-sm text-[var(--app-fg)] outline-none"
++                    >
++                        <option value="__default__">{t('newSession.provider.machineDefault')}</option>
++                        <option value="__system__">{t('newSession.provider.system')}</option>
++                        {providerProfiles.filter((profile) => profile.enabled).map((profile) => (
++                            <option key={profile.id} value={profile.id}>{profile.name}</option>
++                        ))}
++                    </select>
++                    <div className="mt-1 text-xs text-[var(--app-hint)]">
++                        {providerProfileId === null
++                            ? t('newSession.provider.systemDescription')
++                            : providerProfileId === undefined
++                                ? t('newSession.provider.machineDefaultDescription')
++                                : t('newSession.provider.restartDescription')}
++                    </div>
++                </div>
++            ) : null}
+             {agent === 'codex' ? (
+                 <CodexImportSelectButton
+                     selectedSession={selectedCodexImportSession}
+@@ -917,11 +993,7 @@ export function NewSession(props: {
+                         agent={agent}
+                         model={model}
+                         options={
+-                            agent === 'codex'
+-                                ? codexModelOptions
+-                                : agent === 'grok'
+-                                    ? grokModelOptions
+-                                : undefined
++                            providerModelOptions
+                         }
+                         isDisabled={
+                             isFormDisabled
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 02f2cc1d4136a519b92c74ab9e0e9cf459fad08c..360981fc97ff7e18c8e05f34d21ae35392633b0d 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -10,7 +10,9 @@ import type {
+     PermissionMode,
+     Session,
+     PiModelSummary,
+-    SlashCommand
++    SlashCommand,
++    AgentProvider,
++    ProviderProfileView
+ } from '@/types/api'
+ import type { ChatBlock, NormalizedMessage } from '@/chat/types'
+ import type { Suggestion } from '@/hooks/useActiveSuggestions'
+@@ -69,6 +71,8 @@ import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeRe
+ import { useVoiceOptional } from '@/lib/voice-context'
+ import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
+ import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
++import { AGENT_PROVIDER_CAPABILITIES } from '@hapi/protocol'
++import { activeProviderProfile, mergeModelOptions } from '@/lib/provider-models'
+ 
+ type SessionModelSelection = { provider: string; modelId: string } | string | null
+ 
+@@ -627,6 +631,45 @@ function SessionChatInner(props: SessionChatProps) {
+         enabled: agentFlavor === 'cursor' && props.session.active
+     })
+     const sessionMachineId = props.session.metadata?.machineId ?? null
++    const [providerProfiles, setProviderProfiles] = useState<ProviderProfileView[]>([])
++    const [providerDefaults, setProviderDefaults] = useState<Partial<Record<AgentProvider, string | null>>>({})
++    const providerAgent = agentFlavor === 'gemini' || !agentFlavor ? null : agentFlavor as AgentProvider
++    const providerManaged = providerAgent ? AGENT_PROVIDER_CAPABILITIES[providerAgent].managed : false
++    useEffect(() => {
++        if (!sessionMachineId || !providerAgent || !providerManaged) {
++            setProviderProfiles([])
++            setProviderDefaults({})
++            return
++        }
++        let cancelled = false
++        void props.api.listProviderProfiles(sessionMachineId, providerAgent).then((result) => {
++            if (cancelled || !result.success) return
++            setProviderProfiles(result.profiles ?? [])
++            setProviderDefaults(result.defaults ?? {})
++        })
++        return () => { cancelled = true }
++    }, [props.api, providerAgent, providerManaged, sessionMachineId])
++    const sessionProviderProfile = useMemo(() => activeProviderProfile({
++        agent: providerAgent,
++        profiles: providerProfiles,
++        defaults: providerDefaults,
++        requestedId: props.session.metadata?.providerProfileId
++    }), [props.session.metadata?.providerProfileId, providerAgent, providerDefaults, providerProfiles])
++    const managedProviderModelOptions = useMemo(() => {
++        if (!providerManaged) return undefined
++        const withoutDefault = (options: Array<{ value: string | null; label: string }>) => options.filter(
++            (option): option is { value: string; label: string } => option.value !== null
++        )
++        const native = agentFlavor === 'codex'
++            ? withoutDefault(codexModelOptions ?? [])
++            : agentFlavor === 'grok'
++                ? withoutDefault(grokModelOptions ?? [])
++                : agentFlavor === 'claude'
++                    ? []
++                    : []
++        return mergeModelOptions(native.map((option) => ({ ...option, group: 'Native' })), sessionProviderProfile, props.session.model ?? undefined)
++            .map((option) => ({ ...option, value: option.value as string | null }))
++    }, [agentFlavor, codexModelOptions, grokModelOptions, props.session.model, providerManaged, sessionProviderProfile])
+     const machineCursorModelsState = useCursorModelsForMachine({
+         api: props.api,
+         machineId: sessionMachineId,
+@@ -1335,8 +1378,8 @@ function SessionChatInner(props: SessionChatProps) {
+                         effort={props.session.effort}
+                         agentFlavor={agentFlavor}
+                         availableModelOptions={
+-                            agentFlavor === 'codex'
+-                                ? codexModelOptions
++                            agentFlavor === 'claude' || agentFlavor === 'codex'
++                                ? managedProviderModelOptions
+                                 : agentFlavor === 'cursor'
+                                     ? (
+                                         cursorCatalogPending
+@@ -1348,7 +1391,7 @@ function SessionChatInner(props: SessionChatProps) {
+                                     : agentFlavor === 'opencode'
+                                         ? opencodeModelOptions
+                                         : agentFlavor === 'grok'
+-                                            ? grokModelOptions
++                                            ? managedProviderModelOptions
+                                         // Pi uses its own provider-qualified picker (piModels prop).
+                                         // Feeding piModelOptions here would make the generic Ctrl/Cmd+M
+                                         // cycler (getNextModelForFlavor) post a bare modelId string,
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 78c9403d5cc6ca4d0a5374a1f037a88d8979fee8..d036f9ac2045fbc00736d8f864ae7c3e2151fb67 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -241,6 +241,9 @@ export function SessionHeader(props: {
+                                 <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0" />
+                                 {session.metadata?.flavor?.trim() || 'unknown'}
+                             </span>
++                            {session.metadata?.providerProfileName ? (
++                                <span>{t('session.provider')}: {session.metadata.providerProfileName}</span>
++                            ) : null}
+                             {modelLabel ? (
+                                 <span>
+                                     {t(modelLabel.key)}: {modelLabel.value}
+diff --git a/web/src/components/settings/SettingsNav.tsx b/web/src/components/settings/SettingsNav.tsx
+index 3abb26b359260f5c0573e365fe5b93bc48d865ed..8c81c4830a6abef62e9639631755f4285ccc5579 100644
+--- a/web/src/components/settings/SettingsNav.tsx
++++ b/web/src/components/settings/SettingsNav.tsx
+@@ -17,6 +17,7 @@ export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
+         general: locale === 'zh-CN' ? '简体中文' : 'English',
+         display: `${t(`settings.display.appearance.${appearance}`)} · ${Math.round(fontScale * 100)}%`,
+         chat: t(`settings.chat.enterBehavior.${composerEnterBehavior}`),
++        providers: t('settings.providers.summary'),
+         voice: t('settings.hub.voice.summary'),
+         about: `v${__APP_VERSION__}`,
+     }
+diff --git a/web/src/hooks/mutations/useSpawnSession.ts b/web/src/hooks/mutations/useSpawnSession.ts
+index 4c30f3358f70ba5872789c91f0c1ef2820f61cf3..2f6a7a922521032e10e03c02afd8297c1b0c259c 100644
+--- a/web/src/hooks/mutations/useSpawnSession.ts
++++ b/web/src/hooks/mutations/useSpawnSession.ts
+@@ -8,6 +8,7 @@ type SpawnInput = {
+     machineId: string
+     directory: string
+     agent?: AgentFlavor
++    providerProfileId?: string | null
+     model?: string
+     effort?: string
+     modelReasoningEffort?: string
+@@ -39,7 +40,8 @@ export function useSpawnSession(api: ApiClient | null): {
+                 input.sessionType,
+                 input.worktreeName,
+                 input.effort,
+-                input.permissionMode
++                input.permissionMode,
++                input.providerProfileId
+             )
+         },
+         onSuccess: () => {
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 1a656a706d380cfda3b51c4604177c57f9e23d60..b82aaab95ebb174296555c41539b369f1933fd65 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -11,6 +11,8 @@ export default {
+   'message.copy': 'Copy',
+   'message.copied': 'Copied',
+   'message.info': 'Message details',
++  'common.save': 'Save',
++  'common.cancel': 'Cancel',
+ 
+   // Login / Auth
+   'login.title': 'HAPI',
+@@ -745,6 +747,37 @@ export default {
+   'settings.about.website': 'Website',
+   'settings.about.appVersion': 'App Version',
+   'settings.about.protocolVersion': 'Protocol Version',
++  'settings.providers.title': 'API Providers',
++  'settings.providers.description': 'Manage machine-local API profiles for supported agents. Secrets never persist in the hub.',
++  'settings.providers.summary': 'Machine-local agent credentials',
++  'settings.providers.machine': 'Machine',
++  'settings.providers.agent': 'Agent',
++  'settings.providers.profiles': 'Profiles',
++  'settings.providers.system': 'System / agent login',
++  'settings.providers.systemDescription': 'Use the agent’s existing login and environment.',
++  'settings.providers.default': 'Default',
++  'settings.providers.setDefault': 'Set default',
++  'settings.providers.official': 'Official endpoint',
++  'settings.providers.disabled': 'Disabled',
++  'settings.providers.empty': 'No managed profiles yet.',
++  'settings.providers.add': 'Add profile',
++  'settings.providers.edit': 'Edit profile',
++  'settings.providers.name': 'Profile name',
++  'settings.providers.baseUrl': 'Base URL (optional)',
++  'settings.providers.apiKey': 'API key or token',
++  'settings.providers.secretUnchanged': 'Leave blank to keep the current secret',
++  'settings.providers.defaultModel': 'Default model (optional)',
++  'settings.providers.enabled': 'Enabled',
++  'settings.providers.connection.healthy': 'Connected',
++  'settings.providers.connection.unhealthy': 'Connection failed',
++  'settings.providers.connection.unverified': 'Not checked',
++  'settings.providers.test': 'Test',
++  'settings.providers.noModels': 'No cached models',
++  'settings.providers.customModels': 'Custom models, one per line. Add [1M] to declare 1M context.',
++  'settings.providers.context1m': '1M context models',
++  'settings.providers.context1mHint': 'Selecting it adds a model[1M] option; the base model remains the 200K selection.',
++  'settings.providers.protocol': 'API protocol',
++  'settings.providers.nativeOnly': 'This agent currently uses its native login only.',
+ 
+   // Browse / Workspace
+   'browse.title': 'Browse',
+@@ -757,6 +790,13 @@ export default {
+   'browse.noRootHint': 'Browsing is opt-in. Restart the runner with one or more workspace roots to enable file-tree navigation and scoped session spawning.',
+   'browse.noRootFooter': 'You can still create sessions from the “New Session” page.',
+   'browse.noMachinesConnected': 'No CLI connected. Run `hapi runner start --workspace-root /path/a --workspace-root /path/b` on a machine to get started.',
++  'newSession.provider.label': 'API provider',
++  'newSession.provider.machineDefault': 'Machine default',
++  'newSession.provider.system': 'System / agent login',
++  'newSession.provider.machineDefaultDescription': 'Uses the machine default profile when one is configured; otherwise uses the agent login.',
++  'newSession.provider.systemDescription': 'Uses the agent login and existing environment variables.',
++  'newSession.provider.restartDescription': 'The selected profile is applied when this session starts. Switching a provider requires a new or restarted session.',
++  'session.provider': 'Provider',
+ 
+   // Misc
+   'misc.noMachines': 'No machines available',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index b69377d9b6759efa6fbcff64cdae84d3fafd6d85..7fcd0386444b5fff9fafbc01bbfb3e5424b0ffe7 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -11,6 +11,8 @@ export default {
+   'message.copy': '复制',
+   'message.copied': '已复制',
+   'message.info': '消息详情',
++  'common.save': '保存',
++  'common.cancel': '取消',
+ 
+   // Login / Auth
+   'login.title': 'HAPI',
+@@ -749,6 +751,37 @@ export default {
+   'settings.about.website': '官方网站',
+   'settings.about.appVersion': '应用版本',
+   'settings.about.protocolVersion': '协议版本',
++  'settings.providers.title': 'API 供应商',
++  'settings.providers.description': '管理已适配 Agent 的宿主机 API 配置；密钥不会持久化到 Hub。',
++  'settings.providers.summary': '宿主机 Agent 凭证',
++  'settings.providers.machine': '机器',
++  'settings.providers.agent': 'Agent',
++  'settings.providers.profiles': '供应商配置',
++  'settings.providers.system': '系统默认 / Agent 登录',
++  'settings.providers.systemDescription': '使用 Agent 原有登录状态和环境变量。',
++  'settings.providers.default': '默认',
++  'settings.providers.setDefault': '设为默认',
++  'settings.providers.official': '官方端点',
++  'settings.providers.disabled': '已停用',
++  'settings.providers.empty': '暂无供应商配置。',
++  'settings.providers.add': '新增供应商',
++  'settings.providers.edit': '修改供应商',
++  'settings.providers.name': '供应商名称',
++  'settings.providers.baseUrl': 'Base URL（可选）',
++  'settings.providers.apiKey': 'API Key 或 Token',
++  'settings.providers.secretUnchanged': '留空则保留当前密钥',
++  'settings.providers.defaultModel': '默认模型（可选）',
++  'settings.providers.enabled': '启用',
++  'settings.providers.connection.healthy': '连接成功',
++  'settings.providers.connection.unhealthy': '连接失败',
++  'settings.providers.connection.unverified': '未检查',
++  'settings.providers.test': '检测',
++  'settings.providers.noModels': '没有已缓存模型',
++  'settings.providers.customModels': '自定义模型，每行一个。添加 [1M] 声明 1M 上下文。',
++  'settings.providers.context1m': '1M 上下文模型',
++  'settings.providers.context1mHint': '勾选后新增“模型名[1M]”选项；基础模型仍按 200K 使用。',
++  'settings.providers.protocol': 'API 协议',
++  'settings.providers.nativeOnly': '此 Agent 当前仅使用原生登录。',
+ 
+   // Browse / Workspace
+   'browse.title': '浏览',
+@@ -761,6 +794,13 @@ export default {
+   'browse.noRootHint': '浏览功能是可选的。带一个或多个 --workspace-root 参数重启 runner，即可启用文件树浏览和受限的会话启动。',
+   'browse.noRootFooter': '你仍然可以在「新建会话」页面直接创建会话。',
+   'browse.noMachinesConnected': '没有已连接的 CLI。在某台机器上运行 `hapi runner start --workspace-root /path/a --workspace-root /path/b` 来开始。',
++  'newSession.provider.label': 'API 供应商',
++  'newSession.provider.machineDefault': '机器默认',
++  'newSession.provider.system': '系统默认 / Agent 登录',
++  'newSession.provider.machineDefaultDescription': '优先使用机器默认供应商；未配置时使用 Agent 登录。',
++  'newSession.provider.systemDescription': '使用 Agent 原有登录状态和环境变量。',
++  'newSession.provider.restartDescription': '该供应商在创建会话时生效；切换供应商需新建或重启会话。',
++  'session.provider': '供应商',
+ 
+   // Misc
+   'misc.noMachines': '无可用机器',
+diff --git a/web/src/lib/provider-models.test.ts b/web/src/lib/provider-models.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c04e2ada92c063dfa5de8dadc688698b7c8c730
+--- /dev/null
++++ b/web/src/lib/provider-models.test.ts
+@@ -0,0 +1,43 @@
++import { describe, expect, it } from 'vitest'
++import type { ProviderProfileView } from '@/types/api'
++import { activeProviderProfile, mergeModelOptions, providerModelOptions } from './provider-models'
++
++const profile: ProviderProfileView = {
++    id: '11111111-1111-4111-8111-111111111111',
++    name: 'GLM proxy',
++    agent: 'codex',
++    protocol: 'openai-chat-completions',
++    credentialType: 'api-key',
++    defaultModel: 'glm-5.2',
++    models: [
++        { id: 'glm-5.2', contextWindow: 1_000_000, source: 'custom' },
++        { id: 'gpt-5', contextWindow: 200_000, source: 'provider', refreshedAt: 1 }
++    ],
++    health: { status: 'healthy', checkedAt: 1 },
++    enabled: true,
++    revision: 1,
++    hasSecret: true,
++    createdAt: 1,
++    updatedAt: 1
++}
++
++describe('provider model options', () => {
++    it('uses a profile default for machine-default selection', () => {
++        expect(activeProviderProfile({
++            agent: 'codex',
++            profiles: [profile],
++            defaults: { codex: profile.id },
++            requestedId: undefined
++        })?.id).toBe(profile.id)
++    })
++
++    it('shows a distinct 1M selection alongside the conservative base model', () => {
++        expect(providerModelOptions(profile)).toEqual(expect.arrayContaining([
++            expect.objectContaining({ value: 'gpt-5', label: 'gpt-5 (200K)', group: 'GLM proxy · Provider' }),
++            expect.objectContaining({ value: 'glm-5.2', label: 'glm-5.2 (200K)', group: 'GLM proxy · Custom' }),
++            expect.objectContaining({ value: 'glm-5.2[1M]', label: 'glm-5.2[1M]', group: 'GLM proxy · Custom' })
++        ]))
++        expect(mergeModelOptions([{ value: 'auto', label: 'Default', group: 'Native' }], profile, 'glm-5.2[1M]'))
++            .toEqual(expect.arrayContaining([expect.objectContaining({ value: 'glm-5.2[1M]' })]))
++    })
++})
+diff --git a/web/src/lib/provider-models.ts b/web/src/lib/provider-models.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..78a87db035d4776b4c628e3a7c8f3293b1417be1
+--- /dev/null
++++ b/web/src/lib/provider-models.ts
+@@ -0,0 +1,78 @@
++import type { AgentProvider, ProviderModel, ProviderProfileView } from '@/types/api'
++
++export type GroupedModelOption = {
++    value: string
++    label: string
++    group?: string
++}
++
++type ProviderDefaults = Partial<Record<AgentProvider, string | null>>
++
++export function activeProviderProfile(args: {
++    agent: AgentProvider | null
++    profiles: ProviderProfileView[]
++    defaults?: ProviderDefaults
++    requestedId: string | null | undefined
++}): ProviderProfileView | null {
++    if (!args.agent || args.requestedId === null) return null
++    const id = args.requestedId ?? args.defaults?.[args.agent] ?? null
++    return args.profiles.find((profile) => profile.id === id && profile.enabled) ?? null
++}
++
++function contextLabel(model: Pick<ProviderModel, 'id' | 'contextWindow'>): string {
++    return model.contextWindow === 1_000_000 ? `${model.id}[1M]` : `${model.id} (200K)`
++}
++
++/**
++ * A 1M declaration provides an additional virtual model option. The plain
++ * name remains the conservative 200K selection, while the `[1M]` selection
++ * is converted back to the provider's raw model id by the CLI transport.
++ */
++export function providerModelOptions(profile: ProviderProfileView | null): GroupedModelOption[] {
++    if (!profile) return []
++
++    const options: GroupedModelOption[] = []
++    const seen = new Set<string>()
++    const add = (model: ProviderModel, group: string) => {
++        if (!seen.has(model.id)) {
++            seen.add(model.id)
++            options.push({ value: model.id, label: `${model.id} (200K)`, group })
++        }
++        if (model.contextWindow === 1_000_000) {
++            const reference = `${model.id}[1M]`
++            if (!seen.has(reference)) {
++                seen.add(reference)
++                options.push({ value: reference, label: contextLabel(model), group })
++            }
++        }
++    }
++
++    for (const model of profile.models.filter((model) => model.source === 'provider')) {
++        add(model, `${profile.name} · Provider`)
++    }
++    for (const model of profile.models.filter((model) => model.source === 'custom')) {
++        add(model, `${profile.name} · Custom`)
++    }
++    if (profile.defaultModel && !seen.has(profile.defaultModel)) {
++        options.unshift({ value: profile.defaultModel, label: profile.defaultModel, group: `${profile.name} · Default` })
++    }
++    return options
++}
++
++export function mergeModelOptions(
++    native: GroupedModelOption[],
++    profile: ProviderProfileView | null,
++    currentModel?: string
++): GroupedModelOption[] {
++    const result = [...native]
++    const seen = new Set(result.map((option) => option.value))
++    for (const option of providerModelOptions(profile)) {
++        if (seen.has(option.value)) continue
++        seen.add(option.value)
++        result.push(option)
++    }
++    if (currentModel && currentModel !== 'auto' && !seen.has(currentModel)) {
++        result.splice(1, 0, { value: currentModel, label: currentModel, group: 'Current' })
++    }
++    return result
++}
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 8952b183f522b87fd1fccd76884882ad1cdd4150..93a72d3ae5d2ef56c5278688d57ef52c23c6c699 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -53,6 +53,7 @@ import SettingsHubPage from '@/routes/settings'
+ import SettingsGeneralPage from '@/routes/settings/general'
+ import SettingsDisplayPage from '@/routes/settings/display'
+ import SettingsChatPage from '@/routes/settings/chat'
++import SettingsProvidersPage from '@/routes/settings/providers'
+ import SettingsVoicePage from '@/routes/settings/voice'
+ import SettingsVoiceVoicesPage from '@/routes/settings/voice-voices'
+ import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
+@@ -1363,6 +1364,12 @@ const settingsChatRoute = createRoute({
+     component: SettingsChatPage,
+ })
+ 
++const settingsProvidersRoute = createRoute({
++    getParentRoute: () => settingsRoute,
++    path: 'providers',
++    component: SettingsProvidersPage,
++})
++
+ const settingsVoiceRoute = createRoute({
+     getParentRoute: () => settingsRoute,
+     path: 'voice',
+@@ -1423,6 +1430,7 @@ export const routeTree = rootRoute.addChildren([
+         settingsGeneralRoute,
+         settingsDisplayRoute,
+         settingsChatRoute,
++        settingsProvidersRoute,
+         settingsVoiceRoute,
+         settingsVoiceVoicesRoute,
+         settingsVoiceAdvancedRoute,
+diff --git a/web/src/routes/settings/categories.ts b/web/src/routes/settings/categories.ts
+index 1eb1aec6240fa93e73fd90e609c9481afdc8b5b2..dc62e0ac2e899fe988b0647d81d5deb4c75f5cca 100644
+--- a/web/src/routes/settings/categories.ts
++++ b/web/src/routes/settings/categories.ts
+@@ -2,6 +2,7 @@ export const settingsCategories = [
+     { id: 'general', path: '/settings/general', titleKey: 'settings.general.title' },
+     { id: 'display', path: '/settings/display', titleKey: 'settings.display.title' },
+     { id: 'chat', path: '/settings/chat', titleKey: 'settings.chat.title' },
++    { id: 'providers', path: '/settings/providers', titleKey: 'settings.providers.title' },
+     { id: 'voice', path: '/settings/voice', titleKey: 'settings.voice.title' },
+     { id: 'about', path: '/settings/about', titleKey: 'settings.about.title' },
+ ] as const
+diff --git a/web/src/routes/settings/providers.tsx b/web/src/routes/settings/providers.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..903c20a5115372ee622bee45133bd9b4329d6c37
+--- /dev/null
++++ b/web/src/routes/settings/providers.tsx
+@@ -0,0 +1,318 @@
++import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
++import {
++    AGENT_PROVIDER_CAPABILITIES,
++    formatProviderModelReference,
++    parseProviderModelReference,
++    type AgentProvider,
++    type ProviderProfileInput,
++    type ProviderProfileView,
++    type ProviderProtocol
++} from '@hapi/protocol'
++import { SettingsChoiceGroup, SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
++import { useAppContext } from '@/lib/app-context'
++import { useMachines } from '@/hooks/queries/useMachines'
++import { useTranslation } from '@/lib/use-translation'
++
++type FormState = {
++    name: string
++    protocol: ProviderProtocol
++    baseUrl: string
++    apiKey: string
++    credentialType: 'api-key' | 'auth-token'
++    defaultModel: string
++    models: string
++    enabled: boolean
++}
++
++const agentOptions: Array<{ value: AgentProvider; label: string }> = [
++    { value: 'claude', label: 'Claude Code' },
++    { value: 'codex', label: 'Codex' },
++    { value: 'cursor', label: 'Cursor' },
++    { value: 'grok', label: 'Grok Build' },
++    { value: 'kimi', label: 'Kimi Code' },
++    { value: 'opencode', label: 'OpenCode' },
++    { value: 'pi', label: 'Pi' }
++]
++
++const protocolLabels: Record<ProviderProtocol, string> = {
++    'anthropic-messages': 'Anthropic Messages',
++    'openai-responses': 'OpenAI Responses',
++    'openai-chat-completions': 'OpenAI Chat Completions',
++    'gemini-generative-ai': 'Gemini Generative AI'
++}
++
++const emptyDefaults: Record<AgentProvider, string | null> = {
++    claude: null,
++    codex: null,
++    cursor: null,
++    grok: null,
++    kimi: null,
++    opencode: null,
++    pi: null
++}
++
++function emptyForm(agent: AgentProvider): FormState {
++    const capability = AGENT_PROVIDER_CAPABILITIES[agent]
++    return {
++        name: '',
++        protocol: capability.protocols[0] ?? 'openai-chat-completions',
++        baseUrl: '',
++        apiKey: '',
++        credentialType: capability.credentialTypes.includes('auth-token') ? 'api-key' : 'api-key',
++        defaultModel: '',
++        models: '',
++        enabled: true
++    }
++}
++
++function machineLabel(machine: { id: string; metadata?: { displayName?: string; host?: string } | null }): string {
++    return machine.metadata?.displayName || machine.metadata?.host || machine.id.slice(0, 8)
++}
++
++function statusLabel(profile: ProviderProfileView, t: (key: string) => string): string {
++    return t(`settings.providers.connection.${profile.health.status}`)
++}
++
++function modelReferences(value: string): Array<{ id: string; contextWindow: number }> {
++    return value.split(/\r?\n|,/)
++        .map((reference) => reference.trim())
++        .filter(Boolean)
++        .flatMap((reference) => {
++            try {
++                return [parseProviderModelReference(reference)]
++            } catch {
++                return []
++            }
++        })
++}
++
++function updateContextModelReference(models: string, id: string, supportsOneMillion: boolean): string {
++    let found = false
++    const updated = models.split(/\r?\n|,/)
++        .map((reference) => reference.trim())
++        .filter(Boolean)
++        .map((reference) => {
++            try {
++                if (parseProviderModelReference(reference).id !== id) return reference
++                found = true
++                return supportsOneMillion ? `${id}[1M]` : id
++            } catch {
++                return reference
++            }
++        })
++    if (supportsOneMillion && !found) updated.push(`${id}[1M]`)
++    return updated.join('\n')
++}
++
++export default function SettingsProvidersPage() {
++    const { api } = useAppContext()
++    const { t } = useTranslation()
++    const { machines, isLoading: machinesLoading } = useMachines(api, true)
++    const [machineId, setMachineId] = useState('')
++    const [agent, setAgent] = useState<AgentProvider>('claude')
++    const [profiles, setProfiles] = useState<ProviderProfileView[]>([])
++    const [defaults, setDefaults] = useState<Record<AgentProvider, string | null>>(emptyDefaults)
++    const [loading, setLoading] = useState(false)
++    const [saving, setSaving] = useState(false)
++    const [error, setError] = useState<string | null>(null)
++    const [editingId, setEditingId] = useState<string | null>(null)
++    const [form, setForm] = useState<FormState>(() => emptyForm('claude'))
++
++    const capability = AGENT_PROVIDER_CAPABILITIES[agent]
++
++    useEffect(() => {
++        if (!machineId && machines[0]) setMachineId(machines[0].id)
++        if (machineId && !machines.some((machine) => machine.id === machineId)) setMachineId(machines[0]?.id ?? '')
++    }, [machineId, machines])
++
++    const load = useCallback(async () => {
++        if (!machineId) return
++        setLoading(true)
++        setError(null)
++        try {
++            const result = await api.listProviderProfiles(machineId)
++            if (!result.success) throw new Error(result.error ?? 'Failed to load provider profiles')
++            setProfiles(result.profiles ?? [])
++            setDefaults(result.defaults ?? emptyDefaults)
++        } catch (loadError) {
++            setError(loadError instanceof Error ? loadError.message : 'Failed to load provider profiles')
++        } finally {
++            setLoading(false)
++        }
++    }, [api, machineId])
++
++    useEffect(() => { void load() }, [load])
++
++    const visibleProfiles = useMemo(() => profiles.filter((profile) => profile.agent === agent), [agent, profiles])
++    const editableModels = useMemo(
++        () => editingId ? visibleProfiles.find((profile) => profile.id === editingId)?.models ?? [] : [],
++        [editingId, visibleProfiles]
++    )
++    const contextModelIds = useMemo(() => Array.from(new Set([
++        ...editableModels.map((model) => model.id),
++        ...modelReferences(form.models).map((model) => model.id)
++    ])).sort((left, right) => left.localeCompare(right)), [editableModels, form.models])
++    const oneMillionContextModelIds = useMemo(() => new Set(
++        modelReferences(form.models)
++            .filter((model) => model.contextWindow === 1_000_000)
++            .map((model) => model.id)
++    ), [form.models])
++    const defaultModelReferences = useMemo(() => Array.from(new Set(editableModels.flatMap((model) => (
++        model.contextWindow === 1_000_000 ? [model.id, formatProviderModelReference(model)] : [model.id]
++    )))), [editableModels])
++
++    const resetForm = useCallback(() => {
++        setEditingId(null)
++        setForm(emptyForm(agent))
++    }, [agent])
++
++    const chooseAgent = (nextAgent: AgentProvider) => {
++        setAgent(nextAgent)
++        setEditingId(null)
++        setForm(emptyForm(nextAgent))
++    }
++
++    const editProfile = (profile: ProviderProfileView) => {
++        setEditingId(profile.id)
++        setForm({
++            name: profile.name,
++            protocol: profile.protocol,
++            baseUrl: profile.baseUrl ?? '',
++            apiKey: '',
++            credentialType: profile.credentialType,
++            defaultModel: profile.defaultModel ?? '',
++            models: profile.models.filter((model) => model.source === 'custom').map(formatProviderModelReference).join('\n'),
++            enabled: profile.enabled
++        })
++    }
++
++    const submit = async (event: FormEvent) => {
++        event.preventDefault()
++        if (!machineId || !capability.managed || !form.name.trim() || (!editingId && !form.apiKey)) return
++        setSaving(true)
++        setError(null)
++        try {
++            const models = form.models.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean)
++            const common = {
++                name: form.name.trim(),
++                agent,
++                protocol: form.protocol,
++                ...(editingId ? { baseUrl: form.baseUrl.trim() || null } : form.baseUrl.trim() ? { baseUrl: form.baseUrl.trim() } : {}),
++                credentialType: form.credentialType,
++                ...(editingId ? { defaultModel: form.defaultModel.trim() || null } : form.defaultModel.trim() ? { defaultModel: form.defaultModel.trim() } : {}),
++                ...(editingId ? { models } : { models }),
++                enabled: form.enabled
++            }
++            const result = editingId
++                ? await api.updateProviderProfile(machineId, editingId, { ...common, ...(form.apiKey ? { apiKey: form.apiKey } : {}) })
++                : await api.createProviderProfile(machineId, { ...common, apiKey: form.apiKey } as ProviderProfileInput)
++            if (!result.success) throw new Error(result.error ?? 'Failed to save provider profile')
++            resetForm()
++            await load()
++        } catch (saveError) {
++            setError(saveError instanceof Error ? saveError.message : 'Failed to save provider profile')
++        } finally {
++            setSaving(false)
++        }
++    }
++
++    const setDefault = async (id: string | null) => {
++        if (!machineId || !capability.managed) return
++        setSaving(true)
++        setError(null)
++        try {
++            const result = await api.setDefaultProvider(machineId, agent, id)
++            if (!result.success) throw new Error(result.error ?? 'Failed to change default provider')
++            await load()
++        } catch (defaultError) {
++            setError(defaultError instanceof Error ? defaultError.message : 'Failed to change default provider')
++        } finally {
++            setSaving(false)
++        }
++    }
++
++    const checkHealth = async (profile: ProviderProfileView) => {
++        if (!machineId) return
++        setSaving(true)
++        setError(null)
++        try {
++            const result = await api.checkProviderHealth(machineId, profile.id, true)
++            if (!result.success) throw new Error(result.error ?? 'Provider connection failed')
++            await load()
++        } catch (healthError) {
++            setError(healthError instanceof Error ? healthError.message : 'Provider connection failed')
++            await load()
++        } finally {
++            setSaving(false)
++        }
++    }
++
++    return (
++        <SettingsPageContent title={t('settings.providers.title')} description={t('settings.providers.description')}>
++            <SettingsSection title={t('settings.providers.machine')}>
++                <div className="p-3">
++                    <select value={machineId} onChange={(event) => { setMachineId(event.target.value); resetForm() }} disabled={machinesLoading} className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 text-[var(--app-fg)]">
++                        {machines.map((machine) => <option key={machine.id} value={machine.id}>{machineLabel(machine)}</option>)}
++                    </select>
++                </div>
++            </SettingsSection>
++
++            <SettingsSection>
++                <SettingsChoiceGroup label={t('settings.providers.agent')} value={agent} options={agentOptions} onChange={chooseAgent} />
++            </SettingsSection>
++
++            <SettingsSection title={t('settings.providers.profiles')}>
++                <button type="button" disabled={saving || !capability.managed} onClick={() => void setDefault(null)} className="flex w-full items-center justify-between px-3 py-3 text-left hover:bg-[var(--app-subtle-bg)] disabled:opacity-50">
++                    <span>
++                        <span className="block text-[var(--app-fg)]">{t('settings.providers.system')}</span>
++                        <span className="block text-xs text-[var(--app-hint)]">{t('settings.providers.systemDescription')}</span>
++                    </span>
++                    {defaults[agent] === null ? <span className="text-sm font-medium text-[var(--app-link)]">{t('settings.providers.default')}</span> : null}
++                </button>
++                {!capability.managed ? <div className="px-3 pb-3 text-sm text-[var(--app-hint)]">{t('settings.providers.nativeOnly')}</div> : null}
++                {visibleProfiles.map((profile) => (
++                    <div key={profile.id} className="flex items-start gap-3 border-t border-[var(--app-divider)] px-3 py-3">
++                        <button type="button" onClick={() => editProfile(profile)} className="min-w-0 flex-1 text-left">
++                            <span className="block truncate text-[var(--app-fg)]">{profile.name}</span>
++                            <span className="block truncate text-xs text-[var(--app-hint)]">{protocolLabels[profile.protocol]} · {profile.baseUrl || t('settings.providers.official')} · {profile.secretHint ?? '••••'} · {statusLabel(profile, t)}</span>
++                            <span className="mt-1 block truncate text-xs text-[var(--app-hint)]">{profile.models.map(formatProviderModelReference).join(', ') || t('settings.providers.noModels')}</span>
++                        </button>
++                        <div className="flex shrink-0 flex-col gap-1">
++                            <button type="button" disabled={saving} onClick={() => void checkHealth(profile)} className="rounded border border-[var(--app-border)] px-2 py-1 text-xs disabled:opacity-50">{t('settings.providers.test')}</button>
++                            {defaults[agent] === profile.id ? <span className="text-xs font-medium text-[var(--app-link)]">{t('settings.providers.default')}</span> : <button type="button" disabled={saving || !profile.enabled} onClick={() => void setDefault(profile.id)} className="rounded border border-[var(--app-border)] px-2 py-1 text-xs disabled:opacity-50">{t('settings.providers.setDefault')}</button>}
++                        </div>
++                    </div>
++                ))}
++                {!loading && capability.managed && visibleProfiles.length === 0 ? <div className="px-3 py-4 text-sm text-[var(--app-hint)]">{t('settings.providers.empty')}</div> : null}
++            </SettingsSection>
++
++            {capability.managed ? <SettingsSection title={editingId ? t('settings.providers.edit') : t('settings.providers.add')}>
++                <form onSubmit={submit} className="space-y-3 p-3">
++                    <input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={t('settings.providers.name')} className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-transparent px-3" />
++                    <select aria-label={t('settings.providers.protocol')} value={form.protocol} onChange={(event) => setForm({ ...form, protocol: event.target.value as ProviderProtocol })} className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3">
++                        {capability.protocols.map((protocol) => <option key={protocol} value={protocol}>{protocolLabels[protocol]}</option>)}
++                    </select>
++                    <input value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} placeholder={t('settings.providers.baseUrl')} type="url" className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-transparent px-3" />
++                    <input required={!editingId} value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder={editingId ? t('settings.providers.secretUnchanged') : t('settings.providers.apiKey')} type="password" autoComplete="new-password" className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-transparent px-3" />
++                    {capability.credentialTypes.length > 1 ? <select value={form.credentialType} onChange={(event) => setForm({ ...form, credentialType: event.target.value as FormState['credentialType'] })} className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3"><option value="api-key">API key</option><option value="auth-token">Auth token</option></select> : null}
++                    <input list="provider-models" value={form.defaultModel} onChange={(event) => setForm({ ...form, defaultModel: event.target.value })} placeholder={t('settings.providers.defaultModel')} className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-transparent px-3" />
++                    <datalist id="provider-models">{defaultModelReferences.map((model) => <option key={model} value={model} />)}</datalist>
++                    <textarea value={form.models} onChange={(event) => setForm({ ...form, models: event.target.value })} placeholder={t('settings.providers.customModels')} rows={3} className="w-full rounded-lg border border-[var(--app-border)] bg-transparent px-3 py-2 text-sm" />
++                    {contextModelIds.length > 0 ? <fieldset className="space-y-2 rounded-lg border border-[var(--app-border)] p-3">
++                        <legend className="px-1 text-sm font-medium">{t('settings.providers.context1m')}</legend>
++                        <div className="text-xs text-[var(--app-hint)]">{t('settings.providers.context1mHint')}</div>
++                        <div className="flex flex-wrap gap-x-4 gap-y-2">
++                            {contextModelIds.map((modelId) => <label key={modelId} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={oneMillionContextModelIds.has(modelId)} onChange={(event) => setForm((current) => ({ ...current, models: updateContextModelReference(current.models, modelId, event.target.checked) }))} />{modelId}[1M]</label>)}
++                        </div>
++                    </fieldset> : null}
++                    <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />{t('settings.providers.enabled')}</label>
++                    <div className="flex justify-end gap-2">
++                        {editingId ? <button type="button" onClick={resetForm} className="rounded-lg px-3 py-2 text-sm text-[var(--app-hint)]">{t('common.cancel')}</button> : null}
++                        <button type="submit" disabled={saving || !machineId} className="rounded-lg bg-[var(--app-button)] px-4 py-2 text-sm font-medium text-[var(--app-button-text)] disabled:opacity-50">{saving ? t('loading') : t('common.save')}</button>
++                    </div>
++                </form>
++            </SettingsSection> : null}
++            {error ? <div className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600">{error}</div> : null}
++        </SettingsPageContent>
++    )
++}
+diff --git a/web/src/types/api.ts b/web/src/types/api.ts
+index 704923876a00ff904375930ff7ad7873b7f44858..6aa133e9cbe98e0ea6543f916b60ee113b9b8872 100644
+--- a/web/src/types/api.ts
++++ b/web/src/types/api.ts
+@@ -71,6 +71,18 @@ export type {
+ 
+ export type { HapiSessionExport } from '@hapi/protocol/sessionExport'
+ 
++export type {
++    AgentProvider,
++    ProviderListResponse,
++    ProviderHealthCheckResponse,
++    ProviderProtocol,
++    ProviderModel,
++    ProviderMutationResponse,
++    ProviderProfileInput,
++    ProviderProfileUpdate,
++    ProviderProfileView,
++} from '@hapi/protocol'
++
+ export type SessionMetadataSummary = {
+     path: string
+     host: string

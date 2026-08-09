@@ -1,0 +1,2839 @@
+diff --git a/bun.lock b/bun.lock
+index 9338b7ddf9544abc507970fdcc6365efd6848849..9e50ae3a8b30357d477c307babb4adc508536614 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -35,6 +35,7 @@
+         "react": "^19.2.3",
+         "socket.io-client": "^4.8.3",
+         "tar": "^7.5.2",
++        "vscode-jsonrpc": "8.2.0",
+         "yaml": "^2.8.2",
+         "zod": "^4.2.1",
+       },
+@@ -122,6 +123,7 @@
+         "qrcode": "^1.5.4",
+         "react": "^19.2.3",
+         "react-dom": "^19.2.3",
++        "react-markdown": "^10.1.0",
+         "rehype-katex": "^7.0.1",
+         "remark-breaks": "^4.0.0",
+         "remark-gfm": "^4.0.1",
+@@ -140,6 +142,8 @@
+         "@tailwindcss/postcss": "^4.1.18",
+         "@testing-library/jest-dom": "^6.6.3",
+         "@testing-library/react": "^16.3.0",
++        "@types/hast": "^3.0.4",
++        "@types/mdast": "^4.0.4",
+         "@types/qrcode": "^1.5.6",
+         "@types/react": "^19.2.7",
+         "@types/react-dom": "^19.2.3",
+@@ -150,9 +154,11 @@
+         "postcss": "^8.5.6",
+         "remark-parse": "^11.0.0",
+         "remark-rehype": "^11.1.2",
++        "remark-stringify": "^11.0.0",
+         "tailwindcss": "^4.1.18",
+         "typescript": "^5.9.3",
+         "unified": "^11.0.5",
++        "vfile": "^6.0.3",
+         "vite": "^7.3.0",
+         "vitest": "^4.0.16",
+       },
+diff --git a/cli/package.json b/cli/package.json
+index c9996c6183eeccdaba7c381faa30da1603df548c..07ee01e88c6d949bf1608e4d7069880e576ac6e0 100644
+--- a/cli/package.json
++++ b/cli/package.json
+@@ -67,6 +67,7 @@
+     "react": "^19.2.3",
+     "socket.io-client": "^4.8.3",
+     "tar": "^7.5.2",
++    "vscode-jsonrpc": "8.2.0",
+     "yaml": "^2.8.2",
+     "zod": "^4.2.1"
+   },
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+index 1c0e442dced2414d8df56565f32f39f9ddb485a9..02048ea56815282bfc55c8b09cab4342928f941d 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+@@ -1142,6 +1142,193 @@ describe('AcpSdkBackend', () => {
+         expect(registered.get('cursor/ask_question')).toBe(handler);
+     });
+ 
++    it('beginSoftSteerPrompt sends concurrent session/prompt without cancel', () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const calls: Array<{ method: string; params: unknown }> = [];
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
++                sendNotification: (method: string, params: unknown) => void;
++                close: () => Promise<void>;
++            } | null;
++            isProcessingMessage: boolean;
++        };
++        backendInternal.isProcessingMessage = true;
++        backendInternal.transport = {
++            sendRequestWithDispatch: (method, params) => {
++                calls.push({ method, params });
++                return { dispatched: Promise.resolve(), completed: Promise.resolve({ stopReason: 'end_turn' }) };
++            },
++            sendNotification: () => {},
++            close: async () => {}
++        };
++
++        backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
++
++        expect(calls).toEqual([{
++            method: 'session/prompt',
++            params: {
++                sessionId: 'session-1',
++                prompt: [{ type: 'text', text: 'pivot now' }]
++            }
++        }]);
++    });
++
++    it('beginSoftSteerPrompt drains buffered output after completion', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
++                close: () => Promise<void>;
++            } | null;
++            isProcessingMessage: boolean;
++            waitForSessionUpdateQuiet: (quietMs: number, timeoutMs: number) => Promise<void>;
++            drainLateBuffers: () => Promise<void>;
++            messageHandler: { drainBuffers: () => void } | null;
++        };
++        const events: string[] = [];
++        backendInternal.isProcessingMessage = true;
++        backendInternal.transport = {
++            sendRequestWithDispatch: () => {
++                events.push('request');
++                return { dispatched: Promise.resolve(), completed: Promise.resolve({ stopReason: 'end_turn' }) };
++            },
++            close: async () => {}
++        };
++        backendInternal.waitForSessionUpdateQuiet = async () => {
++            events.push('quiet');
++        };
++        backendInternal.messageHandler = {
++            drainBuffers: () => events.push('drain')
++        };
++        backendInternal.drainLateBuffers = async () => {
++            events.push('late');
++        };
++
++        await backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).completed;
++
++        expect(events).toEqual(['request', 'quiet', 'drain', 'late', 'drain']);
++    });
++
++    it('beginSoftSteerPrompt returns a pending promise without blocking the caller', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        let resolvePrompt: ((value: unknown) => void) | null = null;
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
++                sendNotification: (method: string, params: unknown) => void;
++                close: () => Promise<void>;
++            } | null;
++            isProcessingMessage: boolean;
++        };
++        backendInternal.isProcessingMessage = true;
++        backendInternal.transport = {
++            sendRequestWithDispatch: () => ({
++                dispatched: Promise.resolve(),
++                completed: new Promise((resolve) => { resolvePrompt = resolve; })
++            }),
++            sendNotification: () => {},
++            close: async () => {}
++        };
++
++        // Must not hang waiting for the ACP prompt response (hub RPC is 30s).
++        let settled = false;
++        const pending = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).completed.then(() => {
++            settled = true;
++        });
++        expect(resolvePrompt).not.toBeNull();
++        expect(settled).toBe(false);
++        resolvePrompt!({ stopReason: 'end_turn' });
++        await pending;
++        expect(settled).toBe(true);
++    });
++
++    it('keeps response completion pending until a concurrent soft steer settles', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        let resolvePrompt: ((value: unknown) => void) | null = null;
++        const backendInternal = backend as unknown as {
++            transport: { sendRequestWithDispatch: () => { dispatched: Promise<void>; completed: Promise<unknown> }; close: () => Promise<void> } | null;
++            isProcessingMessage: boolean;
++            activePromptRequests: number;
++            finishPromptRequest: () => void;
++            waitForSessionUpdateQuiet: () => Promise<void>;
++            drainLateBuffers: () => Promise<void>;
++        };
++        backendInternal.isProcessingMessage = true;
++        backendInternal.activePromptRequests = 1;
++        backendInternal.transport = {
++            sendRequestWithDispatch: () => ({
++                dispatched: Promise.resolve(),
++                completed: new Promise((resolve) => { resolvePrompt = resolve; })
++            }),
++            close: async () => {}
++        };
++        backendInternal.waitForSessionUpdateQuiet = async () => {};
++        backendInternal.drainLateBuffers = async () => {};
++
++        const pendingSteer = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
++        let responseComplete = false;
++        const responseWait = backend.waitForResponseComplete().then(() => { responseComplete = true; });
++
++        backendInternal.finishPromptRequest();
++        await Promise.resolve();
++        expect(backend.processingMessage).toBe(true);
++        expect(responseComplete).toBe(false);
++
++        resolvePrompt!({ stopReason: 'end_turn' });
++        await pendingSteer.completed;
++        await responseWait;
++        expect(backend.processingMessage).toBe(false);
++        expect(responseComplete).toBe(true);
++    });
++
++    it('softSteerPrompt awaits session/prompt completion', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        let resolvePrompt: ((value: unknown) => void) | null = null;
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
++                sendNotification: (method: string, params: unknown) => void;
++                close: () => Promise<void>;
++            } | null;
++            isProcessingMessage: boolean;
++        };
++        backendInternal.isProcessingMessage = true;
++        backendInternal.transport = {
++            sendRequest: () => new Promise((resolve) => {
++                resolvePrompt = resolve;
++            }),
++            sendNotification: () => {},
++            close: async () => {}
++        };
++
++        let done = false;
++        const pending = backend.softSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).then(() => {
++            done = true;
++        });
++        await Promise.resolve();
++        expect(done).toBe(false);
++        resolvePrompt!({ stopReason: 'end_turn' });
++        await pending;
++        expect(done).toBe(true);
++    });
++
++    it('beginSoftSteerPrompt rejects when no prompt is in flight', () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const backendInternal = backend as unknown as {
++            transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null;
++            isProcessingMessage: boolean;
++        };
++        backendInternal.isProcessingMessage = false;
++        backendInternal.transport = {
++            sendRequest: async () => null,
++            close: async () => {}
++        };
++
++        expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'x' }]))
++            .toThrow(/No active ACP prompt/);
++    });
++
+     it('suppressUpdatesDuring drops session/update notifications that would otherwise leak into the previous turn\'s onUpdate, then restores normal forwarding', async () => {
+         // Reproduces the real /compact duplicate-summary bug: OpenCode keeps
+         // streaming session/update notifications (over the same ACP
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index 8290fcab426091ebb6fec383573b040171feb390..7dd7f7f7c6801da6646e0ad1ae95f258532808fb 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -75,6 +75,7 @@ export class AcpSdkBackend implements AgentBackend {
+     private initializeResult: AcpInitializeResult | null = null;
+     private setModeSupported: boolean | undefined = undefined;
+     private isProcessingMessage = false;
++    private activePromptRequests = 0;
+     private responseCompleteResolvers: Array<() => void> = [];
+     private lastSessionUpdateAt = 0;
+     private latestUsageUpdate: AcpUsageUpdate | null = null;
+@@ -510,7 +511,7 @@ export class AcpSdkBackend implements AgentBackend {
+         );
+         this.messageHandler?.drainBuffers();
+         this.messageHandler = new AcpMessageHandler(onUpdate, { textChunkMode: this.options.textChunkMode });
+-        this.isProcessingMessage = true;
++        this.beginPromptRequest();
+         this.lastSessionUpdateAt = Date.now();
+         this.latestUsageUpdate = null;
+         this.lastForwardedUsageUpdate = null;
+@@ -577,8 +578,7 @@ export class AcpSdkBackend implements AgentBackend {
+                 }
+             } finally {
+                 this.promptUsageCallback = null;
+-                this.isProcessingMessage = false;
+-                this.notifyResponseComplete();
++                this.finishPromptRequest();
+             }
+         }
+     }
+@@ -591,6 +591,83 @@ export class AcpSdkBackend implements AgentBackend {
+         this.transport.sendNotification('session/cancel', { sessionId });
+     }
+ 
++    /**
++     * Soft-inject a follow-up `session/prompt` while another prompt is in flight.
++     *
++     * Used for Cursor mid-turn steer (GUI "Send" / next-opportune soft send).
++     * Does **not** cancel the active prompt and does **not** swap message handlers —
++     * `session/update` notifications keep flowing to the in-flight turn's handler.
++     *
++     * Awaits the full concurrent `session/prompt` JSON-RPC response (turn completion
++     * for that inject). Do **not** call this from the hub `SteerQueuedMessage` handler —
++     * that RPC uses a 30s Socket.IO timeout. Use {@link beginSoftSteerPrompt} there.
++     */
++    async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
++        if (!this.transport) {
++            throw new Error('ACP transport not initialized');
++        }
++        if (!this.isProcessingMessage) {
++            throw new Error('No active ACP prompt to soft-steer into');
++        }
++
++        this.beginPromptRequest();
++        try {
++            await this.transport.sendRequest('session/prompt', {
++                sessionId,
++                prompt: content
++            }, { timeoutMs: Infinity });
++        } finally {
++            this.finishPromptRequest();
++        }
++    }
++
++    /**
++     * Kick off a soft steer without blocking the hub RPC on turn completion.
++     * Separates transport dispatch from prompt completion so callers can commit
++     * queue state only after stdin accepted the request without waiting for the turn.
++     */
++    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): {
++        dispatched: Promise<void>;
++        completed: Promise<void>;
++    } {
++        if (!this.transport) {
++            throw new Error('ACP transport not initialized');
++        }
++        if (!this.isProcessingMessage) {
++            throw new Error('No active ACP prompt to soft-steer into');
++        }
++
++        const transport = this.transport;
++        this.beginPromptRequest();
++        const request = transport.sendRequestWithDispatch('session/prompt', {
++            sessionId,
++            prompt: content
++        }, { timeoutMs: Infinity });
++        const completed = (async () => {
++            try {
++                await request.completed;
++            } finally {
++                try {
++                    await this.waitForSessionUpdateQuiet(
++                        AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
++                        AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
++                    );
++                    this.messageHandler?.drainBuffers();
++                    await this.drainLateBuffers();
++                    this.messageHandler?.drainBuffers();
++                } finally {
++                    this.finishPromptRequest();
++                }
++            }
++        })();
++
++        void completed.catch((error) => {
++            logger.warn('[ACP] soft-steer session/prompt failed', error);
++        });
++
++        return { dispatched: request.dispatched, completed };
++    }
++
+     async respondToPermission(
+         _sessionId: string,
+         request: PermissionRequest,
+@@ -692,7 +769,7 @@ export class AcpSdkBackend implements AgentBackend {
+      * Useful for checking if it's safe to perform session operations.
+      */
+     get processingMessage(): boolean {
+-        return this.isProcessingMessage;
++        return this.activePromptRequests > 0;
+     }
+ 
+     getLastSessionUpdateAt(): number {
+@@ -706,7 +783,7 @@ export class AcpSdkBackend implements AgentBackend {
+      * like session swap or sending task_complete.
+      */
+     async waitForResponseComplete(): Promise<void> {
+-        if (!this.isProcessingMessage) {
++        if (this.activePromptRequests === 0) {
+             return;
+         }
+         return new Promise<void>((resolve) => {
+@@ -723,6 +800,7 @@ export class AcpSdkBackend implements AgentBackend {
+         this.messageHandler?.drainBuffers();
+         this.messageHandler = null;
+         this.activeSessionId = null;
++        this.activePromptRequests = 0;
+         this.isProcessingMessage = false;
+         this.sessionModelsMetadata.clear();
+         this.initialAvailableCommands.clear();
+@@ -938,6 +1016,19 @@ export class AcpSdkBackend implements AgentBackend {
+         return await responsePromise;
+     }
+ 
++    private beginPromptRequest(): void {
++        this.activePromptRequests++;
++        this.isProcessingMessage = true;
++    }
++
++    private finishPromptRequest(): void {
++        this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
++        this.isProcessingMessage = this.activePromptRequests > 0;
++        if (!this.isProcessingMessage) {
++            this.notifyResponseComplete();
++        }
++    }
++
+     private notifyResponseComplete(): void {
+         const resolvers = this.responseCompleteResolvers;
+         this.responseCompleteResolvers = [];
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+index 57506b487bf31ed5c932fe1381db76a4932889dc..af17975956a8b91e990481b82b69329e819227b9 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+@@ -40,7 +40,11 @@ vi.mock('node:child_process', () => ({
+             },
+             stdin: {
+                 end: vi.fn(),
+-                write: (chunk: string) => spawnState.stdinWrite(chunk)
++                write: (chunk: string, callback?: (error?: Error | null) => void) => {
++                    const result = spawnState.stdinWrite(chunk);
++                    callback?.();
++                    return result;
++                }
+             },
+             on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+                 if (event === 'exit') {
+@@ -325,7 +329,11 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         });
+ 
+         const transport = new AcpStdioTransport({ command: 'gemini' });
+-        await expect(transport.sendRequest('initialize')).rejects.toThrow('WritableIterable is closed');
++        const request = transport.sendRequestWithDispatch('initialize');
++        await Promise.all([
++            expect(request.dispatched).rejects.toThrow('WritableIterable is closed'),
++            expect(request.completed).rejects.toThrow('WritableIterable is closed')
++        ]);
+         await expect(transport.sendRequest('session/new')).rejects.toThrow('WritableIterable is closed');
+     });
+ });
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.ts b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+index 42020632feb690aee6d8f4dc0777b933ae58bd56..de6b8041bd478298be4160e6cc55b8c0087fd479 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+@@ -183,10 +183,19 @@ export class AcpStdioTransport {
+     static readonly DEFAULT_TIMEOUT_MS = 120_000;
+ 
+     async sendRequest(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown> {
++        const request = this.sendRequestWithDispatch(method, params, options);
++        void request.dispatched.catch(() => {});
++        return request.completed;
++    }
++
++    sendRequestWithDispatch(
++        method: string,
++        params?: unknown,
++        options?: { timeoutMs?: number }
++    ): { dispatched: Promise<void>; completed: Promise<unknown> } {
+         if (this.closed || this.exited) {
+-            return Promise.reject(
+-                this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
+-            );
++            const error = this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
++            return { dispatched: Promise.reject(error), completed: Promise.reject(error) };
+         }
+ 
+         const id = this.nextId++;
+@@ -199,36 +208,54 @@ export class AcpStdioTransport {
+ 
+         const timeoutMs = options?.timeoutMs ?? AcpStdioTransport.DEFAULT_TIMEOUT_MS;
+ 
+-        // Skip timeout for infinite/no-timeout requests (e.g., long-running prompts)
+-        if (!Number.isFinite(timeoutMs)) {
+-            return new Promise<unknown>((resolve, reject) => {
+-                this.pending.set(id, { resolve, reject });
+-                this.writePayload(payload);
+-            });
+-        }
+-
+-        return new Promise<unknown>((resolve, reject) => {
+-            const timer = setTimeout(() => {
++        let timer: ReturnType<typeof setTimeout> | null = null;
++        let resolveCompleted!: (value: unknown) => void;
++        let rejectCompleted!: (error: Error) => void;
++        const completed = new Promise<unknown>((resolve, reject) => {
++            resolveCompleted = resolve;
++            rejectCompleted = reject;
++        });
++        if (Number.isFinite(timeoutMs)) {
++            timer = setTimeout(() => {
+                 if (this.pending.has(id)) {
+                     this.pending.delete(id);
+-                    reject(new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`));
++                    rejectCompleted(new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`));
+                 }
+             }, timeoutMs);
+-            // Don't let timer keep Node alive if process wants to exit
+             timer.unref();
++        }
+ 
+-            this.pending.set(id, {
+-                resolve: (value) => {
+-                    clearTimeout(timer);
+-                    resolve(value);
+-                },
+-                reject: (error) => {
+-                    clearTimeout(timer);
+-                    reject(error);
+-                }
+-            });
+-            this.writePayload(payload);
++        this.pending.set(id, {
++            resolve: (value) => {
++                if (timer) clearTimeout(timer);
++                resolveCompleted(value);
++            },
++            reject: (error) => {
++                if (timer) clearTimeout(timer);
++                rejectCompleted(error);
++            }
++        });
++
++        const dispatched = new Promise<void>((resolve, reject) => {
++            try {
++                const serialized = JSON.stringify(payload);
++                this.process.stdin.write(`${serialized}\n`, (error) => {
++                    if (error) {
++                        const writeError = error instanceof Error ? error : new Error(String(error));
++                        this.markClosed(writeError);
++                        reject(writeError);
++                        return;
++                    }
++                    resolve();
++                });
++            } catch (error) {
++                const writeError = error instanceof Error ? error : new Error(String(error));
++                this.markClosed(writeError);
++                reject(writeError);
++            }
+         });
++
++        return { dispatched, completed };
+     }
+ 
+     sendNotification(method: string, params?: unknown): void {
+diff --git a/cli/src/api/apiSession.ts b/cli/src/api/apiSession.ts
+index 78af87c2ff977155734714287153b680e9e30226..3eb6cac7225604b76f0d6384af9e9fbb8214bfae 100644
+--- a/cli/src/api/apiSession.ts
++++ b/cli/src/api/apiSession.ts
+@@ -883,7 +883,7 @@ export class ApiSessionClient extends EventEmitter {
+         }, 'droppable')
+     }
+ 
+-    emitMessagesConsumed(localIds: string[], options?: { clearQueuedThinkingGrace?: boolean }): void {
++    emitMessagesConsumed(localIds: string[], options?: { clearQueuedThinkingGrace?: boolean; steered?: boolean }): void {
+         if (localIds.length === 0) return
+         // `clearQueuedThinkingGrace` is an opt-in signal for the hub to drop
+         // the 15s queued-thinking grace immediately. Only synchronous handlers
+@@ -891,13 +891,21 @@ export class ApiSessionClient extends EventEmitter {
+         // inside `onUserMessage`) should set it — normal queue drains still
+         // need the grace so the spinner doesn't flicker between drain and
+         // backend.prompt start.
+-        const payload: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean } = {
++        const payload: {
++            sid: string
++            localIds: string[]
++            clearQueuedThinkingGrace?: boolean
++            steered?: boolean
++        } = {
+             sid: this.sessionId,
+             localIds
+         }
+         if (options?.clearQueuedThinkingGrace) {
+             payload.clearQueuedThinkingGrace = true
+         }
++        if (options?.steered) {
++            payload.steered = true
++        }
+         this.emitOrQueue(() => this.socket.emit('messages-consumed', payload))
+     }
+ 
+diff --git a/cli/src/codex/appServerTypes.ts b/cli/src/codex/appServerTypes.ts
+index 6615b6624c5ab6b66996068bae03678ae8bd85a9..f368943ebe2e6e27c7ddf5d05ec410063119f2b3 100644
+--- a/cli/src/codex/appServerTypes.ts
++++ b/cli/src/codex/appServerTypes.ts
+@@ -295,6 +295,18 @@ export interface ThreadRollbackResponse {
+     [key: string]: unknown;
+ }
+ 
++export interface TurnSteerParams {
++    threadId: string;
++    input: UserInput[];
++    expectedTurnId: string;
++    clientUserMessageId?: string | null;
++}
++
++export interface TurnSteerResponse {
++    turnId: string;
++    [key: string]: unknown;
++}
++
+ export interface ThreadCompactStartParams {
+     threadId: string;
+ }
+diff --git a/cli/src/codex/codexAppServerClient.ts b/cli/src/codex/codexAppServerClient.ts
+index 5c0d6a77d7a00a1815f51d7fb6f0335283a026fe..d3b39cde4be78b26c0d46d27d2ad552432c76bda 100644
+--- a/cli/src/codex/codexAppServerClient.ts
++++ b/cli/src/codex/codexAppServerClient.ts
+@@ -25,6 +25,8 @@ import type {
+     TurnInterruptResponse,
+     ThreadRollbackParams,
+     ThreadRollbackResponse,
++    TurnSteerParams,
++    TurnSteerResponse,
+     ThreadCompactStartParams,
+     ThreadCompactStartResponse,
+     ThreadGoalSetParams,
+@@ -342,6 +344,14 @@ export class CodexAppServerClient extends JsonLineParser {
+         return response as ThreadRollbackResponse;
+     }
+ 
++    async steerTurn(params: TurnSteerParams, options?: { signal?: AbortSignal }): Promise<TurnSteerResponse> {
++        const response = await this.sendRequest('turn/steer', params, {
++            signal: options?.signal,
++            timeoutMs: 30_000
++        });
++        return response as TurnSteerResponse;
++    }
++
+     async compactThread(
+         params: ThreadCompactStartParams,
+         options?: { signal?: AbortSignal }
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index 36bffd9935b36370305e952c6d7058596571d715..c561ca0b08de878200cdf5d69f5a0f88fe655b90 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -963,7 +963,7 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
+     }
+ }));
+ 
+-import { codexRemoteLauncher } from './codexRemoteLauncher';
++import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
+ 
+ type FakeAgentState = {
+     requests: Record<string, unknown>;
+@@ -1106,6 +1106,12 @@ function createSessionStub(
+ }
+ 
+ describe('codexRemoteLauncher', () => {
++    it('invalidates queued steer handlers after abort or cleanup', () => {
++        expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
++        expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
++        expect(isCurrentSteerHandler(3, 3, true)).toBe(false);
++    });
++
+     afterEach(() => {
+         harness.notifications = [];
+         harness.dispatchNotification = null;
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index 3cbc12f53d2fd2f368526695c90a9afa8d81010b..e5d331beee284fc86198254465ec499bf064ec03 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -223,6 +223,14 @@ function stripAnsi(value: string): string {
+     return value.replace(/\u001b\[[0-9;]*m/g, '');
+ }
+ 
++export function isCurrentSteerHandler(
++    currentEpoch: number,
++    handlerEpoch: number,
++    shouldExit: boolean
++): boolean {
++    return currentEpoch === handlerEpoch && !shouldExit;
++}
++
+ class CodexRemoteLauncher extends RemoteLauncherBase {
+     private readonly session: CodexSession;
+     private readonly appServerClient: CodexAppServerClient;
+@@ -231,6 +239,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+     private diffProcessor: DiffProcessor | null = null;
+     private happyServer: HappyServer | null = null;
+     private abortController: AbortController = new AbortController();
++    /** Invalidates queued-message steer handlers after abort or cleanup. */
++    private steerEpoch = 0;
+     private currentThreadId: string | null = null;
+     private currentTurnId: string | null = null;
+     private readonly activeChildTurns = new Map<string, string>();
+@@ -287,6 +297,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+     }
+ 
+     private async handleAbort(): Promise<void> {
++        this.steerEpoch++;
+         logger.debug('[Codex] Abort requested - stopping current task');
+         try {
+             await this.interruptActiveTurns('abort');
+@@ -681,6 +692,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+         let scheduleReadyAfterTurn: (() => void) | null = null;
+         let clearReadyAfterTurnTimer: (() => void) | null = null;
+         let turnInFlight = false;
++        const setTurnInFlight = (value: boolean) => {
++            turnInFlight = value;
++            session.client.updateAgentState((state) => ({ ...state, steeringActive: value }));
++        };
++        setTurnInFlight(false);
+         let usageModel: string | null = null;
+         let allowAnonymousTerminalEvent = false;
+         let invalidThreadId: string | null = null;
+@@ -1903,6 +1919,85 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             signal.addEventListener('abort', finish, { once: true });
+         });
+ 
++        // Non-interrupting mid-turn inject via app-server `turn/steer`.
++        // Returns false when the turn ended or is review/compact (not steerable).
++        const trySteerActiveTurn = async (batch: QueuedMessage): Promise<boolean> => {
++            const threadId = this.currentThreadId;
++            const turnId = this.currentTurnId;
++            if (!threadId || !turnId || !turnInFlight) {
++                return false;
++            }
++            try {
++                await appServerClient.steerTurn({
++                    threadId,
++                    input: [{ type: 'text', text: batch.message }],
++                    expectedTurnId: turnId
++                }, { signal: this.abortController.signal });
++                messageBuffer.addMessage(batch.message, 'user');
++                logger.debug(`[Codex] Steered active turn ${turnId}`);
++                return true;
++            } catch (error) {
++                const detail = error instanceof Error ? error.message : String(error);
++                logger.debug(`[Codex] turn/steer failed (${detail})`);
++                return false;
++            }
++        };
++
++        // Per-message steer from the waiting queue (web "Steer" button).
++        session.client.rpcHandlerManager.registerHandler(
++            RPC_METHODS.SteerQueuedMessage,
++            async (payload: unknown) => {
++                const localId = typeof (payload as { localId?: unknown } | null)?.localId === 'string'
++                    ? (payload as { localId: string }).localId
++                    : '';
++                if (!localId) {
++                    return { steered: false, error: 'Missing localId' };
++                }
++                if (!turnInFlight || !this.currentThreadId || !this.currentTurnId) {
++                    return { steered: false, error: 'No active steerable turn' };
++                }
++                // Reserve before awaiting turn/steer so the main loop cannot
++                // collect the same row for turn/start while steer is in flight.
++                const taken = session.queue.takeByLocalId(localId);
++                if (!taken) {
++                    return { steered: false, error: 'Message not in queue' };
++                }
++                const isControlCommand = Boolean(taken.item.isolate)
++                    || Boolean(parseCodexSpecialCommand(taken.item.message).type);
++                if (isControlCommand) {
++                    session.queue.restoreReservation(taken);
++                    return { steered: false, error: 'Control commands cannot be steered' };
++                }
++                if (activeMessage?.hash !== taken.item.modeHash) {
++                    session.queue.restoreReservation(taken);
++                    return { steered: false, error: 'Queued message mode differs from the active turn' };
++                }
++                const batch: QueuedMessage = {
++                    message: taken.item.message,
++                    mode: taken.item.mode,
++                    isolate: Boolean(taken.item.isolate),
++                    hash: taken.item.modeHash
++                };
++                const steerEpoch = this.steerEpoch;
++                if (!session.queue.beginReservationDispatch(taken)) {
++                    return { steered: false, error: 'Steer cancelled' };
++                }
++                const steered = await trySteerActiveTurn(batch);
++                if (steered) {
++                    session.queue.commitReservation(taken);
++                    session.client.emitMessagesConsumed([localId], { steered: true });
++                    return { steered: true };
++                }
++                if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
++                    return { steered: false, error: 'Steer cancelled' };
++                }
++                if (!session.queue.restoreReservation(taken)) {
++                    return { steered: false, error: 'Steer cancelled' };
++                }
++                return { steered: false, error: 'Active turn is not steerable' };
++            }
++        );
++
+         const clearCompactRecovery = (recovery: typeof compactRecovery) => {
+             if (!recovery) {
+                 return;
+@@ -2208,7 +2303,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 });
+ 
+                 lastFinalizedTurnId = request.turnId;
+-                turnInFlight = false;
++                setTurnInFlight(false);
+                 allowAnonymousTerminalEvent = false;
+                 this.currentTurnId = null;
+                 sameThreadRetryAttempt = 0;
+@@ -2231,7 +2326,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             } catch (error) {
+                 if (interrupted) {
+                     lastFinalizedTurnId = request.turnId;
+-                    turnInFlight = false;
++                    setTurnInFlight(false);
+                     allowAnonymousTerminalEvent = false;
+                     this.currentTurnId = null;
+                     activeMessage = null;
+@@ -2740,7 +2835,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+ 
+             if (msgType === 'task_started') {
+                 clearReadyAfterTurnTimer?.();
+-                turnInFlight = true;
++                setTurnInFlight(true);
+                 if (!eventTurnId && !this.currentTurnId) {
+                     allowAnonymousTerminalEvent = true;
+                 }
+@@ -2750,7 +2845,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 }
+             }
+             if (isTerminalEvent) {
+-                turnInFlight = false;
++                setTurnInFlight(false);
+                 this.conversationHistory.setBusy(false);
+                 allowAnonymousTerminalEvent = false;
+                 if (session.thinking) {
+@@ -3329,7 +3424,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+         const resetCurrentTurnState = () => {
+             clearDeferredThreadStatusFailure();
+             cancelSafetyBufferingRequest('Session reset');
+-            turnInFlight = false;
++            setTurnInFlight(false);
+             allowAnonymousTerminalEvent = false;
+             this.currentTurnId = null;
+             permissionHandler.reset();
+@@ -3779,7 +3874,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     }
+                 }
+ 
+-                turnInFlight = true;
++                setTurnInFlight(true);
+                 this.conversationHistory.setBusy(true);
+                 allowAnonymousTerminalEvent = false;
+                 const mode = {
+@@ -3865,7 +3960,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             } catch (error) {
+                 logger.warn('Error in codex session:', error);
+                 const isAbortError = error instanceof Error && error.name === 'AbortError';
+-                turnInFlight = false;
++                setTurnInFlight(false);
+                 this.conversationHistory.setBusy(false);
+                 allowAnonymousTerminalEvent = false;
+                 this.currentTurnId = null;
+@@ -3917,6 +4012,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+ 
+     protected async cleanup(): Promise<void> {
+         logger.debug('[codex-remote]: cleanup start');
++        this.steerEpoch++;
+         this.appServerClient.setStderrHandler(null);
+         try {
+             await this.appServerClient.disconnect();
+@@ -3925,6 +4021,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+         }
+ 
+         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
++        this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
++            steered: false,
++            error: 'Session ending'
++        }));
+ 
+         if (this.happyServer) {
+             this.happyServer.stop();
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+index a66867fabb9085d3e852783405ce1d07278fc42b..a3baf4fa7e1c62712debe578061c441e027433a6 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+@@ -11,6 +11,10 @@ const harness = vi.hoisted(() => ({
+     newSessionCalled: false,
+     promptCalls: 0,
+     prompts: [] as unknown[][],
++    deferPrompt: null as Promise<void> | null,
++    deferSoftSteer: null as Promise<void> | null,
++    softSteerDispatchError: null as Error | null,
++    deferSoftSteerDispatch: null as Promise<void> | null,
+     backendArgs: null as { command: string; args?: string[] } | null,
+     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
+     deferSetConfigOption: null as Promise<void> | null,
+@@ -103,8 +107,18 @@ vi.mock('./utils/cursorAcpBackend', () => ({
+             prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
+                 harness.promptCalls++;
+                 harness.prompts.push(content);
++                if (harness.deferPrompt) {
++                    await harness.deferPrompt;
++                }
+             }),
+             cancelPrompt: vi.fn(async () => {}),
++            beginSoftSteerPrompt: vi.fn(() => ({
++                dispatched: harness.softSteerDispatchError
++                    ? Promise.reject(harness.softSteerDispatchError)
++                    : (harness.deferSoftSteerDispatch ?? Promise.resolve()),
++                completed: harness.deferSoftSteer ?? Promise.resolve()
++            })),
++            softSteerPrompt: vi.fn(async () => {}),
+             respondToPermission: vi.fn(async () => {}),
+             onStderrError: vi.fn((handler) => {
+                 harness.stderrErrorHandler = handler ?? null;
+@@ -147,12 +161,16 @@ vi.mock('@/ui/logger', () => ({
+     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn() }
+ }));
+ 
+-import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
++import {
++    classifyCursorAcpLoadError,
++    cursorAcpRemoteLauncher
++} from './cursorAcpRemoteLauncher';
+ import { createCursorAcpBackend } from './utils/cursorAcpBackend';
+ import { CursorSession } from './session';
+ import { ApiSessionClient } from '@/api/apiSession';
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ 
+-function makeSession(sessionId: string | null): CursorSession {
++function makeSession(sessionId: string | null, closeQueue = true): CursorSession {
+     const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
+     const client = makeClient();
+ 
+@@ -171,20 +189,28 @@ function makeSession(sessionId: string | null): CursorSession {
+     });
+ 
+     session.onSessionFoundWithProtocol = vi.fn();
+-    queue.close();
++    if (closeQueue) {
++        queue.close();
++    }
+ 
+     return session;
+ }
+ 
+ function makeClient() {
++    const handlers = new Map<string, (payload?: unknown) => Promise<unknown>>();
+     return {
+         rpcHandlerManager: {
+-            registerHandler: vi.fn()
++            handlers,
++            registerHandler: vi.fn((method: string, handler: (payload?: unknown) => Promise<unknown>) => {
++                handlers.set(method, handler);
++            })
+         },
+         updateMetadata: vi.fn(),
++        updateAgentState: vi.fn(),
+         flushMetadata: vi.fn(async () => true),
+         sendSessionEvent: vi.fn(),
+         sendAgentMessage: vi.fn(),
++        emitMessagesConsumed: vi.fn(),
+         keepAlive: vi.fn(),
+         emitSessionReady: vi.fn()
+     } as unknown as ApiSessionClient;
+@@ -200,6 +226,10 @@ describe('cursorAcpRemoteLauncher', () => {
+         harness.newSessionCalled = false;
+         harness.promptCalls = 0;
+         harness.prompts = [];
++        harness.deferPrompt = null;
++        harness.deferSoftSteer = null;
++        harness.softSteerDispatchError = null;
++        harness.deferSoftSteerDispatch = null;
+         harness.setConfigOptionCalls = [];
+         harness.deferSetConfigOption = null;
+         harness.releaseSetConfigOption = null;
+@@ -215,6 +245,187 @@ describe('cursorAcpRemoteLauncher', () => {
+         vi.clearAllMocks();
+     });
+ 
++    it('waits for a soft steer that outlives an abort before the next prompt', async () => {
++        let releasePrompt!: () => void;
++        let releaseSoftSteer!: () => void;
++        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
++        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
++        const session = makeSession(null, false);
++        const mode = { permissionMode: 'default' } as EnhancedMode;
++        session.queue.push('first', mode, 'first');
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        const handlers = (session.client as unknown as {
++            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
++        }).rpcHandlerManager.handlers;
++
++        session.queue.push('soft steer', mode, 'steer');
++        await handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
++        await handlers.get(RPC_METHODS.Abort)!();
++        session.queue.push('next', mode, 'next');
++
++        harness.deferPrompt = null;
++        releasePrompt();
++        await Promise.resolve();
++        expect(harness.promptCalls).toBe(1);
++
++        releaseSoftSteer();
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
++        session.queue.close();
++        await runPromise;
++    });
++
++    it('restores a queued steer when ACP dispatch fails', async () => {
++        let releasePrompt!: () => void;
++        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
++        harness.softSteerDispatchError = new Error('stdin closed');
++        const session = makeSession(null, false);
++        const mode = { permissionMode: 'default' } as EnhancedMode;
++        session.queue.push('first', mode, 'first');
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        const handlers = (session.client as unknown as {
++            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
++        }).rpcHandlerManager.handlers;
++
++        session.queue.push('soft steer', mode, 'steer');
++        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
++            .resolves.toEqual({ steered: false, error: 'Failed to soft-steer into active turn' });
++        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
++
++        harness.softSteerDispatchError = null;
++        harness.deferPrompt = null;
++        releasePrompt();
++        session.queue.close();
++        await runPromise;
++    });
++
++    it('restores a queued steer when ACP rejects it after dispatch', async () => {
++        let releasePrompt!: () => void;
++        let rejectSoftSteer!: (error: Error) => void;
++        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
++        harness.deferSoftSteer = new Promise((_, reject) => { rejectSoftSteer = reject; });
++        const session = makeSession(null, false);
++        const mode = { permissionMode: 'default' } as EnhancedMode;
++        session.queue.push('first', mode, 'first');
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        const handlers = (session.client as unknown as {
++            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
++        }).rpcHandlerManager.handlers;
++
++        session.queue.push('soft steer', mode, 'steer');
++        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
++            .resolves.toEqual({ steered: true });
++        rejectSoftSteer(new Error('request rejected'));
++        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
++        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
++
++        harness.deferPrompt = null;
++        releasePrompt();
++        session.queue.close();
++        await runPromise;
++    });
++
++    it('prevents cancellation once ACP steer dispatch starts', async () => {
++        let releasePrompt!: () => void;
++        let releaseDispatch!: () => void;
++        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
++        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
++        const session = makeSession(null, false);
++        const mode = { permissionMode: 'default' } as EnhancedMode;
++        session.queue.push('first', mode, 'first');
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        const handlers = (session.client as unknown as {
++            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
++        }).rpcHandlerManager.handlers;
++
++        session.queue.push('soft steer', mode, 'steer');
++        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
++        await Promise.resolve();
++        expect(session.queue.cancelByLocalId('steer')).toBe(false);
++        releaseDispatch();
++        await expect(steerResult).resolves.toEqual({ steered: true });
++        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
++
++        harness.deferPrompt = null;
++        releasePrompt();
++        session.queue.close();
++        await runPromise;
++    });
++
++    it('blocks the next prompt while soft-steer dispatch is pending', async () => {
++        let releasePrompt!: () => void;
++        let releaseDispatch!: () => void;
++        let releaseSoftSteer!: () => void;
++        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
++        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
++        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
++        const session = makeSession(null, false);
++        const mode = { permissionMode: 'default' } as EnhancedMode;
++        session.queue.push('first', mode, 'first');
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        const handlers = (session.client as unknown as {
++            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
++        }).rpcHandlerManager.handlers;
++
++        session.queue.push('soft steer', mode, 'steer');
++        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
++        await Promise.resolve();
++        session.queue.push('next', mode, 'next');
++        harness.deferPrompt = null;
++        releasePrompt();
++        await Promise.resolve();
++        expect(harness.promptCalls).toBe(1);
++
++        releaseDispatch();
++        await expect(steerResult).resolves.toEqual({ steered: true });
++        expect(harness.promptCalls).toBe(1);
++        releaseSoftSteer();
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
++        session.queue.close();
++        await runPromise;
++    });
++
++    it('acknowledges a steer dispatched before an overlapping abort', async () => {
++        let releasePrompt!: () => void;
++        let releaseDispatch!: () => void;
++        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
++        harness.deferSoftSteerDispatch = new Promise((resolve) => { releaseDispatch = resolve; });
++        const session = makeSession(null, false);
++        const mode = { permissionMode: 'default' } as EnhancedMode;
++        session.queue.push('first', mode, 'first');
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        const handlers = (session.client as unknown as {
++            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
++        }).rpcHandlerManager.handlers;
++
++        session.queue.push('soft steer', mode, 'steer');
++        const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
++        await Promise.resolve();
++        await handlers.get(RPC_METHODS.Abort)!();
++        releaseDispatch();
++
++        await expect(steerResult).resolves.toEqual({ steered: true });
++        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
++        expect(vi.mocked(session.client.emitMessagesConsumed).mock.calls
++            .filter(([ids]) => ids.includes('steer'))).toHaveLength(1);
++
++        harness.deferPrompt = null;
++        releasePrompt();
++        session.queue.close();
++        await runPromise;
++    });
++
+     it('spawns agent acp backend, not stream-json', async () => {
+         const session = makeSession(null);
+         await cursorAcpRemoteLauncher(session);
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index e0d35a9db3869030edf31a141b87bd7ee8fb3ff1..fd73eeb63634c3cd8171fd3aae4dc1026b00fb9f 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -34,6 +34,7 @@ import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsShared
+ import type { AcpSdkBackend } from '@/agent/backends/acp';
+ import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
+ import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ import {
+     resolveCursorSpawnModel,
+     tryRemapCursorSpawnModelFromConnectError
+@@ -51,10 +52,14 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     private defaultBackendModel: string | null = null;
+     private unregisterModelApplyHandler: (() => void) | null = null;
+     private modelApplySeq = 0;
++    private activePromptModeHash: string | null = null;
+     /** True when ACP process was spawned with `--auto-review`. */
+     private spawnedWithAutoReview = false;
+     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
+     private autoReviewSlashQueued = false;
++    private promptInFlight = false;
++    /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
++    private softSteerWaiters: Promise<void>[] = [];
+     constructor(session: CursorSession) {
+         super(process.env.DEBUG ? session.logPath : undefined);
+         this.session = session;
+@@ -74,6 +79,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     protected async runMainLoop(): Promise<void> {
+         const session = this.session;
+         const messageBuffer = this.messageBuffer;
++        session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+ 
+         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+             enableChangeTitle: false,
+@@ -275,6 +281,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+             }
+         }
+ 
++        this.acpSessionId = acpSessionId;
+         session.client.emitSessionReady();
+ 
+         syncCursorModelsFromAcp(backend, acpSessionId);
+@@ -304,13 +311,89 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+             onSwitch: () => this.handleSwitchRequest()
+         });
+ 
++        // Soft steer = Cursor GUI "Send" (next-opportune / soft inject): fire a
++        // concurrent session/prompt without canceling the in-flight turn. Abort
++        // remains the hard stop path (GUI "Stop & send").
++        session.client.rpcHandlerManager.registerHandler(
++            RPC_METHODS.SteerQueuedMessage,
++            async (payload: unknown) => {
++                const localId = typeof (payload as { localId?: unknown } | null)?.localId === 'string'
++                    ? (payload as { localId: string }).localId
++                    : '';
++                if (!localId) {
++                    return { steered: false, error: 'Missing localId' };
++                }
++                if (!this.promptInFlight || !this.acpSessionId || !this.backend) {
++                    return { steered: false, error: 'No active steerable turn' };
++                }
++                const taken = session.queue.takeByLocalId(localId);
++                if (!taken) {
++                    return { steered: false, error: 'Message not in queue' };
++                }
++                const isControlCommand = Boolean(taken.item.isolate)
++                    || parseCursorSpecialCommand(taken.item.message).type !== null;
++                if (isControlCommand) {
++                    session.queue.restoreReservation(taken);
++                    return { steered: false, error: 'Control commands cannot be steered' };
++                }
++                if (this.activePromptModeHash !== taken.item.modeHash) {
++                    session.queue.restoreReservation(taken);
++                    return { steered: false, error: 'Queued message mode differs from the active turn' };
++                }
++
++                // Ack the hub once the soft-steer request is kicked off — not when
++                // the concurrent session/prompt finishes. ACP treats that response as
++                // turn completion, which can exceed the hub's 30s Socket.IO RPC timeout
++                // and report a false failure after the inject already started.
++                // Keep the launcher busy until that background prompt settles so we
++                // do not emit ready / start the next backend.prompt() while it runs.
++                if (!session.queue.beginReservationDispatch(taken)) {
++                    return { steered: false, error: 'Steer cancelled' };
++                }
++                let steer: { dispatched: Promise<void>; completed: Promise<void> };
++                try {
++                    steer = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
++                        type: 'text',
++                        text: taken.item.message
++                    }]);
++                } catch (error) {
++                    logger.debug('[cursor-acp] soft-steer failed to start', error);
++                    session.queue.restoreReservation(taken);
++                    return { steered: false, error: 'Failed to soft-steer into active turn' };
++                }
++                const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
++                    session.queue.commitReservation(taken);
++                    messageBuffer.addMessage(taken.item.message, 'user');
++                    session.client.emitMessagesConsumed([localId], { steered: true });
++                }, (error) => {
++                    session.queue.restoreReservation(taken);
++                    logger.debug('[cursor-acp] soft-steer failed', error);
++                });
++                this.softSteerWaiters.push(steerDone);
++                const removeWaiter = () => {
++                    this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
++                };
++                void steerDone.then(removeWaiter);
++                try {
++                    await steer.dispatched;
++                } catch (error) {
++                    logger.debug('[cursor-acp] soft-steer failed to start', error);
++                    await steerDone;
++                    return { steered: false, error: 'Failed to soft-steer into active turn' };
++                }
++                return { steered: true };
++            }
++        );
++
+         const sendReady = () => {
+             session.sendSessionEvent({ type: 'ready' });
+         };
+ 
++        try {
+         while (!this.shouldExit) {
+             const waitSignal = this.abortController.signal;
+             const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
++
+             if (!batch) {
+                 if (waitSignal.aborted && !this.shouldExit) {
+                     continue;
+@@ -353,6 +436,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+             }];
+ 
+             session.onThinkingChange(true);
++            this.promptInFlight = true;
++            session.client.updateAgentState?.((state) => ({ ...state, steeringActive: true }));
++            this.activePromptModeHash = batch.hash;
+ 
+             try {
+                 await backend.prompt(acpSessionId, promptContent, (message) => {
+@@ -369,6 +455,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                 }
+                 messageBuffer.addMessage(message, 'status');
+             } finally {
++                this.promptInFlight = false;
++                session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
++                // Soft-steers share the ACP session; wait for them before ready /
++                // the next prompt so message handlers are not swapped mid-inject.
++                if (this.softSteerWaiters.length > 0) {
++                    await Promise.allSettled(this.softSteerWaiters);
++                    this.softSteerWaiters = [];
++                }
++                this.activePromptModeHash = null;
+                 session.onThinkingChange(false);
+                 await this.permissionAdapter?.cancelAll('Prompt finished');
+                 await this.extensionAdapter?.cancelAll('Prompt finished');
+@@ -377,10 +472,23 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                 }
+             }
+         }
++        } finally {
++            if (this.softSteerWaiters.length > 0) {
++                await Promise.allSettled(this.softSteerWaiters);
++                this.softSteerWaiters = [];
++            }
++        }
+     }
+ 
+     protected async cleanup(): Promise<void> {
+         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
++        this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
++            steered: false,
++            error: 'Session ending'
++        }));
++        this.promptInFlight = false;
++        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
++        this.softSteerWaiters = [];
+         this.unregisterModelApplyHandler?.();
+         this.unregisterModelApplyHandler = null;
+ 
+@@ -671,13 +779,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+ 
+     private async handleAbort(): Promise<void> {
+         const backend = this.backend;
+-        const sessionId = this.session.sessionId;
++        const sessionId = this.acpSessionId ?? this.session.sessionId;
+         if (backend && sessionId) {
+             await backend.cancelPrompt(sessionId);
+         }
+         await this.permissionAdapter?.cancelAll('User aborted');
+         await this.extensionAdapter?.cancelAll('User aborted');
+         this.session.queue.reset();
++        this.promptInFlight = false;
++        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+         this.session.onThinkingChange(false);
+         this.abortController.abort();
+         this.abortController = new AbortController();
+diff --git a/cli/src/cursor/cursorLegacyRemoteLauncher.ts b/cli/src/cursor/cursorLegacyRemoteLauncher.ts
+index 3d4437f1a647b4790857c707a253fe880ae26c86..a273423f3dd5be1c217e95aa66755201d51c4967 100644
+--- a/cli/src/cursor/cursorLegacyRemoteLauncher.ts
++++ b/cli/src/cursor/cursorLegacyRemoteLauncher.ts
+@@ -12,6 +12,7 @@ import {
+ } from '@/modules/common/remote/RemoteLauncherBase';
+ import type { CursorSession } from './session';
+ import type { EnhancedMode } from './loop';
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ // TODO(cursor-acp): remove legacy stream-json resume path after migration window.
+ // New Cursor sessions use ACP only. This path exists because pre-ACP Cursor
+ // session_id values are not loadable via ACP session/load.
+@@ -138,6 +139,14 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
+             onSwitch: () => this.handleSwitchRequest()
+         });
+ 
++        session.client.rpcHandlerManager.registerHandler(
++            RPC_METHODS.SteerQueuedMessage,
++            async () => ({
++                steered: false,
++                error: 'Mid-turn steering requires a Cursor ACP session'
++            })
++        );
++
+         const sendReady = () => {
+             session.sendSessionEvent({ type: 'ready' });
+         };
+diff --git a/cli/src/utils/MessageQueue2.test.ts b/cli/src/utils/MessageQueue2.test.ts
+index d54d621da1c5e3386f87c37ea81a4f9a1cc8c4e5..0e1957b958714cd21474cedf29b10a2ba860bdbe 100644
+--- a/cli/src/utils/MessageQueue2.test.ts
++++ b/cli/src/utils/MessageQueue2.test.ts
+@@ -571,6 +571,89 @@ describe('MessageQueue2', () => {
+             expect(queue.queue[0].message).toBe('msg-no-id');
+             expect(queue.queue[1].message).toBe('msg-no-id-2');
+         });
++
++        it('cancels a taken reservation so a failed steer cannot restore it', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            queue.push('msg', 'local', 'id-a');
++            const reservation = queue.takeByLocalId('id-a');
++
++            expect(queue.cancelByLocalId('id-a')).toBe(true);
++            expect(reservation?.state).toBe('cancelled');
++            expect(queue.restoreReservation(reservation!)).toBe(false);
++            expect(queue.size()).toBe(0);
++        });
++    });
++
++    describe('takeByLocalId / peekByLocalId', () => {
++        it('peek returns the item without removing it', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            queue.push('msg1', 'local', 'id-a');
++            const peeked = queue.peekByLocalId('id-a');
++            expect(peeked?.message).toBe('msg1');
++            expect(queue.size()).toBe(1);
++        });
++
++        it('take removes and returns the item with its index', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            queue.push('msg1', 'local', 'id-a');
++            queue.push('msg2', 'local', 'id-b');
++            const taken = queue.takeByLocalId('id-a');
++            expect(taken?.item.message).toBe('msg1');
++            expect(taken?.index).toBe(0);
++            expect(queue.size()).toBe(1);
++            expect(queue.queue[0].localId).toBe('id-b');
++        });
++
++        it('take returns null when missing', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            expect(queue.takeByLocalId('missing')).toBeNull();
++        });
++
++        it('restoreTakenItem puts the item back at the original index', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            queue.push('a', 'local', 'id-a');
++            queue.push('b', 'local', 'id-b');
++            queue.push('c', 'local', 'id-c');
++            const taken = queue.takeByLocalId('id-b');
++            expect(taken).not.toBeNull();
++            expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-c']);
++            queue.restoreTakenItem(taken!);
++            expect(queue.queue.map((item) => item.localId)).toEqual(['id-a', 'id-b', 'id-c']);
++        });
++
++        it('commits a reservation so it can no longer be cancelled', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            queue.push('msg', 'local', 'id-a');
++            const reservation = queue.takeByLocalId('id-a');
++
++            expect(queue.commitReservation(reservation!)).toBe(true);
++            expect(queue.cancelByLocalId('id-a')).toBe(false);
++        });
++
++        it('does not cancel a reservation after steer dispatch begins', () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            queue.push('msg', 'local', 'id-a');
++            const reservation = queue.takeByLocalId('id-a');
++
++            expect(queue.beginReservationDispatch(reservation!)).toBe(true);
++            expect(queue.cancelByLocalId('id-a')).toBe(false);
++            expect(queue.restoreReservation(reservation!)).toBe(true);
++        });
++
++        it('restoreTakenItem wakes a waiter parked on an empty queue', async () => {
++            const queue = new MessageQueue2<string>(mode => mode);
++            const waitPromise = queue.waitForMessagesAndGetAsString();
++            queue.push('placeholder', 'local', 'id-placeholder');
++            const taken = queue.takeByLocalId('id-placeholder');
++            expect(taken).not.toBeNull();
++            expect(queue.size()).toBe(0);
++
++            queue.restoreTakenItem(taken!);
++
++            const result = await waitPromise;
++            expect(result?.message).toBe('placeholder');
++            expect(queue.size()).toBe(0);
++        });
+     });
+ 
+     it('should differentiate between pushImmediate and pushIsolateAndClear behavior', async () => {
+diff --git a/cli/src/utils/MessageQueue2.ts b/cli/src/utils/MessageQueue2.ts
+index a596b0d7f1685557597391f818206ddbc008bcc7..ef592385f3baba45a91c2b0604a2d835702e855f 100644
+--- a/cli/src/utils/MessageQueue2.ts
++++ b/cli/src/utils/MessageQueue2.ts
+@@ -1,6 +1,6 @@
+ import { logger } from "@/ui/logger";
+ 
+-interface QueueItem<T> {
++export interface QueueItem<T> {
+     message: string;
+     mode: T;
+     modeHash: string;
+@@ -8,6 +8,12 @@ interface QueueItem<T> {
+     isolate?: boolean; // If true, this message must be processed alone
+ }
+ 
++export type QueueReservation<T> = {
++    item: QueueItem<T>;
++    index: number;
++    state: 'reserved' | 'dispatching' | 'cancelled';
++};
++
+ /**
+  * A mode-aware message queue that stores messages with their modes.
+  * Returns consistent batches of messages with the same mode.
+@@ -19,6 +25,7 @@ export class MessageQueue2<T> {
+     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
+     onBatchConsumed: ((localIds: string[]) => void) | null = null;
+     modeHasher: (mode: T) => string;
++    private readonly reservations = new Map<string, QueueReservation<T>>();
+ 
+     constructor(
+         modeHasher: (mode: T) => string,
+@@ -264,17 +271,108 @@ export class MessageQueue2<T> {
+     cancelByLocalId(localId: string): boolean {
+         if (!localId) return false;
+         const idx = this.queue.findIndex(item => item.localId === localId);
+-        if (idx === -1) return false;
+-        this.queue.splice(idx, 1);
++        if (idx !== -1) {
++            this.queue.splice(idx, 1);
++            return true;
++        }
++        const reservation = this.reservations.get(localId);
++        if (!reservation) return false;
++        if (reservation.state === 'dispatching') return false;
++        reservation.state = 'cancelled';
++        return true;
++    }
++
++    /**
++     * Look up a queued item by localId without removing it.
++     */
++    peekByLocalId(localId: string): QueueItem<T> | null {
++        if (!localId) return null;
++        return this.queue.find(item => item.localId === localId) ?? null;
++    }
++
++    /**
++     * Remove and return a queued item by localId (with its original index),
++     * or null if not found. Pair with {@link restoreTakenItem} when an async
++     * operation may need to put the item back in order.
++     */
++    takeByLocalId(localId: string): QueueReservation<T> | null {
++        if (!localId) return null;
++        const idx = this.queue.findIndex(item => item.localId === localId);
++        if (idx === -1) return null;
++        const [item] = this.queue.splice(idx, 1);
++        if (!item) return null;
++        const reservation: QueueReservation<T> = { item, index: idx, state: 'reserved' };
++        if (item.localId) {
++            this.reservations.set(item.localId, reservation);
++        }
++        return reservation;
++    }
++
++    /**
++     * Re-insert an item previously removed by {@link takeByLocalId} at its
++     * original index (clamped if the queue shrank).
++     */
++    restoreReservation(reservation: QueueReservation<T>): boolean {
++        if (reservation.state === 'cancelled') {
++            return false;
++        }
++        if (this.closed) {
++            throw new Error('Cannot restore into closed queue');
++        }
++        if (reservation.item.localId) {
++            if (this.reservations.get(reservation.item.localId) !== reservation) {
++                return false;
++            }
++            this.reservations.delete(reservation.item.localId);
++        }
++        const idx = Math.max(0, Math.min(reservation.index, this.queue.length));
++        this.queue.splice(idx, 0, reservation.item);
++        if (this.waiter) {
++            const waiter = this.waiter;
++            this.waiter = null;
++            waiter(true);
++        }
+         return true;
+     }
+ 
++    commitReservation(reservation: QueueReservation<T>): boolean {
++        if (reservation.state === 'cancelled') {
++            return false;
++        }
++        if (reservation.item.localId) {
++            if (this.reservations.get(reservation.item.localId) !== reservation) {
++                return false;
++            }
++            this.reservations.delete(reservation.item.localId);
++        }
++        return true;
++    }
++
++    beginReservationDispatch(reservation: QueueReservation<T>): boolean {
++        if (reservation.state !== 'reserved') {
++            return false;
++        }
++        if (reservation.item.localId && this.reservations.get(reservation.item.localId) !== reservation) {
++            return false;
++        }
++        reservation.state = 'dispatching';
++        return true;
++    }
++
++    restoreTakenItem(taken: QueueReservation<T>): void {
++        this.restoreReservation(taken);
++    }
++
+     /**
+      * Reset the queue - clears all messages and resets to empty state
+      */
+     reset(): void {
+         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
+         this.queue = [];
++        for (const reservation of this.reservations.values()) {
++            reservation.state = 'cancelled';
++        }
++        this.reservations.clear();
+         this.closed = false;
+ 
+         // Clear waiter without calling it since we're not closing
+@@ -287,6 +385,10 @@ export class MessageQueue2<T> {
+     close(): void {
+         logger.debug(`[MessageQueue2] close() called`);
+         this.closed = true;
++        for (const reservation of this.reservations.values()) {
++            reservation.state = 'cancelled';
++        }
++        this.reservations.clear();
+ 
+         // Notify any waiting caller
+         if (this.waiter) {
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.ts b/hub/src/socket/handlers/cli/sessionHandlers.ts
+index 39f34356c89590c217315d8b7b82e35e13fb5950..960624cf39e89e6b25983034148e76e3a8834779 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.ts
+@@ -312,7 +312,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         onSessionReady?.(data)
+     })
+ 
+-    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean }) => {
++    socket.on('messages-consumed', (data: {
++        sid: string
++        localIds: string[]
++        clearQueuedThinkingGrace?: boolean
++        steered?: boolean
++    }) => {
+         if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
+             return
+         }
+@@ -356,7 +361,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
+         // Emit only after the DB transaction succeeds. This is an ACK-level
+         // batch contract, so preserve its original timestamp even when IDs are
+         // heterogeneous, replayed, or unknown.
+-        onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
++        onWebappEvent?.({
++            type: 'messages-consumed',
++            sessionId: data.sid,
++            localIds,
++            invokedAt,
++            ...(data.steered === true ? { steered: true } : {})
++        })
+     })
+ 
+     socket.on('session-end', (data: SessionEndPayload) => {
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index d38465c1499d0e9ab8385aa8b5a46df45de3f53b..1aa2bbceaba2430feb038771aa2d7653013e911c 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -362,6 +362,16 @@ export class RpcGateway {
+         return await this.sessionRpc(sessionId, RPC_METHODS.ListGrokReasoningEffortOptions, {}) as RpcListGrokReasoningEffortOptionsResponse
+     }
+ 
++    async steerQueuedMessage(
++        sessionId: string,
++        localId: string
++    ): Promise<{ steered: boolean; error?: string }> {
++        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
++            steered: boolean
++            error?: string
++        }
++    }
++
+     /** Generic Pi RPC call — routes all Pi-specific session RPCs through
+      *  a single entry point instead of per-method wrappers. */
+     async callPiRpc<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index e41a01764f0b0b552aeec710300b96d17115d8c7..da8d9afd73ee2d4f67797b40e3bf97fcacac3b18 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -7,9 +7,10 @@
+  * - No E2E encryption; data is stored as JSON in SQLite
+  */
+ 
+-import { isKnownFlavor, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
++import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+ import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+ import type { AgentFlavor, CodexCollaborationMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
++import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
+ import type { Server } from 'socket.io'
+ import { randomUUID } from 'node:crypto'
+@@ -871,6 +872,68 @@ async uploadScratchlistAttachment(
+         return this.messageService.cancelQueuedMessage(sessionId, messageId)
+     }
+ 
++    /**
++     * Ask the CLI to deliver one waiting-queue message into the active turn
++     * (Codex turn/steer, or Cursor ACP interrupt+prompt).
++     */
++    async steerQueuedMessage(
++        sessionId: string,
++        messageId: string
++    ): Promise<SteerQueuedMessageResponse> {
++        const session = this.getSession(sessionId)
++        if (!session) {
++            return { status: 'failed', error: 'Session not found', localId: null }
++        }
++        if (!isSteeringSupportedForSession(session.metadata)) {
++            return { status: 'failed', error: 'Steering is not supported for this agent', localId: null }
++        }
++        if (session.agentState?.controlledByUser === true) {
++            return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
++        }
++
++        const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
++        if (lookup.status === 'absent') {
++            return { status: 'failed', error: 'Message not found', localId: null }
++        }
++        if (lookup.status === 'invoked') {
++            const message = lookup.message
++            return {
++                status: 'invoked',
++                message: {
++                    id: message.id,
++                    seq: message.seq,
++                    localId: message.localId,
++                    content: message.content,
++                    createdAt: message.createdAt,
++                    invokedAt: message.invokedAt,
++                    scheduledAt: message.scheduledAt
++                }
++            }
++        }
++        const { localId, scheduledAt } = lookup
++        if (!localId) {
++            return { status: 'failed', error: 'Message has no localId', localId: null }
++        }
++        if (scheduledAt != null && scheduledAt > Date.now()) {
++            return { status: 'failed', error: 'Scheduled messages cannot be steered', localId }
++        }
++
++        try {
++            const result = await this.rpcGateway.steerQueuedMessage(sessionId, localId)
++            if (result.steered) {
++                return { status: 'steered', localId }
++            }
++            return {
++                status: 'failed',
++                error: result.error ?? 'Steer failed',
++                localId
++            }
++        } catch (error) {
++            const message = error instanceof Error ? error.message : 'Steer failed'
++            return { status: 'failed', error: message, localId }
++        }
++    }
++
+     sweepImmediateQueuedOnSessionEnd(sessionId: string, invokedAt: number): void {
+         this.messageService.sweepImmediateQueuedOnSessionEnd(sessionId, invokedAt)
+     }
+diff --git a/hub/src/tunnel/tlsGate.ts b/hub/src/tunnel/tlsGate.ts
+index 8dcb46fe0dc5b4ccdea62508b6a483232accf08b..6d1eccbc3fa1155a39b675dca8f564d43c19f9be 100644
+--- a/hub/src/tunnel/tlsGate.ts
++++ b/hub/src/tunnel/tlsGate.ts
+@@ -64,10 +64,11 @@ function hostMatchesCertificate(host: string, cert: PeerCertificate): boolean {
+     }
+ 
+     if (hostIsIp) {
+-        return commonName === host
++        return Array.isArray(commonName) ? commonName.includes(host) : commonName === host
+     }
+ 
+-    return dnsNameMatchesHost(host, commonName)
++    return (Array.isArray(commonName) ? commonName : [commonName])
++        .some(name => dnsNameMatchesHost(host, name))
+ }
+ 
+ function parseCertDate(value: string | undefined): Date | null {
+diff --git a/hub/src/web/routes/guards.ts b/hub/src/web/routes/guards.ts
+index 9056111d6eff5a04b6c079f5f400044f8d1ef333..0c2b2351eeb97c240295c2a395b58c4e62797fd0 100644
+--- a/hub/src/web/routes/guards.ts
++++ b/hub/src/web/routes/guards.ts
+@@ -42,7 +42,7 @@ export function requireSessionFromParam(
+     options?: { paramName?: string; requireActive?: boolean }
+ ): { sessionId: string; session: Session } | Response {
+     const paramName = options?.paramName ?? 'id'
+-    const sessionId = c.req.param(paramName)
++    const sessionId = c.req.param(paramName) ?? ''
+     const result = requireSession(c, engine, sessionId, { requireActive: options?.requireActive })
+     if (result instanceof Response) {
+         return result
+diff --git a/hub/src/web/routes/messages.ts b/hub/src/web/routes/messages.ts
+index 9e3442acd3bafc8327334abc8d25ac0dc9de13c5..424ba0f828b9115a3b2da0b0103699ba2204b08a 100644
+--- a/hub/src/web/routes/messages.ts
++++ b/hub/src/web/routes/messages.ts
+@@ -71,7 +71,6 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             return sessionResult
+         }
+         const sessionId = sessionResult.sessionId
+-
+         const body = await c.req.json().catch(() => null)
+         const parsed = QueuedStateRequestSchema.safeParse(body)
+         if (!parsed.success) {
+@@ -85,6 +84,23 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         return c.json(engine.getQueuedState(sessionId, localIds))
+     })
+ 
++    app.post('/sessions/:id/messages/:messageId/steer', async (c) => {
++        const engine = requireSyncEngine(c, getSyncEngine)
++        if (engine instanceof Response) {
++            return engine
++        }
++
++        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
++        if (sessionResult instanceof Response) {
++            return sessionResult
++        }
++        const sessionId = sessionResult.sessionId
++        const messageId = c.req.param('messageId')
++
++        const result = await engine.steerQueuedMessage(sessionId, messageId)
++        return c.json(result)
++    })
++
+     app.post('/sessions/:id/messages', async (c) => {
+         const engine = requireSyncEngine(c, getSyncEngine)
+         if (engine instanceof Response) {
+diff --git a/shared/src/modes.test.ts b/shared/src/modes.test.ts
+index db4534ed0c9a4aca6f84222f13ea6dafb671b2b7..7db9ab36a0c52de980bdd41d5a024073f44f808d 100644
+--- a/shared/src/modes.test.ts
++++ b/shared/src/modes.test.ts
+@@ -8,6 +8,8 @@ import {
+     getPermissionModeTone,
+     getPermissionModesForFlavor,
+     isPermissionModeAllowedForFlavor,
++    isSteeringSupportedForFlavor,
++    isSteeringSupportedForSession,
+ } from './modes'
+ 
+ describe('Gemini CLI sunset (read-only, not creatable)', () => {
+@@ -129,3 +131,47 @@ describe('claude auto permission mode', () => {
+         expect(getPermissionModeTone('auto')).toBe('warning')
+     })
+ })
++
++describe('isSteeringSupportedForFlavor', () => {
++    it('supports codex and cursor only', () => {
++        expect(isSteeringSupportedForFlavor('codex')).toBe(true)
++        expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
++        expect(isSteeringSupportedForFlavor('claude')).toBe(false)
++        expect(isSteeringSupportedForFlavor('opencode')).toBe(false)
++        expect(isSteeringSupportedForFlavor('pi')).toBe(false)
++        expect(isSteeringSupportedForFlavor(undefined)).toBe(false)
++        expect(isSteeringSupportedForFlavor(null)).toBe(false)
++    })
++})
++
++describe('isSteeringSupportedForSession', () => {
++    it('supports codex sessions', () => {
++        expect(isSteeringSupportedForSession({ flavor: 'codex' })).toBe(true)
++    })
++
++    it('supports Cursor ACP sessions', () => {
++        expect(isSteeringSupportedForSession({
++            flavor: 'cursor',
++            cursorSessionProtocol: 'acp',
++            cursorSessionId: 'sess-1',
++        })).toBe(true)
++        expect(isSteeringSupportedForSession({ flavor: 'cursor' })).toBe(true)
++    })
++
++    it('rejects legacy Cursor stream-json sessions', () => {
++        expect(isSteeringSupportedForSession({
++            flavor: 'cursor',
++            cursorSessionProtocol: 'stream-json',
++            cursorSessionId: 'legacy-1',
++        })).toBe(false)
++        expect(isSteeringSupportedForSession({
++            flavor: 'cursor',
++            cursorSessionId: 'legacy-without-protocol',
++        })).toBe(false)
++    })
++
++    it('rejects non-steerable flavors', () => {
++        expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
++        expect(isSteeringSupportedForSession(null)).toBe(false)
++    })
++})
+diff --git a/shared/src/modes.ts b/shared/src/modes.ts
+index 8c5e4507645ac0c8c3a722c467decddd0fe473af..c411c361d6ccfde80b2009985b6a316330ea7c12 100644
+--- a/shared/src/modes.ts
++++ b/shared/src/modes.ts
+@@ -162,3 +162,49 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
+         label: getCodexCollaborationModeLabel(mode)
+     }))
+ }
++
++/**
++ * Flavors that can deliver a queued message into an active turn on demand
++ * (per-message "Steer" from the waiting queue), without waiting for full-turn end.
++ *
++ * Steer = soft mid-turn delivery (same idea as Cursor GUI default "Send"):
++ * - Codex: app-server `turn/steer` (true mid-turn inject)
++ * - Cursor ACP: concurrent `session/prompt` soft-send (no cancel). Legacy
++ *   stream-json Cursor sessions are NOT steerable — gate with
++ *   {@link isSteeringSupportedForSession}.
++ *
++ * Claude / others: not supported (no reachable soft-steer path) — UI hides Steer.
++ */
++export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor'] as const
++
++export function isSteeringSupportedForFlavor(flavor?: string | null): boolean {
++    return (STEERING_SUPPORTED_FLAVORS as readonly string[]).includes(flavor ?? '')
++}
++
++/**
++ * Session-aware steer gate. Prefer this over {@link isSteeringSupportedForFlavor}
++ * when metadata is available: legacy Cursor stream-json sessions advertise
++ * flavor `cursor` but cannot steer.
++ *
++ * Matches CLI legacy detection: explicit `stream-json`, or a pre-ACP session
++ * that has `cursorSessionId` without `cursorSessionProtocol: 'acp'`.
++ */
++export function isSteeringSupportedForSession(metadata?: {
++    flavor?: string | null
++    cursorSessionId?: string | null
++    cursorSessionProtocol?: 'acp' | 'stream-json' | null
++} | null): boolean {
++    if (metadata?.flavor === 'codex') {
++        return true
++    }
++    if (metadata?.flavor !== 'cursor') {
++        return false
++    }
++    if (metadata.cursorSessionProtocol === 'stream-json') {
++        return false
++    }
++    if (!metadata.cursorSessionProtocol && metadata.cursorSessionId) {
++        return false
++    }
++    return true
++}
+diff --git a/shared/src/rpcMethods.ts b/shared/src/rpcMethods.ts
+index 0ffd2da3eac9a1d15710eee1380e593c720ff3d1..642d4f0fcd140384b7fd3a3d0f15e29a2841002e 100644
+--- a/shared/src/rpcMethods.ts
++++ b/shared/src/rpcMethods.ts
+@@ -38,6 +38,8 @@ export const RPC_METHODS = {
+     ListGrokModels: 'listGrokModels',
+     ListGrokReasoningEffortOptions: 'listGrokReasoningEffortOptions',
+     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
++    /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
++    SteerQueuedMessage: 'steer-queued-message',
+     ForkConversation: 'fork-conversation',
+     RewindConversation: 'rewind-conversation',
+ } as const
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 80c6e87f03684d3aadca770119e6f2705f60f126..4e9957ca69524450cf7a4ff6f630a9a968e8f9c4 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -160,6 +160,7 @@ export type AgentStateCompletedRequest = z.infer<typeof AgentStateCompletedReque
+ 
+ export const AgentStateSchema = z.object({
+     controlledByUser: z.boolean().nullish(),
++    steeringActive: z.boolean().nullish(),
+     requests: z.record(z.string(), AgentStateRequestSchema).nullish(),
+     completedRequests: z.record(z.string(), AgentStateCompletedRequestSchema).nullish()
+ })
+@@ -251,7 +252,9 @@ export const DecryptedMessageSchema = z.object({
+     content: z.unknown(),
+     createdAt: z.number(),
+     invokedAt: z.number().nullable().optional(),
+-    scheduledAt: z.number().nullable().optional()
++    scheduledAt: z.number().nullable().optional(),
++    // Live signal via messages-consumed (steered:true); not persisted by the hub.
++    steered: z.boolean().optional()
+ })
+ 
+ export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
+@@ -463,7 +466,9 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
+     SessionChangedSchema.extend({
+         type: z.literal('messages-consumed'),
+         localIds: z.array(z.string()),
+-        invokedAt: z.number()
++        invokedAt: z.number(),
++        // True when messages were steered into an active turn (not a normal queue drain).
++        steered: z.boolean().optional()
+     }),
+     SessionChangedSchema.extend({
+         type: z.literal('message-cancelled'),
+@@ -493,3 +498,11 @@ export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
+ ])
+ 
+ export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>
++
++export const SteerQueuedMessageResponseSchema = z.discriminatedUnion('status', [
++    z.object({ status: z.literal('steered'), localId: z.string() }),
++    z.object({ status: z.literal('invoked'), message: DecryptedMessageSchema }),
++    z.object({ status: z.literal('failed'), error: z.string(), localId: z.string().nullable() }),
++])
++
++export type SteerQueuedMessageResponse = z.infer<typeof SteerQueuedMessageResponseSchema>
+diff --git a/shared/src/socket.ts b/shared/src/socket.ts
+index 977dcd5c9eca7908e166490795b235d4e7ceb7d0..b042cdb66a89705fadb2112ce52c5b0c2fe1963a 100644
+--- a/shared/src/socket.ts
++++ b/shared/src/socket.ts
+@@ -216,7 +216,7 @@ export interface ClientToServerEvents {
+   /** CLI agent finished session/load (or equivalent) and can accept prompts. */
+     'session-ready': (data: { sid: string; time: number }) => void
+     'session-end': (data: { sid: string; time: number; reason?: SessionEndReason }) => void
+-    'messages-consumed': (data: { sid: string; localIds: string[] }) => void
++    'messages-consumed': (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => void
+     'update-metadata': (data: { sid: string; expectedVersion: number; metadata: unknown }, cb: (answer: UpdateMetadataAck) => void) => void
+     'update-state': (data: { sid: string; expectedVersion: number; agentState: unknown | null }, cb: (answer: UpdateStateAck) => void) => void
+     'machine-alive': (data: { machineId: string; time: number; health?: unknown }) => void
+diff --git a/web/package.json b/web/package.json
+index 4bffcd6866eee3401b8087253e9d24642aefeebb..824089731596583bb2ca7b235eeb3616c7bbf9a6 100644
+--- a/web/package.json
++++ b/web/package.json
+@@ -41,6 +41,7 @@
+         "mermaid": "^11.12.0",
+         "react": "^19.2.3",
+         "react-dom": "^19.2.3",
++        "react-markdown": "^10.1.0",
+         "qrcode": "^1.5.4",
+         "rehype-katex": "^7.0.1",
+         "remark-breaks": "^4.0.0",
+@@ -61,6 +62,8 @@
+         "@types/react": "^19.2.7",
+         "@types/react-dom": "^19.2.3",
+         "@types/qrcode": "^1.5.6",
++        "@types/hast": "^3.0.4",
++        "@types/mdast": "^4.0.4",
+         "@tailwindcss/postcss": "^4.1.18",
+         "@vitejs/plugin-react": "^5.1.2",
+         "autoprefixer": "^10.4.23",
+@@ -69,11 +72,13 @@
+         "postcss": "^8.5.6",
+         "remark-parse": "^11.0.0",
+         "remark-rehype": "^11.1.2",
++        "remark-stringify": "^11.0.0",
+         "tailwindcss": "^4.1.18",
+         "typescript": "^5.9.3",
+         "unified": "^11.0.5",
+         "vite": "^7.3.0",
+         "vitest": "^4.0.16",
++        "vfile": "^6.0.3",
+         "@playwright/test": "1.60.0"
+     }
+ }
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 9b4e692ebb83be251cf5d697d559d69125a76cf7..b53650f03349e2a35e6fb1fa92b0e0c9b99dfea6 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -47,7 +47,7 @@ import type {
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
+ import type { AgentFlavor } from '@hapi/protocol'
+-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
++import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+ 
+ type ApiClientOptions = {
+@@ -462,6 +462,14 @@ export class ApiClient {
+         return response as CancelMessageResponse
+     }
+ 
++    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
++        const response = await this.request(
++            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
++            { method: 'POST', body: JSON.stringify({}) }
++        )
++        return response as SteerQueuedMessageResponse
++    }
++
+     async abortSession(sessionId: string): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+             method: 'POST',
+diff --git a/web/src/chat/normalize.ts b/web/src/chat/normalize.ts
+index 7b6b73fb5ea7f6562041ea9877fbb1fae5d81949..8040a2dc11f557295902dac238e7eaadde2b3bf7 100644
+--- a/web/src/chat/normalize.ts
++++ b/web/src/chat/normalize.ts
+@@ -23,7 +23,7 @@ export function normalizeDecryptedMessage(message: DecryptedMessage): Normalized
+     if (record.role === 'user') {
+         const normalized = normalizeUserRecord(message.id, message.localId, message.createdAt, record.content, record.meta)
+         return normalized
+-            ? { ...normalized, status: message.status, originalText: message.originalText, invokedAt: message.invokedAt }
++            ? { ...normalized, status: message.status, originalText: message.originalText, invokedAt: message.invokedAt, steered: message.steered }
+             : {
+                 id: message.id,
+                 localId: message.localId,
+@@ -34,7 +34,8 @@ export function normalizeDecryptedMessage(message: DecryptedMessage): Normalized
+                 meta: record.meta,
+                 status: message.status,
+                 originalText: message.originalText,
+-                invokedAt: message.invokedAt
++                invokedAt: message.invokedAt,
++                steered: message.steered
+             }
+     }
+     if (record.role === 'agent') {
+diff --git a/web/src/chat/reducerTimeline.ts b/web/src/chat/reducerTimeline.ts
+index 1af70f011aa2ce035283fcd656c086e08d30fe8d..2842fa6143e28ce3e82c2850de31797ee0b952bd 100644
+--- a/web/src/chat/reducerTimeline.ts
++++ b/web/src/chat/reducerTimeline.ts
+@@ -700,7 +700,8 @@ export function reduceTimeline(
+                 attachments: msg.content.attachments,
+                 status: msg.status,
+                 originalText: msg.originalText,
+-                meta: msg.meta
++                meta: msg.meta,
++                steered: msg.steered
+             })
+             continue
+         }
+diff --git a/web/src/chat/types.ts b/web/src/chat/types.ts
+index 441611110690814bffea20192a45888a3788d719..4125bfe4ff51838b7a0583b8c060ea4f6e932284 100644
+--- a/web/src/chat/types.ts
++++ b/web/src/chat/types.ts
+@@ -147,6 +147,8 @@ export type NormalizedMessage = ({
+      * flavors) — consumers should fall back to `createdAt` in that case.
+      */
+     agentTimestamp?: number | null
++    /** True when a user message was steered into an active turn (mid-turn). */
++    steered?: boolean
+ }
+ 
+ export type ToolPermission = {
+@@ -200,6 +202,8 @@ export type UserTextBlock = {
+     status?: MessageStatus
+     originalText?: string
+     meta?: unknown
++    /** True when this message was steered into an active turn (mid-turn). */
++    steered?: boolean
+ }
+ 
+ export type AgentTextBlock = {
+diff --git a/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx b/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx
+index a84da2e18801bbc68b38373c9f1c7930d537ad8d..34b54f879419d856aa3b250d8c1c7124abe7edcc 100644
+--- a/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx
++++ b/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx
+@@ -51,12 +51,25 @@ vi.mock('@/hooks/mutations/useCancelQueuedMessage', () => ({
+     }),
+ }))
+ 
++vi.mock('@/hooks/mutations/useSteerQueuedMessage', () => ({
++    useSteerQueuedMessage: () => ({
++        isPending: false,
++        variables: undefined,
++        mutate: vi.fn(),
++    }),
++}))
++
+ vi.mock('@/lib/composer-drafts', () => ({
+     saveDraft: mocks.saveDraft,
+ }))
+ 
+ vi.mock('@/lib/use-translation', () => ({
+-    useTranslation: () => ({ t: (key: string) => key }),
++    useTranslation: () => ({
++        t: (key: string) => ({
++            'queuedMessages.edit': 'Edit queued message',
++            'queuedMessages.cancel': 'Cancel queued message',
++        })[key] ?? key,
++    }),
+ }))
+ 
+ vi.mock('@/lib/toast-context', () => ({
+diff --git a/web/src/components/AssistantChat/QueuedMessagesBar.tsx b/web/src/components/AssistantChat/QueuedMessagesBar.tsx
+index 384b231498f2c043e2e511d0d2c69d6b8108f0c2..e5bb91109167f92bcb4551faa13ce8e9e3d7dba5 100644
+--- a/web/src/components/AssistantChat/QueuedMessagesBar.tsx
++++ b/web/src/components/AssistantChat/QueuedMessagesBar.tsx
+@@ -7,9 +7,11 @@ import { EMPTY_STATE } from '@/hooks/queries/useMessages'
+ import { normalizeDecryptedMessage } from '@/chat/normalize'
+ import type { DecryptedMessage } from '@/types/api'
+ import { useCancelQueuedMessage } from '@/hooks/mutations/useCancelQueuedMessage'
++import { useSteerQueuedMessage } from '@/hooks/mutations/useSteerQueuedMessage'
+ import { useTranslation } from '@/lib/use-translation'
+ import { useToast } from '@/lib/toast-context'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
++import { isSteeringSupportedForSession } from '@hapi/protocol'
+ import { formatScheduledTime } from '@/lib/scheduledTime'
+ import {
+     beginQueuedOperation,
+@@ -42,6 +44,39 @@ function ClockIcon() {
+     )
+ }
+ 
++/** Inject-into-stream glyph: mid-turn soft steer (icon-only; label via title/aria). */
++function SteerIcon() {
++    return (
++        <svg
++            viewBox="0 0 16 16"
++            fill="none"
++            className="h-3.5 w-3.5"
++            aria-hidden="true"
++        >
++            <path
++                d="M3 12h10"
++                stroke="currentColor"
++                strokeWidth="1.4"
++                strokeLinecap="round"
++            />
++            <path
++                d="M5 3v5.5L9 12"
++                stroke="currentColor"
++                strokeWidth="1.4"
++                strokeLinecap="round"
++                strokeLinejoin="round"
++            />
++            <path
++                d="M7.5 10.5 9 12l1.5-1.5"
++                stroke="currentColor"
++                strokeWidth="1.4"
++                strokeLinecap="round"
++                strokeLinejoin="round"
++            />
++        </svg>
++    )
++}
++
+ /**
+  * Orders queued messages so the floating bar reads top-down as a single timeline:
+  *   1. Immediate-queued messages first, in the order they were submitted.
+@@ -165,20 +200,32 @@ export function computeCanCancel({
+ 
+ /**
+  * Floating bar above the composer showing queued (pending invocation) messages.
+- * Each item has an edit button (✎) and a cancel button (✕).
++ * Each item has edit, optional Steer (when the agent supports mid-turn delivery),
++ * and cancel.
+  *
+- * Edit = client-side cancel + prefill composer with message text (Codex dialect).
++ * Edit = client-side cancel + prefill composer with message text.
++ * Steer = soft mid-turn delivery now (Codex turn/steer / Cursor ACP soft-send).
+  * Cancel = DELETE /sessions/:id/messages/:messageId with optimistic removal.
+  */
+ export function QueuedMessagesBar({
+     sessionId,
+     api,
++    sessionMetadata,
++    steeringActive,
+     pendingSchedule,
+     pendingScheduleRevision,
+     onEdit,
+ }: {
+     sessionId: string
+     api: ApiClient | null
++    /** Session metadata — gates the Steer button (flavor + Cursor protocol). */
++    sessionMetadata?: {
++        flavor?: string | null
++        cursorSessionId?: string | null
++        cursorSessionProtocol?: 'acp' | 'stream-json' | null
++    } | null
++    /** True only while the launcher has an active steerable turn. */
++    steeringActive?: boolean
+     /** Current composer schedule, used only to guard an asynchronous edit restore. */
+     pendingSchedule: PendingSchedule | null
+     /** Monotonic per-session revision; schedule selections win over an async edit restore. */
+@@ -194,8 +241,10 @@ export function QueuedMessagesBar({
+     const assistantApi = useAui()
+     const composerText = useAuiState((state) => state.composer.text)
+     const cancelMutation = useCancelQueuedMessage(api)
++    const steerMutation = useSteerQueuedMessage(api)
+     const { t } = useTranslation()
+     const { addToast } = useToast()
++    const steeringSupported = isSteeringSupportedForSession(sessionMetadata)
+     const pendingScheduleRef = useRef(pendingSchedule)
+     const pendingScheduleRevisionRef = useRef(pendingScheduleRevision)
+     const composerTextRef = useRef(composerText)
+@@ -302,17 +351,17 @@ export function QueuedMessagesBar({
+     return (
+         <div
+             role="status"
+-            aria-label={`${queued.length} queued message${queued.length === 1 ? '' : 's'} pending invocation`}
++            aria-label={t('queuedMessages.pendingAriaLabel', { count: queued.length })}
+             className="mx-auto w-full max-w-content mb-1"
+         >
+             <div className="px-3 py-2 text-sm text-[var(--app-fg-muted)]">
+                 <div className="flex items-center gap-1.5 mb-1.5 text-xs font-medium text-[var(--app-hint)]">
+                     <ClockIcon />
+-                    <span>Queued</span>
++                    <span>{t('queuedMessages.title')}</span>
+                 </div>
+                 <ul
+                     className="flex flex-col gap-1.5 max-h-32 sm:max-h-48 overflow-y-auto"
+-                    aria-label="Queued messages"
++                    aria-label={t('queuedMessages.listAriaLabel')}
+                 >
+                     {queued.map((msg) => {
+                         const preview = getQueuedMessagePreview(msg)
+@@ -320,8 +369,14 @@ export function QueuedMessagesBar({
+                         const editText = getQueuedMessageEditText(preview)
+                         const hasAttachments = attachmentNames.length > 0
+                         const localId = msg.localId ?? msg.id
+-                        const isPending = cancelMutation.isPending || queuedOperationPending
++                        const isSteerPending = steerMutation.isPending && steerMutation.variables?.localId === localId
++                        const isPending = cancelMutation.isPending || steerMutation.isPending || queuedOperationPending
+                         const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending })
++                        const isFutureScheduled = msg.scheduledAt != null && msg.scheduledAt > Date.now()
++                        const canSteer = steeringSupported
++                            && Boolean(steeringActive)
++                            && !isFutureScheduled
++                            && canCancel
+ 
+                         const handleCancel = () => {
+                             if (!canCancel) return
+@@ -339,6 +394,16 @@ export function QueuedMessagesBar({
+                             })
+                         }
+ 
++                        const handleSteer = () => {
++                            if (!canSteer) return
++                            steerMutation.mutate({
++                                sessionId,
++                                messageId: msg.id,
++                                localId,
++                                snapshot: msg,
++                            })
++                        }
++
+                         const handleEdit = async () => {
+                             if (!canCancel) return
+                             // Edit = cancel + restore composer (text + schedule).
+@@ -442,11 +507,11 @@ export function QueuedMessagesBar({
+                                             ))}
+                                         </div>
+                                     ) : null}
+-                                    {msg.scheduledAt != null && msg.scheduledAt > Date.now() && (
++                                    {isFutureScheduled && (
+                                         <div className="mt-1 flex items-center gap-1 text-xs text-[var(--app-hint)]">
+                                             <ClockIcon />
+                                             <span>
+-                                                {t('queuedMessages.scheduledFor', { time: formatScheduledTime(msg.scheduledAt) })}
++                                                {t('queuedMessages.scheduledFor', { time: formatScheduledTime(msg.scheduledAt!) })}
+                                             </span>
+                                         </div>
+                                     )}
+@@ -454,7 +519,8 @@ export function QueuedMessagesBar({
+                                 <div className="flex shrink-0 items-center gap-1">
+                                     <button
+                                         type="button"
+-                                        aria-label="Edit queued message"
++                                        aria-label={t('queuedMessages.edit')}
++                                        title={t('queuedMessages.edit')}
+                                         disabled={!canEdit}
+                                         onClick={handleEdit}
+                                         onMouseDown={(e) => e.preventDefault()}
+@@ -475,9 +541,29 @@ export function QueuedMessagesBar({
+                                             />
+                                         </svg>
+                                     </button>
++                                    {steeringSupported && (
++                                        <button
++                                            type="button"
++                                            aria-label={t('queuedMessages.steerNow')}
++                                            title={t('queuedMessages.steerNow')}
++                                            disabled={!canSteer}
++                                            onClick={handleSteer}
++                                            onMouseDown={(e) => e.preventDefault()}
++                                            className="flex h-6 items-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
++                                        >
++                                            {isSteerPending ? (
++                                                <span className="flex h-6 w-6 items-center justify-center text-xs" aria-hidden="true">…</span>
++                                            ) : (
++                                                <span className="flex h-6 w-6 shrink-0 items-center justify-center">
++                                                    <SteerIcon />
++                                                </span>
++                                            )}
++                                        </button>
++                                    )}
+                                     <button
+                                         type="button"
+-                                        aria-label="Cancel queued message"
++                                        aria-label={t('queuedMessages.cancel')}
++                                        title={t('queuedMessages.cancel')}
+                                         disabled={!canCancel}
+                                         onClick={handleCancel}
+                                         onMouseDown={(e) => e.preventDefault()}
+diff --git a/web/src/components/AssistantChat/messages/UserMessage.tsx b/web/src/components/AssistantChat/messages/UserMessage.tsx
+index aa3df25a02bc7167cb747b0cf666301e88ef0134..a3bb45c07ded2d01d3b46895c3257a0498a7eace 100644
+--- a/web/src/components/AssistantChat/messages/UserMessage.tsx
++++ b/web/src/components/AssistantChat/messages/UserMessage.tsx
+@@ -7,9 +7,11 @@ import { UserBubbleContent, getUserBubbleClassName, shouldShowMessageStatus } fr
+ import { CliOutputBlock } from '@/components/CliOutputBlock'
+ import { getConversationMessageAnchorId } from '@/chat/outline'
+ import { MessageActions } from '@/components/AssistantChat/messages/MessageActions'
++import { useTranslation } from '@/lib/use-translation'
+ 
+ export function HappyUserMessage() {
+     const ctx = useHappyChatContext()
++    const { t } = useTranslation()
+     const role = useAuiState((s) => s.message.role)
+     const messageId = useAuiState((s) => s.message.id)
+     const elementId = getConversationMessageAnchorId(messageId)
+@@ -41,6 +43,9 @@ export function HappyUserMessage() {
+         if (custom?.kind !== 'cli-output') return ''
+         return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
+     })
++    const steered = useAuiState(({ message }) => (
++        message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
++    )?.steered === true)
+     if (role !== 'user') return null
+     const canRetry = status === 'failed' && typeof localId === 'string' && Boolean(ctx.onRetryMessage)
+     const onRetry = canRetry ? () => ctx.onRetryMessage!(localId) : undefined
+@@ -108,6 +113,14 @@ export function HappyUserMessage() {
+                         </div>
+                     )}
+                 </div>
++                {steered ? (
++                    <span
++                        title={t('queuedMessages.steeredBadgeTitle')}
++                        className="mt-1 inline-flex items-center gap-0.5 text-[10px] leading-none text-[var(--app-hint)]"
++                    >
++                        {t('queuedMessages.steeredBadge')}
++                    </span>
++                ) : null}
+             </div>
+             <MessageActions
+                 align="end"
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 9f3c63675c75958578c9306963be1be5db2c2510..879158fde15c1d9e1b974752d46d4c076bbaa1ae 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1545,7 +1545,6 @@ function SessionChatInner(props: SessionChatProps) {
+                                 </div>
+                             </div>
+                         ) : null}
+-
+                         {/*
+                          * tiann/hapi#893: one-time banner shown on first
+                          * v2-load when localStorage entries got migrated to
+@@ -1582,6 +1581,8 @@ function SessionChatInner(props: SessionChatProps) {
+                             <QueuedMessagesBar
+                                 sessionId={props.session.id}
+                                 api={props.api}
++                                sessionMetadata={props.session.metadata}
++                                steeringActive={props.session.agentState?.steeringActive === true}
+                                 pendingSchedule={pendingSchedule}
+                                 pendingScheduleRevision={pendingScheduleRevision}
+                                 onEdit={({ pendingSchedule: restored }) => {
+diff --git a/web/src/hooks/mutations/useSteerQueuedMessage.ts b/web/src/hooks/mutations/useSteerQueuedMessage.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b82b987a0a00cf8202ee190ffcf5af36d24547cd
+--- /dev/null
++++ b/web/src/hooks/mutations/useSteerQueuedMessage.ts
+@@ -0,0 +1,77 @@
++import { useMutation } from '@tanstack/react-query'
++import type { ApiClient } from '@/api/client'
++import type { DecryptedMessage } from '@/types/api'
++import { appendOptimisticMessage } from '@/lib/message-window-store'
++import { usePlatform } from '@/hooks/usePlatform'
++import { useToast } from '@/lib/toast-context'
++import { useTranslation } from '@/lib/use-translation'
++
++type SteerQueuedMessageInput = {
++    sessionId: string
++    messageId: string
++    localId: string
++    snapshot: DecryptedMessage
++}
++
++/**
++ * Mutation: steer one waiting-queue message into the active turn.
++ * Success is confirmed by messages-consumed (steered:true) SSE; this call only
++ * asks the CLI to start the steer.
++ */
++export function useSteerQueuedMessage(api: ApiClient | null) {
++    const { haptic } = usePlatform()
++    const { addToast } = useToast()
++    const { t } = useTranslation()
++
++    return useMutation({
++        mutationFn: async (input: SteerQueuedMessageInput) => {
++            if (!api) {
++                throw new Error('API unavailable')
++            }
++            return api.steerQueuedMessage(input.sessionId, input.messageId)
++        },
++        onSuccess: (result, input) => {
++            if (result.status === 'failed') {
++                addToast({
++                    title: t('queuedMessages.steerFailed'),
++                    body: result.error,
++                    sessionId: input.sessionId,
++                    url: window.location.href,
++                })
++                haptic.notification('error')
++                return
++            }
++            if (result.status === 'invoked') {
++                // Race: CLI already consumed the row. Merge the authoritative
++                // invoked message so the queued bar clears even if SSE was missed
++                // (same pattern as useCancelQueuedMessage).
++                appendOptimisticMessage(input.sessionId, {
++                    id: result.message.id,
++                    seq: result.message.seq,
++                    localId: result.message.localId,
++                    content: result.message.content,
++                    createdAt: result.message.createdAt,
++                    invokedAt: result.message.invokedAt,
++                    scheduledAt: result.message.scheduledAt,
++                    status: 'sent',
++                })
++                addToast({
++                    title: t('queuedMessages.steerAlreadyInvoked'),
++                    body: '',
++                    sessionId: input.sessionId,
++                    url: window.location.href,
++                })
++            }
++            haptic.notification('success')
++        },
++        onError: (error, input) => {
++            addToast({
++                title: t('queuedMessages.steerFailed'),
++                body: error instanceof Error ? error.message : String(error),
++                sessionId: input.sessionId,
++                url: window.location.href,
++            })
++            haptic.notification('error')
++        },
++    })
++}
+diff --git a/web/src/hooks/useSSE.ts b/web/src/hooks/useSSE.ts
+index b2087060ca598682c9b307f42ffb54fbaa42a078..095ce992988c5b3ca681fc880b14b62b8e85703d 100644
+--- a/web/src/hooks/useSSE.ts
++++ b/web/src/hooks/useSSE.ts
+@@ -552,7 +552,7 @@ export function useSSE(options: {
+                 // reconnect gaps or while another session is selected, only the global
+                 // connection may be alive — still clear the queued bar / optimistic rows.
+                 if (event.type === 'messages-consumed') {
+-                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
++                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+                 }
+                 if (event.type === 'message-cancelled') {
+                     removeOptimisticMessage(event.sessionId, event.messageId)
+@@ -562,7 +562,7 @@ export function useSSE(options: {
+             }
+ 
+             if (event.type === 'messages-consumed') {
+-                markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
++                markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+             }
+ 
+             if (event.type === 'message-cancelled') {
+diff --git a/web/src/lib/assistant-runtime.ts b/web/src/lib/assistant-runtime.ts
+index e670c4a2131549b07958d8d8a97781054a4011d3..71f62188ee3b02178bdd8bdc9e9419f67b363166 100644
+--- a/web/src/lib/assistant-runtime.ts
++++ b/web/src/lib/assistant-runtime.ts
+@@ -35,6 +35,7 @@ export type HappyChatMessageMetadata = {
+     source?: CliOutputBlock['source']
+     attachments?: AttachmentMetadata[]
+     invokedAt?: number | null
++    steered?: boolean
+     durationMs?: number
+     usage?: UsageData
+     model?: string | null
+@@ -378,7 +379,8 @@ function toThreadMessageLike(
+                     localId: block.localId,
+                     originalText: block.originalText,
+                     attachments: block.attachments,
+-                    invokedAt: block.invokedAt
++                    invokedAt: block.invokedAt,
++                    steered: block.steered
+                 } satisfies HappyChatMessageMetadata
+             }
+         }
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 7eee438ab5d715552188c2e86be34309dd174765..78603cf242ea3cb9f3f97f1135bb21cd697ca45e 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -538,8 +538,18 @@ export default {
+   'composer.scheduleSpecificHint': 'Max 7 days. Requires the hub running; the CLI catches up the next time it connects after that time.',
+   'composer.scheduleErrorPast': 'Scheduled time must be in the future.',
+   'composer.scheduleErrorTooFar': 'Maximum schedule time is 7 days.',
++  'queuedMessages.title': 'Queued',
++  'queuedMessages.listAriaLabel': 'Queued messages',
++  'queuedMessages.pendingAriaLabel': '{count} queued messages pending',
++  'queuedMessages.edit': 'Edit',
++  'queuedMessages.cancel': 'Cancel',
+   'queuedMessages.scheduledFor': 'Scheduled for {time}',
+   'queuedMessages.editAlreadyInvoked': "Message already sent — it can't be edited",
++  'queuedMessages.steerNow': 'Steer',
++  'queuedMessages.steerFailed': 'Could not steer message',
++  'queuedMessages.steerAlreadyInvoked': 'Message already sent',
++  'queuedMessages.steeredBadge': '↳ Steered',
++  'queuedMessages.steeredBadgeTitle': 'Steered into the active turn',
+   'queuedMessages.editCurrentDraftKept': 'Queued message cancelled — current draft and schedule were kept.',
+ 
+   // Scratchlist (per-session workbench, issue #11)
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 8e3e286c103ca0dee5f88fb8a4e4d51e79fb8677..060db6fc04fe000e06909623063c511d2f624e7a 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -542,8 +542,18 @@ export default {
+   'composer.scheduleSpecificHint': '最多 7 天。需 Hub 运行；CLI 下次连接时会接收消息。',
+   'composer.scheduleErrorPast': '发送时间必须在未来。',
+   'composer.scheduleErrorTooFar': '最多只能定时 7 天。',
++  'queuedMessages.title': '排队中',
++  'queuedMessages.listAriaLabel': '排队消息',
++  'queuedMessages.pendingAriaLabel': '{count} 条排队消息待发送',
++  'queuedMessages.edit': '编辑',
++  'queuedMessages.cancel': '取消',
+   'queuedMessages.scheduledFor': '定时发送: {time}',
+   'queuedMessages.editAlreadyInvoked': '消息已发送，无法编辑',
++  'queuedMessages.steerNow': '立即发出',
++  'queuedMessages.steerFailed': '无法立即发出',
++  'queuedMessages.steerAlreadyInvoked': '消息已发出',
++  'queuedMessages.steeredBadge': '↳ 已介入',
++  'queuedMessages.steeredBadgeTitle': '已介入当前进行中的回合',
+   'queuedMessages.editCurrentDraftKept': '队列消息已取消，已保留当前草稿和定时设置。',
+ 
+   // Scratchlist (per-session workbench, issue #11)
+diff --git a/web/src/lib/message-window-store.ts b/web/src/lib/message-window-store.ts
+index d7a14e428189194347629639e76410610e60927e..db93f03aa7744218814ef66c1b8cb7b134111ae3 100644
+--- a/web/src/lib/message-window-store.ts
++++ b/web/src/lib/message-window-store.ts
+@@ -1064,7 +1064,12 @@ export function removeOptimisticMessage(sessionId: string, localId: string): voi
+     }, true)
+ }
+ 
+-export function markMessagesConsumed(sessionId: string, localIds: string[], invokedAt: number): void {
++export function markMessagesConsumed(
++    sessionId: string,
++    localIds: string[],
++    invokedAt: number,
++    steered?: boolean
++): void {
+     if (localIds.length === 0) return
+     const idSet = new Set(localIds)
+     updateState(sessionId, (previous) => {
+@@ -1075,12 +1080,14 @@ export function markMessagesConsumed(sessionId: string, localIds: string[], invo
+             }
+             const needsStatus = message.status !== 'sent'
+             const needsInvokedAt = message.invokedAt === null
+-            if (!needsStatus && !needsInvokedAt) return message
++            const needsSteered = steered === true && message.steered !== true
++            if (!needsStatus && !needsInvokedAt && !needsSteered) return message
+             changed = true
+             return {
+                 ...message,
+                 ...(needsStatus ? { status: 'sent' as MessageStatus } : {}),
+-                ...(needsInvokedAt ? { invokedAt } : {})
++                ...(needsInvokedAt ? { invokedAt } : {}),
++                ...(needsSteered ? { steered: true } : {})
+             }
+         })
+         if (!changed) return previous
+diff --git a/web/src/lib/messages.test.ts b/web/src/lib/messages.test.ts
+index d1b64963b66cf5de90232c9a8b38b012cd8dbf32..b162f7d80caac29f4e0a671a06e475278416d30a 100644
+--- a/web/src/lib/messages.test.ts
++++ b/web/src/lib/messages.test.ts
+@@ -10,6 +10,7 @@ function userMessage(partial: Partial<DecryptedMessage> & { id: string }): Decry
+         createdAt: partial.createdAt ?? 1_000,
+         invokedAt: partial.invokedAt ?? null,
+         status: partial.status,
++        steered: partial.steered,
+         content: { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+     }
+ }
+@@ -24,4 +25,49 @@ describe('mergeMessages', () => {
+         expect(merged).toHaveLength(1)
+         expect(merged[0]?.invokedAt).toBe(invokedAt)
+     })
++
++    it('does not inherit optimistic "queued" onto an already-invoked server echo (steered message)', () => {
++        const optimistic = userMessage({ id: 'local-1', localId: 'local-1', invokedAt: null, status: 'queued' })
++        const serverInvoked = userMessage({ id: 'server-1', localId: 'local-1', invokedAt: 2_000 })
++
++        const merged = mergeMessages([optimistic], [serverInvoked])
++        expect(merged).toHaveLength(1)
++        expect(merged[0]?.invokedAt).toBe(2_000)
++        expect(merged[0]?.status).not.toBe('queued')
++    })
++
++    it('keeps "queued" while the message is not yet invoked (normal queue mode)', () => {
++        const optimistic = userMessage({ id: 'local-2', localId: 'local-2', invokedAt: null, status: 'queued' })
++        const serverPending = userMessage({ id: 'server-2', localId: 'local-2', invokedAt: null })
++
++        const merged = mergeMessages([optimistic], [serverPending])
++        expect(merged).toHaveLength(1)
++        expect(merged[0]?.status).toBe('queued')
++    })
++
++    it('carries the live "steered" marker from the optimistic row onto the server echo', () => {
++        const optimisticSteered = userMessage({ id: 'local-s', localId: 'local-s', invokedAt: 4_000, status: 'sent', steered: true })
++        const serverEcho = userMessage({ id: 'server-s', localId: 'local-s', invokedAt: 4_000 })
++
++        const merged = mergeMessages([optimisticSteered], [serverEcho])
++        expect(merged).toHaveLength(1)
++        expect(merged[0]?.steered).toBe(true)
++    })
++
++    it('preserves "steered" across a refetch that omits it', () => {
++        const existing = [userMessage({ id: 'server-s2', localId: 'local-s2', invokedAt: 5_000, steered: true })]
++        const incoming = [userMessage({ id: 'server-s2', localId: 'local-s2', invokedAt: 5_000 })]
++
++        const merged = mergeMessages(existing, incoming)
++        expect(merged).toHaveLength(1)
++        expect(merged[0]?.steered).toBe(true)
++    })
++
++    it('normalizes a stuck queued status on an invoked message', () => {
++        const inconsistent = userMessage({ id: 'server-3', localId: 'local-3', invokedAt: 3_000, status: 'queued' })
++
++        const merged = mergeMessages([inconsistent], [])
++        expect(merged).toHaveLength(1)
++        expect(merged[0]?.status).not.toBe('queued')
++    })
+ })
+diff --git a/web/src/lib/messages.ts b/web/src/lib/messages.ts
+index b4304f4661113c584e3bba6d0337abc9a0ce6243..2f21fc85048711a1fbe0ece642e24fb6c728933c 100644
+--- a/web/src/lib/messages.ts
++++ b/web/src/lib/messages.ts
+@@ -43,12 +43,24 @@ function compareMessages(a: DecryptedMessage, b: DecryptedMessage): number {
+     return a.id.localeCompare(b.id)
+ }
+ 
++// Invariant: a message the CLI has consumed (invokedAt set) is delivered, not
++// queued. A message delivered immediately — e.g. steered into the active turn —
++// can carry a stale optimistic 'queued' status while its invokedAt is already
++// set; normalize so the queued clock never lingers on a delivered message.
++function clearStaleQueuedStatus(list: DecryptedMessage[]): DecryptedMessage[] {
++    return list.map((msg) =>
++        msg.status === 'queued' && msg.invokedAt != null
++            ? { ...msg, status: 'sent' as DecryptedMessage['status'] }
++            : msg
++    )
++}
++
+ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedMessage[]): DecryptedMessage[] {
+     if (existing.length === 0) {
+-        return [...incoming].sort(compareMessages)
++        return clearStaleQueuedStatus([...incoming]).sort(compareMessages)
+     }
+     if (incoming.length === 0) {
+-        return [...existing].sort(compareMessages)
++        return clearStaleQueuedStatus([...existing]).sort(compareMessages)
+     }
+ 
+     const byId = new Map<string, DecryptedMessage>()
+@@ -57,8 +69,17 @@ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedM
+     }
+     for (const msg of incoming) {
+         const existing = byId.get(msg.id)
+-        if (existing && existing.invokedAt != null && msg.invokedAt == null) {
+-            byId.set(msg.id, { ...msg, invokedAt: existing.invokedAt })
++        if (existing) {
++            // Preserve client-only signals the incoming (server) copy can't carry:
++            // a late ack timestamp and the live 'steered' marker (not persisted).
++            const preserved: Partial<DecryptedMessage> = {}
++            if (existing.invokedAt != null && msg.invokedAt == null) {
++                preserved.invokedAt = existing.invokedAt
++            }
++            if (existing.steered && !msg.steered) {
++                preserved.steered = true
++            }
++            byId.set(msg.id, Object.keys(preserved).length > 0 ? { ...msg, ...preserved } : msg)
+         } else {
+             byId.set(msg.id, msg)
+         }
+@@ -78,6 +99,7 @@ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedM
+     if (incomingStoredLocalIds.size > 0) {
+         const optimisticStatusByLocalId = new Map<string, DecryptedMessage['status']>()
+         const optimisticInvokedAtByLocalId = new Map<string, number | null | undefined>()
++        const optimisticSteeredByLocalId = new Map<string, boolean>()
+         for (const msg of merged) {
+             if (msg.localId && isOptimisticMessage(msg) && incomingStoredLocalIds.has(msg.localId)) {
+                 if (msg.status) {
+@@ -86,6 +108,9 @@ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedM
+                 if (msg.invokedAt !== undefined) {
+                     optimisticInvokedAtByLocalId.set(msg.localId, msg.invokedAt)
+                 }
++                if (msg.steered) {
++                    optimisticSteeredByLocalId.set(msg.localId, true)
++                }
+             }
+         }
+         merged = merged.filter((msg) => {
+@@ -94,12 +119,20 @@ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedM
+             }
+             return !isOptimisticMessage(msg)
+         })
+-        if (optimisticStatusByLocalId.size > 0 || optimisticInvokedAtByLocalId.size > 0) {
++        if (optimisticStatusByLocalId.size > 0 || optimisticInvokedAtByLocalId.size > 0 || optimisticSteeredByLocalId.size > 0) {
+             merged = merged.map((msg) => {
+                 if (!msg.localId) return msg
+                 const update: Partial<DecryptedMessage> = {}
+                 if (optimisticStatusByLocalId.has(msg.localId) && !msg.status) {
+-                    update.status = optimisticStatusByLocalId.get(msg.localId)
++                    const optimisticStatus = optimisticStatusByLocalId.get(msg.localId)
++                    // Don't carry an optimistic 'queued' status onto a server message
++                    // the CLI has already consumed (invokedAt set). This happens when a
++                    // message is delivered immediately — e.g. steered into the active
++                    // turn — so its server echo arrives pre-invoked; inheriting 'queued'
++                    // would pin the queued clock on an already-delivered message.
++                    if (optimisticStatus !== 'queued' || msg.invokedAt == null) {
++                        update.status = optimisticStatus
++                    }
+                 }
+                 if (optimisticInvokedAtByLocalId.has(msg.localId) && msg.invokedAt == null) {
+                     const optimisticInvokedAt = optimisticInvokedAtByLocalId.get(msg.localId)
+@@ -107,6 +140,12 @@ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedM
+                         update.invokedAt = optimisticInvokedAt
+                     }
+                 }
++                // The 'steered' marker is live-only (the hub never persists it), so
++                // carry it from the optimistic row onto the replacing server echo —
++                // otherwise the ↳ Steered badge vanishes the moment the echo lands.
++                if (optimisticSteeredByLocalId.has(msg.localId) && !msg.steered) {
++                    update.steered = true
++                }
+                 if (Object.keys(update).length > 0) {
+                     return { ...msg, ...update }
+                 }
+@@ -139,6 +178,7 @@ export function mergeMessages(existing: DecryptedMessage[], incoming: DecryptedM
+         result.push(optimistic)
+     }
+ 
+-    result.sort(compareMessages)
+-    return result
++    const normalized = clearStaleQueuedStatus(result)
++    normalized.sort(compareMessages)
++    return normalized
+ }
