@@ -223,7 +223,7 @@ import { NewSession } from './index'
 const machine = { id: 'machine-1' } as Machine
 const api = {
     listProviderProfiles: async () => ({ success: true as const, profiles: [], defaults: {} })
-} as ApiClient
+} as unknown as ApiClient
 
 describe('NewSession launch preferences', () => {
     beforeEach(() => {
