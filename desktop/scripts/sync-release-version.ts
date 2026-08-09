@@ -13,11 +13,17 @@ if (!rawVersion) {
 const version = rawVersion.replace(/^v/, '')
 // Accept maintained-release four-part versions (e.g. 0.27.2.1) in addition
 // to plain semver — the fork tags every maintained release with four parts.
-if (!/^\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+// electron-builder (app-builder-lib) requires strict semver and rejects a
+// fourth numeric component, so the desktop app version is pinned to the
+// three-part base (0.27.2.1 -> 0.27.2); the bundled CLI inside still carries
+// the full maintained version.
+const match = /^(\d+\.\d+\.\d+)(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.exec(version)
+if (!match) {
     throw new Error(`Invalid desktop release version: ${rawVersion}`)
 }
+const packageVersion = match[1]
 
 const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: string }
-packageJson.version = version
+packageJson.version = packageVersion
 writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 4)}\n`, 'utf8')
-console.log(`Synced desktop package version to ${version}`)
+console.log(`Synced desktop package version to ${packageVersion} (from ${rawVersion})`)
