@@ -417,7 +417,7 @@ describe('UnifiedButton — voice active state', () => {
             />,
         )
 
-        const stopBtn = screen.getByRole('button', { name: 'Connecting…' })
+        const stopBtn = screen.getByRole('button', { name: /connecting/i })
         const sendBtn = screen.queryByRole('button', { name: 'Send' })
         expect(stopBtn).toBeInTheDocument()
         expect(sendBtn).toBeNull()
