@@ -124,7 +124,13 @@ export function useDictation(config: {
                         language
                     })
                     if (!mountedRef.current) return
-                    config.onTextChange(appendTranscript(config.getCurrentText(), result.text))
+                    const transcript = result.text.trim()
+                    if (!transcript) {
+                        setError('No speech was transcribed')
+                        setStatus('error')
+                        return
+                    }
+                    config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
                     setStatus('disconnected')
                     success = true
                 } catch (transcriptionError) {

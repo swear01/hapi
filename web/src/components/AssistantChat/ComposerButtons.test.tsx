@@ -323,6 +323,58 @@ describe('UnifiedButton — voice active state', () => {
         cleanup()
     })
 
+    it('preserves React hook order when re-rendering across disconnected, connecting, and connected states', () => {
+        const onVoiceToggle = vi.fn()
+        const onSend = vi.fn()
+        const { rerender } = renderInProviders(
+            <UnifiedButton
+                canSend={false}
+                voiceStatus="disconnected"
+                voiceEnabled
+                dictationEnabled
+                controlsDisabled={false}
+                onSend={onSend}
+                onVoiceToggle={onVoiceToggle}
+            />,
+        )
+
+        expect(() => {
+            rerender(
+                <UnifiedButton
+                    canSend={false}
+                    voiceStatus="connecting"
+                    voiceEnabled
+                    dictationEnabled
+                    controlsDisabled={false}
+                    onSend={onSend}
+                    onVoiceToggle={onVoiceToggle}
+                />,
+            )
+            rerender(
+                <UnifiedButton
+                    canSend={false}
+                    voiceStatus="connected"
+                    voiceEnabled
+                    dictationEnabled
+                    controlsDisabled={false}
+                    onSend={onSend}
+                    onVoiceToggle={onVoiceToggle}
+                />,
+            )
+            rerender(
+                <UnifiedButton
+                    canSend={false}
+                    voiceStatus="disconnected"
+                    voiceEnabled
+                    dictationEnabled
+                    controlsDisabled={false}
+                    onSend={onSend}
+                    onVoiceToggle={onVoiceToggle}
+                />,
+            )
+        }).not.toThrow()
+    })
+
     it('renders ONLY Stop button when in voice assistant mode (dictationEnabled is false)', () => {
         const onVoiceToggle = vi.fn()
         const onSend = vi.fn()

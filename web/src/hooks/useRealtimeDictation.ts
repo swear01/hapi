@@ -46,6 +46,7 @@ export function useRealtimeDictation(config: {
     const elevenLabsActiveRef = useRef(false)
     const elevenLabsFinalizedRef = useRef(false)
     const resolveElevenLabsCommitRef = useRef<(() => void) | null>(null)
+    const lastFinishedTranscriptRef = useRef<string | null>(null)
     onFinalTranscriptRef.current = config.onFinalTranscript
 
     const updatePartial = useCallback((text: string) => {
@@ -55,6 +56,7 @@ export function useRealtimeDictation(config: {
 
     const finish = useCallback((text: string) => {
         if (!mountedRef.current) return
+        lastFinishedTranscriptRef.current = text
         updatePartial('')
         onFinalTranscriptRef.current(text)
         setStatus('disconnected')
@@ -201,7 +203,7 @@ export function useRealtimeDictation(config: {
         }
     }, [config.api, config.provider, elevenLabs, fail, finish, status, supported, updatePartial])
 
-    const stop = useCallback(async () => {
+    const stop = useCallback(async (): Promise<boolean> => {
         const session = sessionRef.current
         if (!session) {
             operationRef.current += 1
@@ -212,21 +214,28 @@ export function useRealtimeDictation(config: {
                 elevenLabs.disconnect()
             }
             setStatus('disconnected')
-            return
+            return false
         }
         setStatus('connecting')
+        lastFinishedTranscriptRef.current = null
         try {
             await session.stop()
+            const committedText = lastFinishedTranscriptRef.current?.trim() ?? ''
+            return committedText.length > 0
         } catch (stopError) {
             fail(stopError)
+            return false
         } finally {
             if (sessionRef.current === session) sessionRef.current = null
         }
     }, [elevenLabs, fail])
 
-    const toggle = useCallback(async () => {
-        if (status === 'connected' || status === 'connecting') await stop()
-        else await start()
+    const toggle = useCallback(async (): Promise<boolean> => {
+        if (status === 'connected' || status === 'connecting') return await stop()
+        else {
+            await start()
+            return false
+        }
     }, [start, status, stop])
 
     useEffect(() => {

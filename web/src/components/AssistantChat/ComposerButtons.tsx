@@ -504,6 +504,33 @@ export function UnifiedButton(props: {
     const routesToScratchlist = props.routesToScratchlist ?? false
     const isDictation = props.dictationEnabled ?? false
 
+    const handleClick = () => {
+        if (hasText) {
+            props.onSend('default') // Send message (or scratchlist add — wrapper decides)
+        } else if (props.voiceEnabled && !routesToScratchlist) {
+            props.onVoiceToggle() // Start voice (suppressed in scratchlist mode)
+        }
+    }
+
+    // This is intentionally narrower than the button's general enabled state:
+    // a touch hold changes only an active Pi-main-thread chat submission. Voice
+    // controls, scratchlist routing, scheduled sends, and desktop input retain
+    // their existing native behavior.
+    const canQueueGesture = Boolean(
+        props.allowQueueGesture
+        && hasText
+        && !isVoiceActive
+        && !routesToScratchlist
+        && !props.controlsDisabled,
+    )
+    const sendButtonHandlers = useLongPress({
+        interaction: 'touch-only-native-click',
+        onClick: handleClick,
+        onLongPress: () => props.onSend('queue'),
+        longPressEnabled: canQueueGesture,
+        disabled: props.controlsDisabled,
+    })
+
     if (isVoiceActive) {
         const stopIcon = isConnecting ? <LoadingIcon /> : <StopIcon />
         const stopAriaLabel = isConnecting ? t('voice.connecting') : t('composer.stop')
@@ -517,7 +544,7 @@ export function UnifiedButton(props: {
             voiceSendPendingRef.current = true
             try {
                 const committed = await props.onVoiceToggle()
-                if (committed !== false) {
+                if (committed === true) {
                     props.onSend('default')
                 }
             } finally {
@@ -552,32 +579,6 @@ export function UnifiedButton(props: {
             </div>
         )
     }
-
-    const handleClick = () => {
-        if (hasText) {
-            props.onSend('default') // Send message (or scratchlist add — wrapper decides)
-        } else if (props.voiceEnabled && !routesToScratchlist) {
-            props.onVoiceToggle() // Start voice (suppressed in scratchlist mode)
-        }
-    }
-
-    // This is intentionally narrower than the button's general enabled state:
-    // a touch hold changes only an active Pi-main-thread chat submission. Voice
-    // controls, scratchlist routing, scheduled sends, and desktop input retain
-    // their existing native behavior.
-    const canQueueGesture = Boolean(
-        props.allowQueueGesture
-        && hasText
-        && !routesToScratchlist
-        && !props.controlsDisabled,
-    )
-    const sendButtonHandlers = useLongPress({
-        interaction: 'touch-only-native-click',
-        onClick: handleClick,
-        onLongPress: () => props.onSend('queue'),
-        longPressEnabled: canQueueGesture,
-        disabled: props.controlsDisabled,
-    })
 
     let icon: React.ReactNode
     let className: string
