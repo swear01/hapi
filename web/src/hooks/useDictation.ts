@@ -59,6 +59,8 @@ export function useDictation(config: {
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
 
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
+
     const stopTracks = useCallback(() => {
         streamRef.current?.getTracks().forEach((track) => track.stop())
         streamRef.current = null
@@ -98,11 +100,15 @@ export function useDictation(config: {
                 const blob = new Blob(chunksRef.current, { type })
                 recorderRef.current = null
                 chunksRef.current = []
-                if (!mountedRef.current) return
+                const pendingSend = sendOnFinishRef.current
+                sendOnFinishRef.current = null
+
                 if (!blob.size) {
                     transcribingRef.current = false
-                    setError('No audio was recorded')
-                    setStatus('error')
+                    if (mountedRef.current) {
+                        setError('No audio was recorded')
+                        setStatus('error')
+                    }
                     return
                 }
                 transcribingRef.current = true
@@ -113,13 +119,23 @@ export function useDictation(config: {
                         mode: 'standard',
                         language
                     })
-                    if (!mountedRef.current) return
-                    config.onTextChange(appendTranscript(config.getCurrentText(), result.text))
-                    setStatus('disconnected')
+                    const transcribedText = result.text || ''
+                    if (pendingSend) {
+                        const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
+                        if (finalMessage.trim() && config.api) {
+                            await config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                        }
+                    } else if (mountedRef.current) {
+                        config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))
+                    }
+                    if (mountedRef.current) {
+                        setStatus('disconnected')
+                    }
                 } catch (transcriptionError) {
-                    if (!mountedRef.current) return
-                    setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
-                    setStatus('error')
+                    if (mountedRef.current) {
+                        setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
+                        setStatus('error')
+                    }
                 } finally {
                     transcribingRef.current = false
                 }
@@ -148,6 +164,11 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
+    const stopAndSend = useCallback(async (targetSessionId: string) => {
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: config.getCurrentText() }
+        await stop()
+    }, [config, stop])
+
     const toggle = useCallback(async () => {
         if (status === 'connected' || status === 'connecting') await stop()
         else await start()
@@ -166,6 +187,6 @@ export function useDictation(config: {
     }, [stopTracks])
 
     return config.mode === 'realtime'
-        ? realtime
-        : { supported: standardSupported, status, error, partialTranscript: '', toggle }
+        ? { ...realtime, stopAndSend: realtime.stopAndSend }
+        : { supported: standardSupported, status, error, partialTranscript: '', toggle, stopAndSend }
 }

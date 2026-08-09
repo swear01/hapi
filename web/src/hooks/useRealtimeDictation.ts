@@ -7,6 +7,7 @@ import {
 } from '@hapi/protocol/voice'
 import type { ApiClient } from '@/api/client'
 import type { ConversationStatus } from '@/realtime/types'
+import { appendTranscript } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -53,12 +54,25 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
+
     const finish = useCallback((text: string) => {
-        if (!mountedRef.current) return
-        updatePartial('')
-        onFinalTranscriptRef.current(text)
-        setStatus('disconnected')
-    }, [updatePartial])
+        const pendingSend = sendOnFinishRef.current
+        sendOnFinishRef.current = null
+        if (pendingSend) {
+            const finalMessage = appendTranscript(pendingSend.initialText, text)
+            if (finalMessage.trim() && config.api) {
+                void config.api.sendMessage(pendingSend.sessionId, finalMessage)
+            }
+        } else if (mountedRef.current) {
+            updatePartial('')
+            onFinalTranscriptRef.current(text)
+            setStatus('disconnected')
+        }
+        if (mountedRef.current) {
+            setStatus('disconnected')
+        }
+    }, [config.api, updatePartial])
 
     const fail = useCallback((value: unknown) => {
         if (!mountedRef.current) return
@@ -224,6 +238,11 @@ export function useRealtimeDictation(config: {
         }
     }, [elevenLabs, fail])
 
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '' }
+        await stop()
+    }, [stop])
+
     const toggle = useCallback(async () => {
         if (status === 'connected' || status === 'connecting') await stop()
         else await start()
@@ -244,5 +263,5 @@ export function useRealtimeDictation(config: {
         }
     }, [])
 
-    return { supported, status, error, partialTranscript, toggle }
+    return { supported, status, error, partialTranscript, toggle, stopAndSend }
 }

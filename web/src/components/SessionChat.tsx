@@ -1105,15 +1105,25 @@ function SessionChatInner(props: SessionChatProps) {
     // Register session store for voice client tools
     useEffect(() => {
         registerSessionStore({
-            getSession: () => props.session as { agentState?: { requests?: Record<string, unknown> } } | null,
-            sendMessage: (_sessionId: string, message: string) => props.onSend(message),
-            approvePermission: async (_sessionId: string, requestId: string) => {
-                await props.api.approvePermission(props.session.id, requestId)
-                props.onRefresh()
+            getSession: (sessionId: string) => (sessionId === props.session.id ? (props.session as unknown as { agentState?: { requests?: Record<string, unknown> } }) : null),
+            sendMessage: (sessionId: string, message: string) => {
+                if (sessionId === props.session.id) {
+                    props.onSend(message)
+                } else {
+                    props.api.sendMessage(sessionId, message)
+                }
             },
-            denyPermission: async (_sessionId: string, requestId: string) => {
-                await props.api.denyPermission(props.session.id, requestId)
-                props.onRefresh()
+            approvePermission: async (sessionId: string, requestId: string) => {
+                await props.api.approvePermission(sessionId, requestId)
+                if (sessionId === props.session.id) {
+                    props.onRefresh()
+                }
+            },
+            denyPermission: async (sessionId: string, requestId: string) => {
+                await props.api.denyPermission(sessionId, requestId)
+                if (sessionId === props.session.id) {
+                    props.onRefresh()
+                }
             }
         })
     }, [props.session, props.api, props.onSend, props.onRefresh])

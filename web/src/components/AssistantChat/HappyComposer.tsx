@@ -480,8 +480,22 @@ export function HappyComposer(props: {
     const dictation = useDictation(dictationConfig)
     const dictationActive = voiceInput.voiceMode === 'dictation'
     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
+    const handleDictationToggle = useCallback(async () => {
+        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
+            const targetSessionId = props.sessionId ?? ''
+            api.composer().setText('')
+            if (targetSessionId) {
+                await dictation.stopAndSend?.(targetSessionId)
+            } else {
+                await dictation.toggle()
+            }
+            return
+        }
+        await dictation.toggle()
+    }, [api, dictation, dictationActive, props.sessionId])
+
     const effectiveVoiceToggle = dictationActive
-        ? (dictation.supported ? dictation.toggle : undefined)
+        ? (dictation.supported ? handleDictationToggle : undefined)
         : onVoiceToggle
     const previousVoiceModeRef = useRef(voiceInput.voiceMode)
     useEffect(() => {
@@ -1102,6 +1116,10 @@ export function HappyComposer(props: {
     }, [pendingSendIntentRef])
 
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
+        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
+            await handleDictationToggle()
+            return
+        }
         // SessionChat preloads the ref only when restoring a rejected send:
         // queue retries remain queue, while an ordinary fresh send always
         // starts from the explicit/default argument. Capture it before the
@@ -1212,6 +1230,9 @@ export function HappyComposer(props: {
         sendError,
         pendingSendIntentRef,
         resetPendingSendIntent,
+        dictationActive,
+        dictation.status,
+        handleDictationToggle,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {

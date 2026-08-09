@@ -112,4 +112,60 @@ describe('useDictation', () => {
         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft final words'))
         expect(result.current.partialTranscript).toBe('')
     })
+
+    it('sends message to target session when unmounted after stopAndSend', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const onTextChange = vi.fn()
+        let resolveTranscribe: ((res: { text: string }) => void) | null = null
+        const api = {
+            transcribeVoice: vi.fn(() => new Promise<{ text: string }>((resolve) => { resolveTranscribe = resolve })),
+            sendMessage: vi.fn(async () => {})
+        }
+
+        const { result, unmount } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => 'initial text',
+            onTextChange
+        }))
+
+        await act(() => result.current.toggle())
+        expect(result.current.status).toBe('connected')
+
+        act(() => {
+            result.current.stopAndSend('session-A')
+        })
+
+        unmount()
+
+        await act(async () => {
+            resolveTranscribe?.({ text: 'voice payload' })
+        })
+
+        await waitFor(() => {
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial text voice payload')
+        })
+    })
 })
