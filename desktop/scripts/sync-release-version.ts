@@ -11,7 +11,9 @@ if (!rawVersion) {
 }
 
 const version = rawVersion.replace(/^v/, '')
-if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+// Accept maintained-release four-part versions (e.g. 0.27.2.1) in addition
+// to plain semver — the fork tags every maintained release with four parts.
+if (!/^\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error(`Invalid desktop release version: ${rawVersion}`)
 }
 
