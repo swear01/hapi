@@ -1,6 +1,7 @@
-import { CREATABLE_AGENT_FLAVORS, type AgentFlavor } from '@hapi/protocol'
+import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
 
-export type CreateAgentVisibility = Record<AgentFlavor, boolean>
+export type CreatableAgentFlavor = typeof CREATABLE_AGENT_FLAVORS[number]
+export type CreateAgentVisibility = Record<CreatableAgentFlavor, boolean>
 
 const STORAGE_KEY = 'hapi:newSession:agentVisibility:v1'
 

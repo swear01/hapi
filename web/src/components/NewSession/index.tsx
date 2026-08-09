@@ -102,7 +102,10 @@ export function NewSession(props: {
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
-    const visibleAgents = useMemo(() => CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate]), [agentVisibility])
+    const visibleAgents = useMemo<AgentType[]>(
+        () => CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate]),
+        [agentVisibility]
+    )
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
