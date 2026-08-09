@@ -52,5 +52,6 @@ describe('schema migration v22 to v23', () => {
         // under the new semantics instead of mixing old and new rows.
         const seedCount = internalDb.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE session_id = 'migration-v23-seed'").get() as { n: number }
         expect(seedCount.n).toBe(0)
+        migrated.close()
     })
 })
