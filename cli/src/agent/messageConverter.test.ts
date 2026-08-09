@@ -229,6 +229,11 @@ describe('convertAgentMessage', () => {
                 modelContextWindow: 200_000
             }
         });
+        // Narrowed access proves the wire type declares the emitted fields.
+        if (converted?.type === 'token_count') {
+            expect(converted.cost).toBe(1.25);
+            expect(converted.costCurrency).toBe('USD');
+        }
     });
     it('returns null instead of echoing an unrecognized message shape', () => {
         // Unreachable through the type system, but callers forward any non-null

@@ -11,6 +11,9 @@ export type CodexMessage =
         model: string | null;
         usageSchema: InclusiveInputTokenUsageMarker['usageSchema'];
         inputTokenSemantics: InclusiveInputTokenUsageMarker['inputTokenSemantics'];
+        /** Cumulative session cost from ACP `usage_update.cost`. */
+        cost?: number;
+        costCurrency?: string;
         info: {
             total: {
                 inputTokens: number;
