@@ -31,7 +31,7 @@ const runtime = vi.hoisted(() => ({
         thread: { isRunning: false, isDisabled: false },
     } as FakeRuntimeState,
     setSnapshot: null as null | ((updater: (current: FakeRuntimeState) => FakeRuntimeState) => void),
-    pendingSendIntentRef: null as null | { current: ComposerSendIntent },
+    pendingSendIntentRef: { current: 'default' },
     sentIntents: [] as ComposerSendIntent[],
     narrowViewport: false,
 }))
@@ -49,7 +49,7 @@ vi.mock('@assistant-ui/react', async () => {
                 },
                 send: () => {
                     const intent = runtime.pendingSendIntentRef?.current ?? 'default'
-                    runtime.sentIntents.push(intent)
+                    runtime.sentIntents.push(intent as ComposerSendIntent)
                     if (runtime.pendingSendIntentRef) runtime.pendingSendIntentRef.current = 'default'
                     runtime.setSnapshot!((current) => ({
                         ...current,
@@ -129,7 +129,7 @@ function renderComposer(agentFlavor: string) {
                 onEffortChange={vi.fn()}
                 onPermissionModeChange={vi.fn()}
                 availableModelOptions={[{ value: 'claude-sonnet-4', label: 'Sonnet 4' }]}
-                pendingSendIntentRef={runtime.pendingSendIntentRef}
+                pendingSendIntentRef={runtime.pendingSendIntentRef as { current: ComposerSendIntent }}
             />
         </I18nProvider>
     )
