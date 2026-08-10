@@ -46,7 +46,7 @@ describe('PushService.sendToNamespace', () => {
     it('returns zero when the namespace has no subscriptions', async () => {
         const { service } = createService([])
 
-        expect(await service.sendToNamespace('default', payload)).toBe(0)
+        expect(await service.sendToNamespace('default', payload)).toEqual({ sent: 0, failed: 0, subscriptions: 0 })
         expect(sendNotification).not.toHaveBeenCalled()
     })
 
@@ -63,7 +63,7 @@ describe('PushService.sendToNamespace', () => {
         })
         const { service, removePushSubscription } = createService(subscriptions)
 
-        expect(await service.sendToNamespace('default', payload)).toBe(1)
+        expect(await service.sendToNamespace('default', payload)).toEqual({ sent: 1, failed: 1, subscriptions: 2 })
         expect(removePushSubscription).toHaveBeenCalledWith('default', 'https://push.example/gone')
     })
 })
