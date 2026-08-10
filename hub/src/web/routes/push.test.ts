@@ -4,7 +4,7 @@ import type { PushPayload } from '../../push/pushService'
 import type { WebAppEnv } from '../middleware/auth'
 import { createPushRoutes } from './push'
 
-function createApp(sendToNamespace: (namespace: string, payload: PushPayload) => Promise<number>): Hono<WebAppEnv> {
+function createApp(sendToNamespace: (namespace: string, payload: PushPayload) => Promise<{ sent: number; failed: number; subscriptions: number }>): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
     app.use('*', async (c, next) => {
         c.set('namespace', 'default')
@@ -19,7 +19,7 @@ describe('POST /api/push/test', () => {
         const sent: Array<{ namespace: string; payload: PushPayload }> = []
         const app = createApp(async (namespace, payload) => {
             sent.push({ namespace, payload })
-            return 1
+            return { sent: 1, failed: 0, subscriptions: 1 }
         })
 
         const response = await app.request('/api/push/test', { method: 'POST' })
