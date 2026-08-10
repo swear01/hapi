@@ -7,6 +7,7 @@ import type { WebAppEnv } from '../middleware/auth'
 import { createHubSettingsRoutes } from './hubSettings'
 import { writeAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
 import { writeSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
+import { writeSessionSummaryInChatEnabled } from '../../config/sessionSummaryInChat'
 
 const directories: string[] = []
 
@@ -27,7 +28,7 @@ describe('GET/PUT /api/hub-settings', () => {
         return { app, dataDir }
     }
 
-    it('returns default off', async () => {
+    it('returns default off for emit and chat display', async () => {
         const { app } = await createApp()
         const response = await app.request('/api/hub-settings')
         expect(response.status).toBe(200)
@@ -39,6 +40,11 @@ describe('GET/PUT /api/hub-settings', () => {
     })
 
     it('persists sessionSummaryContract toggle for owner', async () => {
+            sessionSummaryInChat: false
+        })
+    })
+
+    it('persists emit toggle for owner without changing display', async () => {
         const { app } = await createApp()
         const put = await app.request('/api/hub-settings', {
             method: 'PUT',
@@ -49,6 +55,7 @@ describe('GET/PUT /api/hub-settings', () => {
         expect(await put.json()).toEqual({
             sessionSummaryContract: true,
             autoBridgeTransientModelErrors: false
+            sessionSummaryInChat: false
         })
 
         const get = await app.request('/api/hub-settings')
@@ -70,6 +77,34 @@ describe('GET/PUT /api/hub-settings', () => {
             sessionSummaryContract: false,
             autoBridgeTransientModelErrors: true
         })
+            sessionSummaryInChat: false
+        })
+    })
+
+    it('persists chat display toggle for owner without changing emit', async () => {
+        const { app, dataDir } = await createApp()
+        await writeSessionSummaryContractEnabled(dataDir, true)
+
+        const put = await app.request('/api/hub-settings', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionSummaryInChat: true })
+        })
+        expect(put.status).toBe(200)
+        expect(await put.json()).toEqual({
+            sessionSummaryContract: true,
+            sessionSummaryInChat: true
+        })
+    })
+
+    it('rejects empty body', async () => {
+        const { app } = await createApp()
+        const response = await app.request('/api/hub-settings', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+        expect(response.status).toBe(400)
     })
 
     it('rejects invalid body', async () => {
@@ -96,8 +131,25 @@ describe('GET/PUT /api/hub-settings', () => {
         const { app } = await createApp('tenant')
         const get = await app.request('/api/hub-settings')
         expect(get.status).toBe(403)
+    it('rejects non-default namespaces for PUT but allows GET', async () => {
+        const { app, dataDir } = await createApp('default')
+        await writeSessionSummaryInChatEnabled(dataDir, true)
 
-        const put = await app.request('/api/hub-settings', {
+        const tenantApp = new Hono<WebAppEnv>()
+        tenantApp.use('*', async (c, next) => {
+            c.set('namespace', 'tenant')
+            await next()
+        })
+        tenantApp.route('/api', createHubSettingsRoutes(dataDir))
+
+        const get = await tenantApp.request('/api/hub-settings')
+        expect(get.status).toBe(200)
+        expect(await get.json()).toEqual({
+            sessionSummaryContract: false,
+            sessionSummaryInChat: true
+        })
+
+        const put = await tenantApp.request('/api/hub-settings', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionSummaryContract: true })
@@ -113,6 +165,11 @@ describe('GET/PUT /api/hub-settings', () => {
         expect(await response.json()).toEqual({
             sessionSummaryContract: true,
             autoBridgeTransientModelErrors: true
+        await writeSessionSummaryInChatEnabled(dataDir, true)
+        const response = await app.request('/api/hub-settings')
+        expect(await response.json()).toEqual({
+            sessionSummaryContract: true,
+            sessionSummaryInChat: true
         })
     })
 })

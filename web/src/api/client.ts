@@ -49,6 +49,7 @@ import type {
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
     HubSettingsResponse,
+    UpdateHubSettingsRequest,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
@@ -811,10 +812,7 @@ export class ApiClient {
         return await this.request<HubSettingsResponse>('/api/hub-settings')
     }
 
-    async updateHubSettings(settings: {
-        sessionSummaryContract?: boolean
-        autoBridgeTransientModelErrors?: boolean
-    }): Promise<HubSettingsResponse> {
+    async updateHubSettings(settings: UpdateHubSettingsRequest): Promise<HubSettingsResponse> {
         return await this.request<HubSettingsResponse>('/api/hub-settings', {
             method: 'PUT',
             body: JSON.stringify(settings)

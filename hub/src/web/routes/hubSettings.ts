@@ -8,6 +8,10 @@ import {
     readSessionSummaryContractEnabled,
     writeSessionSummaryContractEnabled
 } from '../../config/sessionSummaryContract'
+import {
+    readSessionSummaryInChatEnabled,
+    writeSessionSummaryInChatEnabled
+} from '../../config/sessionSummaryInChat'
 import type { SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 
@@ -24,12 +28,14 @@ export function createHubSettingsRoutes(
             return c.json({ error: OWNER_ONLY_ERROR }, 403)
         }
         c.header('Cache-Control', 'no-store')
-        const [sessionSummaryContract, autoBridgeTransientModelErrors] = await Promise.all([
+        const [sessionSummaryContract, sessionSummaryInChat, autoBridgeTransientModelErrors] = await Promise.all([
             readSessionSummaryContractEnabled(dataDir),
+            readSessionSummaryInChatEnabled(dataDir),
             readAutoBridgeTransientModelErrorsEnabled(dataDir)
         ])
         const response: HubSettingsResponse = {
             sessionSummaryContract,
+            sessionSummaryInChat,
             autoBridgeTransientModelErrors
         }
         return c.json(response)
@@ -50,6 +56,9 @@ export function createHubSettingsRoutes(
                 parsed.data.sessionSummaryContract
             )
         }
+        if (parsed.data.sessionSummaryInChat !== undefined) {
+            await writeSessionSummaryInChatEnabled(dataDir, parsed.data.sessionSummaryInChat)
+        }
         if (parsed.data.autoBridgeTransientModelErrors !== undefined) {
             const enabled = parsed.data.autoBridgeTransientModelErrors
             const previous = await readAutoBridgeTransientModelErrorsEnabled(dataDir)
@@ -69,12 +78,14 @@ export function createHubSettingsRoutes(
             }
         }
         c.header('Cache-Control', 'no-store')
-        const [sessionSummaryContract, autoBridgeTransientModelErrors] = await Promise.all([
+        const [sessionSummaryContract, sessionSummaryInChat, autoBridgeTransientModelErrors] = await Promise.all([
             readSessionSummaryContractEnabled(dataDir),
+            readSessionSummaryInChatEnabled(dataDir),
             readAutoBridgeTransientModelErrorsEnabled(dataDir)
         ])
         const response: HubSettingsResponse = {
             sessionSummaryContract,
+            sessionSummaryInChat,
             autoBridgeTransientModelErrors
         }
         return c.json(response)

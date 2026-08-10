@@ -61,6 +61,8 @@ export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
 
 export const HubSettingsResponseSchema = z.object({
     sessionSummaryContract: z.boolean(),
+    /** Show compact AGENT_NOTIFY_SUMMARY in chat (default off / hide). */
+    sessionSummaryInChat: z.boolean(),
     autoBridgeTransientModelErrors: z.boolean()
 })
 
@@ -68,9 +70,11 @@ export type HubSettingsResponse = z.infer<typeof HubSettingsResponseSchema>
 
 export const UpdateHubSettingsRequestSchema = z.object({
     sessionSummaryContract: z.boolean().optional(),
+    sessionSummaryInChat: z.boolean().optional(),
     autoBridgeTransientModelErrors: z.boolean().optional()
 }).refine(
     (body) => body.sessionSummaryContract !== undefined
+        || body.sessionSummaryInChat !== undefined
         || body.autoBridgeTransientModelErrors !== undefined,
     { message: 'At least one hub setting is required' }
 )

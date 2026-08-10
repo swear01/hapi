@@ -35,6 +35,10 @@ export interface Settings {
      * transient model error. Default off. Survives hub/CLI restarts.
      */
     autoBridgeTransientModelErrors?: boolean
+     * When true, web chat shows a compact AGENT_NOTIFY_SUMMARY row.
+     * Default off: render/copy strip the footer; store stays raw.
+     */
+    sessionSummaryInChat?: boolean
     /**
      * Hub-side provider API keys / endpoints managed from Settings.
      * Env vars still win when set at process start (ops override).
