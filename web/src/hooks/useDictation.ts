@@ -126,7 +126,7 @@ export function useDictation(config: {
                     if (pendingSend) {
                         const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                         if (finalMessage.trim() && config.api) {
-                            await config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                            await config.api.sendMessage(pendingSend.sessionId, finalMessage, undefined, undefined, undefined, pendingSend.deliveryMode)
                             success = true
                         }
                     } else if (mountedRef.current) {
@@ -181,10 +181,11 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
         sendOnFinishRef.current = {
             sessionId: targetSessionId,
-            initialText: initialText ?? config.getCurrentText()
+            initialText: initialText ?? config.getCurrentText(),
+            deliveryMode
         }
         await stop()
     }, [config, stop])

@@ -1150,14 +1150,9 @@ export function HappyComposer(props: {
                 richInputRef.current?.flushSerializedText()
                 const targetSessionId = props.sessionId ?? ''
                 const initialText = api.composer().getState().text
-                const deliveryMode = resolveMessageDeliveryMode({
-                    agentFlavor: props.agentFlavor,
-                    isSessionThinking: props.thinking ?? false,
-                    intent: 'default'
-                })
                 api.composer().setText('')
                 if (targetSessionId && dictation.stopAndSend) {
-                    await dictation.stopAndSend(targetSessionId, initialText, deliveryMode)
+                    await dictation.stopAndSend(targetSessionId, initialText)
                 } else {
                     await dictation.toggle()
                 }

@@ -8,6 +8,7 @@ import {
 import type { ApiClient } from '@/api/client'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript } from './useDictation'
+import type { MessageDeliveryMode } from '@hapi/protocol'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -48,7 +49,7 @@ export function useRealtimeDictation(config: {
     const elevenLabsFinalizedRef = useRef(false)
     const resolveElevenLabsCommitRef = useRef<(() => void) | null>(null)
     const lastCommitSucceededRef = useRef(false)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; deliveryMode?: MessageDeliveryMode } | null>(null)
     onFinalTranscriptRef.current = config.onFinalTranscript
 
     const updatePartial = useCallback((text: string) => {
@@ -63,7 +64,7 @@ export function useRealtimeDictation(config: {
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
             if (finalMessage.trim() && config.api) {
-                void config.api.sendMessage(pendingSend.sessionId, finalMessage)
+                void config.api.sendMessage(pendingSend.sessionId, finalMessage, undefined, undefined, undefined, pendingSend.deliveryMode)
             }
         } else if (mountedRef.current) {
             updatePartial('')
@@ -239,8 +240,8 @@ export function useRealtimeDictation(config: {
         }
     }, [elevenLabs, fail])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string) => {
-        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '' }
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', deliveryMode }
         await stop()
     }, [stop])
 

@@ -555,7 +555,7 @@ describe('useDictation', () => {
         await act(() => result.current.stopAndSend('session-A', 'initial', 'steer'))
 
         await waitFor(() => {
-            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial steer me', 'steer')
+            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial steer me', undefined, undefined, undefined, 'steer')
         })
     })
 
