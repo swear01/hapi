@@ -547,8 +547,7 @@ describe('useDictation', () => {
             provider: 'openai',
             mode: 'standard',
             getCurrentText: () => '',
-            onTextChange: vi.fn(),
-            sendMessage
+            onTextChange: vi.fn()
         }))
 
         await act(() => result.current.toggle())
@@ -598,8 +597,7 @@ describe('useDictation', () => {
             provider: 'openai',
             mode: 'standard',
             getCurrentText: () => '',
-            onTextChange: vi.fn(),
-            sendMessage
+            onTextChange: vi.fn()
         }))
 
         await act(() => result.current.toggle())

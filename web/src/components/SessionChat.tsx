@@ -1113,14 +1113,14 @@ function SessionChatInner(props: SessionChatProps) {
                     return null
                 }
             },
-            sendMessage: async (sessionId: string, message: string, deliveryMode?: unknown) => {
+            sendMessage: async (sessionId: string, message: string, deliveryMode?: MessageDeliveryMode) => {
                 if (sessionId === props.session.id) {
-                    const accepted = await props.onSend(message, deliveryMode as MessageDeliveryMode)
+                    const accepted = await props.onSend(message, undefined, undefined, deliveryMode)
                     if (!accepted) {
                         throw new Error('Message was not accepted')
                     }
                 } else {
-                    await props.api.sendMessage(sessionId, message, undefined, deliveryMode as MessageDeliveryMode)
+                    await props.api.sendMessage(sessionId, message, undefined, undefined, undefined, deliveryMode)
                 }
             },
             approvePermission: async (sessionId: string, requestId: string) => {
