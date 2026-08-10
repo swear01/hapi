@@ -15,6 +15,9 @@ afterEach(() => {
 
 describe('schema migration v22 to v23', () => {
     it('adds events and event_links tables to a V22 database', () => {
+    })
+
+        it('adds cost and context-only presence columns and rebuilds the usage index', () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v23-'))
         tempDirs.push(dir)
         const dbPath = join(dir, 'hapi.db')
@@ -26,6 +29,23 @@ describe('schema migration v22 to v23', () => {
             DROP TABLE IF EXISTS events;
             PRAGMA user_version = 22;
         `)
+    })
+
+            legacy.exec('ALTER TABLE usage_events DROP COLUMN context_only')
+        legacy.exec('ALTER TABLE usage_events DROP COLUMN cost')
+        legacy.exec('ALTER TABLE usage_events DROP COLUMN cost_currency')
+        // Seed a v22-shaped derived row: the upgrade must wipe it so the lazy
+        // re-index rebuilds every row under the new semantics.
+        legacy.prepare(`
+            INSERT INTO usage_events (
+                session_id, source_key, source_seq, created_at, agent, model, kind,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+            ) VALUES (
+                'migration-v23-seed', 'delta|seed', 1, 0, 'opencode', NULL, 'delta',
+                100, 20, 0, 0
+            )
+        `).run()
+        legacy.exec('PRAGMA user_version = 22')
         legacy.close()
 
         const migrated = new Store(dbPath)
@@ -42,6 +62,20 @@ describe('schema migration v22 to v23', () => {
         expect(links?.name).toBe('event_links')
         // Tip after #1404: V23 A2A + V24 session_jobs + V25 run_id.
         expect(version.user_version).toBe(25)
+    })
+
+            const columns = new Set(
+            (internalDb.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        expect(columns.has('context_only')).toBe(true)
+        expect(columns.has('cost')).toBe(true)
+        expect(columns.has('cost_currency')).toBe(true)
+
+        // The derived index is cleared on upgrade so rows are re-derived
+        // under the new semantics instead of mixing old and new rows.
+        const seedCount = internalDb.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE session_id = 'migration-v23-seed'").get() as { n: number }
+        expect(seedCount.n).toBe(0)
         migrated.close()
     })
 })
