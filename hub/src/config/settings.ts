@@ -37,6 +37,7 @@ export interface Settings {
      * transient model error. Default off. Survives hub/CLI restarts.
      */
     autoBridgeTransientModelErrors?: boolean
+    /**
      * When true, web chat shows a compact AGENT_NOTIFY_SUMMARY row.
      * Default off: render/copy strip the footer; store stays raw.
      */

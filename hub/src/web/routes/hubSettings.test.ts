@@ -161,15 +161,12 @@ describe('GET/PUT /api/hub-settings', () => {
         const { app, dataDir } = await createApp()
         await writeSessionSummaryContractEnabled(dataDir, true)
         await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
-        const response = await app.request('/api/hub-settings')
-        expect(await response.json()).toEqual({
-            sessionSummaryContract: true,
-            autoBridgeTransientModelErrors: true
         await writeSessionSummaryInChatEnabled(dataDir, true)
         const response = await app.request('/api/hub-settings')
         expect(await response.json()).toEqual({
             sessionSummaryContract: true,
-            sessionSummaryInChat: true
+            sessionSummaryInChat: true,
+            autoBridgeTransientModelErrors: true
         })
     })
 })
