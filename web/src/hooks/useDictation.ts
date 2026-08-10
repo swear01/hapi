@@ -60,7 +60,7 @@ export function useDictation(config: {
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
     const stopResolverRef = useRef<((success: boolean) => void) | null>(null)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; deliveryMode?: MessageDeliveryMode } | null>(null)
 
     const stopTracks = useCallback(() => {
         streamRef.current?.getTracks().forEach((track) => track.stop())
