@@ -3,7 +3,7 @@ import { ApiError, type ApiClient, type TranscriptionCredentialStatus, type Tran
 import { useTranslation } from '@/lib/use-translation'
 import { SelectControl } from '@/components/ui/select-control'
 import { Button } from '@/components/ui/button'
-import { DICTATION_PROVIDER_PRESETS, dictationOnboardProviders, type DictationProviderPreset } from './transcriptionProviders'
+import { DICTATION_PROVIDER_PRESETS, dictationOnboardProviders, hasOpenAICompatibleCredentials, type DictationProviderPreset } from './transcriptionProviders'
 
 type DictationProvider = DictationProviderPreset | 'deepgram' | 'openai-compatible'
 type AssistantProvider = 'elevenlabs' | 'gemini-live' | 'qwen-realtime'
@@ -87,7 +87,7 @@ export function TranscriptionProviderOnboard(props: {
         ? ASSISTANT_PROVIDERS
         : dictationOnboardProviders(
             status?.deepgram.configured ?? false,
-            status?.openaiCompatible.configured ?? false
+            hasOpenAICompatibleCredentials(status)
         )
 
     useEffect(() => {
