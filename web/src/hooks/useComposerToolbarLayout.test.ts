@@ -12,6 +12,8 @@ describe('DEFAULT_COMPOSER_TOOLBAR_LAYOUT', () => {
             'attachment',
             'settings',
             'expand',
+            'model',
+            'effort',
             'piModel',
             'piThinking',
             'terminal',
@@ -76,15 +78,17 @@ describe('normalizeComposerToolbarLayout', () => {
         })
         const result = moveComposerToolbarItemInSingleLayout(layout, 'attachment', 7)
 
-        expect([...result.left, ...result.right].slice(0, 8)).toEqual([
+        expect([...result.left, ...result.right].slice(0, 10)).toEqual([
             'settings',
             'piModel',
             'piThinking',
             'terminal',
             'expand',
+            'model',
+            'effort',
+            'attachment',
             'abort',
             'switch',
-            'attachment',
         ])
         expect(result.left).toHaveLength(layout.left.length)
     })

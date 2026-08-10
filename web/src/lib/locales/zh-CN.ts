@@ -879,6 +879,8 @@ export default {
   'settings.chat.composerToolbar.item.attachment': '添加附件',
   'settings.chat.composerToolbar.item.settings': '会话设置',
   'settings.chat.composerToolbar.item.expand': '展开消息编辑器',
+  'settings.chat.composerToolbar.item.model': '模型',
+  'settings.chat.composerToolbar.item.effort': '推理强度',
   'settings.chat.composerToolbar.item.piModel': 'Pi 模型',
   'settings.chat.composerToolbar.item.piThinking': 'Pi 思考等级',
   'settings.chat.composerToolbar.item.terminal': '终端',

@@ -341,12 +341,15 @@ export function ComposerToolbarItemPreview(props: { item: ComposerToolbarItemId;
             case 'voiceMic': return <SpeakerIcon />
             case 'scratchlist': return <ScratchlistToggleIcon />
             case 'schedule': return <ScheduleIcon className="h-[18px] w-[18px]" />
+            case 'model':
+            case 'effort':
             case 'piModel':
             case 'piThinking':
                 return <><span className="max-w-24 truncate text-xs font-medium">{props.label}</span><ChevronIcon /></>
         }
     })()
-    const isTextControl = props.item === 'piModel' || props.item === 'piThinking'
+    const isTextControl = props.item === 'model' || props.item === 'effort'
+        || props.item === 'piModel' || props.item === 'piThinking'
     return (
         <span
             className={`flex h-8 items-center justify-center rounded-full text-[var(--app-fg)]/60 ${isTextControl ? 'gap-1 px-3' : 'w-8'}`}
@@ -632,6 +635,15 @@ export function ComposerButtons(props: {
     // The composer must surface that constraint at UI time so the user never
     // builds a submission the hub will reject — see hub/web/routes/messages.ts.
     hasAttachments?: boolean
+    // Generic model/effort value buttons (non-Pi flavors)
+    modelValueLabel?: string
+    modelValueDisabled?: boolean
+    modelValueOpen?: boolean
+    onModelValueToggle?: () => void
+    effortValueLabel?: string
+    effortValueDisabled?: boolean
+    effortValueOpen?: boolean
+    onEffortValueToggle?: () => void
     // Pi-specific toolbar buttons
     piModelLabel?: string
     piModelDisabled?: boolean
@@ -699,6 +711,46 @@ export function ComposerButtons(props: {
                     expanded={props.expanded}
                     onToggle={props.onExpandedToggle}
                 />
+                </ToolbarItemSlot>
+
+                <ToolbarItemSlot item="model">
+                {props.modelValueLabel ? (
+                    <button
+                        type="button"
+                        aria-label={props.modelValueLabel}
+                        title={props.modelValueLabel}
+                        className={`flex h-8 items-center gap-1 rounded-full px-3 text-xs font-medium transition-colors ${
+                            props.modelValueOpen
+                                ? 'bg-[var(--app-secondary-bg)] text-[var(--app-link)]'
+                                : 'text-[var(--app-fg)]/60 hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)]'
+                        }`}
+                        onClick={props.onModelValueToggle}
+                        disabled={props.modelValueDisabled}
+                    >
+                        {props.modelValueLabel}
+                        <ChevronIcon />
+                    </button>
+                ) : null}
+                </ToolbarItemSlot>
+
+                <ToolbarItemSlot item="effort">
+                {props.effortValueLabel ? (
+                    <button
+                        type="button"
+                        aria-label={props.effortValueLabel}
+                        title={props.effortValueLabel}
+                        className={`flex h-8 items-center gap-1 rounded-full px-3 text-xs font-medium transition-colors ${
+                            props.effortValueOpen
+                                ? 'bg-[var(--app-secondary-bg)] text-[var(--app-link)]'
+                                : 'text-[var(--app-fg)]/60 hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)]'
+                        }`}
+                        onClick={props.onEffortValueToggle}
+                        disabled={props.effortValueDisabled}
+                    >
+                        {props.effortValueLabel}
+                        <ChevronIcon />
+                    </button>
+                ) : null}
                 </ToolbarItemSlot>
 
                 <ToolbarItemSlot item="piModel">
