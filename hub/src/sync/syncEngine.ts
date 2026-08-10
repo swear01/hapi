@@ -1024,7 +1024,10 @@ async uploadScratchlistAttachment(
         if (!localId) {
             return { status: 'failed', error: 'Message has no localId', localId: null }
         }
-        if (scheduledAt != null && scheduledAt > Date.now()) {
+        // Reject every scheduled row — mature ones included. A matured row is
+        // released by the scheduled-FIFO path moments later anyway, and the web
+        // never offers Steer on scheduled rows.
+        if (scheduledAt != null) {
             return { status: 'failed', error: 'Scheduled messages cannot be steered', localId }
         }
 

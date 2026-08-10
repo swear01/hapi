@@ -1221,4 +1221,32 @@ describe('Pi steer-queued-message RPC', () => {
         harness.onError?.(new Error('stop test transport'));
         await running;
     });
+
+    it('drops a deferred steer when the message is cancelled while preparing', async () => {
+        const { running } = await startReadySession(true);
+
+        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
+            message: { role: 'user'; content: { type: 'text'; text: string } },
+            localId: string
+        ) => void;
+        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+
+        onUserMessage({ role: 'user', content: { type: 'text', text: 'cancel me' } }, 'cancel-local');
+        const result = await handler({ localId: 'cancel-local' });
+        expect(result).toEqual({ steered: true });
+
+        // Cancellation wins over the deferred steer (checked first in the chain).
+        const onCancelQueuedMessage = harness.session.onCancelQueuedMessage.mock.calls.at(-1)![0] as (localId: string) => boolean;
+        expect(onCancelQueuedMessage('cancel-local')).toBe(true);
+
+        // Preparation completes: the message is dropped — never steered, never
+        // sent as a prompt, never consumed (the hub deletes the row instead).
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
+        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'prompt')).toHaveLength(0);
+        expect(harness.session.emitMessagesConsumed).not.toHaveBeenCalled();
+
+        harness.onError?.(new Error('stop test transport'));
+        await running;
+    });
 });

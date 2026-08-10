@@ -852,13 +852,19 @@ export async function runPi(opts: {
             }
         }).catch((error: unknown) => {
             const wasCancelled = localId ? cancelledWhilePreparing.delete(localId) : false;
-            if (localId) steerPendingWhilePreparing.delete(localId);
             if (localId) preparingLocalIds.delete(localId);
             const detail = error instanceof Error ? error.message : String(error);
             piSession.sendSessionEvent({ type: 'message', message: `Failed to prepare Pi prompt: ${detail}` });
             if (localId && !wasCancelled) {
                 piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
             }
+        }).finally(() => {
+            // Deferred-steer bookkeeping must not outlive the message it refers
+            // to: the promotion path already deletes it, and every early exit
+            // (cancellation before/after preparation, empty prepared message,
+            // preparation failure) lands here. A stale entry could misroute a
+            // later reuse of the same localId.
+            if (localId) steerPendingWhilePreparing.delete(localId);
         });
     });
 
