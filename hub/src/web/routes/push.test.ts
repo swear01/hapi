@@ -30,7 +30,7 @@ describe('POST /api/push/test', () => {
     })
 
     it('returns 503 when no subscription receives the push', async () => {
-        const app = createApp(async () => 0)
+        const app = createApp(async () => ({ sent: 0, failed: 0, subscriptions: 0 }))
 
         const response = await app.request('/api/push/test', { method: 'POST' })
 

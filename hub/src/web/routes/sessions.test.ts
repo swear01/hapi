@@ -1428,6 +1428,8 @@ describe('sessions routes', () => {
                 scheduledIds.push(ids)
                 return new Map(ids.map((id) => [id, 0]))
             },
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getPrimaryAttachedJobsBySessionIds: () => new Map(),
             allocateAttachedJobVersion: () => Date.now(),
@@ -1462,6 +1464,8 @@ describe('sessions routes', () => {
         const engine = {
             getSessionsByNamespace: () => sessions,
             getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getPrimaryAttachedJobsBySessionIds: () => new Map(),
             allocateAttachedJobVersion: () => Date.now(),
