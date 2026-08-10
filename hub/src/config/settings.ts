@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path'
 import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
 import type { FleetUpgradePolicy } from '@hapi/protocol/upgradeChannel'
 
+import type { NotificationCopyConfig } from '../push/notificationCopy'
+
 export interface Settings {
     machineId?: string
     machineIdConfirmedByServer?: boolean
@@ -46,6 +48,8 @@ export interface Settings {
     providerCredentials?: Partial<Record<string, string>>
     // Operator fleet-upgrade policy (no alert / alert / auto-upgrade)
     fleetUpgradePolicy?: FleetUpgradePolicy
+    /** Custom push notification copy templates (web push only). Empty fields fall back to defaults. */
+    notificationCopy?: NotificationCopyConfig
 }
 
 export function getSettingsFile(dataDir: string): string {

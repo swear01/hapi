@@ -8,6 +8,7 @@ import { addMessage } from './messages'
 import type { StoredMessage } from './types'
 import { PushStore } from './pushStore'
 import { FcmStore } from './fcmStore'
+import { NotificationPreferenceStore } from './notificationPreferenceStore'
 import { ScratchlistStore } from './scratchlistStore'
 import { SessionJobsStore } from './sessionJobsStore'
 import { SessionStore } from './sessionStore'
@@ -31,6 +32,7 @@ export { MachineStore } from './machineStore'
 export { MessageStore } from './messageStore'
 export { PushStore } from './pushStore'
 export { FcmStore } from './fcmStore'
+export { NotificationPreferenceStore } from './notificationPreferenceStore'
 export { ScratchlistStore } from './scratchlistStore'
 export { SessionJobsStore } from './sessionJobsStore'
 export { SessionStore } from './sessionStore'
@@ -43,7 +45,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 26
+const SCHEMA_VERSION: number = 27
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -57,7 +59,8 @@ const REQUIRED_TABLES = [
     'usage_events',
     'usage_scan_state',
     'events',
-    'event_links'
+    'event_links',
+    'notification_preferences'
 ] as const
 
 export class Store {
@@ -75,6 +78,7 @@ export class Store {
     readonly sessionJobs: SessionJobsStore
     readonly usage: UsageStore
     readonly workGraph: WorkGraphStore
+    readonly notificationPrefs: NotificationPreferenceStore
 
     /**
      * Filesystem path of the underlying SQLite database, or ':memory:' for
@@ -130,6 +134,7 @@ export class Store {
         this.sessionJobs = new SessionJobsStore(this.db)
         this.usage = new UsageStore(this.db)
         this.workGraph = new WorkGraphStore(this.db)
+        this.notificationPrefs = new NotificationPreferenceStore(this.db)
     }
 
     /**
@@ -313,6 +318,7 @@ export class Store {
             23: () => this.migrateFromV23ToV24(),
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
         })
 
         if (currentVersion === 0) {
@@ -578,6 +584,15 @@ export class Store {
                 ON event_links(namespace, from_event_id);
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
+
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                namespace TEXT PRIMARY KEY,
+                permission_requests INTEGER NOT NULL DEFAULT 1,
+                session_ready INTEGER NOT NULL DEFAULT 1,
+                task_notifications INTEGER NOT NULL DEFAULT 1,
+                session_completion INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
         `)
     }
 
@@ -1065,6 +1080,21 @@ export class Store {
         this.db.exec(`
             DELETE FROM usage_events;
             DELETE FROM usage_scan_state;
+        `)
+    }
+
+    private migrateFromV26ToV27(): void {
+        // PR #1360 — per-namespace notification preferences. Defaults are
+        // all-enabled so existing namespaces keep the pre-preferences behavior.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                namespace TEXT PRIMARY KEY,
+                permission_requests INTEGER NOT NULL DEFAULT 1,
+                session_ready INTEGER NOT NULL DEFAULT 1,
+                task_notifications INTEGER NOT NULL DEFAULT 1,
+                session_completion INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
         `)
     }
     private getSessionColumnNames(): Set<string> {

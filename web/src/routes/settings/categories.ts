@@ -4,6 +4,7 @@ export const settingsCategories = [
     { id: 'chat', path: '/settings/chat', titleKey: 'settings.chat.title' },
     { id: 'providers', path: '/settings/providers', titleKey: 'settings.providers.title' },
     { id: 'voice', path: '/settings/voice', titleKey: 'settings.voice.title' },
+    { id: 'notifications', path: '/settings/notifications', titleKey: 'settings.notifications.title' },
     { id: 'machines', path: '/settings/machines', titleKey: 'settings.machines.title' },
     { id: 'storage', path: '/settings/storage', titleKey: 'settings.storage.title' },
     { id: 'usage', path: '/settings/usage', titleKey: 'settings.usage.title' },
