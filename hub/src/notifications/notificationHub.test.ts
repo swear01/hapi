@@ -8,7 +8,6 @@ import type {
     TaskNotification
 } from './notificationTypes'
 import type { Store } from '../store'
-import type { NotificationChannel, TaskNotification } from './notificationTypes'
 import { NotificationHub } from './notificationHub'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
