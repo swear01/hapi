@@ -76,7 +76,6 @@ function createSessionStub(
     const sessionEvents: Array<{ type: string; message?: string }> = [];
     const userMessages: string[] = [];
     const agentMessages: unknown[] = [];
-<<<<<<< ours
     const messageEvents: Array<{
         type: 'user-message';
         message: string;
@@ -86,9 +85,7 @@ function createSessionStub(
         type: 'agent-message';
         message: unknown;
     }> = [];
-=======
     const usagePayloads: unknown[] = [];
->>>>>>> theirs
     let userActivityCount = 0;
     let localLaunchFailure: { message: string; exitReason: 'switch' | 'exit' } | null = null;
     let sessionId: string | null = null;
@@ -173,11 +170,8 @@ function createSessionStub(
         sessionEvents,
         userMessages,
         agentMessages,
-<<<<<<< ours
         messageEvents,
-=======
         usagePayloads,
->>>>>>> theirs
         getUserActivityCount: () => userActivityCount,
         getLocalLaunchFailure: () => localLaunchFailure,
         getModelReasoningEffort: () => modelReasoningEffort,
