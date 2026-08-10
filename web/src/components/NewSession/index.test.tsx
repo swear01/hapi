@@ -221,7 +221,9 @@ vi.mock('./ActionButtons', () => ({
 import { NewSession } from './index'
 
 const machine = { id: 'machine-1' } as Machine
-const api = {} as ApiClient
+const api = {
+    listProviderProfiles: async () => ({ success: true as const, profiles: [], defaults: {} })
+} as unknown as ApiClient
 
 describe('NewSession launch preferences', () => {
     beforeEach(() => {
@@ -455,6 +457,10 @@ describe('NewSession launch preferences', () => {
             cursorSelectedBase: 'auto',
             effort: 'auto',
             modelReasoningEffort: 'max',
+            serviceTier: 'standard',
+            collaborationMode: 'default',
+            grokPermissionMode: 'default',
+            sessionType: 'simple',
             permissionMode: 'yolo'
         })
     })
