@@ -355,6 +355,11 @@ export async function runPi(opts: {
     const promptQueue = new PiPromptQueue();
     const preparingLocalIds = new Set<string>();
     const cancelledWhilePreparing = new Set<string>();
+    // LocalIds whose owner pressed Steer while image preparation was still in
+    // flight. Checked after preparation completes, before normal FIFO routing,
+    // so an explicit steer request is never lost to the queue (and cancel still
+    // wins over it because cancellation is checked earlier in the chain).
+    const steerPendingWhilePreparing = new Set<string>();
     let preparationChain = Promise.resolve();
     let promptCommandInFlight = false;
     let abortInFlight = false;
@@ -553,6 +558,43 @@ export async function runPi(opts: {
             throw error;
         }
     });
+    // --- Steer-queued-message RPC ---
+    // Delivers one queued message into the active Pi turn (native steer). The
+    // web shows a per-message Steer button only while Pi is thinking; the hub
+    // gates flavor/remote/scheduled before reaching this handler. Messages
+    // still being prepared are marked for steering and promoted right after
+    // preparation completes, so the request is never lost to the FIFO.
+    apiSession.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async (payload: unknown) => {
+        const localId = payload && typeof payload === 'object'
+            && typeof (payload as { localId?: unknown }).localId === 'string'
+            ? (payload as { localId: string }).localId
+            : undefined;
+        if (!localId) {
+            return { steered: false, error: 'localId is required' };
+        }
+        if (preparingLocalIds.has(localId)) {
+            steerPendingWhilePreparing.add(localId);
+            return { steered: true };
+        }
+        if (!steerDispatcher) {
+            return { steered: false, error: 'Steering is not ready' };
+        }
+        const entry = promptQueue.removeByLocalId(localId);
+        if (!entry) {
+            return { steered: false, error: 'Message not found or already dispatched' };
+        }
+        // Only steer into a live Pi generation. Otherwise restore the entry to
+        // its FIFO position (enqueue re-orders by outboundSequence) and let the
+        // normal pump deliver it when the agent settles.
+        const currentGeneration = piSession.currentStreamingGeneration;
+        if (!piSession.isReady || currentGeneration === null) {
+            promptQueue.enqueue(entry);
+            return { steered: false, error: 'Session is not streaming' };
+        }
+        steerDispatcher.enqueue({ ...entry, targetStreamingGeneration: currentGeneration });
+        return { steered: true };
+    });
+
     apiSession.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, async (payload: unknown) => {
         if (!payload || typeof payload !== 'object' || typeof (payload as { messageLocalId?: unknown }).messageLocalId !== 'string') {
             throw new Error('messageLocalId is required');
@@ -788,12 +830,24 @@ export async function runPi(opts: {
             };
             if (deliveryMode === 'steer') {
                 steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration });
+            } else if (localId && steerPendingWhilePreparing.delete(localId)) {
+                // The user pressed Steer while this message was still preparing.
+                // Promote it into the active turn; fall back to the FIFO (and
+                // resume the pump) when the turn already ended meanwhile.
+                const currentGeneration = piSession.currentStreamingGeneration;
+                if (piSession.isReady && currentGeneration !== null) {
+                    steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration: currentGeneration });
+                } else {
+                    promptQueue.enqueue(entry);
+                    pumpPromptQueue();
+                }
             } else {
                 promptQueue.enqueue(entry);
                 pumpPromptQueue();
             }
         }).catch((error: unknown) => {
             const wasCancelled = localId ? cancelledWhilePreparing.delete(localId) : false;
+            if (localId) steerPendingWhilePreparing.delete(localId);
             if (localId) preparingLocalIds.delete(localId);
             const detail = error instanceof Error ? error.message : String(error);
             piSession.sendSessionEvent({ type: 'message', message: `Failed to prepare Pi prompt: ${detail}` });

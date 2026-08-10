@@ -7,6 +7,7 @@ import { EMPTY_STATE } from '@/hooks/queries/useMessages'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
 import type { DecryptedMessage } from '@/types/api'
 import { useCancelQueuedMessage } from '@/hooks/mutations/useCancelQueuedMessage'
+import { useSteerQueuedMessage } from '@/hooks/mutations/useSteerQueuedMessage'
 import { useTranslation } from '@/lib/use-translation'
 import { useToast } from '@/lib/toast-context'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
@@ -36,6 +37,24 @@ function ClockIcon() {
                 stroke="currentColor"
                 strokeWidth="1.5"
                 strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+        </svg>
+    )
+}
+
+function SteerIcon() {
+    return (
+        <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            className="h-3.5 w-3.5"
+            aria-hidden="true"
+        >
+            <path
+                d="M9.5 1 3 9h3.8L6 15l6.5-8H8.7L9.5 1Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
                 strokeLinejoin="round"
             />
         </svg>
@@ -176,6 +195,7 @@ export function QueuedMessagesBar({
     pendingSchedule,
     pendingScheduleRevision,
     onEdit,
+    canSteer,
 }: {
     sessionId: string
     api: ApiClient | null
@@ -189,11 +209,18 @@ export function QueuedMessagesBar({
      * Edit is always cancel + prefill, regardless of whether the message is scheduled or immediate.
      */
     onEdit?: (params: { text: string; pendingSchedule: PendingSchedule | null }) => void
+    /**
+     * When true, each queued row gets a Steer button that delivers that
+     * message into the active turn (Pi native steer). The parent computes it
+     * as: pi flavor && session thinking && remote-controlled.
+     */
+    canSteer?: boolean
 }) {
     const queued = useQueuedMessages(sessionId)
     const assistantApi = useAui()
     const composerText = useAuiState((state) => state.composer.text)
     const cancelMutation = useCancelQueuedMessage(api)
+    const steerMutation = useSteerQueuedMessage(api)
     const { t } = useTranslation()
     const { addToast } = useToast()
     const pendingScheduleRef = useRef(pendingSchedule)
@@ -339,6 +366,31 @@ export function QueuedMessagesBar({
                             })
                         }
 
+                        // Steer delivers this message into the active Pi turn. Gated
+                        // on the same server-echo + no-pending-op conditions as
+                        // Edit/Cancel, and never offered for future-scheduled rows
+                        // (the hub rejects those).
+                        const canSteerRow = Boolean(
+                            canSteer
+                            && msg.scheduledAt == null
+                            && canCancel
+                        )
+                        const steerPending = steerMutation.isPending
+                            && steerMutation.variables?.messageId === msg.id
+                        const handleSteer = () => {
+                            if (!canSteerRow) return
+                            const token = beginQueuedOperation(sessionId)
+                            if (!token) return
+                            void steerMutation.mutateAsync({
+                                sessionId,
+                                messageId: msg.id,
+                            }).catch(() => {
+                                // useSteerQueuedMessage already toasts the failure.
+                            }).finally(() => {
+                                endQueuedOperation(sessionId, token)
+                            })
+                        }
+
                         const handleEdit = async () => {
                             if (!canCancel) return
                             // Edit = cancel + restore composer (text + schedule).
@@ -452,6 +504,19 @@ export function QueuedMessagesBar({
                                     )}
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
+                                    {canSteerRow ? (
+                                        <button
+                                            type="button"
+                                            aria-label="Steer queued message"
+                                            title={t('queuedMessages.steer')}
+                                            disabled={steerPending}
+                                            onClick={handleSteer}
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            className="flex h-6 w-6 items-center justify-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            <SteerIcon />
+                                        </button>
+                                    ) : null}
                                     <button
                                         type="button"
                                         aria-label="Edit queued message"

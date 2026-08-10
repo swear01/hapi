@@ -1819,6 +1819,7 @@ function SessionChatInner(props: SessionChatProps) {
                                     // Restore the schedule so the clock button re-activates
                                     updatePendingSchedule(restored)
                                 }}
+                                canSteer={agentFlavor === 'pi' && props.session.thinking && !controlledByUser}
                             />
                         </div>
 
