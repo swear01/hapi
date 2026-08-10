@@ -39,7 +39,6 @@ type UseLongPressHandlers = {
     onTouchCancel: React.TouchEventHandler
     onContextMenu: React.MouseEventHandler
     onKeyDown: React.KeyboardEventHandler
-    onClick?: React.MouseEventHandler
 }
 
 export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers {
@@ -116,13 +115,13 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
     const handleEnd = useCallback((shouldTriggerClick: boolean) => {
         clearTimer()
 
-        if (shouldTriggerClick && !isLongPressRef.current && !touchMoved.current && onShortClick) {
-            onShortClick()
+        if (shouldTriggerClick && !isLongPressRef.current && !touchMoved.current && onClick) {
+            onClick()
         }
 
         isLongPressRef.current = false
         touchMoved.current = false
-    }, [clearTimer, onShortClick])
+    }, [clearTimer, onClick])
 
     // True when a mouse event is actually a touch-synthesized compatibility
     // event firing right after a tap; such events must not re-trigger onClick.
@@ -149,13 +148,13 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         handleEnd(false)
     }, [handleEnd, isGhostMouseEvent])
 
-    const onClick = useCallback<React.MouseEventHandler>(() => {
+    const handleClick = useCallback<React.MouseEventHandler>(() => {
         if (suppressNextClickRef.current) {
             suppressNextClickRef.current = false
             return
         }
-        onShortClick?.()
-    }, [onShortClick])
+        onClick?.()
+    }, [onClick])
 
     const onTouchStart = useCallback<React.TouchEventHandler>((e) => {
         lastTouchAtRef.current = Date.now()
@@ -189,9 +188,9 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         if (disabled || e.currentTarget instanceof HTMLButtonElement) return
         if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
-            onShortClick?.()
+            onClick?.()
         }
-    }, [disabled, onShortClick])
+    }, [disabled, onClick])
 
     const onTouchCancel = useCallback<React.TouchEventHandler>(() => {
         clearTimer()
@@ -268,7 +267,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         onMouseDown,
         onMouseUp,
         onMouseLeave,
-        onClick,
+        onClick: handleClick,
         onTouchStart,
         onTouchEnd,
         onTouchMove,

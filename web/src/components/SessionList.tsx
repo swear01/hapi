@@ -32,7 +32,6 @@ import {
     usePinInProgressSessions,
     type PinInProgressMode
 } from '@/hooks/usePinInProgressSessions'
-import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
 import { usePinActiveSessions } from '@/hooks/usePinActiveSessions'
 import { classifySessionAttention, sessionIsUnread } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt, getSessionLastSeenSnapshot } from '@/lib/sessionLastSeen'
