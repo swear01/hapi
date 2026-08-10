@@ -161,20 +161,8 @@ vi.mock('./MachineSelector', () => ({
     )
 }))
 vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
-vi.mock('./GrokPermissionModeSelector', () => ({ GrokPermissionModeSelector: () => null }))
-vi.mock('./CodexFamilyPermissionModeSelector', () => ({
-    CodexFamilyPermissionModeSelector: (props: {
-        agent: string
-        value: string
-        onChange: (mode: string) => void
-    }) => props.agent === 'codex' || props.agent === 'copilot' ? (
-        <button type="button" data-testid="permission-mode" onClick={() => props.onChange('yolo')}>
-            {props.value}
-        </button>
-    ) : null
-}))
+vi.mock('./PermissionField', () => ({ PermissionField: () => null }))
 vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
-vi.mock('./YoloToggle', () => ({ YoloToggle: () => null }))
 vi.mock('./OpencodeModelSelector', () => ({ OpencodeModelSelector: () => null }))
 vi.mock('./AgyModelSelector', () => ({
     AgyModelSelector: (props: { selectedModel: string | null; onModelChange: (model: string | null) => void }) => (
