@@ -148,6 +148,22 @@ describe('AgySessionScanner — resume support', () => {
         await scanner.cleanup()
     })
 
+    it('forwards the native title while scanning a known brain', async () => {
+        const emitted: AgyTranscriptEntry[] = []
+        const onTitle = vi.fn()
+        const readTitle = vi.fn(async () => 'Native AGY title')
+        const scanner = await createAgySessionScanner({
+            resumeBrainUuid: TEST_UUID,
+            onEntry: (e) => emitted.push(e),
+            onTitle,
+            readTitle,
+        })
+
+        await vi.waitFor(() => expect(onTitle).toHaveBeenCalledWith('Native AGY title'), { timeout: 1200 })
+        expect(readTitle).toHaveBeenCalledWith(TEST_UUID)
+        await scanner.cleanup()
+    })
+
     it('new entry appended after resume is emitted (only the new one)', async () => {
         // Pre-existing transcript.
         const existingLines = [
