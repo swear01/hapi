@@ -9,6 +9,7 @@ import { getTerminalFontSizeOptions, useTerminalFontSize } from '@/hooks/useTerm
 import { getSessionListStatusModeOptions, useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
 import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
+import { usePinActiveSessions } from '@/hooks/usePinActiveSessions'
 import { MAX_SESSION_PREVIEW_LIMIT, MIN_SESSION_PREVIEW_LIMIT, normalizeSessionPreviewLimit, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { useThemeColors, type ThemeColorKeyId } from '@/hooks/useThemeColors'
 import { useSessionHeaderMetadata, type SessionHeaderMetadataKey } from '@/hooks/useSessionHeaderMetadata'
@@ -140,6 +141,8 @@ export default function SettingsDisplayPage() {
     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
     const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
     const { pinInProgressMode, setPinInProgressMode } = usePinInProgressSessions()
+    const { pinInProgressSessions, setPinInProgressSessions } = usePinInProgressSessions()
+    const { pinActiveSessions, setPinActiveSessions } = usePinActiveSessions()
     const { preferences: sessionHeaderMetadata, setPreference: setSessionHeaderMetadata } = useSessionHeaderMetadata()
     const [agentVisibility, setAgentVisibility] = useState(loadCreateAgentVisibility)
     const setAgentVisible = (agent: typeof CREATABLE_AGENT_FLAVORS[number], visible: boolean) => {
@@ -194,6 +197,8 @@ export default function SettingsDisplayPage() {
                     ]}
                     onChange={setPinInProgressMode}
                 />
+                                <SettingsSwitch label={t('settings.display.pinInProgressSessions')} description={t('settings.display.pinInProgressSessions.desc')} checked={pinInProgressSessions} onChange={setPinInProgressSessions} />
+                <SettingsSwitch label={t('settings.display.pinActiveSessions')} description={t('settings.display.pinActiveSessions.desc')} checked={pinActiveSessions} onChange={setPinActiveSessions} />
                 <SettingsChoiceGroup
                     label={t('settings.display.sessionListStatus')}
                     description={t('settings.display.sessionListStatus.detailedDescription')}

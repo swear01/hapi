@@ -32,6 +32,8 @@ import {
     usePinInProgressSessions,
     type PinInProgressMode
 } from '@/hooks/usePinInProgressSessions'
+import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
+import { usePinActiveSessions } from '@/hooks/usePinActiveSessions'
 import { classifySessionAttention, sessionIsUnread } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt, getSessionLastSeenSnapshot } from '@/lib/sessionLastSeen'
 import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
@@ -69,6 +71,7 @@ const RUNNING_BUCKETS = [
     { key: 'jobs', labelKey: 'session.item.attachedJob', colorClass: 'text-[var(--app-badge-success-text)]', pulse: true },
     { key: 'working', labelKey: 'session.item.running', colorClass: 'text-[var(--app-badge-success-text)]', pulse: true },
     { key: 'pending', labelKey: 'session.item.pending', colorClass: 'text-[var(--app-badge-warning-text)]', pulse: true },
+    { key: 'active', labelKey: 'session.item.active', colorClass: 'text-[var(--app-hint)]', pulse: false },
 ] as const
 
 function hasRunningAttachedJob(session: SessionSummary): boolean {
@@ -1357,6 +1360,8 @@ export function SessionList(props: {
     // Transient unread lens — not a Settings preference. Cleared on reload; rows drop as they're seen.
     const [showUnreadOnly, setShowUnreadOnly] = useState(false)
     const { pinInProgressMode } = usePinInProgressSessions()
+    const { pinInProgressSessions } = usePinInProgressSessions()
+    const { pinActiveSessions } = usePinActiveSessions()
     const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
     const showDetailedStatus = sessionListStatusMode === 'detailed'
     const [searchQuery, setSearchQuery] = useState('')
@@ -1474,12 +1479,14 @@ export function SessionList(props: {
             .sort((a, b) => b.updatedAt - a.updatedAt)
     }, [machineFilteredSessions])
     const runningSessions = useMemo(() => {
-        const buckets: Record<'jobs' | 'working' | 'pending', SessionSummary[]> = {
+        const buckets: Record<'jobs' | 'working' | 'pending' | 'active', SessionSummary[]> = {
             jobs: [],
+        const buckets: Record<'working' | 'pending' | 'active', SessionSummary[]> = {
             working: [],
             pending: [],
+            active: [],
         }
-        if (pinInProgressMode === 'off') {
+        if (pinInProgressMode === 'off' && !pinActiveSessions) {
             return buckets
         }
         for (const session of machineFilteredSessions) {
@@ -1502,6 +1509,8 @@ export function SessionList(props: {
                 buckets.jobs.push(session)
             } else if (agentPending) {
                 buckets.pending.push(session)
+            } else if (pinActiveSessions) {
+                buckets.active.push(session)
             }
         }
         const byRecent = (a: SessionSummary, b: SessionSummary) => b.updatedAt - a.updatedAt
@@ -1509,10 +1518,11 @@ export function SessionList(props: {
             buckets[key].sort(byRecent)
         }
         return buckets
-    }, [machineFilteredSessions, pinInProgressMode])
+    }, [machineFilteredSessions, pinInProgressMode, pinActiveSessions])
     const runningSessionTotal = runningSessions.jobs.length
         + runningSessions.working.length
         + runningSessions.pending.length
+        + runningSessions.active.length
     const groups = useMemo(
         () => groupSessionsByDirectory(
             machineFilteredSessions.filter((session) => {
@@ -1526,10 +1536,13 @@ export function SessionList(props: {
                 ) {
                     return false
                 }
+                if (pinActiveSessions && session.active) {
+                    return false
+                }
                 return true
             })
         ),
-        [machineFilteredSessions, pinInProgressMode]
+        [machineFilteredSessions, pinInProgressMode, pinActiveSessions]
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
@@ -2073,14 +2086,14 @@ export function SessionList(props: {
                                     setRunningSectionCollapsed((value) => !value)
                                 }
                             }}
-                            title={t('sessions.runningSection')}
+                            title={t(pinActiveSessions ? 'sessions.activeSection' : 'sessions.runningSection')}
                         >
                             <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={runningSectionCollapsed && !isFiltering} />
                             <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
                                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--app-badge-success-text)] animate-pulse" />
                             </span>
                             <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                                {t('sessions.runningSection')}
+                                {t(pinActiveSessions ? 'sessions.activeSection' : 'sessions.runningSection')}
                             </span>
                             <span className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
                                 ({runningSessionTotal})
