@@ -944,49 +944,6 @@ export class SyncEngine {
         return this.sessionCache.allocateAttachedJobVersion(sessionId)
     }
 
-    deleteSessionJob(sessionId: string, jobKey: string): boolean {
-        const removed = this.store.sessionJobs.delete(sessionId, jobKey)
-        if (removed) {
-            const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
-            this.sessionCache.emitAttachedJobChanged(sessionId, primary)
-        }
-        return removed
-    }
-
-    listSessionJobs(sessionId: string) {
-        return this.store.sessionJobs.list(sessionId).map((job) => ({
-            key: job.key,
-            label: job.label,
-            status: job.status,
-            ...(job.done !== undefined ? { done: job.done } : {}),
-            ...(job.total !== undefined ? { total: job.total } : {}),
-            ...(job.remaining !== undefined ? { remaining: job.remaining } : {}),
-            ...(job.unit !== undefined ? { unit: job.unit } : {}),
-            ...(job.detail !== undefined ? { detail: job.detail } : {}),
-            heartbeatAt: job.heartbeatAt,
-            startedAt: job.startedAt,
-            updatedAt: job.updatedAt
-        }))
-    }
-
-    getPrimaryAttachedJob(sessionId: string) {
-        return this.store.sessionJobs.getPrimaryRunning(sessionId)
-    }
-
-    getPrimaryAttachedJobsBySessionIds(sessionIds: string[]) {
-        return this.store.sessionJobs.getPrimaryRunningBySessionIds(sessionIds)
-    }
-
-    /** Move outliving jobs + redirects onto another session (pre-delete). */
-    transferAttachedJobs(fromSessionId: string, toSessionId: string, namespace: string): void {
-        this.sessionCache.transferAttachedJobs(fromSessionId, toSessionId, namespace)
-    }
-
-    /** Shared REST/SSE watermark allocator for attachedJob patches. */
-    allocateAttachedJobVersion(sessionId: string): number {
-        return this.sessionCache.allocateAttachedJobVersion(sessionId)
-    }
-
     upsertSessionJob(
         sessionId: string,
         jobKey: string,
