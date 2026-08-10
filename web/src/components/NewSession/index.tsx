@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { AgentProvider, CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary, ProviderProfileView } from '@/types/api'
-import { AGENT_PROVIDER_CAPABILITIES } from '@hapi/protocol'
+import { AGENT_PROVIDER_CAPABILITIES, CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
 import type { CodexCollaborationMode, CopilotAgentMode, GrokPermissionMode, PermissionMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
@@ -18,6 +18,7 @@ import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggesti
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
 import { useRecentPaths } from '@/hooks/useRecentPaths'
 import { useTranslation } from '@/lib/use-translation'
+import { loadCreateAgentVisibility } from '@/lib/createAgentVisibility'
 import { getCodexModelReasoningEfforts } from '@/lib/codexModelCapabilities'
 import {
     buildNewSessionCursorModelCatalog,
@@ -95,6 +96,7 @@ export function NewSession(props: {
     const { sessions, refetch: refetchSessions } = useSessions(props.api)
     const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
 
+    const [agentVisibility] = useState(loadCreateAgentVisibility)
     const [machineId, setMachineId] = useState<string | null>(props.initialMachineId ?? null)
     const [directory, setDirectory] = useState(props.initialDirectory ?? '')
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
@@ -107,6 +109,10 @@ export function NewSession(props: {
     const [providerProfiles, setProviderProfiles] = useState<ProviderProfileView[]>([])
     const [providerDefaults, setProviderDefaults] = useState<Partial<Record<AgentProvider, string | null>>>({})
     const [providersLoading, setProvidersLoading] = useState(false)
+        const visibleAgents = useMemo<AgentType[]>(
+        () => CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate]),
+        [agentVisibility]
+    )
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
@@ -159,6 +165,15 @@ export function NewSession(props: {
     )
     const worktreeInputRef = useRef<HTMLInputElement>(null)
     const preserveRestoredDraftRef = useRef(false)
+
+    useEffect(() => {
+        if (!visibleAgents.includes(agent) && visibleAgents[0]) {
+            // A hidden agent must not keep restored-draft launch state: the
+            // fallback behaves like a manual agent switch, so normalize.
+            preserveRestoredDraftRef.current = false
+            setAgent(visibleAgents[0])
+        }
+    }, [agent, visibleAgents])
 
     useEffect(() => {
         if (sessionType === 'worktree') {
@@ -252,31 +267,42 @@ export function NewSession(props: {
             return
         }
         restoredFromBrowseRef.current = true
-        preserveRestoredDraftRef.current = true
-        setAgent(draft.agent)
-        setModel(draft.model)
-        setCursorSelectedBase(draft.cursorSelectedBase)
-        setEffort(draft.effort)
-        setModelReasoningEffort(draft.modelReasoningEffort)
-        setOpencodeSelectedModel(
-            draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
-        )
-        setAgySelectedModel(
-            draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
-        )
-        setServiceTier(draft.serviceTier)
-        setCollaborationMode(draft.collaborationMode)
-        setCopilotAgentMode(draft.copilotAgentMode)
-        setYoloMode(draft.yoloMode)
-        setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
-        setGrokPermissionMode(draft.grokPermissionMode)
-        setSessionType(draft.sessionType)
-        setWorktreeName(draft.worktreeName)
+        if (visibleAgents.includes(draft.agent)) {
+            preserveRestoredDraftRef.current = true
+            setAgent(draft.agent)
+            setModel(draft.model)
+            setCursorSelectedBase(draft.cursorSelectedBase)
+            setEffort(draft.effort)
+            setModelReasoningEffort(draft.modelReasoningEffort)
+            setOpencodeSelectedModel(
+                draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
+            )
+            setAgySelectedModel(
+                draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
+            )
+            setServiceTier(draft.serviceTier)
+            setCollaborationMode(draft.collaborationMode)
+            setCopilotAgentMode(draft.copilotAgentMode)
+            setYoloMode(draft.yoloMode)
+            setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
+            setGrokPermissionMode(draft.grokPermissionMode)
+            setSessionType(draft.sessionType)
+            setWorktreeName(draft.worktreeName)
+        } else if (visibleAgents[0]) {
+            // The draft agent is hidden in settings: restore only the
+            // agent-agnostic fields and let the normalization effects pick
+            // defaults for the fallback agent (no stale model/permission state).
+            setAgent(visibleAgents[0])
+            setYoloMode(draft.yoloMode)
+            setSessionType(draft.sessionType)
+            setWorktreeName(draft.worktreeName)
+        }
         clearNewSessionFormDraft()
     }, [
         props.initialDirectory,
         props.initialMachineId,
-        machineId
+        machineId,
+        visibleAgents
     ])
 
     useEffect(() => {
@@ -1552,9 +1578,9 @@ export function NewSession(props: {
             : trimmedDirectory
     )
     const canCreate = Boolean(
-        machineId
-        && hasSpawnDirectory
-        && !isFormDisabled
+        visibleAgents.includes(agent)
+        && machineId
+        && hasSpawnDirectory        && !isFormDisabled
         && !missingWorktreeDirectory
         && !isLaunchPreferenceValidationPending
         && !fastModeSelectionPending
@@ -1602,6 +1628,7 @@ export function NewSession(props: {
                 agent={agent}
                 isDisabled={isFormDisabled}
                 onAgentChange={handleAgentChange}
+                visibleAgents={visibleAgents}
             />
             {providerCapability?.managed ? (
                 <div className="px-3 pb-3">
