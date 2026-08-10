@@ -120,6 +120,11 @@ export default function SettingsStoragePage() {
                                     share: t('settings.storage.breakdownShare'),
                                 }}
                             />
+                            {data.breakdownApproximate ? (
+                                <div className="mt-2 px-2 text-xs text-[var(--app-hint)]" data-testid="storage-breakdown-approx">
+                                    {t('settings.storage.breakdownApprox')}
+                                </div>
+                            ) : null}
                         </SettingsSection>
                     ) : null}
                     <SettingsSection>

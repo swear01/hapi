@@ -848,6 +848,7 @@ export default {
   'settings.storage.chartEmpty': 'No on-disk size to chart yet.',
   'settings.storage.usageSummary': 'Logical data {used} · reclaimable {free} ({percent})',
   'settings.storage.breakdown': 'Itemized usage',
+  'settings.storage.breakdownApprox': 'Sizes estimated from content length (dbstat is unavailable in this runtime).',
   'settings.storage.kindTable': 'Table',
   'settings.storage.kindIndex': 'Index',
   'settings.storage.rows': 'Rows',

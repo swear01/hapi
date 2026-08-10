@@ -42,6 +42,7 @@ export function createStorageRoutes(store: Store): Hono<WebAppEnv> {
                 freelistBytes,
                 usedBytes,
                 tables: insights.tables,
+                breakdownApproximate: insights.breakdownApproximate,
             }
             return c.json(response)
         } catch (error) {

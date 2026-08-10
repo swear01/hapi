@@ -985,6 +985,8 @@ export type SqliteStorageUsageResponse = {
     usedBytes: number
     /** Per-table / per-index usage, largest first. */
     tables: SqliteTableUsage[]
+    /** True when tables were estimated from content length (no dbstat vtab on this runtime). */
+    breakdownApproximate: boolean
 }
 
 export type VacuumStorageResponse = {

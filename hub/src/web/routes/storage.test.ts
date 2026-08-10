@@ -49,6 +49,7 @@ type StorageUsageBody = {
     freelistBytes: number
     usedBytes: number
     tables: Array<{ name: string; kind: string; bytes: number; rows: number }>
+    breakdownApproximate: boolean
 }
 
 async function fetchUsage(app: Hono<WebAppEnv>): Promise<StorageUsageBody> {
@@ -103,6 +104,21 @@ describe('GET /api/storage/sqlite', () => {
         expect(after.usedBytes).toBeLessThan(before.usedBytes)
         const messages = after.tables.find((table: { name: string }) => table.name === 'messages')
         expect(messages?.rows).toBe(0)
+    })
+
+    it('falls back to a content-length estimate when dbstat is unavailable', async () => {
+        const { store } = createStore()
+        seedSession(store, 'fallback', 200)
+
+        const usage = store.estimateTableUsage()
+        const messages = usage.find((table) => table.name === 'messages')
+        expect(messages).toBeDefined()
+        expect(messages!.kind).toBe('table')
+        expect(messages!.rows).toBeGreaterThanOrEqual(200)
+        expect(messages!.bytes).toBeGreaterThan(0)
+        // The fallback only covers user tables (no indexes), so the
+        // largest reported object should be messages.
+        expect(usage[0]?.name).toBe('messages')
     })
 
     it('rejects non-default namespaces', async () => {

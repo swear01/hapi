@@ -847,6 +847,7 @@ export default {
   'settings.storage.chartEmpty': '暂无可绘制的磁盘占用。',
   'settings.storage.usageSummary': '逻辑数据 {used} · 可回收 {free}（{percent}）',
   'settings.storage.breakdown': '分项用量',
+  'settings.storage.breakdownApprox': '大小为按内容长度估算（当前运行时不支持 dbstat）。',
   'settings.storage.kindTable': '表',
   'settings.storage.kindIndex': '索引',
   'settings.storage.rows': '行数',

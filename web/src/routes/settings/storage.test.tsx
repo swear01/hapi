@@ -15,6 +15,7 @@ const getSqliteStorageUsage = vi.fn().mockResolvedValue({
     freelistBytes: 0,
     usedBytes: 1,
     tables: [],
+    breakdownApproximate: false,
 })
 
 vi.mock('@/lib/app-context', () => ({
