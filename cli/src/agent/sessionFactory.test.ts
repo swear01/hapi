@@ -146,6 +146,14 @@ describe('bootstrapExistingSession', () => {
         session.metadata = {
             ...existingMetadata,
             claudeSessionId: 'claude-thread-1',
+            claudeImportState: {
+                state: 'complete',
+                machineId: 'machine-1',
+                claudeSessionId: 'claude-thread-1',
+                sourceFile: '/tmp/claude-thread-1.jsonl',
+                startedAt: 100,
+                updatedAt: 200
+            },
             codexSessionId: 'codex-thread-1',
             codexUsage: {
                 contextWindow: {
@@ -201,6 +209,10 @@ describe('bootstrapExistingSession', () => {
 
         expect(result.metadata).toEqual(expect.objectContaining({
             claudeSessionId: 'claude-thread-1',
+            claudeImportState: expect.objectContaining({
+                state: 'complete',
+                claudeSessionId: 'claude-thread-1'
+            }),
             codexSessionId: 'codex-thread-1',
             codexUsage: {
                 contextWindow: {
