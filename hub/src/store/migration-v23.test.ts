@@ -42,7 +42,7 @@ describe('schema migration v22 to v23', () => {
         expect(links?.name).toBe('event_links')
         // Tip after #1468/#1360: V23 A2A + V24 session_jobs + V25 run_id +
         // V26 cost columns + V27 notification preferences.
-        expect(version.user_version).toBe(27)
+        expect(version.user_version).toBe(28)
         migrated.close()
     })
 

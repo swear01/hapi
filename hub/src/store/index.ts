@@ -45,7 +45,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 27
+const SCHEMA_VERSION: number = 28
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -319,6 +319,7 @@ export class Store {
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
             26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
         })
 
         if (currentVersion === 0) {
@@ -1095,6 +1096,62 @@ export class Store {
                 session_completion INTEGER NOT NULL DEFAULT 1,
                 updated_at INTEGER NOT NULL
             );
+        `)
+    }
+
+    private migrateFromV27ToV28(): void {
+        // Fork repair: upstream #1467's V22→V23 creates the A2A events ledger,
+        // but fork-maintained DBs that were already past V22 skipped that step.
+        // Idempotently create the ledger tables when missing (v0.27.2.2 hub).
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                ts INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                sink_kind TEXT,
+                sink_ref TEXT,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                payload_json TEXT,
+                artifact_refs TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                related_session_id TEXT,
+                related_event_id TEXT,
+                provenance TEXT,
+                idempotency_key TEXT,
+                dedupe_key TEXT,
+                confidence REAL,
+                severity TEXT,
+                expires_at INTEGER,
+                namespace TEXT NOT NULL,
+                principal_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_ts
+                ON events(namespace, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_related_session
+                ON events(namespace, related_session_id, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_expires
+                ON events(namespace, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_namespace_idempotency
+                ON events(namespace, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS event_links (
+                id TEXT PRIMARY KEY,
+                from_event_id TEXT NOT NULL,
+                to_event_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                metadata_json TEXT,
+                namespace TEXT NOT NULL,
+                FOREIGN KEY (from_event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (to_event_id) REFERENCES events(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_from
+                ON event_links(namespace, from_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
+                ON event_links(namespace, to_event_id);
         `)
     }
     private getSessionColumnNames(): Set<string> {
