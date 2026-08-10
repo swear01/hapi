@@ -1,6 +1,6 @@
 import type { SqliteTableUsage } from '@hapi/protocol/apiTypes'
 import { formatFileSize } from '@/lib/file-metadata'
-import { formatStoragePercent } from '@/components/settings/storageUsagePie'
+import { formatStoragePercent } from '@/components/settings/storageUsageSlices'
 
 type StorageUsageBreakdownProps = {
     tables: SqliteTableUsage[]

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { StorageUsageBreakdown } from '@/components/settings/StorageUsageBreakdown'
-import { StorageUsagePie } from '@/components/settings/StorageUsagePie.tsx'
+import { StorageUsagePie } from '@/components/settings/StorageUsagePie'
 import { SettingsPageContent, SettingsRow, SettingsSection } from '@/components/settings/SettingsPrimitives'
 import { useAppContext } from '@/lib/app-context'
 import { formatFileSize } from '@/lib/file-metadata'
