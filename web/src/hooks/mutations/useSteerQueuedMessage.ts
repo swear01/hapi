@@ -1,5 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
+import { markMessagesConsumed } from '@/lib/message-window-store'
 import { useTranslation } from '@/lib/use-translation'
 import { useToast } from '@/lib/toast-context'
 
@@ -37,9 +38,16 @@ export function useSteerQueuedMessage(api: ApiClient | null) {
                     sessionId: input.sessionId,
                     url: window.location.href,
                 })
+                return
+            }
+            if (result.status === 'invoked' && result.message.localId && typeof result.message.invokedAt === 'number') {
+                // The CLI consumed this message before the steer arrived. If the
+                // messages-consumed SSE was missed while the row was still
+                // queued, reconcile it now so the queued bar cannot keep a
+                // stale actionable row (mirrors useCancelQueuedMessage).
+                markMessagesConsumed(input.sessionId, [result.message.localId], result.message.invokedAt)
             }
             // status === 'steered': the messages-consumed SSE will remove the row.
-            // status === 'invoked': the CLI already consumed it; nothing to do.
         },
         onError: (error, input) => {
             addToast({

@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     rejectCancel: null as ((reason?: unknown) => void) | null,
     steerMessage: vi.fn(),
     resolveSteer: null as ((result: unknown) => void) | null,
+    markMessagesConsumed: vi.fn(),
     saveDraft: vi.fn(),
     messageWindowState: { messages: [] as unknown[] },
 }))
@@ -45,6 +46,7 @@ vi.mock('@assistant-ui/react', () => ({
 vi.mock('@/lib/message-window-store', () => ({
     getMessageWindowState: () => mocks.messageWindowState,
     subscribeMessageWindow: () => () => {},
+    markMessagesConsumed: mocks.markMessagesConsumed,
 }))
 
 vi.mock('@/hooks/mutations/useCancelQueuedMessage', () => ({
@@ -140,6 +142,7 @@ beforeEach(() => {
     mocks.rejectCancel = null
     mocks.steerMessage.mockReset()
     mocks.resolveSteer = null
+    mocks.markMessagesConsumed.mockReset()
     mocks.saveDraft.mockReset()
     mocks.messageWindowState = { messages: [] }
     clearQueuedEditRecovery('session-1')
@@ -777,6 +780,27 @@ describe('QueuedMessagesBar steer action', () => {
             await Promise.resolve()
         })
 
+        expect(mocks.addToast).not.toHaveBeenCalled()
+    })
+
+    it('reconciles a stale queued row when the steer returns invoked (missed consumption SSE)', async () => {
+        renderSteerable(true)
+
+        fireEvent.click(screen.getByRole('button', { name: 'Steer queued message' }))
+        await waitFor(() => expect(mocks.steerMessage).toHaveBeenCalled())
+        await act(async () => {
+            mocks.resolveSteer?.({
+                status: 'invoked',
+                message: { localId: 'local-server-message-id', invokedAt: 5_000 },
+            })
+            await Promise.resolve()
+        })
+
+        expect(mocks.markMessagesConsumed).toHaveBeenCalledWith(
+            'session-1',
+            ['local-server-message-id'],
+            5_000,
+        )
         expect(mocks.addToast).not.toHaveBeenCalled()
     })
 })
