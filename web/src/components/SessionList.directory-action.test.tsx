@@ -12,6 +12,8 @@ afterEach(() => {
     localStorage.removeItem('hapi-session-preview-limit')
     // Explicit off — unset now defaults to `jobs` (session-attached jobs stand).
     localStorage.setItem('hapi-pin-in-progress-sessions', 'off')
+    localStorage.removeItem('hapi-pin-in-progress-sessions')
+    localStorage.removeItem('hapi-session-list-machine-filter')
 })
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -354,7 +356,11 @@ describe('SessionList action menu parity', () => {
 })
 
 describe('SessionList collapse behavior', () => {
-    function renderSessionList(sessions: SessionSummary[], selectedSessionId: string | null = 'session-running') {
+    function renderSessionList(
+        sessions: SessionSummary[],
+        selectedSessionId: string | null = 'session-running',
+        machineLabelsById: Record<string, string> = {}
+    ) {
         return (
             <QueryClientProvider client={new QueryClient({
                 defaultOptions: {
@@ -373,6 +379,7 @@ describe('SessionList collapse behavior', () => {
                             isLoading={false}
                             renderHeader={false}
                             api={null}
+                            machineLabelsById={machineLabelsById}
                         />
                     </I18nProvider>
                 </ToastProvider>
@@ -587,6 +594,107 @@ describe('SessionList collapse behavior', () => {
         // Thinking agent is not a long-running job — stays in directory under jobs mode.
         expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Thinking agent/ })).toBeInTheDocument()
+    })
+
+        it('omits the redundant machine label from pinned rows with one machine', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    name: 'Running task',
+                    flavor: 'codex',
+                },
+            }),
+        ]
+
+        render(renderSessionList(sessions, null, { 'machine-1': 'NUC' }))
+
+        expect(screen.getByText('work/hapi')).toHaveAttribute('title', 'work/hapi')
+        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
+    })
+
+    it('keeps machine labels on pinned rows with multiple machines', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    name: 'Running task',
+                    flavor: 'codex',
+                },
+            }),
+            makeSession({
+                id: 'session-pending',
+                active: true,
+                pendingRequestsCount: 1,
+                updatedAt: 90,
+                metadata: {
+                    path: '/work/docs',
+                    machineId: 'machine-2',
+                    name: 'Pending task',
+                    flavor: 'codex',
+                },
+            }),
+        ]
+
+        render(renderSessionList(sessions, null, {
+            'machine-1': 'NUC',
+            'machine-2': 'Laptop',
+        }))
+
+        expect(screen.getByText('work/hapi · NUC')).toHaveAttribute('title', 'work/hapi · NUC')
+        expect(screen.getByText('work/docs · Laptop')).toHaveAttribute('title', 'work/docs · Laptop')
+    })
+
+    it('omits the machine label when a multi-machine list is filtered to one machine', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        localStorage.setItem('hapi-session-list-machine-filter', 'machine-1')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    name: 'Running task',
+                    flavor: 'codex',
+                },
+            }),
+            makeSession({
+                id: 'session-other-machine',
+                active: true,
+                thinking: true,
+                updatedAt: 90,
+                metadata: {
+                    path: '/work/docs',
+                    machineId: 'machine-2',
+                    name: 'Other machine task',
+                    flavor: 'codex',
+                },
+            }),
+        ]
+
+        render(renderSessionList(sessions, null, {
+            'machine-1': 'NUC',
+            'machine-2': 'Laptop',
+        }))
+
+        expect(screen.getByText('work/hapi')).toHaveAttribute('title', 'work/hapi')
+        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
+        expect(screen.queryByRole('button', { name: /Other machine task/ })).toBeNull()
     })
 
     it('does not label quiet active sessions as Idle', () => {
