@@ -32,7 +32,6 @@ patch	state	upstream_ref	source_commits
 22-pr-1418.patch	carry	pr-1418	58a84ed53ab9beb12b678882dd2430a1c3a09f98
 23-pr-1477.patch	carry	pr-1477	ba518f2ec868cefb5f5daf3045af7aa623526d68
 24-pr-1447.patch	carry	pr-1447	df3e0e9e78f02ffdd6e4d84395fb26aaa7830d1a
-25-pr-1443.patch	carry	pr-1443	c0f78cc2a4c10d9cf50b36f269e255e033f11567
 26-pr-1429.patch	carry	pr-1429	860771570f3c775780040f2ad815ca022677e182
 27-pr-1360.patch	carry	pr-1360	0eda13503288d2016fc766ae7e7322cd3027f184
 28-pr-1093.patch	carry	pr-1093	c94fa5fccd41f5f8113585b0afef737664d5f0c6
