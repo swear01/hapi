@@ -1510,7 +1510,7 @@ describe('cursorAcpRemoteLauncher', () => {
             .filter((event) => event?.type === 'modelError');
         expect(modelErrors).toHaveLength(1);
         expect(modelErrors[0]?.kind).toBe('transport_closed');
-        expect(modelErrors[0]?.transient).toBe(true);
+        expect(modelErrors[0]?.transient).toBe(false);
         expect(client.sendSessionEvent.mock.calls.some(
             (call) => call[0]?.type === 'ready'
         )).toBe(false);
