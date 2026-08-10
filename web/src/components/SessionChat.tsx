@@ -1060,6 +1060,41 @@ function SessionChatInner(props: SessionChatProps) {
         props.onRefresh()
     }, [props.api, props.session.id, props.session.metadata?.lastModelError?.eventId, props.onRefresh])
 
+    const [isBridgingModelError, setIsBridgingModelError] = useState(false)
+    const [bridgeModelErrorReason, setBridgeModelErrorReason] = useState<string | null>(null)
+
+    const handleBridgeModelError = useCallback(async () => {
+        if (isBridgingModelError) {
+            return
+        }
+        const eventId = props.session.metadata?.lastModelError?.eventId
+        if (typeof eventId !== 'string' || eventId.length === 0) {
+            props.onRefresh()
+            return
+        }
+        setIsBridgingModelError(true)
+        setBridgeModelErrorReason(null)
+        try {
+            const result = await props.api.bridgeModelError(props.session.id, eventId)
+            if (!result.ok) {
+                setBridgeModelErrorReason(result.reason ?? 'not_bridgeable')
+            }
+            props.onRefresh()
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'bridge_failed'
+            setBridgeModelErrorReason(message)
+            console.warn('[SessionChat] model error bridge failed:', error)
+        } finally {
+            setIsBridgingModelError(false)
+        }
+    }, [
+        isBridgingModelError,
+        props.api,
+        props.session.id,
+        props.session.metadata?.lastModelError?.eventId,
+        props.onRefresh
+    ])
+
     // Voice assistant integration
     const voice = useVoiceOptional()
     const [voiceBackendReady, setVoiceBackendReady] = useState(false)
@@ -1682,6 +1717,11 @@ function SessionChatInner(props: SessionChatProps) {
             <ModelErrorBanner
                 metadata={props.session.metadata}
                 onDismiss={handleAcknowledgeModelError}
+                onBridge={agentFlavor === 'cursor' && props.session.active
+                    ? handleBridgeModelError
+                    : undefined}
+                isBridging={isBridgingModelError}
+                bridgeErrorReason={bridgeModelErrorReason}
             />
 
             <div className="flex flex-col min-h-0 flex-1">

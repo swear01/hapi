@@ -23,8 +23,14 @@ const { context, navigate, setAppearance, setColorTheme, setFontScale, setTermin
     setVoice: vi.fn(),
 }))
 
-const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: false })
-const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: true })
+const getHubSettings = vi.fn().mockResolvedValue({
+    sessionSummaryContract: false,
+    autoBridgeTransientModelErrors: false
+})
+const updateHubSettings = vi.fn().mockResolvedValue({
+    sessionSummaryContract: true,
+    autoBridgeTransientModelErrors: false
+})
 
 vi.mock('@/hooks/useColorTheme', () => ({
     useColorTheme: () => ({ colorTheme: 'default', setColorTheme }),
@@ -160,7 +166,7 @@ vi.mock('@/hooks/useChatSurfaceColors', () => ({
 
 vi.mock('@/lib/app-context', () => ({
     useAppContext: () => ({
-        api: { getHubSettings, updateHubSettings },
+        api: { getHubSettings, updateHubSettings, getSessions: vi.fn().mockResolvedValue({ sessions: [] }) },
         baseUrl: 'http://127.0.0.1:3006',
         token: context.token,
     }),
@@ -216,8 +222,14 @@ describe('responsive settings pages', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
-        getHubSettings.mockResolvedValue({ sessionSummaryContract: false })
-        updateHubSettings.mockResolvedValue({ sessionSummaryContract: true })
+        getHubSettings.mockResolvedValue({
+            sessionSummaryContract: false,
+            autoBridgeTransientModelErrors: false
+        })
+        updateHubSettings.mockResolvedValue({
+            sessionSummaryContract: true,
+            autoBridgeTransientModelErrors: false
+        })
         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`
     })
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import { convertAgentMessage } from '@/agent/messageConverter';
@@ -11,7 +12,7 @@ import {
 } from '@/modules/common/remote/RemoteLauncherBase';
 import { OpencodeDisplay } from '@/ui/ink/OpencodeDisplay';
 import type { CursorSession } from './session';
-import type { PermissionMode } from './loop';
+import type { EnhancedMode, PermissionMode } from './loop';
 import {
     createCursorAcpBackend,
     CURSOR_ACP_REQUIRED_MESSAGE,
@@ -43,6 +44,22 @@ import {
     resolveCursorSpawnModel,
     tryRemapCursorSpawnModelFromConnectError
 } from './utils/cursorStaleModelRemap';
+import {
+    classifyAcpRpcRejection,
+    classifyCursorAgentMessage,
+    isCompletionClaim,
+    mapAcpStderrToFailure,
+    rawSnippetForFailure,
+    type CursorAgentStreamFailure
+} from './cursorAgentMessageClassifier';
+import {
+    buildModelErrorBridgePrompt,
+    canBridgeModelError,
+    mergeBridgeGateFields,
+    MAX_LAST_USER_MESSAGE_CHARS
+} from './cursorModelErrorBridge';
+import { getAutoBridgeTransientModelErrors } from './cursorModelErrorBridgePrefs';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -62,6 +79,52 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
     private autoReviewSlashQueued = false;
     private cursorMcpOverlay: CursorMcpOverlayHandle | null = null;
+    private lastAssistantText: string | null = null;
+    private turnHasModelError = false;
+    /**
+     * Text-classifier hit retained until `backend.prompt` settles. Callbacks
+     * run before the promise rejects, so recording text immediately would
+     * beat the structural RPC classification (e.g. unknown_t_prefix vs
+     * transport_closed for WritableIterable). Flush on success; prefer RPC
+     * in catch.
+     */
+    private pendingTextFailure: CursorAgentStreamFailure | null = null;
+    /**
+     * Typed stderr failure deferred while prompt is in flight so RPC rejection
+     * keeps precedence (RPC → stderr → text). Flushed on settle like text.
+     */
+    private pendingStderrFailure: CursorAgentStreamFailure | null = null;
+    /** True while backend.prompt() is in flight — lets stderr model_not_found
+     *  surface as modelError during a turn without breaking setup/load remap. */
+    private promptInFlight = false;
+    /**
+     * Set in handleAbort before session/cancel. Cursor often rejects the
+     * in-flight prompt as `Error: T: [canceled] Operation aborted`, which the
+     * classifier maps to kind=canceled (real model cancel). Intent tracking
+     * keeps deliberate Abort/Exit/Switch out of the emergency model-error path.
+     */
+    private userAbortRequested = false;
+    private lastUserMessage: string | null = null;
+    private lastTurnMode: EnhancedMode | null = null;
+    /** Set only while the bridge prompt itself is the active turn. */
+    private bridgingForEventId: string | null = null;
+    private bridgingSource: 'auto' | 'manual' | null = null;
+    /** Enqueued but not yet started — must not attribute the current in-flight turn. */
+    private pendingBridgeEventId: string | null = null;
+    private pendingBridgeSource: 'auto' | 'manual' | null = null;
+    private lastRecordedModelError: {
+        eventId: string;
+        atTs: number;
+        kind: string;
+        rawSnippet: string;
+        priorAssistantClaimsDone: boolean;
+        lastUserMessage: string;
+        transient: boolean;
+        bridgedForEventId?: string;
+        retriedAndFailed?: boolean;
+        supersededByUserTurn?: boolean;
+        bridgeable?: boolean;
+    } | null = null;
 
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -396,7 +459,21 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             onSwitch: () => this.handleSwitchRequest()
         });
 
+        session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.BridgeModelError,
+            async (payload: unknown) => this.handleBridgeModelErrorRpc(payload)
+        );
+
+        // Restart / resume: hub metadata may still hold an unresolved error from
+        // the previous process. Hydrate before the queue loop so the first newer
+        // normal turn can durably set supersededByUserTurn.
+        this.hydrateLastRecordedModelErrorFromMetadata();
+
         const sendReady = () => {
+            if (this.turnHasModelError) {
+                // Don't clear the error state with a 'ready' — banner stays visible.
+                return;
+            }
             session.sendSessionEvent({ type: 'ready' });
         };
 
@@ -408,6 +485,24 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     continue;
                 }
                 break;
+            }
+
+            // Activate bridge attribution only from queue-owned provenance —
+            // never from caller-controlled localId (which can forge `bridge:`).
+            const bridgeItem = batch.items.find(
+                (item) => item.internal?.kind === 'model-error-bridge'
+            );
+            if (bridgeItem?.internal?.kind === 'model-error-bridge') {
+                const eventId = bridgeItem.internal.eventId;
+                this.bridgingForEventId = eventId;
+                this.bridgingSource = this.pendingBridgeSource ?? 'manual';
+                if (this.pendingBridgeEventId === eventId) {
+                    this.pendingBridgeEventId = null;
+                    this.pendingBridgeSource = null;
+                }
+            } else if (this.lastRecordedModelError && !this.lastRecordedModelError.supersededByUserTurn) {
+                // A newer normal turn owns the conversation — stale Bridge must not replay the failed prompt.
+                this.markModelErrorSupersededByUserTurn();
             }
 
             const requestedModel = batch.mode.model === null
@@ -431,6 +526,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             await applyCursorAcpMode(backend, acpSessionId, batch.mode.permissionMode as PermissionMode);
             this.applyDisplayMode(batch.mode.permissionMode as PermissionMode);
 
+            this.lastUserMessage = batch.message;
+            this.lastTurnMode = batch.mode;
+
             const specialCommand = parseCursorSpecialCommand(batch.message);
             if (specialCommand.type === 'pass-through') {
                 messageBuffer.addMessage(cursorPassThroughStatusMessage(specialCommand.command), 'status');
@@ -445,11 +543,24 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             }];
 
             session.onThinkingChange(true);
+            this.turnHasModelError = false;
+            this.userAbortRequested = false;
+            this.lastAssistantText = null;
+            this.pendingTextFailure = null;
+            this.pendingStderrFailure = null;
 
+            this.promptInFlight = true;
             try {
                 await backend.prompt(acpSessionId, promptContent, (message) => {
                     this.handleAgentMessage(message);
                 });
+                // Prompt resolved: flush deferred structural stderr, then text.
+                const settled = this.pendingStderrFailure ?? this.pendingTextFailure;
+                if (settled && !this.turnHasModelError) {
+                    this.recordModelError(settled);
+                }
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
                 void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
@@ -460,10 +571,41 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.sendAgentMessage(converted);
                 }
                 messageBuffer.addMessage(message, 'status');
+                // Specific RPC (canceled / rate_limited / …) still wins. Generic
+                // transport/crash/prompt_failed must not overwrite a stronger
+                // deferred stderr cause (quota/auth/model) with “safe to retry”.
+                const rpcFailure = classifyAcpRpcRejection(error);
+                const genericRpcFailure = rpcFailure !== null && (
+                    rpcFailure.kind === 'transport_closed'
+                    || rpcFailure.kind === 'agent_crashed'
+                    || rpcFailure.kind === 'prompt_failed'
+                );
+                const failure = genericRpcFailure
+                    ? this.pendingStderrFailure ?? rpcFailure ?? this.pendingTextFailure
+                    : rpcFailure ?? this.pendingStderrFailure ?? this.pendingTextFailure;
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
+                if (failure) {
+                    this.recordModelError(failure);
+                }
             } finally {
+                this.promptInFlight = false;
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');
+                if (
+                    !this.userAbortRequested
+                    && !this.turnHasModelError
+                    && this.bridgingForEventId !== null
+                ) {
+                    const eventId = this.bridgingForEventId;
+                    const source = this.bridgingSource ?? 'manual';
+                    this.markModelErrorBridgeSucceeded(eventId, source);
+                    this.bridgingForEventId = null;
+                    this.bridgingSource = null;
+                }
                 if (session.queue.size() === 0 && !this.shouldExit) {
                     sendReady();
                 }
@@ -479,6 +621,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
         try {
             this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+            this.session.client.rpcHandlerManager.registerHandler(
+                RPC_METHODS.BridgeModelError,
+                async () => ({ ok: false, reason: 'session_ended' })
+            );
             this.unregisterModelApplyHandler?.();
             this.unregisterModelApplyHandler = null;
 
@@ -517,7 +663,18 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             logger.debug('[cursor-acp] stderr error', error);
             const hint = error.raw || error.message;
             onHint(hint);
+            // Setup/load remap consumes "Cannot use this model" stderr without
+            // promoting to modelError. During an active prompt, the same
+            // signature must become model_not_found (mapper would otherwise
+            // be unreachable behind this early return).
+            const failure = mapAcpStderrToFailure(error);
             if (error.type === 'model_not_found' && extractCannotUseThisModelMessage(hint)) {
+                // Setup/load remap may reject a stale spawn model then succeed
+                // after remap — never promote that to a turn alert. Only defer
+                // during an active prompt so RPC precedence still wins.
+                if (this.promptInFlight && failure) {
+                    this.pendingStderrFailure ??= failure;
+                }
                 return;
             }
             const converted = convertAgentMessage({ type: 'error', message: error.message });
@@ -525,6 +682,22 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 session.sendAgentMessage(converted);
             }
             messageBuffer.addMessage(error.message, 'status');
+            // STRUCTURAL signal: route typed stderr into the modelError pipeline
+            // (rate_limited / quota_exhausted / auth_failed / model_not_found)
+            // without text matching. Generic `unknown` stderr stays status-only —
+            // ACP treats stderr as logging, and the transport labels any
+            // "error"/"failed"/"exception" line as unknown.
+            // While prompt is in flight, defer so RPC rejection keeps precedence.
+            // Idle stderr can still surface a banner/notify, but must not be
+            // Bridgeable — stdout/stderr are independent, so a strong rate-limit
+            // line can arrive after a turn already succeeded.
+            if (failure) {
+                if (this.promptInFlight) {
+                    this.pendingStderrFailure ??= failure;
+                } else {
+                    this.recordModelError(failure, { bridgeable: false });
+                }
+            }
         });
     }
 
@@ -566,6 +739,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         switch (message.type) {
             case 'text':
                 this.messageBuffer.addMessage(message.text, 'assistant');
+                this.handleTextMessageClassification(message.text);
                 break;
             case 'reasoning':
                 break;
@@ -591,6 +765,362 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             default:
                 break;
         }
+    }
+
+    private handleTextMessageClassification(text: string): void {
+        // FALLBACK PATH ONLY — deferred until prompt settles so structural
+        // RPC / stderr can win. If a structural signal already classified
+        // this turn, keep lastAssistantText for priorAssistantClaimsDone.
+        if (this.turnHasModelError) {
+            this.lastAssistantText = text;
+            return;
+        }
+        const failure = classifyCursorAgentMessage(text);
+        if (failure) {
+            this.pendingTextFailure ??= failure;
+        } else {
+            this.lastAssistantText = text;
+        }
+    }
+
+    /**
+     * Single source of truth for emitting modelError. Structural paths
+     * (RPC catch / stderr) record immediately; text fallback is deferred
+     * via pendingTextFailure until prompt settles, then flushed here.
+     * First recorded signal wins for the turn.
+     */
+    private recordModelError(
+        failure: CursorAgentStreamFailure,
+        opts?: { bridgeable?: boolean }
+    ): void {
+        if (this.turnHasModelError) {
+            logger.debug(
+                `[cursor-acp] modelError already recorded for this turn, dropping ${failure.source}/${failure.kind}`
+            );
+            return;
+        }
+        // Abort/Exit/Switch can settle as canceled *or* transport/process-close
+        // shapes (ACP process exited, WritableIterable closed, …). Never promote
+        // those into lastModelError / notify / auto-bridge after a deliberate stop.
+        if (this.userAbortRequested) {
+            logger.debug(
+                `[cursor-acp] dropping modelError after user abort kind=${failure.kind}`
+            );
+            this.pendingTextFailure = null;
+            this.pendingStderrFailure = null;
+            return;
+        }
+        this.turnHasModelError = true;
+        this.pendingTextFailure = null;
+        this.pendingStderrFailure = null;
+
+        const bridgedFailure = this.bridgingForEventId !== null;
+        if (bridgedFailure) {
+            this.bridgingForEventId = null;
+            this.bridgingSource = null;
+        }
+
+        // A newer displayed error invalidates any not-yet-started bridge.
+        this.cancelPendingBridge();
+
+        // Same-message case: Cursor often appends `Error: T: ...` onto the
+        // assistant block that already claimed "Done." — lastAssistantText is
+        // still null because we classify before storing. Check failure.raw too.
+        const priorAssistantClaimsDone = (this.lastAssistantText !== null
+            && isCompletionClaim(this.lastAssistantText))
+            || (failure.source === 'text' && isCompletionClaim(failure.raw));
+        const rawSnippet = rawSnippetForFailure(failure);
+        const eventId = randomUUID();
+        const atTs = Date.now();
+        // Fail closed on silently truncated prompts — Bridge must replay exact text.
+        const fullMessage = this.lastUserMessage ?? '';
+        const fitsBridgeLimit = fullMessage.length <= MAX_LAST_USER_MESSAGE_CHARS;
+        const bridgeable = opts?.bridgeable !== false && fitsBridgeLimit;
+        const lastUserMessage = bridgeable ? fullMessage : '';
+
+        logger.debug(
+            `[cursor-acp] modelError recorded source=${failure.source} kind=${failure.kind} transient=${failure.transient}${bridgedFailure ? ' (bridge failed)' : ''}${!bridgeable ? ' (not bridgeable)' : ''}`
+        );
+
+        this.lastRecordedModelError = {
+            eventId,
+            atTs,
+            kind: failure.kind,
+            transient: failure.transient,
+            rawSnippet,
+            priorAssistantClaimsDone,
+            lastUserMessage,
+            ...(bridgeable ? {} : { bridgeable: false }),
+            ...(bridgedFailure ? { retriedAndFailed: true } : {})
+        };
+
+        this.session.client.updateMetadata((metadata) => ({
+            ...metadata,
+            lastModelError: this.lastRecordedModelError!
+        }));
+
+        this.session.sendSessionEvent({
+            type: 'modelError',
+            kind: failure.kind,
+            transient: failure.transient,
+            rawSnippet,
+            priorAssistantClaimsDone
+        });
+
+        if (
+            !bridgedFailure
+            && bridgeable
+            && failure.transient
+            && getAutoBridgeTransientModelErrors()
+        ) {
+            this.tryEnqueueModelErrorBridge('auto');
+        }
+    }
+
+    private async handleBridgeModelErrorRpc(payload: unknown): Promise<{ ok: boolean; reason?: string }> {
+        if (!payload || typeof payload !== 'object') {
+            return this.tryEnqueueModelErrorBridge('manual');
+        }
+
+        const record = payload as Record<string, unknown>;
+        const snapshot = {
+            eventId: typeof record.eventId === 'string' ? record.eventId : undefined,
+            atTs: typeof record.atTs === 'number' ? record.atTs : undefined,
+            kind: typeof record.kind === 'string' ? record.kind : undefined,
+            rawSnippet: typeof record.rawSnippet === 'string' ? record.rawSnippet : undefined,
+            lastUserMessage: typeof record.lastUserMessage === 'string' ? record.lastUserMessage : undefined,
+            priorAssistantClaimsDone: record.priorAssistantClaimsDone === true,
+            transient: typeof record.transient === 'boolean'
+                ? record.transient
+                : (this.lastRecordedModelError?.transient ?? false),
+            bridgedForEventId: typeof record.bridgedForEventId === 'string'
+                ? record.bridgedForEventId
+                : undefined,
+            retriedAndFailed: record.retriedAndFailed === true,
+            supersededByUserTurn: record.supersededByUserTurn === true,
+            bridgeable: record.bridgeable === false ? false : undefined
+        };
+
+        if (snapshot.eventId !== undefined) {
+            // Bind to the displayed error — refuse if a newer local error won.
+            if (
+                this.lastRecordedModelError
+                && this.lastRecordedModelError.eventId !== snapshot.eventId
+            ) {
+                return { ok: false, reason: 'model_error_changed' };
+            }
+            // Merge hub snapshot into local gate state — never clobber
+            // bridgedForEventId / retriedAndFailed / supersededByUserTurn /
+            // bridgeable=false with undefined/false from a stale hub payload.
+            const gates = mergeBridgeGateFields(this.lastRecordedModelError, {
+                bridgedForEventId: snapshot.bridgedForEventId,
+                retriedAndFailed: snapshot.retriedAndFailed,
+                supersededByUserTurn: snapshot.supersededByUserTurn,
+                bridgeable: snapshot.bridgeable
+            });
+            this.lastRecordedModelError = {
+                eventId: snapshot.eventId,
+                atTs: snapshot.atTs ?? this.lastRecordedModelError?.atTs ?? Date.now(),
+                kind: snapshot.kind ?? this.lastRecordedModelError?.kind ?? 'unknown',
+                rawSnippet: snapshot.rawSnippet ?? this.lastRecordedModelError?.rawSnippet ?? '',
+                priorAssistantClaimsDone: snapshot.priorAssistantClaimsDone,
+                lastUserMessage: snapshot.lastUserMessage
+                    ?? this.lastRecordedModelError?.lastUserMessage
+                    ?? this.lastUserMessage
+                    ?? '',
+                transient: snapshot.transient,
+                bridgedForEventId: gates.bridgedForEventId,
+                retriedAndFailed: gates.retriedAndFailed,
+                supersededByUserTurn: gates.supersededByUserTurn,
+                bridgeable: gates.bridgeable
+            };
+        }
+
+        return this.tryEnqueueModelErrorBridge('manual');
+    }
+
+    private tryEnqueueModelErrorBridge(source: 'auto' | 'manual'): { ok: boolean; reason?: string } {
+        const metadataError = this.lastRecordedModelError;
+
+        if (!metadataError) {
+            return { ok: false, reason: 'no_model_error' };
+        }
+
+        // Manual Bridge during a newer in-flight turn would front-queue a stale
+        // retry that still runs if that turn succeeds (no superseding modelError).
+        // Auto-bridge may still fire while settling the failed turn itself.
+        if (source === 'manual' && this.promptInFlight) {
+            return { ok: false, reason: 'prompt_in_flight' };
+        }
+
+        if (metadataError.supersededByUserTurn) {
+            return { ok: false, reason: 'superseded_by_newer_turn' };
+        }
+
+        // Fail closed while a bridge for this eventId is pending or active.
+        if (
+            this.bridgingForEventId === metadataError.eventId
+            || this.pendingBridgeEventId === metadataError.eventId
+        ) {
+            return { ok: false, reason: 'not_bridgeable' };
+        }
+
+        const bridgeInput = {
+            kind: metadataError.kind,
+            rawSnippet: metadataError.rawSnippet,
+            priorAssistantClaimsDone: metadataError.priorAssistantClaimsDone,
+            lastUserMessage: metadataError.lastUserMessage ?? this.lastUserMessage ?? ''
+        };
+
+        if (!bridgeInput.lastUserMessage.trim()) {
+            return { ok: false, reason: 'missing_last_user_message' };
+        }
+
+        if (!canBridgeModelError({
+            transient: metadataError.transient,
+            eventId: metadataError.eventId,
+            bridgedForEventId: metadataError.bridgedForEventId,
+            retriedAndFailed: metadataError.retriedAndFailed,
+            supersededByUserTurn: metadataError.supersededByUserTurn,
+            bridgeable: metadataError.bridgeable
+        })) {
+            return { ok: false, reason: 'not_bridgeable' };
+        }
+
+        const prompt = buildModelErrorBridgePrompt({
+            kind: bridgeInput.kind,
+            rawSnippet: bridgeInput.rawSnippet,
+            lastUserMessage: bridgeInput.lastUserMessage,
+            priorAssistantClaimsDone: bridgeInput.priorAssistantClaimsDone
+        });
+
+        const bridgedEventId = metadataError.eventId;
+
+        // Never overtake newer user intent already waiting in the queue.
+        // supersededByUserTurn is only stamped when a normal batch starts; if we
+        // unshift Bridge ahead of that batch we replay the old prompt first.
+        if (this.session.queue.hasPendingNonBridgeTurn()) {
+            this.markModelErrorSupersededByUserTurn();
+            return { ok: false, reason: 'superseded_by_newer_turn' };
+        }
+
+        // Drop any stale pending bridge for a different event before enqueue.
+        if (this.pendingBridgeEventId && this.pendingBridgeEventId !== bridgedEventId) {
+            this.cancelPendingBridge();
+        }
+
+        // Attribution arms when the bridge batch starts, not at enqueue.
+        this.pendingBridgeEventId = bridgedEventId;
+        this.pendingBridgeSource = source;
+
+        const mode = this.lastTurnMode ?? {
+            permissionMode: this.session.getPermissionMode() as PermissionMode,
+            model: this.currentBackendModel ?? this.session.model ?? undefined
+        };
+
+        // Front of queue only when no newer user turn is waiting.
+        // Provenance is queue-owned (`internal`); localId is cancel/telemetry only.
+        this.session.queue.unshiftIsolated(
+            prompt,
+            mode,
+            `bridge:${bridgedEventId}`,
+            { kind: 'model-error-bridge', eventId: bridgedEventId }
+        );
+        logger.debug(`[cursor-acp] modelError bridge enqueued for eventId=${bridgedEventId} source=${source}`);
+
+        return { ok: true };
+    }
+
+    /** Drop not-yet-started bridge queue entries and clear the retry gate. */
+    private cancelPendingBridge(): void {
+        const eventId = this.pendingBridgeEventId;
+        if (eventId) {
+            this.session.queue.cancelModelErrorBridge(eventId);
+        } else {
+            // Gate/queue desync: scrub any pending queue-owned bridge rows.
+            for (const item of this.session.queue.queue) {
+                if (item.internal?.kind === 'model-error-bridge') {
+                    this.session.queue.cancelModelErrorBridge(item.internal.eventId);
+                }
+            }
+        }
+        this.pendingBridgeEventId = null;
+        this.pendingBridgeSource = null;
+    }
+
+    private markModelErrorBridgeSucceeded(eventId: string, source: 'auto' | 'manual'): void {
+        const current = this.lastRecordedModelError;
+        if (!current || current.eventId !== eventId) {
+            return;
+        }
+        this.lastRecordedModelError = {
+            ...current,
+            bridgedForEventId: eventId
+        };
+        this.session.client.updateMetadata((metadata) => {
+            const err = metadata.lastModelError;
+            if (!err || err.eventId !== eventId) {
+                return metadata;
+            }
+            return {
+                ...metadata,
+                lastModelError: {
+                    ...err,
+                    bridgedForEventId: eventId
+                }
+            };
+        });
+        // Chat-visible recovery marker only. Not an AGENT_NOTIFY_SUMMARY.
+        this.session.sendSessionEvent({
+            type: 'modelErrorBridged',
+            kind: current.kind,
+            auto: source === 'auto',
+            eventId
+        });
+    }
+
+    /** Durable invalidation after a newer normal (non-bridge) turn starts. */
+    private markModelErrorSupersededByUserTurn(): void {
+        const current = this.lastRecordedModelError;
+        if (!current || current.supersededByUserTurn) {
+            return;
+        }
+        this.lastRecordedModelError = {
+            ...current,
+            supersededByUserTurn: true
+        };
+        this.session.client.updateMetadata((metadata) => {
+            const err = metadata.lastModelError;
+            if (!err || err.eventId !== current.eventId) {
+                return metadata;
+            }
+            return {
+                ...metadata,
+                lastModelError: {
+                    ...err,
+                    supersededByUserTurn: true
+                }
+            };
+        });
+    }
+
+    /** Load durable lastModelError from hub metadata after CLI restart/resume. */
+    private hydrateLastRecordedModelErrorFromMetadata(): void {
+        if (this.lastRecordedModelError) {
+            return;
+        }
+        const getMetadata = this.session.client.getMetadata;
+        if (typeof getMetadata !== 'function') {
+            return;
+        }
+        const persistedError = getMetadata.call(this.session.client)?.lastModelError;
+        if (!persistedError || typeof persistedError.eventId !== 'string') {
+            return;
+        }
+        this.lastRecordedModelError = {
+            ...persistedError,
+            lastUserMessage: persistedError.lastUserMessage ?? ''
+        };
     }
 
     private installLiveSessionConfigSync(
@@ -775,6 +1305,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private async handleAbort(): Promise<void> {
         const backend = this.backend;
         const sessionId = this.session.sessionId;
+        // Mark + clear bridge gates BEFORE any await. Otherwise a settling
+        // bridge prompt can race markModelErrorBridgeSucceeded and falsely
+        // persist bridgedForEventId / modelErrorBridged after the operator canceled.
+        this.userAbortRequested = true;
+        this.cancelPendingBridge();
+        this.bridgingForEventId = null;
+        this.bridgingSource = null;
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
         }

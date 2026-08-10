@@ -1,0 +1,166 @@
+import { afterEach, describe, expect, it } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Store } from '../store'
+import { RpcRegistry } from '../socket/rpcRegistry'
+import { writeAutoBridgeTransientModelErrorsEnabled } from '../config/autoBridgeTransientModelErrors'
+import { SyncEngine } from './syncEngine'
+
+const directories: string[] = []
+
+afterEach(async () => {
+    await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+})
+
+async function flushAsyncWork(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+describe('cursor auto-bridge reconcile on session-ready', () => {
+    async function setup(opts?: { namespace?: string; flavor?: string }) {
+        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-auto-bridge-reconcile-'))
+        directories.push(dataDir)
+
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+        engine.setSettingsDataDirForTests(dataDir)
+
+        const session = engine.getOrCreateSession(
+            'session-cursor-bootstrapping',
+            {
+                path: '/tmp/project',
+                host: 'localhost',
+                machineId: 'machine-1',
+                flavor: opts?.flavor ?? 'cursor'
+            },
+            null,
+            opts?.namespace ?? 'default'
+        )
+
+        const configCalls: Array<{ sessionId: string; config: Record<string, unknown> }> = []
+        ;(engine as unknown as {
+            rpcGateway: {
+                requestSessionConfig: (
+                    sessionId: string,
+                    config: Record<string, unknown>
+                ) => Promise<unknown>
+            }
+        }).rpcGateway.requestSessionConfig = async (sessionId, config) => {
+            configCalls.push({ sessionId, config })
+            return { applied: config }
+        }
+
+        return { engine, session, dataDir, configCalls }
+    }
+
+    it('pushes enable after session-ready when CLI fetched while inactive', async () => {
+        const { engine, session, dataDir, configCalls } = await setup()
+        // Simulate Settings toggle while the row is still inactive (create/get
+        // already handed the CLI the previous false default).
+        expect(session.active).toBe(false)
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
+
+        engine.handleSessionReady({ sid: session.id, time: Date.now() })
+        await flushAsyncWork()
+
+        expect(configCalls).toEqual([
+            {
+                sessionId: session.id,
+                config: { autoBridgeTransientModelErrors: true }
+            }
+        ])
+    })
+
+    it('pushes disable after session-ready so a stale CLI cannot keep auto-bridging', async () => {
+        const { engine, session, dataDir, configCalls } = await setup()
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, false)
+
+        engine.handleSessionReady({ sid: session.id, time: Date.now() })
+        await flushAsyncWork()
+
+        expect(configCalls).toEqual([
+            {
+                sessionId: session.id,
+                config: { autoBridgeTransientModelErrors: false }
+            }
+        ])
+    })
+
+    it('skips tenant namespaces and non-cursor flavors', async () => {
+        const tenant = await setup({ namespace: 'tenant-a' })
+        await writeAutoBridgeTransientModelErrorsEnabled(tenant.dataDir, true)
+        tenant.engine.handleSessionReady({ sid: tenant.session.id, time: Date.now() })
+        await flushAsyncWork()
+        expect(tenant.configCalls).toEqual([])
+
+        const claude = await setup({ flavor: 'claude' })
+        await writeAutoBridgeTransientModelErrorsEnabled(claude.dataDir, true)
+        claude.engine.handleSessionReady({ sid: claude.session.id, time: Date.now() })
+        await flushAsyncWork()
+        expect(claude.configCalls).toEqual([])
+    })
+
+    it('reconciles on first inactive → active transition after a toggle while inactive', async () => {
+        const { engine, session, dataDir, configCalls } = await setup()
+        expect(session.active).toBe(false)
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
+
+        engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+        await flushAsyncWork()
+
+        expect(configCalls).toEqual([
+            {
+                sessionId: session.id,
+                config: { autoBridgeTransientModelErrors: true }
+            }
+        ])
+    })
+
+    it('serializes settings fanout with an in-flight session-ready reconcile', async () => {
+        const { engine, session, dataDir, configCalls } = await setup()
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, false)
+
+        const firstRpc = { release: null as (() => void) | null }
+        ;(engine as unknown as {
+            rpcGateway: {
+                requestSessionConfig: (
+                    sessionId: string,
+                    config: Record<string, unknown>
+                ) => Promise<unknown>
+            }
+        }).rpcGateway.requestSessionConfig = async (sessionId, config) => {
+            configCalls.push({ sessionId, config })
+            if (configCalls.length === 1) {
+                await new Promise<void>((resolve) => {
+                    firstRpc.release = resolve
+                })
+            }
+            return { applied: config }
+        }
+
+        const reconcilePromise = engine.reconcileCursorAutoBridgeSetting(session.id)
+        await flushAsyncWork()
+        expect(firstRpc.release).toBeTypeOf('function')
+
+        // Become active while the first reconcile still holds the lock, then
+        // toggle + fanout so the serialized tail sees the new value.
+        engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
+        const fanoutPromise = engine.fanoutAutoBridgeTransientModelErrors(true)
+
+        firstRpc.release?.()
+        await Promise.all([reconcilePromise, fanoutPromise])
+        await flushAsyncWork()
+
+        expect(configCalls.some((call) => call.config.autoBridgeTransientModelErrors === true)).toBe(true)
+        expect(configCalls.at(-1)?.config).toEqual({ autoBridgeTransientModelErrors: true })
+    })
+})
