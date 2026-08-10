@@ -59,6 +59,31 @@ function resolveMachineForNamespace(
     return { ok: false, status: 404, error: 'Machine not found' }
 }
 
+/**
+ * Fork-only guard (kept out of upstream): sessions created via /cli/sessions
+ * must live inside one of their machine's declared workspace roots. Integration
+ * tests run from upstream-main checkouts (e.g. /tmp/hapi-1461-pristine) connect
+ * their own runner+CLI to this hub with the fleet token but report session
+ * directories like /tmp that no fleet runner declares as a workspace root;
+ * rejecting them here keeps fake sessions out of the hub regardless of which
+ * checkout the agent branched from. Set HAPI_FORK_ENFORCE_SESSION_ROOTS=0 to
+ * disable.
+ */
+function isWithinWorkspaceRoots(sessionPath: string, roots: string[]): boolean {
+    const normalize = (p: string): string => {
+        const normalized = p.replace(/\\/g, '/').replace(/\/+$/, '')
+        return normalized.length > 0 ? normalized : '/'
+    }
+    const path = normalize(sessionPath)
+    for (const root of roots) {
+        const base = normalize(root)
+        if (path === base || path.startsWith(base + '/')) {
+            return true
+        }
+    }
+    return false
+}
+
 function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
     return code === 'access_denied' ? 403
         : code === 'session_not_found' ? 404
@@ -117,6 +142,25 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
                 machineInput.runnerState ?? null,
                 namespace
             )
+        }
+
+        const sessionMetadata = (
+            typeof parsed.data.metadata === 'object' && parsed.data.metadata !== null
+        ) ? parsed.data.metadata as Record<string, unknown> : {}
+        if (process.env.HAPI_FORK_ENFORCE_SESSION_ROOTS !== '0') {
+            const machineId = typeof sessionMetadata.machineId === 'string'
+                ? sessionMetadata.machineId
+                : machineInput?.id
+            const sessionPath = typeof sessionMetadata.path === 'string' ? sessionMetadata.path : undefined
+            if (machineId && sessionPath) {
+                const machine = engine.getMachineByNamespace?.(machineId, namespace) ?? engine.getMachine(machineId)
+                const roots = machine?.metadata?.workspaceRoots
+                if (roots && roots.length > 0 && !isWithinWorkspaceRoots(sessionPath, roots)) {
+                    return c.json({
+                        error: `Session directory \"${sessionPath}\" is outside machine \"${machineId}\" workspace roots: ${roots.join(', ')}`
+                    }, 403)
+                }
+            }
         }
 
         try {
