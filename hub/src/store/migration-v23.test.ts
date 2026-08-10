@@ -15,9 +15,6 @@ afterEach(() => {
 
 describe('schema migration v22 to v23', () => {
     it('adds events and event_links tables to a V22 database', () => {
-    })
-
-        it('adds cost and context-only presence columns and rebuilds the usage index', () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v23-'))
         tempDirs.push(dir)
         const dbPath = join(dir, 'hapi.db')
@@ -29,9 +26,39 @@ describe('schema migration v22 to v23', () => {
             DROP TABLE IF EXISTS events;
             PRAGMA user_version = 22;
         `)
+        legacy.close()
+
+        const migrated = new Store(dbPath)
+        const internalDb = (migrated as unknown as { db: Database }).db
+        const events = internalDb.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+        ).get() as { name: string } | null
+        const links = internalDb.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_links'"
+        ).get() as { name: string } | null
+        const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+
+        expect(events?.name).toBe('events')
+        expect(links?.name).toBe('event_links')
+        // Tip after #1468/#1360: V23 A2A + V24 session_jobs + V25 run_id +
+        // V26 cost columns + V27 notification preferences.
+        expect(version.user_version).toBe(27)
+        migrated.close()
     })
 
-            legacy.exec('ALTER TABLE usage_events DROP COLUMN context_only')
+    it('adds cost and context-only presence columns and rebuilds the usage index', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v23-'))
+        tempDirs.push(dir)
+        const dbPath = join(dir, 'hapi.db')
+
+        new Store(dbPath).close()
+        const legacy = new Database(dbPath)
+        legacy.exec(`
+            DROP TABLE IF EXISTS event_links;
+            DROP TABLE IF EXISTS events;
+            PRAGMA user_version = 22;
+        `)
+        legacy.exec('ALTER TABLE usage_events DROP COLUMN context_only')
         legacy.exec('ALTER TABLE usage_events DROP COLUMN cost')
         legacy.exec('ALTER TABLE usage_events DROP COLUMN cost_currency')
         // Seed a v22-shaped derived row: the upgrade must wipe it so the lazy
@@ -50,21 +77,7 @@ describe('schema migration v22 to v23', () => {
 
         const migrated = new Store(dbPath)
         const internalDb = (migrated as unknown as { db: Database }).db
-        const events = internalDb.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events'"
-        ).get() as { name: string } | null
-        const links = internalDb.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'event_links'"
-        ).get() as { name: string } | null
-        const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
-
-        expect(events?.name).toBe('events')
-        expect(links?.name).toBe('event_links')
-        // Tip after #1404: V23 A2A + V24 session_jobs + V25 run_id.
-        expect(version.user_version).toBe(27)
-    })
-
-            const columns = new Set(
+        const columns = new Set(
             (internalDb.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
                 .map((column) => column.name)
         )

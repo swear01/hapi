@@ -28,9 +28,6 @@ describe('GET/PUT /api/hub-settings', () => {
         return { app, dataDir }
     }
 
-    it('returns default off for emit and chat display', async () => {
-        const { app } = await createApp()
-
     it('returns hub settings for owner', async () => {
         const { app } = await createApp()
         const response = await app.request('/api/hub-settings')

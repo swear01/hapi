@@ -616,6 +616,10 @@ describe('NotificationHub', () => {
 
         expect(pushCalls).toHaveLength(1)
         expect(pushCalls[0]?.atTs).toBe(5000)
+
+        hub.stop()
+    })
+
     it('suppresses all notification types when preferences are disabled', async () => {
         const engine = new FakeSyncEngine()
         const channel = new StubChannel()
@@ -1027,6 +1031,10 @@ describe('NotificationHub', () => {
         expect(engine.getSession(session.id)?.metadata?.lastModelError?.notifiedAt).toEqual(
             expect.any(Number)
         )
+
+        hub.stop()
+    })
+
     it('filters per event type by namespace preferences', async () => {
         const engine = new FakeSyncEngine()
         const channel = new StubChannel()
