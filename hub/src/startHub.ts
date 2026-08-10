@@ -276,7 +276,6 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         const offer = resolveCurrentUpgradeOffer()
         console.log(`[Hub] fleet upgrade channel=${offer.channel} target=${offer.targetVersion}`)
     }
->>>>>>> theirs
     syncEngine.setHubOwnerUserId(await getOrCreateOwnerId())
 
     const fcmConfig = resolveFcmConfig()

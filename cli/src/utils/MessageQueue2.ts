@@ -3,7 +3,6 @@ import { logger } from "@/ui/logger";
 export type QueueItemInternal =
     | { kind: 'model-error-bridge'; eventId: string };
 
-interface QueueItem<T> {
 export interface QueueItem<T> {
     message: string;
     mode: T;
@@ -18,6 +17,8 @@ export type CollectedQueueItem = {
     message: string
     localId?: string
     internal?: QueueItemInternal
+};
+
 export type QueueReservation<T> = {
     item: QueueItem<T>;
     index: number;

@@ -204,7 +204,6 @@ describe('isRenderIrrelevantPatch', () => {
             attachedJob: { ...job, startedAt: 50 },
             activeAt: 11_000
         })
->>>>>>> theirs
         expect(isRenderIrrelevantPatch(current, next)).toBe(false)
     })
 })

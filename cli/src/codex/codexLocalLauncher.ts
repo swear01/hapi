@@ -398,7 +398,7 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
                         session.sendAgentMessage(message);
                     }
                 }
->>>>>>> theirs            }
+            }
         });
         replayingUsage = false;
         for (const payload of orderedReplayUsagePayloads(replayUsage)) {
