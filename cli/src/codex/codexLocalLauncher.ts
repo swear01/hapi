@@ -397,7 +397,6 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
                         }
                     }
                 }
-                }
             }
         });
         replayingUsage = false;
