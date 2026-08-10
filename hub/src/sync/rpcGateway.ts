@@ -35,6 +35,14 @@ import type {
 } from '@hapi/protocol/apiTypes'
 import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
+import type {
+    AgentProvider,
+    ProviderListResponse,
+    ProviderHealthCheckResponse,
+    ProviderMutationResponse,
+    ProviderProfileInput,
+    ProviderProfileUpdate
+} from '@hapi/protocol'
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
 const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
@@ -176,6 +184,7 @@ export class RpcGateway {
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
         startingMode?: 'remote' | 'pty',
+        providerProfileId?: string | null,
         // Hub session id to reuse for this spawn. When set, the runner boots the
         // CLI with `--hapi-session-id`, so the child reuses the existing hub
         // session row (same id) instead of minting a new one.
@@ -189,6 +198,7 @@ export class RpcGateway {
                     type: 'spawn-in-directory',
                     directory,
                     agent,
+                    providerProfileId,
                     model,
                     modelReasoningEffort,
                     yolo,
@@ -265,6 +275,26 @@ export class RpcGateway {
         return exists
     }
 
+    async listProviderProfiles(machineId: string, agent?: AgentProvider): Promise<ProviderListResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderList, { agent }) as ProviderListResponse
+    }
+
+    async createProviderProfile(machineId: string, input: ProviderProfileInput): Promise<ProviderMutationResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderCreate, input) as ProviderMutationResponse
+    }
+
+    async updateProviderProfile(machineId: string, id: string, patch: ProviderProfileUpdate): Promise<ProviderMutationResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderUpdate, { id, patch }) as ProviderMutationResponse
+    }
+
+    async setDefaultProvider(machineId: string, agent: AgentProvider, id: string | null): Promise<ProviderMutationResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderSetDefault, { agent, id }) as ProviderMutationResponse
+    }
+
+    async checkProviderHealth(machineId: string, id: string, refreshModels: boolean): Promise<ProviderHealthCheckResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderHealthCheck, { id, refreshModels }) as ProviderHealthCheckResponse
+    }
+
     async getCursorChatStoreStatus(
         machineId: string,
         workspacePath: string,
@@ -277,6 +307,15 @@ export class RpcGateway {
             { workspacePath, cursorSessionId, homeDir }
         )
         return CursorChatStoreStatusSchema.parse(result)
+    }
+
+    async stopRunner(machineId: string): Promise<void> {
+        await this.machineRpc(machineId, RPC_METHODS.StopRunner, {})
+    }
+
+    async runnerSelfUpgrade(machineId: string, offer: unknown): Promise<unknown> {
+        // Upgrades can take minutes (npm install / artifact download).
+        return await this.machineRpc(machineId, RPC_METHODS.RunnerSelfUpgrade, { offer }, 10 * 60_000)
     }
 
     async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {
@@ -407,6 +446,16 @@ export class RpcGateway {
             {},
             MODEL_LIST_RPC_TIMEOUT_MS
         ) as RpcListCopilotModelsResponse
+    }
+
+    async steerQueuedMessage(
+        sessionId: string,
+        localId: string
+    ): Promise<{ steered: boolean; error?: string }> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
+            steered: boolean
+            error?: string
+        }
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

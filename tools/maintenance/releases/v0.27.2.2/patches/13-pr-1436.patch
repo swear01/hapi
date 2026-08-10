@@ -1,0 +1,1099 @@
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 118bd01f9..d2f52c935 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -62,7 +62,7 @@ import { PiThinkingLevelPanel } from './PiThinkingLevelPanel'
+ import type { ApiClient } from '@/api/client'
+ import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
+ import { useDictation } from '@/hooks/useDictation'
+-import type { ComposerSendIntent } from '@/lib/messageDelivery'
++import { resolveMessageDeliveryMode, type ComposerSendIntent } from '@/lib/messageDelivery'
+ import type { MessageDeliveryMode } from '@hapi/protocol'
+ 
+ export interface TextInputState {
+@@ -469,7 +469,12 @@ export function HappyComposer(props: {
+         provider: voiceInput.provider,
+         mode: voiceInput.transcriptionMode,
+         getCurrentText: getCurrentComposerText,
+-        onTextChange: setComposerText
++        onTextChange: setComposerText,
++        sendMessage: async (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => {
++            if (props.voiceTranscriptionApi) {
++                await props.voiceTranscriptionApi.sendMessage(sessionId, text, null, undefined, undefined, deliveryMode)
++            }
++        }
+     }), [
+         props.voiceTranscriptionApi,
+         voiceInput.provider,
+@@ -480,8 +485,13 @@ export function HappyComposer(props: {
+     const dictation = useDictation(dictationConfig)
+     const dictationActive = voiceInput.voiceMode === 'dictation'
+     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
++    const handleDictationToggle = useCallback(async () => {
++        await dictation.toggle()
++    }, [dictation])
++
++
+     const effectiveVoiceToggle = dictationActive
+-        ? (dictation.supported ? dictation.toggle : undefined)
++        ? (dictation.supported ? handleDictationToggle : undefined)
+         : onVoiceToggle
+     const previousVoiceModeRef = useRef(voiceInput.voiceMode)
+     useEffect(() => {
+@@ -1102,6 +1112,33 @@ export function HappyComposer(props: {
+     }, [pendingSendIntentRef])
+ 
+     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
++        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
++            const canDirectSend = dictation.status === 'connected'
++                && active
++                && attachments.length === 0
++                && pendingSchedule == null
++                && !props.scratchlistMode
++                && intent === 'default'
++            if (canDirectSend) {
++                richInputRef.current?.flushSerializedText()
++                const targetSessionId = props.sessionId ?? ''
++                const initialText = api.composer().getState().text
++                const deliveryMode = resolveMessageDeliveryMode({
++                    agentFlavor: props.agentFlavor,
++                    isSessionThinking: props.thinking ?? false,
++                    intent: 'default'
++                })
++                api.composer().setText('')
++                if (targetSessionId && dictation.stopAndSend) {
++                    await dictation.stopAndSend(targetSessionId, initialText, deliveryMode)
++                } else {
++                    await dictation.toggle()
++                }
++            } else {
++                await dictation.toggle()
++            }
++            return
++        }
+         // SessionChat preloads the ref only when restoring a rejected send:
+         // queue retries remain queue, while an ordinary fresh send always
+         // starts from the explicit/default argument. Capture it before the
+@@ -1212,6 +1249,14 @@ export function HappyComposer(props: {
+         sendError,
+         pendingSendIntentRef,
+         resetPendingSendIntent,
++        dictationActive,
++        dictation.status,
++        dictation.toggle,
++        dictation.stopAndSend,
++        props.sessionId,
++        props.agentFlavor,
++        props.thinking,
++        active,
+     ])
+ 
+     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 52bcbdd67..c3ccdf756 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1105,15 +1105,38 @@ function SessionChatInner(props: SessionChatProps) {
+     // Register session store for voice client tools
+     useEffect(() => {
+         registerSessionStore({
+-            getSession: () => props.session as { agentState?: { requests?: Record<string, unknown> } } | null,
+-            sendMessage: (_sessionId: string, message: string) => props.onSend(message),
+-            approvePermission: async (_sessionId: string, requestId: string) => {
+-                await props.api.approvePermission(props.session.id, requestId)
+-                props.onRefresh()
++            getSession: async (sessionId: string) => {
++                if (sessionId === props.session.id) {
++                    return props.session as unknown as { agentState?: { requests?: Record<string, unknown> } }
++                }
++                try {
++                    const res = await props.api.getSession(sessionId)
++                    return res.session as unknown as { agentState?: { requests?: Record<string, unknown> } }
++                } catch {
++                    return null
++                }
+             },
+-            denyPermission: async (_sessionId: string, requestId: string) => {
+-                await props.api.denyPermission(props.session.id, requestId)
+-                props.onRefresh()
++            sendMessage: async (sessionId: string, message: string) => {
++                if (sessionId === props.session.id) {
++                    const accepted = await props.onSend(message)
++                    if (!accepted) {
++                        throw new Error('Message was not accepted')
++                    }
++                } else {
++                    await props.api.sendMessage(sessionId, message)
++                }
++            },
++            approvePermission: async (sessionId: string, requestId: string) => {
++                await props.api.approvePermission(sessionId, requestId)
++                if (sessionId === props.session.id) {
++                    props.onRefresh()
++                }
++            },
++            denyPermission: async (sessionId: string, requestId: string) => {
++                await props.api.denyPermission(sessionId, requestId)
++                if (sessionId === props.session.id) {
++                    props.onRefresh()
++                }
+             }
+         })
+     }, [props.session, props.api, props.onSend, props.onRefresh])
+diff --git a/web/src/hooks/useDictation.test.ts b/web/src/hooks/useDictation.test.ts
+index 77d3870c2..8bfc10eb9 100644
+--- a/web/src/hooks/useDictation.test.ts
++++ b/web/src/hooks/useDictation.test.ts
+@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
+ import { act, renderHook, waitFor } from '@testing-library/react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { ApiClient } from '@/api/client'
++import { getDraft, saveDraft } from '@/lib/composer-drafts'
+ import { appendTranscript, useDictation } from './useDictation'
+ 
+ describe('appendTranscript', () => {
+@@ -112,4 +113,458 @@ describe('useDictation', () => {
+         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft final words'))
+         expect(result.current.partialTranscript).toBe('')
+     })
++
++    it('sends message to target session when unmounted after stopAndSend', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        const onTextChange = vi.fn()
++        let resolveTranscribe: ((res: { text: string }) => void) | null = null
++        const api = {
++            transcribeVoice: vi.fn(() => new Promise<{ text: string }>((resolve) => { resolveTranscribe = resolve })),
++            sendMessage: vi.fn(async () => {})
++        }
++
++        const { result, unmount } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => 'initial text',
++            onTextChange
++        }))
++
++        await act(() => result.current.toggle())
++        expect(result.current.status).toBe('connected')
++
++        act(() => {
++            result.current.stopAndSend('session-A', 'explicit initial text')
++        })
++
++        unmount()
++
++        await act(async () => {
++            resolveTranscribe?.({ text: 'voice payload' })
++        })
++
++        await waitFor(() => {
++            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload', null, undefined, undefined, undefined)
++        })
++    })
++
++    it('restores draft via onTextChange if sendMessage fails while still mounted', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        let currentText = 'draft text'
++        const onTextChange = vi.fn((val) => { currentText = val })
++        const api = {
++            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
++            sendMessage: vi.fn(async () => { throw new Error('Send failed') })
++        }
++
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => currentText,
++            onTextChange
++        }))
++
++        await act(() => result.current.toggle())
++        await act(() => {
++            currentText = ''
++            return result.current.stopAndSend('session-A', 'draft text')
++        })
++
++        await waitFor(() => {
++            expect(onTextChange).toHaveBeenCalledWith('draft text voice text')
++            expect(result.current.status).toBe('error')
++        })
++    })
++
++    it('does not clobber non-empty replacement draft if sendMessage fails while mounted', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        const onTextChange = vi.fn()
++        let currentText = 'initial'
++        const api = {
++            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
++            sendMessage: vi.fn(async () => { throw new Error('Send failed') })
++        }
++
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => currentText,
++            onTextChange
++        }))
++
++        await act(() => result.current.toggle())
++        act(() => {
++            result.current.stopAndSend('session-A', 'initial')
++            currentText = 'user typed new text'
++        })
++
++        await waitFor(() => {
++            expect(result.current.status).toBe('error')
++        })
++        expect(onTextChange).not.toHaveBeenCalledWith('initial voice text')
++    })
++
++    it('does not clobber replacement draft when zero-byte recording completes', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockZeroByteMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob([], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockZeroByteMediaRecorder)
++
++        const onTextChange = vi.fn()
++        let currentText = 'initial'
++        const api = {
++            transcribeVoice: vi.fn(),
++            sendMessage: vi.fn()
++        }
++
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => currentText,
++            onTextChange
++        }))
++
++        await act(() => result.current.toggle())
++        act(() => {
++            result.current.stopAndSend('session-A', 'initial')
++            currentText = 'user typed replacement text'
++        })
++
++        await waitFor(() => {
++            expect(result.current.status).toBe('error')
++            expect(result.current.error).toBe('No audio was recorded')
++        })
++        expect(onTextChange).not.toHaveBeenCalledWith('initial')
++    })
++
++    it('does not transcribe when unmounted without stopAndSend', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        const api = {
++            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
++            sendMessage: vi.fn()
++        }
++
++        const { result, unmount } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => '',
++            onTextChange: vi.fn()
++        }))
++
++        await act(() => result.current.toggle())
++        unmount()
++
++        await new Promise((r) => setTimeout(r, 50))
++        expect(api.transcribeVoice).not.toHaveBeenCalled()
++    })
++
++    it('clears persisted draft when sendMessage succeeds', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onerror: (() => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        saveDraft('session-A', 'old draft')
++
++        const api = {
++            transcribeVoice: vi.fn(async () => ({ text: 'voice text' })),
++            sendMessage: vi.fn(async () => {})
++        }
++
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => '',
++            onTextChange: vi.fn()
++        }))
++
++        await act(() => result.current.toggle())
++        await act(() => result.current.stopAndSend('session-A', 'initial draft'))
++
++        await waitFor(() => {
++            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial draft voice text', null, undefined, undefined, undefined)
++        })
++        expect(getDraft('session-A')).toBe('')
++    })
++
++    it('forwards saved language from localStorage to transcribeVoice', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++        localStorage.setItem('hapi-voice-lang', 'zh-TW')
++
++        const api = {
++            transcribeVoice: vi.fn(async () => ({ text: '轉錄內容' }))
++        }
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => '',
++            onTextChange: vi.fn()
++        }))
++
++        await act(() => result.current.toggle())
++        await act(() => result.current.toggle())
++
++        await waitFor(() => {
++            expect(api.transcribeVoice).toHaveBeenCalledWith(expect.objectContaining({
++                language: 'zh-TW'
++            }))
++        })
++    })
++
++    it('forwards deliveryMode to sendMessage when stopAndSend specifies it', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        const sendMessage = vi.fn(async () => {})
++        const api = {
++            transcribeVoice: vi.fn(async () => ({ text: 'steer me' })),
++            sendMessage
++        }
++
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => '',
++            onTextChange: vi.fn(),
++            sendMessage
++        }))
++
++        await act(() => result.current.toggle())
++        await act(() => result.current.stopAndSend('session-A', 'initial', 'steer'))
++
++        await waitFor(() => {
++            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial steer me', 'steer')
++        })
++    })
++
++    it('does not clear newer draft saved after stopAndSend started', async () => {
++        const stopTrack = vi.fn()
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
++        })
++
++        class MockMediaRecorder {
++            static isTypeSupported() { return true }
++            state: RecordingState = 'inactive'
++            mimeType = 'audio/webm'
++            ondataavailable: ((event: BlobEvent) => void) | null = null
++            onstop: (() => void) | null = null
++            start() { this.state = 'recording' }
++            stop() {
++                this.state = 'inactive'
++                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
++                this.onstop?.()
++            }
++        }
++        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
++
++        saveDraft('session-A', 'draft at start')
++
++        const sendMessage = vi.fn(async () => {})
++        const api = {
++            transcribeVoice: vi.fn(async () => {
++                // Simulate user editing draft during transcription
++                saveDraft('session-A', 'newer draft typed by user')
++                return { text: 'transcribed' }
++            }),
++            sendMessage
++        }
++
++        const { result } = renderHook(() => useDictation({
++            api: api as unknown as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => '',
++            onTextChange: vi.fn(),
++            sendMessage
++        }))
++
++        await act(() => result.current.toggle())
++        await act(() => result.current.stopAndSend('session-A', 'initial draft'))
++
++        await waitFor(() => {
++            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial draft transcribed', undefined)
++        })
++        expect(getDraft('session-A')).toBe('newer draft typed by user')
++    })
++
++    it('reports supported as false when browser recording APIs are unavailable', () => {
++        Object.defineProperty(navigator, 'mediaDevices', {
++            configurable: true,
++            value: undefined
++        })
++        const { result } = renderHook(() => useDictation({
++            api: {} as ApiClient,
++            provider: 'openai',
++            mode: 'standard',
++            getCurrentText: () => '',
++            onTextChange: vi.fn()
++        }))
++
++        expect(result.current.supported).toBe(false)
++    })
+ })
+diff --git a/web/src/hooks/useDictation.ts b/web/src/hooks/useDictation.ts
+index 9976b597d..f5e16c3a3 100644
+--- a/web/src/hooks/useDictation.ts
++++ b/web/src/hooks/useDictation.ts
+@@ -1,6 +1,8 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import type { ApiClient } from '@/api/client'
++import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
+ import type { ConversationStatus } from '@/realtime/types'
++import type { MessageDeliveryMode } from '@hapi/protocol'
+ import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
+ import { useRealtimeDictation } from './useRealtimeDictation'
+ 
+@@ -33,6 +35,7 @@ export function useDictation(config: {
+     mode: TranscriptionMode
+     getCurrentText: () => string
+     onTextChange: (text: string) => void
++    sendMessage?: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
+ }) {
+     const onFinalTranscript = useCallback((transcript: string) => {
+         config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
+@@ -41,85 +44,147 @@ export function useDictation(config: {
+         api: config.api,
+         provider: config.provider,
+         mode: config.mode,
+-        onFinalTranscript
++        onFinalTranscript,
++        sendMessage: config.sendMessage,
++        getCurrentText: config.getCurrentText
+     })
+     const browserCanRecord = typeof navigator !== 'undefined'
+         && typeof navigator.mediaDevices?.getUserMedia === 'function'
+         && typeof MediaRecorder !== 'undefined'
+-    const standardSupported = config.api !== null
++    const standardSupported = config.mode === 'standard'
++        && config.api !== null
+         && config.provider !== null
+-        && config.mode === 'standard'
+         && browserCanRecord
++
++    const supported = realtime.supported || standardSupported
+     const [status, setStatus] = useState<ConversationStatus>('disconnected')
+     const [error, setError] = useState<string | null>(null)
++    const mountedRef = useRef(true)
+     const recorderRef = useRef<MediaRecorder | null>(null)
+-    const streamRef = useRef<MediaStream | null>(null)
++    const mediaStreamRef = useRef<MediaStream | null>(null)
+     const chunksRef = useRef<Blob[]>([])
+-    const mountedRef = useRef(true)
+     const operationRef = useRef(0)
+     const transcribingRef = useRef(false)
++    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+ 
+     const stopTracks = useCallback(() => {
+-        streamRef.current?.getTracks().forEach((track) => track.stop())
+-        streamRef.current = null
++        if (mediaStreamRef.current) {
++            mediaStreamRef.current.getTracks().forEach((track) => track.stop())
++            mediaStreamRef.current = null
++        }
+     }, [])
+ 
+     const start = useCallback(async () => {
+-        if (!standardSupported || !config.provider || status === 'connecting' || status === 'connected') return
+-        const operation = ++operationRef.current
+-        const provider = config.provider
+-        const language = localStorage.getItem('hapi-voice-lang') || undefined
++        if (status !== 'disconnected' && status !== 'error') return
+         setError(null)
++        if (realtime.supported) {
++            await realtime.toggle()
++            return
++        }
++        if (!standardSupported || !browserCanRecord) {
++            setError('Voice input is not supported in this browser')
++            setStatus('error')
++            return
++        }
++        const mimeType = preferredMimeType()
++        operationRef.current += 1
++        const operation = operationRef.current
+         setStatus('connecting')
++
+         try {
+-            const stream = await navigator.mediaDevices.getUserMedia({
+-                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+-            })
++            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+             if (operationRef.current !== operation) {
+                 stream.getTracks().forEach((track) => track.stop())
+                 return
+             }
+-            const mimeType = preferredMimeType()
++            mediaStreamRef.current = stream
++            chunksRef.current = []
++
+             const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+-            streamRef.current = stream
+             recorderRef.current = recorder
+-            chunksRef.current = []
++            const type = recorder.mimeType || mimeType || 'audio/webm'
++
+             recorder.ondataavailable = (event) => {
+                 if (event.data.size > 0) chunksRef.current.push(event.data)
+             }
+-            recorder.onerror = () => {
+-                stopTracks()
+-                setError('Audio recording failed')
+-                setStatus('error')
+-            }
++
+             recorder.onstop = async () => {
+                 stopTracks()
+-                const type = recorder.mimeType || mimeType || 'audio/webm'
+-                const blob = new Blob(chunksRef.current, { type })
+-                recorderRef.current = null
+-                chunksRef.current = []
+-                if (!mountedRef.current) return
+-                if (!blob.size) {
+-                    transcribingRef.current = false
+-                    setError('No audio was recorded')
+-                    setStatus('error')
+-                    return
+-                }
+-                transcribingRef.current = true
+                 try {
+-                    const result = await config.api!.transcribeVoice({
+-                        file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
+-                        provider,
+-                        mode: 'standard',
+-                        language
+-                    })
+-                    if (!mountedRef.current) return
+-                    config.onTextChange(appendTranscript(config.getCurrentText(), result.text))
+-                    setStatus('disconnected')
+-                } catch (transcriptionError) {
+-                    if (!mountedRef.current) return
+-                    setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
+-                    setStatus('error')
++                    const blob = new Blob(chunksRef.current, { type })
++                    recorderRef.current = null
++                    chunksRef.current = []
++                    const pendingSend = sendOnFinishRef.current
++                    sendOnFinishRef.current = null
++
++                    if (!mountedRef.current && !pendingSend) return
++
++                    const draftUnchanged = (sid: string, baseline: string) => {
++                        const cur = getDraft(sid)
++                        return cur === '' || cur === baseline
++                    }
++
++                    if (!blob.size) {
++                        transcribingRef.current = false
++                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
++                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
++                        }
++                        if (mountedRef.current) {
++                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
++                            setError('No audio was recorded')
++                            setStatus('error')
++                        }
++                        return
++                    }
++                    transcribingRef.current = true
++                    try {
++                        const savedLanguage = (typeof localStorage !== 'undefined' && localStorage.getItem('hapi-voice-lang')) || undefined
++                        const result = await config.api!.transcribeVoice({
++                            file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
++                            provider: config.provider!,
++                            mode: 'standard',
++                            language: savedLanguage
++                        })
++                        const transcribedText = result.text || ''
++                        if (pendingSend) {
++                            const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
++                            if (finalMessage.trim()) {
++                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
++                                try {
++                                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
++                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
++                                        clearDraft(pendingSend.sessionId)
++                                    }
++                                } catch (sendError) {
++                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
++                                        saveDraft(pendingSend.sessionId, finalMessage)
++                                    }
++                                    if (mountedRef.current) {
++                                        if (!config.getCurrentText().trim()) {
++                                            config.onTextChange(finalMessage)
++                                        }
++                                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
++                                        setStatus('error')
++                                        return
++                                    }
++                                }
++                            }
++                        } else if (mountedRef.current) {
++                            config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))
++                        }
++                        if (mountedRef.current) {
++                            setStatus('disconnected')
++                        }
++                    } catch (transcriptionError) {
++                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
++                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
++                        }
++                        if (mountedRef.current) {
++                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
++                            setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
++                            setStatus('error')
++                        }
++                    }
+                 } finally {
+                     transcribingRef.current = false
+                 }
+@@ -148,6 +213,16 @@ export function useDictation(config: {
+         }
+     }, [stopTracks])
+ 
++    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
++        sendOnFinishRef.current = {
++            sessionId: targetSessionId,
++            initialText: initialText ?? config.getCurrentText(),
++            draftAtStart: getDraft(targetSessionId),
++            deliveryMode
++        }
++        await stop()
++    }, [config, stop])
++
+     const toggle = useCallback(async () => {
+         if (status === 'connected' || status === 'connecting') await stop()
+         else await start()
+@@ -166,6 +241,6 @@ export function useDictation(config: {
+     }, [stopTracks])
+ 
+     return config.mode === 'realtime'
+-        ? realtime
+-        : { supported: standardSupported, status, error, partialTranscript: '', toggle }
++        ? { ...realtime, stopAndSend: realtime.stopAndSend }
++        : { supported, status, error, partialTranscript: '', toggle, stopAndSend }
+ }
+diff --git a/web/src/hooks/useRealtimeDictation.ts b/web/src/hooks/useRealtimeDictation.ts
+index 8ed207e05..e77642b96 100644
+--- a/web/src/hooks/useRealtimeDictation.ts
++++ b/web/src/hooks/useRealtimeDictation.ts
+@@ -5,8 +5,11 @@ import {
+     type TranscriptionMode,
+     type TranscriptionProvider
+ } from '@hapi/protocol/voice'
++import type { MessageDeliveryMode } from '@hapi/protocol'
+ import type { ApiClient } from '@/api/client'
++import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
+ import type { ConversationStatus } from '@/realtime/types'
++import { appendTranscript } from './useDictation'
+ import {
+     startBrowserLocalTranscription,
+     startDeepgramRealtimeTranscription,
+@@ -29,6 +32,8 @@ export function useRealtimeDictation(config: {
+     provider: TranscriptionProvider | null
+     mode: TranscriptionMode
+     onFinalTranscript: (text: string) => void
++    sendMessage?: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
++    getCurrentText?: () => string
+ }) {
+     const supported = config.api !== null
+         && config.mode === 'realtime'
+@@ -53,23 +58,70 @@ export function useRealtimeDictation(config: {
+         if (mountedRef.current) setPartialTranscript(text)
+     }, [])
+ 
+-    const finish = useCallback((text: string) => {
+-        if (!mountedRef.current) return
++    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
++
++    const finish = useCallback(async (text: string) => {
++        const pendingSend = sendOnFinishRef.current
++        sendOnFinishRef.current = null
+         updatePartial('')
+-        onFinalTranscriptRef.current(text)
+-        setStatus('disconnected')
+-    }, [updatePartial])
++        if (pendingSend) {
++            const finalMessage = appendTranscript(pendingSend.initialText, text)
++            if (finalMessage.trim()) {
++                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
++                try {
++                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
++                    const cur = getDraft(pendingSend.sessionId)
++                    if (cur === '' || cur === pendingSend.draftAtStart) {
++                        clearDraft(pendingSend.sessionId)
++                    }
++                } catch (sendError) {
++                    const cur = getDraft(pendingSend.sessionId)
++                    if (cur === '' || cur === pendingSend.draftAtStart) {
++                        saveDraft(pendingSend.sessionId, finalMessage)
++                    }
++                    if (mountedRef.current) {
++                        if (!config.getCurrentText?.().trim()) {
++                            onFinalTranscriptRef.current(finalMessage)
++                        }
++                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
++                        setStatus('error')
++                        return
++                    }
++                }
++            }
++        } else if (mountedRef.current) {
++            onFinalTranscriptRef.current(text)
++            setStatus('disconnected')
++        }
++        if (mountedRef.current) {
++            setStatus('disconnected')
++        }
++    }, [config.api, config.getCurrentText, config.sendMessage, updatePartial])
+ 
+     const fail = useCallback((value: unknown) => {
+-        if (!mountedRef.current) return
++        const pendingSend = sendOnFinishRef.current
++        sendOnFinishRef.current = null
++        if (pendingSend) {
++            const finalMessage = appendTranscript(pendingSend.initialText, partialRef.current)
++            const cur = getDraft(pendingSend.sessionId)
++            if (cur === '' || cur === pendingSend.draftAtStart) {
++                saveDraft(pendingSend.sessionId, finalMessage)
++            }
++            if (mountedRef.current) {
++                if (!config.getCurrentText?.().trim()) {
++                    onFinalTranscriptRef.current(finalMessage)
++                }
++            }
++        }
+         elevenLabsActiveRef.current = false
+         resolveElevenLabsCommitRef.current?.()
+         resolveElevenLabsCommitRef.current = null
++        if (!mountedRef.current) return
+         sessionRef.current?.cancel()
+         sessionRef.current = null
+-        setError(value instanceof Error ? value.message : 'Realtime transcription failed')
++        setError(value instanceof Error ? value.message : 'Transcription failed')
+         setStatus('error')
+-    }, [])
++    }, [config.getCurrentText])
+ 
+     const elevenLabs = useScribe({
+         modelId: ELEVENLABS_REALTIME_TRANSCRIPTION_MODEL,
+@@ -224,6 +276,11 @@ export function useRealtimeDictation(config: {
+         }
+     }, [elevenLabs, fail])
+ 
++    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
++        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), deliveryMode }
++        await stop()
++    }, [stop])
++
+     const toggle = useCallback(async () => {
+         if (status === 'connected' || status === 'connecting') await stop()
+         else await start()
+@@ -233,6 +290,7 @@ export function useRealtimeDictation(config: {
+         mountedRef.current = true
+         return () => {
+             mountedRef.current = false
++            if (sendOnFinishRef.current) return
+             operationRef.current += 1
+             startAbortRef.current?.abort()
+             startAbortRef.current = null
+@@ -244,5 +302,5 @@ export function useRealtimeDictation(config: {
+         }
+     }, [])
+ 
+-    return { supported, status, error, partialTranscript, toggle }
++    return { supported, status, error, partialTranscript, toggle, stopAndSend }
+ }
+diff --git a/web/src/realtime/realtimeClientTools.test.ts b/web/src/realtime/realtimeClientTools.test.ts
+new file mode 100644
+index 000000000..2d8feea29
+--- /dev/null
++++ b/web/src/realtime/realtimeClientTools.test.ts
+@@ -0,0 +1,67 @@
++import { describe, expect, it, vi } from 'vitest'
++import { realtimeClientTools, registerSessionStore } from './realtimeClientTools'
++import { updateCurrentSessionId } from './RealtimeSession'
++
++describe('realtimeClientTools', () => {
++    it('sends message to target sessionId via api.sendMessage when active session differs', async () => {
++        const mockApi = {
++            sendMessage: vi.fn(async (_sessionId: string, _message: string) => {})
++        }
++        const sessionBOnSend = vi.fn()
++
++        registerSessionStore({
++            getSession: (id) => (id === 'session-B' ? { agentState: {} } : null),
++            sendMessage: (sessionId, message) => {
++                if (sessionId === 'session-B') {
++                    sessionBOnSend(message)
++                } else {
++                    mockApi.sendMessage(sessionId, message)
++                }
++            },
++            approvePermission: async (_sessionId: string, _requestId: string) => {},
++            denyPermission: async (_sessionId: string, _requestId: string) => {}
++        })
++
++        updateCurrentSessionId('session-A')
++
++        const result = await realtimeClientTools.messageCodingAgent({ message: 'fix the bug' })
++
++        expect(result).toContain('sent')
++        expect(sessionBOnSend).not.toHaveBeenCalled()
++        expect(mockApi.sendMessage).toHaveBeenCalledWith('session-A', 'fix the bug')
++    })
++
++    it('returns error when sessionStore.sendMessage throws or rejects', async () => {
++        registerSessionStore({
++            getSession: () => null,
++            sendMessage: async () => {
++                throw new Error('Network error')
++            },
++            approvePermission: async (_sessionId: string, _requestId: string) => {},
++            denyPermission: async (_sessionId: string, _requestId: string) => {}
++        })
++
++        updateCurrentSessionId('session-A')
++
++        const result = await realtimeClientTools.messageCodingAgent({ message: 'do something' })
++
++        expect(result).toBe('error (failed to send message)')
++    })
++
++    it('approves permission for target session retrieved asynchronously', async () => {
++        const approvePermission = vi.fn(async () => {})
++        registerSessionStore({
++            getSession: async (id) => (id === 'session-A' ? { agentState: { requests: { 'req-123': {} } } } : null),
++            sendMessage: async () => {},
++            approvePermission,
++            denyPermission: async () => {}
++        })
++
++        updateCurrentSessionId('session-A')
++
++        const result = await realtimeClientTools.processPermissionRequest({ decision: 'allow' })
++
++        expect(result).toContain('done')
++        expect(approvePermission).toHaveBeenCalledWith('session-A', 'req-123')
++    })
++})
+diff --git a/web/src/realtime/realtimeClientTools.ts b/web/src/realtime/realtimeClientTools.ts
+index a2490ac81..1d9970163 100644
+--- a/web/src/realtime/realtimeClientTools.ts
++++ b/web/src/realtime/realtimeClientTools.ts
+@@ -3,8 +3,8 @@ import { VOICE_CONFIG } from './voiceConfig'
+ 
+ // Store for session state and API client
+ let sessionStore: {
+-    getSession: (sessionId: string) => { agentState?: { requests?: Record<string, unknown> } } | null
+-    sendMessage: (sessionId: string, message: string) => void
++    getSession: (sessionId: string) => Promise<{ agentState?: { requests?: Record<string, unknown> } } | null> | { agentState?: { requests?: Record<string, unknown> } } | null
++    sendMessage: (sessionId: string, message: string) => Promise<void> | void
+     approvePermission: (sessionId: string, requestId: string) => Promise<void>
+     denyPermission: (sessionId: string, requestId: string) => Promise<void>
+ } | null = null
+@@ -50,8 +50,13 @@ export const realtimeClientTools = {
+             console.log('[Voice] Sending message to session:', sessionId)
+         }
+ 
+-        sessionStore.sendMessage(sessionId, message)
+-        return "sent [DO NOT say anything else, simply say 'sent']"
++        try {
++            await sessionStore.sendMessage(sessionId, message)
++            return "sent [DO NOT say anything else, simply say 'sent']"
++        } catch (sendError) {
++            console.error('[Voice] Failed to send message to session:', sendError)
++            return 'error (failed to send message)'
++        }
+     },
+ 
+     /**
+@@ -83,7 +88,7 @@ export const realtimeClientTools = {
+         }
+ 
+         // Get the current session to check for permission requests
+-        const session = sessionStore.getSession(sessionId)
++        const session = await sessionStore.getSession(sessionId)
+         const requests = session?.agentState?.requests
+ 
+         if (!requests || Object.keys(requests).length === 0) {

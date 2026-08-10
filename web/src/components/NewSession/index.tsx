@@ -1,7 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
-import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
-import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
+import type { AgentProvider, CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary, ProviderProfileView } from '@/types/api'
+import { AGENT_PROVIDER_CAPABILITIES } from '@hapi/protocol'
+import type { CodexCollaborationMode, CopilotAgentMode, GrokPermissionMode, PermissionMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
@@ -36,7 +37,7 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
+import { MODEL_OPTIONS, type AgentType, type LaunchEffort, type CodexReasoningEffort, type NewSessionServiceTier, type SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { CollaborationModeSelector } from './CollaborationModeSelector'
@@ -72,6 +73,7 @@ import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
 import { PiSessionImportDialog } from '@/components/PiSessionImportDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { formatRunnerSpawnError } from '../../utils/formatRunnerSpawnError'
+import { activeProviderProfile, mergeModelOptions } from '@/lib/provider-models'
 import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
 import { useToast } from '@/lib/toast-context'
 
@@ -103,6 +105,10 @@ export function NewSession(props: {
     const [legacyCodexYolo] = useState(
         () => loadPreferredAgent() === 'codex' && loadPreferredYoloMode()
     )
+    const [providerProfileId, setProviderProfileId] = useState<string | null | undefined>(undefined)
+    const [providerProfiles, setProviderProfiles] = useState<ProviderProfileView[]>([])
+    const [providerDefaults, setProviderDefaults] = useState<Partial<Record<AgentProvider, string | null>>>({})
+    const [providersLoading, setProvidersLoading] = useState(false)
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
@@ -178,6 +184,25 @@ export function NewSession(props: {
             setCursorSelectedBase('auto')
         }
     }, [agent])
+
+    useEffect(() => {
+        setProviderProfileId(undefined)
+        setProviderProfiles([])
+        setProviderDefaults({})
+        const providerAgent = agent === 'gemini' || !AGENT_PROVIDER_CAPABILITIES[agent as AgentProvider] ? null : agent as AgentProvider
+        if (!machineId || !providerAgent || !AGENT_PROVIDER_CAPABILITIES[providerAgent].managed) return
+        let cancelled = false
+        setProvidersLoading(true)
+        void props.api.listProviderProfiles(machineId, providerAgent).then((result) => {
+            if (!cancelled && result.success) {
+                setProviderProfiles(result.profiles ?? [])
+                setProviderDefaults(result.defaults ?? {})
+            }
+        }).finally(() => {
+            if (!cancelled) setProvidersLoading(false)
+        })
+        return () => { cancelled = true }
+    }, [agent, machineId, props.api])
 
     useEffect(() => {
         savePreferredAgent(agent)
@@ -301,6 +326,14 @@ export function NewSession(props: {
         }
         return options
     }, [codexModelsState.models, model])
+    const providerAgent = agent === 'gemini' ? null : agent as AgentProvider
+    const providerCapability = providerAgent ? AGENT_PROVIDER_CAPABILITIES[providerAgent] : null
+    const selectedProviderProfile = useMemo(() => activeProviderProfile({
+        agent: providerAgent,
+        profiles: providerProfiles,
+        defaults: providerDefaults,
+        requestedId: providerProfileId
+    }), [providerAgent, providerDefaults, providerProfileId, providerProfiles])
     const codexSupportedReasoningEfforts = useMemo(
         () => getCodexModelReasoningEfforts(codexModelsState.models, model),
         [codexModelsState.models, model]
@@ -563,6 +596,17 @@ export function NewSession(props: {
         () => buildGrokModelOptions(grokModelsState.availableModels),
         [grokModelsState.availableModels]
     )
+    const providerModelOptions = useMemo(() => {
+        if (!providerCapability?.managed) return undefined
+        const native = agent === 'codex'
+            ? codexModelOptions
+            : agent === 'grok'
+                ? grokModelOptions
+                : agent === 'claude'
+                    ? MODEL_OPTIONS.claude
+                    : []
+        return mergeModelOptions(native.map((option) => ({ ...option, group: 'Native' })), selectedProviderProfile, model)
+    }, [agent, codexModelOptions, grokModelOptions, model, providerCapability?.managed, selectedProviderProfile])
     const grokEffortOptions = useMemo(
         () => buildGrokEffortOptions(
             grokModelsState.availableModels,
@@ -681,6 +725,10 @@ export function NewSession(props: {
         setCursorSelectedBase(preferred.cursorSelectedBase)
         setEffort(preferred.effort)
         setModelReasoningEffort(preferred.modelReasoningEffort)
+        setServiceTier(preferred.serviceTier ?? 'standard')
+        setCollaborationMode(preferred.collaborationMode ?? 'default')
+        setGrokPermissionMode(preferred.grokPermissionMode ?? 'default')
+        setSessionType(preferred.sessionType ?? 'simple')
         if (usesCodexFamilyPermissionModes(agent)) {
             setCodexFamilyPermissionMode(preferred.permissionMode ?? 'default')
         }
@@ -1283,14 +1331,21 @@ export function NewSession(props: {
     }, [suggestions, selectedIndex, moveUp, moveDown, clearSuggestions, handleSuggestionSelect])
 
     async function handleCreate() {
-        if (!machineId || !trimmedDirectory || createInFlightRef.current) return
+        if (!machineId || createInFlightRef.current) return
+
+        // When importing a Codex session, prefer that session's recorded workspace cwd.
+        const spawnDirectory = (agent === 'codex' && selectedCodexImportSession?.cwd)
+            ? selectedCodexImportSession.cwd
+            : trimmedDirectory
+
+        if (!spawnDirectory) return
 
         createInFlightRef.current = true
         setIsCreating(true)
         setError(null)
         try {
-            const existsResult = await checkPathsExists([trimmedDirectory])
-            const directoryExists = existsResult[trimmedDirectory]
+            const existsResult = await checkPathsExists([spawnDirectory])
+            const directoryExists = existsResult[spawnDirectory]
 
             if (sessionType === 'worktree' && directoryExists === false) {
                 haptic.notification('error')
@@ -1336,6 +1391,10 @@ export function NewSession(props: {
                 cursorSelectedBase,
                 effort,
                 modelReasoningEffort,
+                serviceTier,
+                collaborationMode,
+                grokPermissionMode,
+                sessionType,
                 ...(usesCodexFamilyPermissions ? { permissionMode: codexFamilyPermissionMode } : {})
             }
             const resolvedServiceTier = agent === 'codex' && showCodexFastMode
@@ -1412,8 +1471,9 @@ export function NewSession(props: {
 
             const result = await spawnSession({
                 machineId,
-                directory: trimmedDirectory,
+                directory: spawnDirectory,
                 agent,
+                providerProfileId,
                 model: resolvedModel,
                 effort: resolvedEffort,
                 modelReasoningEffort: resolvedModelReasoningEffort,
@@ -1437,7 +1497,7 @@ export function NewSession(props: {
                 savePreferredLaunchSettings(machineId, agent, preferredLaunchSettings)
                 clearNewSessionFormDraft()
                 setLastUsedMachineId(machineId)
-                addRecentPath(machineId, trimmedDirectory)
+                addRecentPath(machineId, spawnDirectory)
                 props.onSuccess(result.sessionId)
                 return
             }
@@ -1488,9 +1548,14 @@ export function NewSession(props: {
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
         && codexModelsState.isLoading
+    const hasSpawnDirectory = Boolean(
+        (agent === 'codex' && selectedCodexImportSession?.cwd)
+            ? selectedCodexImportSession.cwd
+            : trimmedDirectory
+    )
     const canCreate = Boolean(
         machineId
-        && trimmedDirectory
+        && hasSpawnDirectory
         && !isFormDisabled
         && !missingWorktreeDirectory
         && !isLaunchPreferenceValidationPending
@@ -1540,6 +1605,36 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onAgentChange={handleAgentChange}
             />
+            {providerCapability?.managed ? (
+                <div className="px-3 pb-3">
+                    <label className="mb-1.5 block text-sm font-medium text-[var(--app-fg)]" htmlFor="new-session-provider">
+                        {t('newSession.provider.label')}
+                    </label>
+                    <select
+                        id="new-session-provider"
+                        value={providerProfileId === undefined ? '__default__' : providerProfileId === null ? '__system__' : providerProfileId}
+                        onChange={(event) => {
+                            const value = event.target.value
+                            setProviderProfileId(value === '__default__' ? undefined : value === '__system__' ? null : value)
+                        }}
+                        disabled={isFormDisabled || providersLoading}
+                        className="h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 text-sm text-[var(--app-fg)] outline-none"
+                    >
+                        <option value="__default__">{t('newSession.provider.machineDefault')}</option>
+                        <option value="__system__">{t('newSession.provider.system')}</option>
+                        {providerProfiles.filter((profile) => profile.enabled).map((profile) => (
+                            <option key={profile.id} value={profile.id}>{profile.name}</option>
+                        ))}
+                    </select>
+                    <div className="mt-1 text-xs text-[var(--app-hint)]">
+                        {providerProfileId === null
+                            ? t('newSession.provider.systemDescription')
+                            : providerProfileId === undefined
+                                ? t('newSession.provider.machineDefaultDescription')
+                                : t('newSession.provider.restartDescription')}
+                    </div>
+                </div>
+            ) : null}
             {agent === 'codex' ? (
                 <CodexImportActions
                     selectedSession={selectedCodexImportSession}
@@ -1633,13 +1728,9 @@ export function NewSession(props: {
                         agent={agent}
                         model={model}
                         options={
-                            agent === 'codex'
-                                ? codexModelOptions
-                                : agent === 'grok'
-                                    ? grokModelOptions
-                                    : agent === 'copilot'
-                                        ? copilotModelOptions
-                                : undefined
+                            agent === 'copilot'
+                                ? copilotModelOptions
+                                : providerModelOptions
                         }
                         isDisabled={
                             isFormDisabled
