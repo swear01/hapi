@@ -317,86 +317,86 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
                     session.setModelReasoningEffort(observedReasoningEffort);
                 }
 
-                const converted = convertTranscriptEvent(event);
-                if (converted?.sessionId) {
-                    if (!isPrimarySessionId(converted.sessionId)) {
-                        logger.debug(`[codex-local]: Ignoring converted session id ${converted.sessionId}; primary is ${primarySessionId}`);
-                        return;
-                    }
-                    session.onSessionFound(converted.sessionId);
-                }
-                if (converted?.userMessage) {
-                    session.sendUserMessage(converted.userMessage);
-                } else if (converted?.userActivity) {
-                    session.notifyUserActivity();
-                }
-                for (const message of converted?.messages ?? []) {
-                    if (message.type === 'token_count') {
-                        const scopeRole = message.scopeRole ?? message.scope_role;
-                        const messageThreadId = message.threadId ?? message.thread_id;
-                        // Parent budget / composer gauge only; child samples keep native thread ids for hub deltas.
-                        // scopeRole is optional - a foreign thread_id alone still means child usage.
-                        const isChildUsage = scopeRole === 'child'
-                            || Boolean(messageThreadId && primarySessionId && messageThreadId !== primarySessionId);
-                        if (!isChildUsage) {
-                            if (replayingUsage) {
-                                noteReplayUsageSample(replayUsage, message);
+                for (const action of convertTranscriptEvent(event)) {
+                    if (action.type === 'session-found') {
+                        if (!isPrimarySessionId(action.sessionId)) {
+                            logger.debug(`[codex-local]: Ignoring converted session id ${action.sessionId}; primary is ${primarySessionId}`);
+                            return;
+                        }
+                        session.onSessionFound(action.sessionId);
+                    } else if (action.type === 'user-message') {
+                        session.sendUserMessage(action.message);
+                    } else if (action.type === 'user-activity') {
+                        session.notifyUserActivity();
+                    } else if (action.type === 'agent-message') {
+                        const message = action.message;
+                        if (message.type === 'token_count') {
+                            const scopeRole = message.scopeRole ?? message.scope_role;
+                            const messageThreadId = message.threadId ?? message.thread_id;
+                            // Parent budget / composer gauge only; child samples keep native thread ids for hub deltas.
+                            // scopeRole is optional - a foreign thread_id alone still means child usage.
+                            const isChildUsage = scopeRole === 'child'
+                                || Boolean(messageThreadId && primarySessionId && messageThreadId !== primarySessionId);
+                            if (!isChildUsage) {
+                                if (replayingUsage) {
+                                    noteReplayUsageSample(replayUsage, message);
+                                } else {
+                                    session.recordCodexUsage(message);
+                                }
+                            }
+                            // Web latestUsage filters on usage.scope_role === 'child'; stamp it
+                            // even when Codex only sent a foreign thread_id (no scopeRole).
+                            const effectiveScopeRole = isChildUsage ? 'child' : scopeRole;
+                            const managedThreadId = messageThreadId ?? primarySessionId;
+                            const scopedUsage = context.replayedHistory
+                                ? {
+                                    ...message,
+                                    ...(effectiveScopeRole
+                                        ? { scopeRole: effectiveScopeRole, scope_role: effectiveScopeRole }
+                                        : {}),
+                                    model: transcriptModel,
+                                    hapiUsageScope: 'imported-history' as const
+                                }
+                                : {
+                                    ...message,
+                                    model: transcriptModel,
+                                    ...(managedThreadId ? { threadId: managedThreadId, thread_id: managedThreadId } : {}),
+                                    ...(effectiveScopeRole
+                                        ? { scopeRole: effectiveScopeRole, scope_role: effectiveScopeRole }
+                                        : {}),
+                                    hapiUsageScope: 'managed' as const
+                                };
+                            session.sendAgentMessage(scopedUsage);
+                        } else if (message.type === 'proposed_plan') {
+                            // Codex may complete the Plan item before emitting its final text preface.
+                            pendingPlansByTurnId.set(message.turnId, message);
+                        } else if (message.type === 'tool-call' && message.name === 'exec') {
+                            if (countHookCoveredExecCalls(message.input) === null) {
+                                session.sendAgentMessage(message);
                             } else {
-                                session.recordCodexUsage(message);
+                                pendingExecWrappers.set(message.callId, {
+                                    message,
+                                    ...(action.turnId ? { turnId: action.turnId } : {})
+                                });
                             }
-                        }
-                        // Web latestUsage filters on usage.scope_role === 'child'; stamp it
-                        // even when Codex only sent a foreign thread_id (no scopeRole).
-                        const effectiveScopeRole = isChildUsage ? 'child' : scopeRole;
-                        const managedThreadId = messageThreadId ?? primarySessionId;
-                        const scopedUsage = context.replayedHistory
-                            ? {
-                                ...message,
-                                ...(effectiveScopeRole
-                                    ? { scopeRole: effectiveScopeRole, scope_role: effectiveScopeRole }
-                                    : {}),
-                                model: transcriptModel,
-                                hapiUsageScope: 'imported-history' as const
+                        } else if (message.type === 'tool-call-result' && pendingExecWrappers.has(message.callId)) {
+                            const pending = pendingExecWrappers.get(message.callId);
+                            const turnId = pending?.turnId ?? action.turnId;
+                            if (pending && toolHookBridge.hasCompletedAllObservedNestedTools(turnId)) {
+                                pendingExecWrappers.delete(message.callId);
+                            } else {
+                                flushPendingExecWrapper(message.callId, message);
                             }
-                            : {
-                                ...message,
-                                model: transcriptModel,
-                                ...(managedThreadId ? { threadId: managedThreadId, thread_id: managedThreadId } : {}),
-                                ...(effectiveScopeRole
-                                    ? { scopeRole: effectiveScopeRole, scope_role: effectiveScopeRole }
-                                    : {}),
-                                hapiUsageScope: 'managed' as const
-                            };
-                        session.sendAgentMessage(scopedUsage);
-                    } else if (message.type === 'proposed_plan') {
-                        // Codex may complete the Plan item before emitting its final text preface.
-                        pendingPlansByTurnId.set(message.turnId, message);
-                    } else if (message.type === 'tool-call' && message.name === 'exec') {
-                        if (countHookCoveredExecCalls(message.input) === null) {
+                        } else {
                             session.sendAgentMessage(message);
-                        } else {
-                            pendingExecWrappers.set(message.callId, {
-                                message,
-                                ...(converted?.turnId ? { turnId: converted.turnId } : {})
-                            });
                         }
-                    } else if (message.type === 'tool-call-result' && pendingExecWrappers.has(message.callId)) {
-                        const pending = pendingExecWrappers.get(message.callId);
-                        const turnId = pending?.turnId ?? converted?.turnId;
-                        if (pending && toolHookBridge.hasCompletedAllObservedNestedTools(turnId)) {
-                            pendingExecWrappers.delete(message.callId);
-                        } else {
-                            flushPendingExecWrapper(message.callId, message);
+                    } else if (action.type === 'turn-finished') {
+                        flushPendingPlan(action.turnId);
+                        for (const message of toolHookBridge.finishTurn(action.turnId)) {
+                            session.sendAgentMessage(message);
                         }
-                    } else {
-                        session.sendAgentMessage(message);
                     }
                 }
-                if (converted?.finishedTurnId) {
-                    flushPendingPlan(converted.finishedTurnId);
-                    for (const message of toolHookBridge.finishTurn(converted.finishedTurnId)) {
-                        session.sendAgentMessage(message);
-                    }
                 }
             }
         });
