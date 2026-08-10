@@ -1481,7 +1481,6 @@ export function SessionList(props: {
     const runningSessions = useMemo(() => {
         const buckets: Record<'jobs' | 'working' | 'pending' | 'active', SessionSummary[]> = {
             jobs: [],
-        const buckets: Record<'working' | 'pending' | 'active', SessionSummary[]> = {
             working: [],
             pending: [],
             active: [],

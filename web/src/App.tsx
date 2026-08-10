@@ -347,6 +347,8 @@ function AppInner() {
             return {
                 title: t('toast.runnerUpgrade.failed.title'),
                 body: normalizedBody,
+            }
+        }
         if (normalizedTitle === 'Session completed') {
             return {
                 title: t('toast.session.completed'),

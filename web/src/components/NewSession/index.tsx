@@ -1836,7 +1836,6 @@ export function NewSession(props: {
                     onClear={() => setSelectedClaudeImportSessionId(null)}
                 />
             ) : null}
-                        ) : null}
             {agent === 'codex' ? (
                 <CodexImportActions
                     selectedSession={selectedCodexImportSession}

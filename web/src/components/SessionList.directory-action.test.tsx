@@ -837,6 +837,8 @@ describe('SessionList collapse behavior', () => {
         expect(getProjectPanel().getAttribute('data-open')).toBe('true')
         expect(screen.getByRole('button', { name: /Pinned task/ })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Idle task/ })).toBeInTheDocument()
+    })
+
     it('opens the project group menu on right-click without collapsing the group', () => {
         const sessions = [makeSession({
             id: 'session-running',
