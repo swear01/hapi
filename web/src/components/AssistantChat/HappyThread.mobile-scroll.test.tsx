@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import type { PropsWithChildren } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('@/hooks/queries/useMachines', () => ({
     useMachines: () => ({ machines: [] })
@@ -32,7 +33,9 @@ import type { Session } from '@/types/api'
 const originalScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTo')
 
 function renderThread(onViewModeChange = vi.fn()) {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const renderHappyThread = (forceScrollToken: number) => (
+        <QueryClientProvider client={queryClient}>
         <I18nProvider>
             <HappyThread
                 api={{} as ApiClient}
@@ -59,6 +62,7 @@ function renderThread(onViewModeChange = vi.fn()) {
                 onOutlineOpenChange={vi.fn()}
             />
         </I18nProvider>
+        </QueryClientProvider>
     )
     const result = render(renderHappyThread(0))
     const viewport = result.container.querySelector<HTMLElement>('.chat-scroll-y')

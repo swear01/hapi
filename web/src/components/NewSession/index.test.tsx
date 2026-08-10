@@ -170,7 +170,13 @@ vi.mock('./MachineSelector', () => ({
     )
 }))
 vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
-vi.mock('./PermissionField', () => ({ PermissionField: () => null }))
+vi.mock('./PermissionField', () => ({
+    PermissionField: (props: { agent: string; nativeValue: string; onNativeChange: (mode: string) => void }) => props.agent === 'codex' || props.agent === 'copilot' || props.agent === 'opencode' || props.agent === 'gemini' || props.agent === 'kimi' ? (
+        <button type="button" data-testid="permission-mode" onClick={() => props.onNativeChange('yolo')}>
+            {props.nativeValue}
+        </button>
+    ) : null
+}))
 vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
 vi.mock('./OpencodeModelSelector', () => ({ OpencodeModelSelector: () => null }))
 vi.mock('./AgyModelSelector', () => ({
@@ -608,6 +614,7 @@ describe('NewSession launch preferences', () => {
     it('imports the selected Claude history and resumes the canonical HAPI session', async () => {
         savePreferredAgent('claude')
         const claudeApi = {
+            listProviderProfiles: async () => ({ success: true as const, profiles: [], defaults: {} }),
             getClaudeSessions: vi.fn().mockResolvedValue({
                 success: true,
                 machineId: 'machine-1',

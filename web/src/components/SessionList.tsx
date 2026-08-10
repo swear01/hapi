@@ -1492,7 +1492,7 @@ export function SessionList(props: {
             if (session.globalPinned || session.pinned) {
                 continue
             }
-            if (!isPinnedInProgressSession(session, pinInProgressMode)) {
+            if (!pinActiveSessions && !isPinnedInProgressSession(session, pinInProgressMode)) {
                 continue
             }
             const agentWorking = session.active
@@ -1507,7 +1507,7 @@ export function SessionList(props: {
                 buckets.jobs.push(session)
             } else if (agentPending) {
                 buckets.pending.push(session)
-            } else if (pinActiveSessions) {
+            } else if (pinActiveSessions && session.active) {
                 buckets.active.push(session)
             }
         }

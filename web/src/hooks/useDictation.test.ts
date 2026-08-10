@@ -554,7 +554,7 @@ describe('useDictation', () => {
         await act(() => result.current.stopAndSend('session-A', 'initial', 'steer'))
 
         await waitFor(() => {
-            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial steer me', undefined, undefined, undefined, 'steer')
+            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial steer me', null, undefined, undefined, 'steer')
         })
     })
 
@@ -604,7 +604,7 @@ describe('useDictation', () => {
         await act(() => result.current.stopAndSend('session-A', 'initial draft'))
 
         await waitFor(() => {
-            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial draft transcribed', undefined)
+            expect(sendMessage).toHaveBeenCalledWith('session-A', 'initial draft transcribed', null, undefined, undefined, undefined)
         })
         expect(getDraft('session-A')).toBe('newer draft typed by user')
     })

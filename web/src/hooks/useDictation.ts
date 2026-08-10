@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
+import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
@@ -34,6 +35,7 @@ export function useDictation(config: {
     mode: TranscriptionMode
     getCurrentText: () => string
     onTextChange: (text: string) => void
+    sendMessage?: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
 }) {
     const onFinalTranscript = useCallback((transcript: string) => {
         config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
@@ -42,115 +44,149 @@ export function useDictation(config: {
         api: config.api,
         provider: config.provider,
         mode: config.mode,
-        onFinalTranscript
+        onFinalTranscript,
+        sendMessage: config.sendMessage,
+        getCurrentText: config.getCurrentText
     })
     const browserCanRecord = typeof navigator !== 'undefined'
         && typeof navigator.mediaDevices?.getUserMedia === 'function'
         && typeof MediaRecorder !== 'undefined'
-    const standardSupported = config.api !== null
+    const standardSupported = config.mode === 'standard'
+        && config.api !== null
         && config.provider !== null
-        && config.mode === 'standard'
         && browserCanRecord
+
+    const supported = realtime.supported || standardSupported
     const [status, setStatus] = useState<ConversationStatus>('disconnected')
     const [error, setError] = useState<string | null>(null)
-    const recorderRef = useRef<MediaRecorder | null>(null)
-    const streamRef = useRef<MediaStream | null>(null)
-    const chunksRef = useRef<Blob[]>([])
     const mountedRef = useRef(true)
+    const recorderRef = useRef<MediaRecorder | null>(null)
+    const mediaStreamRef = useRef<MediaStream | null>(null)
+    const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-    const stopResolverRef = useRef<((success: boolean) => void) | null>(null)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
 
     const stopTracks = useCallback(() => {
-        streamRef.current?.getTracks().forEach((track) => track.stop())
-        streamRef.current = null
+        if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach((track) => track.stop())
+            mediaStreamRef.current = null
+        }
     }, [])
 
     const start = useCallback(async () => {
-        if (!standardSupported || !config.provider || status === 'connecting' || status === 'connected') return
-        const operation = ++operationRef.current
-        const provider = config.provider
-        const language = localStorage.getItem('hapi-voice-lang') || undefined
+        if (status !== 'disconnected' && status !== 'error') return
         setError(null)
+        if (realtime.supported) {
+            await realtime.toggle()
+            return
+        }
+        if (!standardSupported || !browserCanRecord) {
+            setError('Voice input is not supported in this browser')
+            setStatus('error')
+            return
+        }
+        const mimeType = preferredMimeType()
+        operationRef.current += 1
+        const operation = operationRef.current
         setStatus('connecting')
+
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-            })
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
             if (operationRef.current !== operation) {
                 stream.getTracks().forEach((track) => track.stop())
                 return
             }
-            const mimeType = preferredMimeType()
-            const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
-            streamRef.current = stream
-            recorderRef.current = recorder
+            mediaStreamRef.current = stream
             chunksRef.current = []
+
+            const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+            recorderRef.current = recorder
+            const type = recorder.mimeType || mimeType || 'audio/webm'
+
             recorder.ondataavailable = (event) => {
                 if (event.data.size > 0) chunksRef.current.push(event.data)
             }
-            recorder.onerror = () => {
-                stopTracks()
-                setError('Audio recording failed')
-                setStatus('error')
-            }
+
             recorder.onstop = async () => {
                 stopTracks()
-                const type = recorder.mimeType || mimeType || 'audio/webm'
-                const blob = new Blob(chunksRef.current, { type })
-                recorderRef.current = null
-                chunksRef.current = []
-                const pendingSend = sendOnFinishRef.current
-                sendOnFinishRef.current = null
-                if (!blob.size) {
-                    transcribingRef.current = false
-                    if (mountedRef.current) {
-                        setError('No audio was recorded')
-                        setStatus('error')
-                    }
-                    const resolve = stopResolverRef.current
-                    stopResolverRef.current = null
-                    resolve?.(false)
-                    return
-                }
-                transcribingRef.current = true
-                let success = false
                 try {
-                    const result = await config.api!.transcribeVoice({
-                        file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
-                        provider,
-                        mode: 'standard',
-                        language
-                    })
-                    const transcribedText = result.text || ''
-                    if (pendingSend) {
-                        const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
-                        if (finalMessage.trim() && config.api) {
-                            await config.api.sendMessage(pendingSend.sessionId, finalMessage, undefined, undefined, undefined, pendingSend.deliveryMode)
-                            success = true
-                        }
-                    } else if (mountedRef.current) {
-                        const transcript = transcribedText.trim()
-                        if (!transcript) {
-                            setError('No speech was transcribed')
-                            setStatus('error')
-                        } else {
-                            config.onTextChange(appendTranscript(config.getCurrentText(), transcript))
-                            success = true
-                        }
+                    const blob = new Blob(chunksRef.current, { type })
+                    recorderRef.current = null
+                    chunksRef.current = []
+                    const pendingSend = sendOnFinishRef.current
+                    sendOnFinishRef.current = null
+
+                    if (!mountedRef.current && !pendingSend) return
+
+                    const draftUnchanged = (sid: string, baseline: string) => {
+                        const cur = getDraft(sid)
+                        return cur === '' || cur === baseline
                     }
-                    if (mountedRef.current) setStatus(success ? 'disconnected' : 'error')
-                } catch (transcriptionError) {
-                    if (mountedRef.current) {
-                        setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
-                        setStatus('error')
+
+                    if (!blob.size) {
+                        transcribingRef.current = false
+                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        }
+                        if (mountedRef.current) {
+                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
+                            setError('No audio was recorded')
+                            setStatus('error')
+                        }
+                        return
+                    }
+                    transcribingRef.current = true
+                    try {
+                        const savedLanguage = (typeof localStorage !== 'undefined' && localStorage.getItem('hapi-voice-lang')) || undefined
+                        const result = await config.api!.transcribeVoice({
+                            file: new File([blob], `speech.${recordingExtension(type)}`, { type }),
+                            provider: config.provider!,
+                            mode: 'standard',
+                            language: savedLanguage
+                        })
+                        const transcribedText = result.text || ''
+                        if (pendingSend) {
+                            const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
+                            if (finalMessage.trim()) {
+                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                                try {
+                                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
+                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                        clearDraft(pendingSend.sessionId)
+                                    }
+                                } catch (sendError) {
+                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                        saveDraft(pendingSend.sessionId, finalMessage)
+                                    }
+                                    if (mountedRef.current) {
+                                        if (!config.getCurrentText().trim()) {
+                                            config.onTextChange(finalMessage)
+                                        }
+                                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
+                                        setStatus('error')
+                                        return
+                                    }
+                                }
+                            }
+                        } else if (mountedRef.current) {
+                            config.onTextChange(appendTranscript(config.getCurrentText(), transcribedText))
+                        }
+                        if (mountedRef.current) {
+                            setStatus('disconnected')
+                        }
+                    } catch (transcriptionError) {
+                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        }
+                        if (mountedRef.current) {
+                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
+                            setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
+                            setStatus('error')
+                        }
                     }
                 } finally {
                     transcribingRef.current = false
-                    const resolve = stopResolverRef.current
-                    stopResolverRef.current = null
-                    resolve?.(success)
                 }
             }
             recorder.start()
@@ -163,22 +199,17 @@ export function useDictation(config: {
         }
     }, [config, standardSupported, status, stopTracks])
 
-    const stop = useCallback(async (): Promise<boolean> => {
-        if (transcribingRef.current) return false
+    const stop = useCallback(async () => {
+        if (transcribingRef.current) return
         operationRef.current += 1
         const recorder = recorderRef.current
         if (recorder && recorder.state !== 'inactive') {
             transcribingRef.current = true
             setStatus('connecting')
-            const completionPromise = new Promise<boolean>((resolve) => {
-                stopResolverRef.current = resolve
-            })
             recorder.stop()
-            return await completionPromise
         } else {
             setStatus('disconnected')
             stopTracks()
-            return false
         }
     }, [stopTracks])
 
@@ -186,17 +217,15 @@ export function useDictation(config: {
         sendOnFinishRef.current = {
             sessionId: targetSessionId,
             initialText: initialText ?? config.getCurrentText(),
+            draftAtStart: getDraft(targetSessionId),
             deliveryMode
         }
         await stop()
     }, [config, stop])
 
-    const toggle = useCallback(async (): Promise<boolean> => {
-        if (status === 'connected' || status === 'connecting') return await stop()
-        else {
-            await start()
-            return false
-        }
+    const toggle = useCallback(async () => {
+        if (status === 'connected' || status === 'connecting') await stop()
+        else await start()
     }, [start, status, stop])
 
     useEffect(() => {
@@ -213,5 +242,5 @@ export function useDictation(config: {
 
     return config.mode === 'realtime'
         ? { ...realtime, stopAndSend: realtime.stopAndSend }
-        : { supported: standardSupported, status, error, partialTranscript: '', toggle, stopAndSend }
+        : { supported, status, error, partialTranscript: '', toggle, stopAndSend }
 }
