@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import { MachineStore } from './machineStore'
@@ -87,6 +87,77 @@ export class Store {
      */
     get dbPath(): string {
         return this._dbPath
+    }
+
+    /**
+     * Snapshot of the SQLite file layout for the settings storage page:
+     * page geometry, reclaimable free pages, and per-table / per-index usage
+     * from the dbstat virtual table (enabled in Bun's SQLite build).
+     */
+    storageInsights(): {
+        pageSize: number
+        pageCount: number
+        freelistCount: number
+        tables: Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }>
+    } {
+        const pageSize = (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size
+        const pageCount = (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count
+        const freelistCount = (
+            this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }
+        ).freelist_count
+        const tables = (
+            this.db.query(
+                `SELECT d.name AS name,
+                        COALESCE(m.type, 'table') AS kind,
+                        d.pgsize AS bytes,
+                        d.ncell AS rows
+                 FROM dbstat d
+                 LEFT JOIN sqlite_master m ON m.name = d.name
+                 WHERE d.aggregate = TRUE
+                   AND d.name NOT IN ('sqlite_schema', 'sqlite_master')
+                 ORDER BY d.pgsize DESC`
+            ).all() as Array<{ name: string; kind: string; bytes: number; rows: number }>
+        )
+        return {
+            pageSize,
+            pageCount,
+            freelistCount,
+            tables: tables.map((table) => ({
+                ...table,
+                kind: table.kind === 'index' ? 'index' : 'table',
+            })),
+        }
+    }
+
+    /**
+     * Rebuilds the database with VACUUM and then checkpoint-truncates the
+     * WAL so the main file actually shrinks (in WAL mode VACUUM alone only
+     * repacks through the write-ahead log). Returns the file size before and
+     * after so the caller can report how much space was reclaimed.
+     */
+    vacuum(): { beforeBytes: number; afterBytes: number; reclaimedBytes: number; durationMs: number } {
+        if (this._dbPath === ':memory:' || this._dbPath.startsWith('file::memory:')) {
+            throw new Error('VACUUM is not supported for in-memory databases')
+        }
+        const beforeBytes = statSync(this._dbPath).size
+        const started = performance.now()
+        this.db.exec('VACUUM')
+        const checkpoint = (
+            this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
+        )
+        if (checkpoint.busy > 0) {
+            throw new Error(
+                `WAL checkpoint was blocked by ${checkpoint.busy} other connection(s); the file did not shrink`
+            )
+        }
+        const durationMs = Math.round(performance.now() - started)
+        const afterBytes = statSync(this._dbPath).size
+        return {
+            beforeBytes,
+            afterBytes,
+            reclaimedBytes: Math.max(0, beforeBytes - afterBytes),
+            durationMs,
+        }
     }
 
     constructor(dbPath: string) {

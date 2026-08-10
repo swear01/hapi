@@ -959,12 +959,40 @@ export type SlashCommandsResponse = {
     error?: string
 }
 
+export type SqliteTableUsage = {
+    name: string
+    kind: 'table' | 'index'
+    /** Bytes of disk pages owned by this object (from the dbstat virtual table). */
+    bytes: number
+    /** Number of cells (rows) currently stored in this object. */
+    rows: number
+}
+
 export type SqliteStorageUsageResponse = {
     path: string
+    /** Physical on-disk size of the database file. */
     databaseBytes: number
     walBytes: number
     shmBytes: number
     totalBytes: number
+    /** SQLite page size in bytes (normally 4096). */
+    pageSize: number
+    /** Total pages in the database file. */
+    pageCount: number
+    /** Bytes held by free (reclaimable) pages that a VACUUM can return to disk. */
+    freelistBytes: number
+    /** Bytes actually occupied by live data plus b-tree overhead. */
+    usedBytes: number
+    /** Per-table / per-index usage, largest first. */
+    tables: SqliteTableUsage[]
+}
+
+export type VacuumStorageResponse = {
+    path: string
+    beforeBytes: number
+    afterBytes: number
+    reclaimedBytes: number
+    durationMs: number
 }
 
 export type UsageSummaryBucket = {

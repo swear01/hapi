@@ -5,6 +5,11 @@
         "lib": ["ES2020", "ESNext", "ESNext.Disposable", "DOM", "DOM.Iterable"],
         "jsx": "react-jsx",
         "noEmit": true,
+        // macOS resolves file names case-insensitively, so importing the pie
+        // component without its extension can hit the similarly-named helper
+        // module storageUsagePie.ts ('.ts' is tried before '.tsx').
+        // Explicit extensions sidestep that; only valid because noEmit is on.
+        "allowImportingTsExtensions": true,
         "types": ["vite/client"],
         "baseUrl": ".",
         "paths": {
