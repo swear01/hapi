@@ -968,6 +968,8 @@ export default {
   'settings.chat.composerToolbar.item.attachment': 'Add attachment',
   'settings.chat.composerToolbar.item.settings': 'Session settings',
   'settings.chat.composerToolbar.item.expand': 'Expand message editor',
+  'settings.chat.composerToolbar.item.model': 'Model',
+  'settings.chat.composerToolbar.item.effort': 'Effort',
   'settings.chat.composerToolbar.item.piModel': 'Pi model',
   'settings.chat.composerToolbar.item.piThinking': 'Pi thinking level',
   'settings.chat.composerToolbar.item.terminal': 'Terminal',
