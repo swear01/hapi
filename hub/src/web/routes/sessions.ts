@@ -1433,6 +1433,10 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (!parsed.success) {
             return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
         }
+        // Client must not supply heartbeatAt — hub stamps receipt time.
+        if (parsed.data.heartbeatAt !== undefined) {
+            return c.json({ error: 'heartbeatAt is hub-stamped; omit it' }, 400)
+        }
         const result = engine.upsertSessionJob(sessionResult.sessionId, jobKey, parsed.data)
         if (result.outcome === 'session-not-found') {
             return c.json({ error: 'Session not found' }, 404)
