@@ -356,10 +356,15 @@ export async function runPi(opts: {
     const preparingLocalIds = new Set<string>();
     const cancelledWhilePreparing = new Set<string>();
     // LocalIds whose owner pressed Steer while image preparation was still in
-    // flight. Checked after preparation completes, before normal FIFO routing,
-    // so an explicit steer request is never lost to the queue (and cancel still
-    // wins over it because cancellation is checked earlier in the chain).
-    const steerPendingWhilePreparing = new Set<string>();
+    // flight, mapped to the streaming generation observed at request time.
+    // Checked after preparation completes, before normal FIFO routing, so an
+    // explicit steer request is never lost to the queue (and cancel still wins
+    // over it because cancellation is checked earlier in the chain). The
+    // captured generation matters: if the original turn ends and a new one
+    // starts while the message is preparing, the dispatcher's mismatch check
+    // degrades the message to the prompt FIFO instead of steering into a turn
+    // the operator never targeted.
+    const steerPendingWhilePreparing = new Map<string, number>();
     let preparationChain = Promise.resolve();
     let promptCommandInFlight = false;
     let abortInFlight = false;
@@ -573,7 +578,11 @@ export async function runPi(opts: {
             return { steered: false, error: 'localId is required' };
         }
         if (preparingLocalIds.has(localId)) {
-            steerPendingWhilePreparing.add(localId);
+            const generation = piSession.currentStreamingGeneration;
+            if (!piSession.isReady || generation === null) {
+                return { steered: false, error: 'Session is not streaming' };
+            }
+            steerPendingWhilePreparing.set(localId, generation);
             return { steered: true };
         }
         if (!steerDispatcher) {
@@ -830,17 +839,13 @@ export async function runPi(opts: {
             };
             if (deliveryMode === 'steer') {
                 steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration });
-            } else if (localId && steerPendingWhilePreparing.delete(localId)) {
+            } else if (localId && steerPendingWhilePreparing.has(localId)) {
                 // The user pressed Steer while this message was still preparing.
-                // Promote it into the active turn; fall back to the FIFO (and
-                // resume the pump) when the turn already ended meanwhile.
-                const currentGeneration = piSession.currentStreamingGeneration;
-                if (piSession.isReady && currentGeneration !== null) {
-                    steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration: currentGeneration });
-                } else {
-                    promptQueue.enqueue(entry);
-                    pumpPromptQueue();
-                }
+                // Promote it into the turn observed at request time; if that
+                // turn already ended, the dispatcher degrades it to the FIFO.
+                const targetGeneration = steerPendingWhilePreparing.get(localId)!;
+                steerPendingWhilePreparing.delete(localId);
+                steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration: targetGeneration });
             } else {
                 promptQueue.enqueue(entry);
                 pumpPromptQueue();

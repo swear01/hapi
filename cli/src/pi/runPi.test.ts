@@ -1186,4 +1186,39 @@ describe('Pi steer-queued-message RPC', () => {
         harness.onError?.(new Error('stop test transport'));
         await running;
     });
+
+    it('steers into the generation captured at request time, not one that started mid-preparation', async () => {
+        const { running } = await startReadySession(true);
+
+        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
+            message: { role: 'user'; content: { type: 'text'; text: string } },
+            localId: string
+        ) => void;
+        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+
+        // Request the steer while the message is still preparing (generation G1).
+        onUserMessage({ role: 'user', content: { type: 'text', text: 'rollover me' } }, 'rollover-local');
+        const result = await handler({ localId: 'rollover-local' });
+        expect(result).toEqual({ steered: true });
+        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
+
+        // G1 ends and G2 starts while the message is still preparing.
+        const state = { sessionId: 'pi-session', sessionFile: '/tmp/pi-session.jsonl' };
+        harness.onEvent!({ type: 'response', command: 'get_state', success: true, data: { ...state, isStreaming: false } });
+        harness.onEvent!({ type: 'response', command: 'get_state', success: true, data: { ...state, isStreaming: true } });
+
+        // Preparation completes; the dispatcher sees generation G2 != captured
+        // G1 and degrades the message to the prompt FIFO instead of steering it.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
+        expect(harness.session.emitMessagesConsumed).not.toHaveBeenCalledWith(['rollover-local'], undefined);
+
+        // Once G2 settles, the FIFO delivers the message as a normal prompt.
+        harness.onEvent!({ type: 'response', command: 'get_state', success: true, data: { ...state, isStreaming: false } });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'prompt', message: 'rollover me' }));
+
+        harness.onError?.(new Error('stop test transport'));
+        await running;
+    });
 });
