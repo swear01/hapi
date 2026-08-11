@@ -46,6 +46,9 @@ type UsageEventRow = {
     last_output_tokens: number | null
     last_cache_read_tokens: number | null
     last_cache_creation_tokens: number | null
+    context_only: number
+    cost: number | null
+    cost_currency: string | null
 }
 
 function toUsageEvent(row: UsageEventRow): UsageEvent {
