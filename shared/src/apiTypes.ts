@@ -961,14 +961,12 @@ export type SlashCommandsResponse = {
 
 
 export type SqliteTableUsage = {
-    /** SQLite object name (table or index, possibly schema-qualified). */
     name: string
-    /** Kind: 'table' | 'index' | 'view' | 'trigger' | 'virtual_table'. */
-    kind: string
-    /** Bytes occupied by this object's b-tree pages (reclaimable on delete). */
+    kind: 'table' | 'index'
+    /** Bytes of disk pages owned by this object (from the dbstat virtual table). */
     bytes: number
-    /** Approximate row count when dbstat is unavailable. */
-    approxRows?: number
+    /** Number of cells (rows) currently stored in this object. */
+    rows: number
 }
 
 export type SqliteStorageUsageResponse = {
