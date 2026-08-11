@@ -26,9 +26,11 @@ export default defineConfig({
         // Real detached process trees: never parallelize this suite.
         fileParallelism: false,
         // beforeEach starts a real runner (state-file wait can exceed the
-        // default 5s hook budget on slow machines).
+        // default 5s hook budget on slow machines); afterEach runs the
+        // two-stage cleanup + marker sweep, which can take longer on hosts
+        // with slow process teardown.
         testTimeout: 20_000,
-        hookTimeout: 30_000,
+        hookTimeout: 60_000,
         coverage: {
             provider: 'v8',
             reporter: ['text', 'json', 'html'],
