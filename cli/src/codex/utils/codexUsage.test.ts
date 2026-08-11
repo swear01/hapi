@@ -78,6 +78,64 @@ describe('normalizeCodexUsage', () => {
         });
     });
 
+    it('parses the real codex app-server rate-limit wire shape (camelCase windowDurationMins/resetsAt)', () => {
+        // Regression for tiann/hapi#1514: the codex app-server serializes
+        // RateLimitWindow as { usedPercent, windowDurationMins, resetsAt }
+        // (verified via `codex app-server generate-json-schema`, codex >= 0.120).
+        // The old key lists only matched window_minutes/windowMinutes and
+        // reset_at/resetAt, silently dropping both buckets so the web gauge
+        // misread healthy Pro accounts as blocked.
+        const usage = normalizeCodexUsage({
+            info: {
+                rate_limits: {
+                    limitId: 'codex',
+                    limitName: null,
+                    primary: {
+                        usedPercent: 0,
+                        windowDurationMins: 300,
+                        resetsAt: 1_774_278_000
+                    },
+                    secondary: {
+                        usedPercent: 12,
+                        windowDurationMins: 10080,
+                        resetsAt: 1_774_278_000
+                    },
+                    credits: {
+                        hasCredits: true,
+                        unlimited: false,
+                        balance: '0.0000000000'
+                    },
+                    individualLimit: null,
+                    spendControlReached: false,
+                    planType: 'pro',
+                    rateLimitReachedType: null
+                }
+            }
+        }, { now: 1_000_000 });
+
+        expect(usage).toMatchObject({
+            rateLimits: {
+                fiveHour: {
+                    usedPercent: 0,
+                    windowMinutes: 300,
+                    resetAt: 1_774_278_000_000
+                },
+                weekly: {
+                    usedPercent: 12,
+                    windowMinutes: 10080,
+                    resetAt: 1_774_278_000_000
+                }
+            },
+            credits: {
+                hasCredits: true,
+                unlimited: false,
+                balance: '0.0000000000'
+            },
+            planType: 'pro',
+            limitId: 'codex'
+        });
+    });
+
     it('falls back to input+output when total_tokens is omitted (cached/reasoning are subsets)', () => {
         const usage = normalizeCodexUsage({
             info: {
