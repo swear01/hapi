@@ -438,7 +438,7 @@ export function getUsageSummary(
 
     return {
         range: { from, to: now },
-        totals: { ...totals, sessions: sessionsWithUsage.size },
+        totals: { ...totals, sessions: sessionsWithUsage.size, costs: [] },
         daily: Array.from(daily.entries())
             .map(([key, value]) => toBucket(key, value))
             .sort((a, b) => a.key.localeCompare(b.key)),
