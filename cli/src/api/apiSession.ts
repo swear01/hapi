@@ -982,6 +982,17 @@ export class ApiSessionClient extends EventEmitter {
         // Carries the exact in-flight prompt text the web should restore.
         type: 'abort-restore'
         text: string
+    } | {
+        type: 'modelError'
+        kind: string
+        transient: boolean
+        rawSnippet: string
+        priorAssistantClaimsDone: boolean
+    } | {
+        type: 'modelErrorBridged'
+        kind: string
+        auto: boolean
+        eventId: string
     }, id?: string): void {
         const content = {
             role: 'agent',
