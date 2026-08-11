@@ -361,7 +361,7 @@ export class ApiMachineClient {
                 }
                 if (parsed.data.mode === 'summaries') {
                     const sessions = []
-                    for (const session of listLocalClaudeSessionSummaries()) {
+                    for (const session of await listLocalClaudeSessionSummaries()) {
                         if (await this.isLocalSessionWithinWorkspaceRoots(session)) sessions.push(session)
                     }
                     return { success: true, mode: 'summaries', sessions }
