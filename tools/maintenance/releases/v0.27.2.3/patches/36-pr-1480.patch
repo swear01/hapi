@@ -1,0 +1,1577 @@
+diff --git a/cli/src/pi/promptQueue.test.ts b/cli/src/pi/promptQueue.test.ts
+index adb50a6a6..34a1c184a 100644
+--- a/cli/src/pi/promptQueue.test.ts
++++ b/cli/src/pi/promptQueue.test.ts
+@@ -21,4 +21,29 @@ describe('PiPromptQueue', () => {
+         expect(queue.dequeue()?.message).toBe('earlier steer fallback');
+         expect(queue.dequeue()?.message).toBe('later ordinary');
+     });
++
++    it('removes a queued entry by localId for explicit steer promotion', () => {
++        const queue = new PiPromptQueue();
++        queue.enqueue({ message: 'first', images: [], outboundSequence: 1, localId: 'one' });
++        queue.enqueue({ message: 'steer me', images: [], outboundSequence: 2, localId: 'two' });
++        queue.enqueue({ message: 'third', images: [], outboundSequence: 3, localId: 'three' });
++
++        const removed = queue.removeByLocalId('two');
++        expect(removed?.message).toBe('steer me');
++        expect(removed?.localId).toBe('two');
++        // Remaining order preserved.
++        expect(queue.dequeue()?.message).toBe('first');
++        expect(queue.dequeue()?.message).toBe('third');
++        expect(queue.dequeue()).toBeUndefined();
++    });
++
++    it('returns undefined when removing an absent or already-dispatched localId', () => {
++        const queue = new PiPromptQueue();
++        queue.enqueue({ message: 'only', images: [], outboundSequence: 1, localId: 'one' });
++
++        expect(queue.removeByLocalId('missing')).toBeUndefined();
++        expect(queue.removeByLocalId('')).toBeUndefined();
++        expect(queue.removeByLocalId('one')?.message).toBe('only');
++        expect(queue.removeByLocalId('one')).toBeUndefined();
++    });
+ });
+diff --git a/cli/src/pi/promptQueue.ts b/cli/src/pi/promptQueue.ts
+index 0addeefe1..f8e861a59 100644
+--- a/cli/src/pi/promptQueue.ts
++++ b/cli/src/pi/promptQueue.ts
+@@ -36,6 +36,19 @@ export class PiPromptQueue {
+         return true;
+     }
+ 
++    /**
++     * Remove and return a queued entry by localId — used to promote a message
++     * into the active turn (explicit steer). Returns undefined when the entry
++     * is absent (already dispatched, cancelled, or still preparing).
++     */
++    removeByLocalId(localId: string): PiPreparedPrompt | undefined {
++        if (!localId) return undefined;
++        const index = this.entries.findIndex((entry) => entry.localId === localId);
++        if (index === -1) return undefined;
++        const [entry] = this.entries.splice(index, 1);
++        return entry;
++    }
++
+     get size(): number {
+         return this.entries.length;
+     }
+diff --git a/cli/src/pi/runPi.test.ts b/cli/src/pi/runPi.test.ts
+index bc01d6dc0..c2d4ed8db 100644
+--- a/cli/src/pi/runPi.test.ts
++++ b/cli/src/pi/runPi.test.ts
+@@ -1038,3 +1038,215 @@ describe('Pi prompt preparation', () => {
+         }
+     });
+ });
++
++describe('Pi steer-queued-message RPC', () => {
++    beforeEach(() => {
++        harness.sent.length = 0;
++        harness.throwOnGetCommands = false;
++        harness.onError = null;
++        harness.onEvent = null;
++        harness.rpcHandlers.clear();
++        harness.session.rpcHandlerManager.registerHandler.mockReset();
++        harness.session.rpcHandlerManager.registerHandler.mockImplementation(
++            (method: string, handler: (payload: unknown) => Promise<unknown>) => {
++                harness.rpcHandlers.set(method, handler);
++            }
++        );
++        harness.session.onUserMessage.mockReset();
++        harness.session.emitMessagesConsumed.mockReset();
++        harness.session.sendSessionEvent.mockReset();
++        harness.session.updateMetadata.mockReset();
++        harness.killCount = 0;
++        harness.cleanupCount = 0;
++        vi.useFakeTimers();
++    });
++
++    // Startup helper used by the flow tests. Mirrors the existing "establishes
++    // the history baseline" test: the 30s ready fallback establishes the
++    // baseline first, then get_state reports the streaming state and the native
++    // preparation probe completes. Advancing timers explicitly (instead of
++    // letting vi.waitFor auto-advance) keeps the fallback from re-firing mid-test.
++    async function startReadySession(streaming: boolean): Promise<{ running: Promise<void> }> {
++        const running = runPi({ workingDirectory: '/work' });
++        await Promise.resolve();
++        await vi.advanceTimersByTimeAsync(31_000);
++        await completeHistoryBaseline();
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-session', sessionFile: '/tmp/pi-session.jsonl', ...(streaming ? { isStreaming: true } : {}) },
++        });
++        await completeHistoryProbe();
++        await vi.advanceTimersByTimeAsync(0);
++        return { running };
++    }
++
++    it('registers the steer-queued-message RPC handler', async () => {
++        const { running } = await startReadySession(false);
++
++        expect(harness.rpcHandlers.has(RPC_METHODS.SteerQueuedMessage)).toBe(true);
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++
++    it('requires a localId', async () => {
++        const { running } = await startReadySession(false);
++
++        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
++        const result = await handler({});
++
++        expect(result).toEqual({ steered: false, error: 'localId is required' });
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++
++    it('promotes a queued message into the active turn while Pi is streaming', async () => {
++        const { running } = await startReadySession(true);
++
++        // Pi reports a streaming turn: the prompt pump stays blocked, so the
++        // message waits in the queue instead of being sent as a prompt.
++        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
++            message: { role: 'user'; content: { type: 'text'; text: string } },
++            localId: string
++        ) => void;
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'steer me' } }, 'steer-local');
++        await vi.advanceTimersByTimeAsync(0);
++
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt', message: 'steer me' }));
++
++        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
++        const result = await handler({ localId: 'steer-local' });
++
++        expect(result).toEqual({ steered: true });
++
++        // The native steer reaches Pi stdin and is acked once Pi confirms it.
++        await vi.advanceTimersByTimeAsync(0);
++        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as
++            { id: string; message: string } | undefined;
++        expect(steer?.message).toBe('steer me');
++        harness.onEvent!({ type: 'response', id: steer!.id, command: 'steer', success: true });
++        await vi.advanceTimersByTimeAsync(0);
++        expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['steer-local'], undefined);
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++
++    it('rejects a steer when the message is not queued (already dispatched)', async () => {
++        const { running } = await startReadySession(false);
++
++        // Idle Pi: the pump dispatches the message as a normal prompt right away.
++        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
++            message: { role: 'user'; content: { type: 'text'; text: string } },
++            localId: string
++        ) => void;
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'prompt me' } }, 'prompt-local');
++        await vi.advanceTimersByTimeAsync(0);
++
++        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'prompt', message: 'prompt me' }));
++
++        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
++        const result = await handler({ localId: 'prompt-local' });
++
++        expect(result).toEqual({ steered: false, error: 'Message not found or already dispatched' });
++        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++
++    it('defers a steer requested while the message is still preparing, then steers after preparation', async () => {
++        const { running } = await startReadySession(true);
++
++        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
++            message: { role: 'user'; content: { type: 'text'; text: string } },
++            localId: string
++        ) => void;
++        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
++
++        // The handler registers the localId in preparingLocalIds synchronously;
++        // call the steer RPC before the preparation microtask completes so the
++        // message is still "preparing".
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'attach me' } }, 'attach-local');
++        const result = await handler({ localId: 'attach-local' });
++
++        expect(result).toEqual({ steered: true });
++        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
++
++        // Preparation completes and the pending steer is promoted into the turn.
++        await vi.advanceTimersByTimeAsync(0);
++        const steer = harness.sent.find((item) => (item as { type?: string }).type === 'steer') as
++            { id: string; message: string } | undefined;
++        expect(steer?.message).toBe('attach me');
++        harness.onEvent!({ type: 'response', id: steer!.id, command: 'steer', success: true });
++        await vi.advanceTimersByTimeAsync(0);
++        expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['attach-local'], undefined);
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++
++    it('steers into the generation captured at request time, not one that started mid-preparation', async () => {
++        const { running } = await startReadySession(true);
++
++        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
++            message: { role: 'user'; content: { type: 'text'; text: string } },
++            localId: string
++        ) => void;
++        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
++
++        // Request the steer while the message is still preparing (generation G1).
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'rollover me' } }, 'rollover-local');
++        const result = await handler({ localId: 'rollover-local' });
++        expect(result).toEqual({ steered: true });
++        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
++
++        // G1 ends and G2 starts while the message is still preparing.
++        const state = { sessionId: 'pi-session', sessionFile: '/tmp/pi-session.jsonl' };
++        harness.onEvent!({ type: 'response', command: 'get_state', success: true, data: { ...state, isStreaming: false } });
++        harness.onEvent!({ type: 'response', command: 'get_state', success: true, data: { ...state, isStreaming: true } });
++
++        // Preparation completes; the dispatcher sees generation G2 != captured
++        // G1 and degrades the message to the prompt FIFO instead of steering it.
++        await vi.advanceTimersByTimeAsync(0);
++        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
++        expect(harness.session.emitMessagesConsumed).not.toHaveBeenCalledWith(['rollover-local'], undefined);
++
++        // Once G2 settles, the FIFO delivers the message as a normal prompt.
++        harness.onEvent!({ type: 'response', command: 'get_state', success: true, data: { ...state, isStreaming: false } });
++        await vi.advanceTimersByTimeAsync(0);
++        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'prompt', message: 'rollover me' }));
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++
++    it('drops a deferred steer when the message is cancelled while preparing', async () => {
++        const { running } = await startReadySession(true);
++
++        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (
++            message: { role: 'user'; content: { type: 'text'; text: string } },
++            localId: string
++        ) => void;
++        const handler = harness.rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'cancel me' } }, 'cancel-local');
++        const result = await handler({ localId: 'cancel-local' });
++        expect(result).toEqual({ steered: true });
++
++        // Cancellation wins over the deferred steer (checked first in the chain).
++        const onCancelQueuedMessage = harness.session.onCancelQueuedMessage.mock.calls.at(-1)![0] as (localId: string) => boolean;
++        expect(onCancelQueuedMessage('cancel-local')).toBe(true);
++
++        // Preparation completes: the message is dropped — never steered, never
++        // sent as a prompt, never consumed (the hub deletes the row instead).
++        await vi.advanceTimersByTimeAsync(0);
++        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'steer')).toHaveLength(0);
++        expect(harness.sent.filter((item) => (item as { type?: string }).type === 'prompt')).toHaveLength(0);
++        expect(harness.session.emitMessagesConsumed).not.toHaveBeenCalled();
++
++        harness.onError?.(new Error('stop test transport'));
++        await running;
++    });
++});
+diff --git a/cli/src/pi/runPi.ts b/cli/src/pi/runPi.ts
+index f2a3fb3f4..d1fdd926e 100644
+--- a/cli/src/pi/runPi.ts
++++ b/cli/src/pi/runPi.ts
+@@ -355,6 +355,16 @@ export async function runPi(opts: {
+     const promptQueue = new PiPromptQueue();
+     const preparingLocalIds = new Set<string>();
+     const cancelledWhilePreparing = new Set<string>();
++    // LocalIds whose owner pressed Steer while image preparation was still in
++    // flight, mapped to the streaming generation observed at request time.
++    // Checked after preparation completes, before normal FIFO routing, so an
++    // explicit steer request is never lost to the queue (and cancel still wins
++    // over it because cancellation is checked earlier in the chain). The
++    // captured generation matters: if the original turn ends and a new one
++    // starts while the message is preparing, the dispatcher's mismatch check
++    // degrades the message to the prompt FIFO instead of steering into a turn
++    // the operator never targeted.
++    const steerPendingWhilePreparing = new Map<string, number>();
+     let preparationChain = Promise.resolve();
+     let promptCommandInFlight = false;
+     let abortInFlight = false;
+@@ -553,6 +563,47 @@ export async function runPi(opts: {
+             throw error;
+         }
+     });
++    // --- Steer-queued-message RPC ---
++    // Delivers one queued message into the active Pi turn (native steer). The
++    // web shows a per-message Steer button only while Pi is thinking; the hub
++    // gates flavor/remote/scheduled before reaching this handler. Messages
++    // still being prepared are marked for steering and promoted right after
++    // preparation completes, so the request is never lost to the FIFO.
++    apiSession.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async (payload: unknown) => {
++        const localId = payload && typeof payload === 'object'
++            && typeof (payload as { localId?: unknown }).localId === 'string'
++            ? (payload as { localId: string }).localId
++            : undefined;
++        if (!localId) {
++            return { steered: false, error: 'localId is required' };
++        }
++        if (preparingLocalIds.has(localId)) {
++            const generation = piSession.currentStreamingGeneration;
++            if (!piSession.isReady || generation === null) {
++                return { steered: false, error: 'Session is not streaming' };
++            }
++            steerPendingWhilePreparing.set(localId, generation);
++            return { steered: true };
++        }
++        if (!steerDispatcher) {
++            return { steered: false, error: 'Steering is not ready' };
++        }
++        const entry = promptQueue.removeByLocalId(localId);
++        if (!entry) {
++            return { steered: false, error: 'Message not found or already dispatched' };
++        }
++        // Only steer into a live Pi generation. Otherwise restore the entry to
++        // its FIFO position (enqueue re-orders by outboundSequence) and let the
++        // normal pump deliver it when the agent settles.
++        const currentGeneration = piSession.currentStreamingGeneration;
++        if (!piSession.isReady || currentGeneration === null) {
++            promptQueue.enqueue(entry);
++            return { steered: false, error: 'Session is not streaming' };
++        }
++        steerDispatcher.enqueue({ ...entry, targetStreamingGeneration: currentGeneration });
++        return { steered: true };
++    });
++
+     apiSession.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, async (payload: unknown) => {
+         if (!payload || typeof payload !== 'object' || typeof (payload as { messageLocalId?: unknown }).messageLocalId !== 'string') {
+             throw new Error('messageLocalId is required');
+@@ -788,6 +839,13 @@ export async function runPi(opts: {
+             };
+             if (deliveryMode === 'steer') {
+                 steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration });
++            } else if (localId && steerPendingWhilePreparing.has(localId)) {
++                // The user pressed Steer while this message was still preparing.
++                // Promote it into the turn observed at request time; if that
++                // turn already ended, the dispatcher degrades it to the FIFO.
++                const targetGeneration = steerPendingWhilePreparing.get(localId)!;
++                steerPendingWhilePreparing.delete(localId);
++                steerDispatcher?.enqueue({ ...entry, targetStreamingGeneration: targetGeneration });
+             } else {
+                 promptQueue.enqueue(entry);
+                 pumpPromptQueue();
+@@ -800,6 +858,13 @@ export async function runPi(opts: {
+             if (localId && !wasCancelled) {
+                 piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+             }
++        }).finally(() => {
++            // Deferred-steer bookkeeping must not outlive the message it refers
++            // to: the promotion path already deletes it, and every early exit
++            // (cancellation before/after preparation, empty prepared message,
++            // preparation failure) lands here. A stale entry could misroute a
++            // later reuse of the same localId.
++            if (localId) steerPendingWhilePreparing.delete(localId);
+         });
+     });
+ 
+diff --git a/cli/src/pi/steerDispatcher.test.ts b/cli/src/pi/steerDispatcher.test.ts
+index d273e0d05..b76e198af 100644
+--- a/cli/src/pi/steerDispatcher.test.ts
++++ b/cli/src/pi/steerDispatcher.test.ts
+@@ -178,17 +178,19 @@ describe('PiSteerDispatcher', () => {
+         expect(h.history.registerUserEntry).not.toHaveBeenCalled();
+     });
+ 
+-    it('removes failed native steers from history and clears only their queued thinking grace', async () => {
++    it('preserves a deterministically rejected steer by degrading it to the prompt FIFO', async () => {
+         const h = createHarness();
+         h.dispatcher.enqueue({ localId: 'failed-steer', message: 'will fail', images: [], outboundSequence: 1, targetStreamingGeneration: h.session.currentStreamingGeneration });
+         await vi.waitFor(() => expect(steerCommands(h.transport)).toHaveLength(1));
+ 
+         resolveSteer(h.session, steerCommands(h.transport)[0]!, false, 'steer rejected');
+         await vi.waitFor(() => expect(h.history.rejectPendingEntry).toHaveBeenCalledWith('failed-steer'));
+-        expect(h.client.emitMessagesConsumed).toHaveBeenCalledWith(
+-            ['failed-steer'],
+-            { clearQueuedThinkingGrace: true },
+-        );
++        // Pi never accepted the steer: the message must survive by falling back
++        // to the ordinary prompt FIFO instead of being consumed (issue #1466).
++        expect(h.enqueuePrompt).toHaveBeenCalledWith({
++            localId: 'failed-steer', message: 'will fail', images: [], outboundSequence: 1,
++        });
++        expect(h.client.emitMessagesConsumed).not.toHaveBeenCalled();
+         expect(h.client.sendSessionEvent).toHaveBeenCalledWith({
+             type: 'message', message: 'Pi steer failed: steer rejected',
+         });
+diff --git a/cli/src/pi/steerDispatcher.ts b/cli/src/pi/steerDispatcher.ts
+index 50ea0df09..6d1aa7182 100644
+--- a/cli/src/pi/steerDispatcher.ts
++++ b/cli/src/pi/steerDispatcher.ts
+@@ -135,6 +135,26 @@ export class PiSteerDispatcher {
+ 
+             const detail = error instanceof Error ? error.message : String(error);
+             this.options.conversationHistory.rejectPendingEntry(active.entry.localId);
++
++            // A deterministic native rejection means Pi never accepted the
++            // steer. Preserve the message by degrading it to the ordinary
++            // prompt FIFO (it is delivered when the agent settles) instead of
++            // consuming the hub row — a promoted queued message must not be
++            // lost just because the steer was rejected.
++            if (!(error instanceof PiRpcTimeoutError)) {
++                this.options.enqueuePrompt({
++                    message: active.entry.message,
++                    images: active.entry.images,
++                    outboundSequence: active.entry.outboundSequence,
++                    ...(active.entry.localId ? { localId: active.entry.localId } : {}),
++                });
++                this.options.session.sendSessionEvent({ type: 'message', message: `Pi steer failed: ${detail}` });
++                return;
++            }
++
++            // Indeterminate timeout: Pi may or may not have accepted the
++            // steer. Keep the fail-closed handling (consume + escalate) rather
++            // than risking a duplicate delivery via the prompt FIFO.
+             if (active.entry.localId) {
+                 this.options.session.emitMessagesConsumed(
+                     [active.entry.localId],
+@@ -142,7 +162,7 @@ export class PiSteerDispatcher {
+                 );
+             }
+             this.options.session.sendSessionEvent({ type: 'message', message: `Pi steer failed: ${detail}` });
+-            if (error instanceof PiRpcTimeoutError) this.options.onIndeterminateTimeout(error);
++            this.options.onIndeterminateTimeout(error);
+         }
+     }
+ }
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 259155a8c..e24b293c5 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -415,6 +415,20 @@ export class RpcGateway {
+         return await this.sessionRpc(sessionId, method, params ?? {}, timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS) as T
+     }
+ 
++    /**
++     * Ask the CLI to deliver one queued message into the active Pi turn
++     * (Pi native steer). Only the pi flavor registers this handler.
++     */
++    async steerQueuedMessage(
++        sessionId: string,
++        localId: string
++    ): Promise<{ steered: boolean; error?: string }> {
++        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
++            steered: boolean
++            error?: string
++        }
++    }
++
+     async forkConversation(
+         sessionId: string,
+         params: { messageLocalId?: string }
+diff --git a/hub/src/sync/steerQueuedMessage.test.ts b/hub/src/sync/steerQueuedMessage.test.ts
+new file mode 100644
+index 000000000..78b51e877
+--- /dev/null
++++ b/hub/src/sync/steerQueuedMessage.test.ts
+@@ -0,0 +1,73 @@
++import { describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import { SyncEngine } from './syncEngine'
++
++function createEngine() {
++    const store = new Store(':memory:')
++    const io = {
++        of: () => ({
++            to: () => ({ emit: () => {} })
++        })
++    }
++    const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() {} } as never)
++    return { store, engine }
++}
++
++describe('SyncEngine.steerQueuedMessage', () => {
++    it('rejects every scheduled row, mature ones included, without invoking the CLI', async () => {
++        const { store, engine } = createEngine()
++        try {
++            const session = engine.getOrCreateSession(
++                'steer-scheduled',
++                { path: '/tmp/project', host: 'localhost', flavor: 'pi' },
++                { requests: {}, completedRequests: {} },
++                'default'
++            )
++            // A mature scheduled row: the fire time already passed, but the row
++            // is still uninvoked and waiting for the scheduled-FIFO release.
++            const message = store.messages.addMessage(
++                session.id,
++                { text: 'mature scheduled' },
++                'mature-local',
++                Date.now() - 1_000
++            )
++
++            const result = await engine.steerQueuedMessage(session.id, message.id)
++
++            expect(result).toEqual({
++                status: 'failed',
++                error: 'Scheduled messages cannot be steered',
++                localId: 'mature-local'
++            })
++            // The row must stay queued — untouched by the rejected steer.
++            const lookup = store.messages.lookupQueuedMessage(session.id, message.id)
++            expect(lookup.status).toBe('queued')
++        } finally {
++            engine.stop()
++        }
++    })
++
++    it('rejects non-pi sessions without invoking the CLI', async () => {
++        const { store, engine } = createEngine()
++        try {
++            const session = engine.getOrCreateSession(
++                'steer-codex',
++                { path: '/tmp/project', host: 'localhost', flavor: 'codex' },
++                { requests: {}, completedRequests: {} },
++                'default'
++            )
++            const message = store.messages.addMessage(session.id, { text: 'hi' }, 'local-id')
++
++            const result = await engine.steerQueuedMessage(session.id, message.id)
++
++            expect(result).toEqual({
++                status: 'failed',
++                error: 'Steering is only supported for Pi sessions',
++                localId: null
++            })
++        } finally {
++            engine.stop()
++        }
++    })
++})
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 92f38fb91..255514d69 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -9,6 +9,7 @@
+ 
+ import { isKnownFlavor, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+ import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
++import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
+ import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
+ import type { Server } from 'socket.io'
+@@ -980,6 +981,72 @@ async uploadScratchlistAttachment(
+         return this.messageService.cancelQueuedMessage(sessionId, messageId)
+     }
+ 
++    /**
++     * Ask the CLI to deliver one waiting-queue message into the active Pi turn
++     * (Pi native steer). Only pi sessions support this today; the CLI's
++     * `steer-queued-message` handler is registered by the pi runner alone.
++     */
++    async steerQueuedMessage(
++        sessionId: string,
++        messageId: string
++    ): Promise<SteerQueuedMessageResponse> {
++        const session = this.getSession(sessionId)
++        if (!session) {
++            return { status: 'failed', error: 'Session not found', localId: null }
++        }
++        if (session.metadata?.flavor !== 'pi') {
++            return { status: 'failed', error: 'Steering is only supported for Pi sessions', localId: null }
++        }
++        if (session.agentState?.controlledByUser === true) {
++            return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
++        }
++
++        const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
++        if (lookup.status === 'absent') {
++            return { status: 'failed', error: 'Message not found', localId: null }
++        }
++        if (lookup.status === 'invoked') {
++            const message = lookup.message
++            return {
++                status: 'invoked',
++                message: {
++                    id: message.id,
++                    seq: message.seq,
++                    localId: message.localId,
++                    content: message.content,
++                    createdAt: message.createdAt,
++                    invokedAt: message.invokedAt,
++                    scheduledAt: message.scheduledAt
++                }
++            }
++        }
++        const { localId, scheduledAt } = lookup
++        if (!localId) {
++            return { status: 'failed', error: 'Message has no localId', localId: null }
++        }
++        // Reject every scheduled row — mature ones included. A matured row is
++        // released by the scheduled-FIFO path moments later anyway, and the web
++        // never offers Steer on scheduled rows.
++        if (scheduledAt != null) {
++            return { status: 'failed', error: 'Scheduled messages cannot be steered', localId }
++        }
++
++        try {
++            const result = await this.rpcGateway.steerQueuedMessage(sessionId, localId)
++            if (result.steered) {
++                return { status: 'steered', localId }
++            }
++            return {
++                status: 'failed',
++                error: result.error ?? 'Steer failed',
++                localId
++            }
++        } catch (error) {
++            const message = error instanceof Error ? error.message : 'Steer failed'
++            return { status: 'failed', error: message, localId }
++        }
++    }
++
+     sweepImmediateQueuedOnSessionEnd(sessionId: string, invokedAt: number): void {
+         this.messageService.sweepImmediateQueuedOnSessionEnd(sessionId, invokedAt)
+     }
+diff --git a/hub/src/web/routes/messages.test.ts b/hub/src/web/routes/messages.test.ts
+index 3876d3f85..55b96cdd0 100644
+--- a/hub/src/web/routes/messages.test.ts
++++ b/hub/src/web/routes/messages.test.ts
+@@ -28,6 +28,7 @@ function createApp(opts: {
+         queuedLocalIds: string[]
+         invokedLocalMessages: Array<{ localId: string; invokedAt: number }>
+     }
++    steerQueuedMessage?: (sessionId: string, messageId: string) => Promise<unknown>
+ }) {
+     const sentMessages: Array<{ sessionId: string; payload: unknown }> = []
+     const queuedStateCalls: Array<{ sessionId: string; localIds: string[] }> = []
+@@ -69,6 +70,7 @@ function createApp(opts: {
+         sendMessage,
+         getQueuedState,
+         cancelQueuedMessage: async () => ({ status: 'cancelled' }),
++        steerQueuedMessage: opts.steerQueuedMessage ?? (async () => ({ status: 'failed', error: 'Steer failed', localId: null })),
+         getMessagesPage,
+     } as unknown as SyncEngine
+ 
+@@ -485,3 +487,32 @@ describe('POST /api/sessions/:id/messages/queued-state', () => {
+         expect(queuedStateCalls).toHaveLength(0)
+     })
+ })
++
++describe('POST /api/sessions/:id/messages/:messageId/steer', () => {
++    it('forwards the steer request to the engine and returns its result', async () => {
++        const calls: Array<{ sessionId: string; messageId: string }> = []
++        const { app } = createApp({
++            steerQueuedMessage: async (sessionId: string, messageId: string) => {
++                calls.push({ sessionId, messageId })
++                return { status: 'steered', localId: 'local-1' }
++            }
++        })
++
++        const response = await app.request('/api/sessions/session-1/messages/msg-1/steer', { method: 'POST' })
++
++        expect(response.status).toBe(200)
++        expect(calls).toEqual([{ sessionId: 'session-1', messageId: 'msg-1' }])
++        expect(await response.json()).toEqual({ status: 'steered', localId: 'local-1' })
++    })
++
++    it('rejects inactive sessions', async () => {
++        const { app } = createApp({ active: false })
++
++        const response = await app.request('/api/sessions/session-1/messages/msg-1/steer', { method: 'POST' })
++
++        expect(response.status).toBe(409)
++        const body = await response.json() as { error: string; code: string }
++        expect(body.error).toBe('Session is inactive')
++        expect(body.code).toBe('session_inactive')
++    })
++})
+diff --git a/hub/src/web/routes/messages.ts b/hub/src/web/routes/messages.ts
+index b4eb79b37..dcd33d7ca 100644
+--- a/hub/src/web/routes/messages.ts
++++ b/hub/src/web/routes/messages.ts
+@@ -60,6 +60,23 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         return c.json(result)
+     })
+ 
++    app.post('/sessions/:id/messages/:messageId/steer', async (c) => {
++        const engine = requireSyncEngine(c, getSyncEngine)
++        if (engine instanceof Response) {
++            return engine
++        }
++
++        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
++        if (sessionResult instanceof Response) {
++            return sessionResult
++        }
++        const sessionId = sessionResult.sessionId
++        const messageId = c.req.param('messageId')
++
++        const result = await engine.steerQueuedMessage(sessionId, messageId)
++        return c.json(result)
++    })
++
+     app.post('/sessions/:id/messages/queued-state', async (c) => {
+         const engine = requireSyncEngine(c, getSyncEngine)
+         if (engine instanceof Response) {
+diff --git a/shared/src/rpcMethods.ts b/shared/src/rpcMethods.ts
+index ef57eaa7f..af06f53e9 100644
+--- a/shared/src/rpcMethods.ts
++++ b/shared/src/rpcMethods.ts
+@@ -42,6 +42,8 @@ export const RPC_METHODS = {
+     ListCopilotModels: 'listCopilotModels',
+     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+     ListAgyModels: 'listAgyModels',
++    /** Deliver one queued message into the active Pi turn (native steer). */
++    SteerQueuedMessage: 'steer-queued-message',
+     ForkConversation: 'fork-conversation',
+     RewindConversation: 'rewind-conversation',
+ } as const
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index dc9288ae3..e6d067d9f 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -590,3 +590,11 @@ export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
+ ])
+ 
+ export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>
++
++export const SteerQueuedMessageResponseSchema = z.discriminatedUnion('status', [
++    z.object({ status: z.literal('steered'), localId: z.string() }),
++    z.object({ status: z.literal('invoked'), message: DecryptedMessageSchema }),
++    z.object({ status: z.literal('failed'), error: z.string(), localId: z.string().nullable() }),
++])
++
++export type SteerQueuedMessageResponse = z.infer<typeof SteerQueuedMessageResponseSchema>
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index 5d3a1e0e9..df920910d 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -151,6 +151,22 @@ describe('ApiClient error mapping', () => {
+         })
+     })
+ 
++    it('posts a steer for a queued message', async () => {
++        fetchMock.mockResolvedValueOnce(
++            new Response(JSON.stringify({ status: 'steered', localId: 'local-1' }), { status: 200 })
++        )
++
++        const api = new ApiClient('test-token')
++        await expect(api.steerMessage('session /?#', 'msg-1')).resolves.toEqual({
++            status: 'steered',
++            localId: 'local-1',
++        })
++
++        const [url, init] = fetchMock.mock.calls[0] ?? []
++        expect(url).toBe('/api/sessions/session%20%2F%3F%23/messages/msg-1/steer')
++        expect(init).toMatchObject({ method: 'POST' })
++    })
++
+     it('requests usage buckets in the viewer IANA time zone', async () => {
+         fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+ 
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 08650fdd6..73dfc31d8 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -53,7 +53,7 @@ import type {
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
+ import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
+-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
++import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+ 
+ export type ProviderCredentialSource = 'env' | 'settings' | 'none'
+@@ -539,6 +539,14 @@ export class ApiClient {
+         return response as CancelMessageResponse
+     }
+ 
++    async steerMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
++        const response = await this.request(
++            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
++            { method: 'POST' }
++        )
++        return response as SteerQueuedMessageResponse
++    }
++
+     async abortSession(sessionId: string): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+             method: 'POST',
+diff --git a/web/src/components/AssistantChat/ComposerButtons.test.tsx b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+index 8f3f123e0..d6ac051be 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.test.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+@@ -107,12 +107,7 @@ describe('UnifiedButton — routesToScratchlist visual state', () => {
+     })
+ })
+ 
+-describe('UnifiedButton — touch queue gesture', () => {
+-    afterEach(() => {
+-        cleanup()
+-        vi.useRealTimers()
+-    })
+-
++describe('UnifiedButton — default send intent', () => {
+     function renderSendButton(overrides: Partial<ComponentProps<typeof UnifiedButton>> = {}) {
+         const onSend = vi.fn()
+         renderInProviders(
+@@ -123,7 +118,6 @@ describe('UnifiedButton — touch queue gesture', () => {
+                 controlsDisabled={false}
+                 onSend={onSend}
+                 onVoiceToggle={() => {}}
+-                allowQueueGesture
+                 {...overrides}
+             />,
+         )
+@@ -146,40 +140,6 @@ describe('UnifiedButton — touch queue gesture', () => {
+         expect(onSend).toHaveBeenCalledWith('default')
+     })
+ 
+-    it('uses queue only for a mobile touch long-press and suppresses its native click', () => {
+-        vi.useFakeTimers()
+-        const { onSend, button } = renderSendButton()
+-
+-        fireEvent.touchStart(button, { touches: [{ clientX: 10, clientY: 10 }] })
+-        act(() => vi.advanceTimersByTime(500))
+-        fireEvent.touchEnd(button, { changedTouches: [{ clientX: 10, clientY: 10 }] })
+-        fireEvent.click(button, { detail: 1 })
+-
+-        expect(onSend).toHaveBeenCalledOnce()
+-        expect(onSend).toHaveBeenCalledWith('queue')
+-
+-        fireEvent.click(button, { detail: 1 })
+-        expect(onSend).toHaveBeenCalledTimes(2)
+-        expect(onSend).toHaveBeenLastCalledWith('default')
+-    })
+-
+-    it('keeps keyboard and assistive send activation after a long touch has no compatibility click', () => {
+-        vi.useFakeTimers()
+-        const { onSend, button } = renderSendButton()
+-
+-        fireEvent.touchStart(button, { touches: [{ clientX: 10, clientY: 10 }] })
+-        act(() => vi.advanceTimersByTime(500))
+-        fireEvent.touchEnd(button, { changedTouches: [{ clientX: 10, clientY: 10 }] })
+-
+-        // The browser does not emit its touch compatibility click. A detail-0
+-        // click is the native keyboard/assistive activation path.
+-        fireEvent.click(button, { detail: 0 })
+-
+-        expect(onSend).toHaveBeenCalledTimes(2)
+-        expect(onSend).toHaveBeenNthCalledWith(1, 'queue')
+-        expect(onSend).toHaveBeenNthCalledWith(2, 'default')
+-    })
+-
+     it('keeps touch tap, desktop mouse hold, and desktop right-click on normal behavior', () => {
+         vi.useFakeTimers()
+         const { onSend, button } = renderSendButton()
+@@ -199,22 +159,6 @@ describe('UnifiedButton — touch queue gesture', () => {
+         expect(onSend).toHaveBeenNthCalledWith(2, 'default')
+         expect(contextMenuWasNotPrevented).toBe(true)
+     })
+-
+-    it.each([
+-        ['voice is active', { voiceStatus: 'connected' as const }],
+-        ['scratchlist route is active', { routesToScratchlist: true }],
+-        ['queue gesture is disabled', { allowQueueGesture: false }],
+-    ])('does not queue on long-press when %s', (_name, overrides) => {
+-        vi.useFakeTimers()
+-        const { onSend, button } = renderSendButton(overrides)
+-
+-        fireEvent.touchStart(button, { touches: [{ clientX: 10, clientY: 10 }] })
+-        act(() => vi.advanceTimersByTime(500))
+-        fireEvent.touchEnd(button, { changedTouches: [{ clientX: 10, clientY: 10 }] })
+-        fireEvent.click(button)
+-
+-        expect(onSend).not.toHaveBeenCalledWith('queue')
+-    })
+ })
+ 
+ describe('DictationButton', () => {
+diff --git a/web/src/components/AssistantChat/ComposerButtons.tsx b/web/src/components/AssistantChat/ComposerButtons.tsx
+index 8973a807a..e90c1da80 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.tsx
+@@ -8,7 +8,6 @@ import { useFue } from '@/lib/use-fue'
+ import { FueCallout, FueDot } from '@/components/Fue'
+ import { Children, isValidElement, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react'
+ import { useComposerToolbarLayout, type ComposerToolbarItemId, type ComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
+-import { useLongPress } from '@/hooks/useLongPress'
+ import type { ComposerSendIntent } from '@/lib/messageDelivery'
+ 
+ function ToolbarItemSlot(props: { item: ComposerToolbarItemId; children: ReactNode }) {
+@@ -490,8 +489,6 @@ export function UnifiedButton(props: {
+      * would fall back to chat, the button must look like a normal chat send.
+      */
+     routesToScratchlist?: boolean
+-    /** Pi-only explicit follow-up gesture; never changes the normal click. */
+-    allowQueueGesture?: boolean
+ }) {
+     const { t } = useTranslation()
+ 
+@@ -511,25 +508,6 @@ export function UnifiedButton(props: {
+         }
+     }
+ 
+-    // This is intentionally narrower than the button's general enabled state:
+-    // a touch hold changes only an active Pi-main-thread chat submission. Voice
+-    // controls, scratchlist routing, scheduled sends, and desktop input retain
+-    // their existing native behavior.
+-    const canQueueGesture = Boolean(
+-        props.allowQueueGesture
+-        && hasText
+-        && !isVoiceActive
+-        && !routesToScratchlist
+-        && !props.controlsDisabled,
+-    )
+-    const sendButtonHandlers = useLongPress({
+-        interaction: 'touch-only-native-click',
+-        onClick: handleClick,
+-        onLongPress: () => props.onSend('queue'),
+-        longPressEnabled: canQueueGesture,
+-        disabled: props.controlsDisabled,
+-    })
+-
+     let icon: React.ReactNode
+     let className: string
+     let ariaLabel: string
+@@ -577,7 +555,7 @@ export function UnifiedButton(props: {
+     return (
+         <button
+             type="button"
+-            {...sendButtonHandlers}
++            onClick={handleClick}
+             disabled={isDisabled}
+             aria-label={ariaLabel}
+             title={ariaLabel}
+@@ -670,8 +648,6 @@ export function ComposerButtons(props: {
+     scratchlistMode?: boolean
+     scratchlistCount?: number
+     onScratchlistToggle?: () => void
+-    /** Enables touch hold as an explicit queue intent for an in-flight Pi turn. */
+-    allowQueueGesture?: boolean
+ }) {
+     const { t } = useTranslation()
+     const { layout } = useComposerToolbarLayout()
+@@ -921,7 +897,6 @@ export function ComposerButtons(props: {
+                     (props.scratchlistMode ?? false)
+                     && props.pendingSchedule == null
+                 }
+-                allowQueueGesture={props.allowQueueGesture && props.pendingSchedule == null}
+             />
+         </div>
+     )
+diff --git a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+index a8d60826a..1490118ad 100644
+--- a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+@@ -565,12 +565,14 @@ describe('HappyComposer send intent gestures', () => {
+         runtime.sentIntents = []
+     })
+ 
+-    it('uses queue for Alt/Option+Enter only while the Pi main thread is running', () => {
++    it('ignores Alt/Option+Enter (the old explicit-queue gesture) entirely', () => {
+         renderComposer('follow-up', null, true)
+ 
+         fireEvent.keyDown(input(), { key: 'Enter', altKey: true })
+ 
+-        expect(runtime.sentIntents).toEqual(['queue'])
++        // Every send now queues by default (issue #1466); the Alt+Enter
++        // gesture was removed with the Pi automatic steer.
++        expect(runtime.sentIntents).toEqual([])
+         expect(runtime.pendingSendIntentRef?.current).toBe('default')
+     })
+ 
+@@ -593,7 +595,7 @@ describe('HappyComposer send intent gestures', () => {
+         expect(runtime.pendingSendIntentRef?.current).toBe('default')
+     })
+ 
+-    it('does not turn Alt/Option+Enter into queue when Pi is idle or a schedule is active', () => {
++    it('keeps Alt/Option+Enter inert when Pi is idle or a schedule is active', () => {
+         const idle = renderComposer('idle', null, false)
+         fireEvent.keyDown(input(), { key: 'Enter', altKey: true })
+         expect(runtime.sentIntents).toEqual([])
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index f2515a375..f037d0c57 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -1219,12 +1219,6 @@ export function HappyComposer(props: {
+         void handleSend(intent)
+     }, [handleSend])
+ 
+-    const canQueueSend = agentFlavor === 'pi'
+-        && thinking
+-        && threadIsRunning
+-        && pendingSchedule == null
+-        && !props.scratchlistMode
+-
+     const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement | HTMLDivElement>) => {
+         const key = e.key
+ 
+@@ -1246,22 +1240,6 @@ export function HappyComposer(props: {
+             return
+         }
+ 
+-        // Alt/Option+Enter is an explicit Pi follow-up request. It is
+-        // orthogonal to the normal Enter preference but never overrides IME,
+-        // Shift+Enter, autocomplete, scheduling, or scratchlist routing.
+-        if (
+-            key === 'Enter'
+-            && e.altKey
+-            && !e.ctrlKey
+-            && !e.metaKey
+-            && canQueueSend
+-        ) {
+-            e.preventDefault()
+-            flushAndSend('queue')
+-            setShowContinueHint(false)
+-            return
+-        }
+-
+         // Only plain Enter (no modifiers) sends; other modifier combos are ignored
+         if (key === 'Enter') {
+             if (composerEnterBehavior === 'newline') {
+@@ -1350,7 +1328,6 @@ export function HappyComposer(props: {
+         richComposerFueStatus,
+         dismissRichComposerFue,
+         flushAndSend,
+-        canQueueSend,
+         isExpanded,
+         handleExpandedToggle,
+     ])
+@@ -2315,7 +2292,6 @@ export function HappyComposer(props: {
+                             onVoiceToggle={effectiveVoiceToggle ?? (() => {})}
+                             onVoiceMicToggle={dictationActive ? undefined : onVoiceMicToggle}
+                             onSend={handleSend}
+-                            allowQueueGesture={canQueueSend}
+                             pendingSchedule={pendingSchedule}
+                             onSchedule={handleUserSchedule}
+                             onClearSchedule={onUserClearSchedule}
+diff --git a/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx b/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx
+index a84da2e18..49133d19c 100644
+--- a/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx
++++ b/web/src/components/AssistantChat/QueuedMessagesBar.test.tsx
+@@ -1,5 +1,7 @@
+ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { ApiClient } from '@/api/client'
+ import type { DecryptedMessage } from '@/types/api'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+ import {
+@@ -22,6 +24,9 @@ const mocks = vi.hoisted(() => ({
+     mutateAsync: vi.fn(),
+     resolveCancel: null as ((result: DeferredCancelResult) => void) | null,
+     rejectCancel: null as ((reason?: unknown) => void) | null,
++    steerMessage: vi.fn(),
++    resolveSteer: null as ((result: unknown) => void) | null,
++    markMessagesConsumed: vi.fn(),
+     saveDraft: vi.fn(),
+     messageWindowState: { messages: [] as unknown[] },
+ }))
+@@ -41,6 +46,7 @@ vi.mock('@assistant-ui/react', () => ({
+ vi.mock('@/lib/message-window-store', () => ({
+     getMessageWindowState: () => mocks.messageWindowState,
+     subscribeMessageWindow: () => () => {},
++    markMessagesConsumed: mocks.markMessagesConsumed,
+ }))
+ 
+ vi.mock('@/hooks/mutations/useCancelQueuedMessage', () => ({
+@@ -83,18 +89,28 @@ function renderQueuedMessage(
+     scheduledAt: number | null = null,
+     pendingSchedule: PendingSchedule | null = null,
+     pendingScheduleRevision = 0,
++    canSteer = false,
++    api: ApiClient | null = null,
+ ) {
+     const onEdit = vi.fn()
+     let currentPendingScheduleRevision = pendingScheduleRevision
+     mocks.messageWindowState = { messages: [makeQueuedMessage(scheduledAt)] }
++    // The real useSteerQueuedMessage hook runs inside the bar, so every render
++    // needs a QueryClient (its mutations use the tanstack defaults).
++    const queryClient = new QueryClient({
++        defaultOptions: { mutations: { retry: false } },
++    })
+     const view = render(
+-        <QueuedMessagesBar
+-            sessionId="session-1"
+-            api={null}
+-            pendingSchedule={pendingSchedule}
+-            pendingScheduleRevision={currentPendingScheduleRevision}
+-            onEdit={onEdit}
+-        />
++        <QueryClientProvider client={queryClient}>
++            <QueuedMessagesBar
++                sessionId="session-1"
++                api={api}
++                pendingSchedule={pendingSchedule}
++                pendingScheduleRevision={currentPendingScheduleRevision}
++                onEdit={onEdit}
++                canSteer={canSteer}
++            />
++        </QueryClientProvider>
+     )
+     return {
+         onEdit,
+@@ -102,13 +118,16 @@ function renderQueuedMessage(
+         rerender: (nextPendingSchedule: PendingSchedule | null, nextPendingScheduleRevision = currentPendingScheduleRevision) => {
+             currentPendingScheduleRevision = nextPendingScheduleRevision
+             view.rerender(
+-                <QueuedMessagesBar
+-                    sessionId="session-1"
+-                    api={null}
+-                    pendingSchedule={nextPendingSchedule}
+-                    pendingScheduleRevision={currentPendingScheduleRevision}
+-                    onEdit={onEdit}
+-                />
++                <QueryClientProvider client={queryClient}>
++                    <QueuedMessagesBar
++                        sessionId="session-1"
++                        api={api}
++                        pendingSchedule={nextPendingSchedule}
++                        pendingScheduleRevision={currentPendingScheduleRevision}
++                        onEdit={onEdit}
++                        canSteer={canSteer}
++                    />
++                </QueryClientProvider>
+             )
+         },
+     }
+@@ -121,6 +140,9 @@ beforeEach(() => {
+     mocks.mutateAsync.mockReset()
+     mocks.resolveCancel = null
+     mocks.rejectCancel = null
++    mocks.steerMessage.mockReset()
++    mocks.resolveSteer = null
++    mocks.markMessagesConsumed.mockReset()
+     mocks.saveDraft.mockReset()
+     mocks.messageWindowState = { messages: [] }
+     clearQueuedEditRecovery('session-1')
+@@ -267,14 +289,19 @@ describe('QueuedMessagesBar edit restore', () => {
+         const second = makeQueuedMessage(scheduledAt, 'server-message-b')
+         mocks.messageWindowState = { messages: [first, second] }
+         const onEdit = vi.fn()
++        const queryClient = new QueryClient({
++            defaultOptions: { mutations: { retry: false } },
++        })
+         render(
+-            <QueuedMessagesBar
+-                sessionId="session-1"
+-                api={null}
+-                pendingSchedule={null}
+-                pendingScheduleRevision={0}
+-                onEdit={onEdit}
+-            />
++            <QueryClientProvider client={queryClient}>
++                <QueuedMessagesBar
++                    sessionId="session-1"
++                    api={null}
++                    pendingSchedule={null}
++                    pendingScheduleRevision={0}
++                    onEdit={onEdit}
++                />
++            </QueryClientProvider>
+         )
+ 
+         const editButtons = screen.getAllByRole('button', { name: 'Edit queued message' })
+@@ -683,3 +710,97 @@ describe('formatScheduledTime', () => {
+         expect(result).toContain(String(nextYear))
+     })
+ })
++
++describe('QueuedMessagesBar steer action', () => {
++    // The real useSteerQueuedMessage hook runs here (only the cancel hook is
++    // module-mocked); pass a fake api whose steerMessage resolves on demand.
++    function renderSteerable(canSteer = true) {
++        mocks.steerMessage.mockImplementation(() => new Promise((resolve) => {
++            mocks.resolveSteer = resolve
++        }))
++        const api = { steerMessage: mocks.steerMessage } as unknown as ApiClient
++        const view = renderQueuedMessage(null, null, 0, canSteer, api)
++        return { unmount: view.unmount }
++    }
++
++    it('shows the Steer button only when canSteer is set and the row is immediate', () => {
++        const immediate = renderSteerable(true)
++        expect(screen.getByRole('button', { name: 'Steer queued message' })).toBeTruthy()
++        immediate.unmount()
++
++        renderSteerable(false)
++        expect(screen.queryByRole('button', { name: 'Steer queued message' })).toBeNull()
++    })
++
++    it('hides the Steer button on future-scheduled rows', () => {
++        const api = { steerMessage: mocks.steerMessage } as unknown as ApiClient
++        renderQueuedMessage(Date.now() + 60_000, null, 0, true, api)
++        expect(screen.queryByRole('button', { name: 'Steer queued message' })).toBeNull()
++    })
++
++    it('calls the steer api with the session and message id', async () => {
++        renderSteerable(true)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Steer queued message' }))
++
++        await waitFor(() => expect(mocks.steerMessage).toHaveBeenCalledWith('session-1', 'server-message-id'))
++        // Settle the pending mutation so the queued-operation token releases;
++        // otherwise the next test would see the session as busy.
++        await act(async () => {
++            mocks.resolveSteer?.({ status: 'steered', localId: 'local-server-message-id' })
++            await Promise.resolve()
++        })
++    })
++
++    it('toasts when the steer fails and leaves the row queued', async () => {
++        renderSteerable(true)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Steer queued message' }))
++        await waitFor(() => expect(mocks.steerMessage).toHaveBeenCalled())
++        await act(async () => {
++            mocks.resolveSteer?.({ status: 'failed', error: 'Session is not streaming', localId: 'local-server-message-id' })
++            await Promise.resolve()
++        })
++
++        expect(mocks.addToast).toHaveBeenCalledWith({
++            title: 'queuedMessages.steerFailed',
++            body: 'Session is not streaming',
++            sessionId: 'session-1',
++            url: window.location.href,
++        })
++    })
++
++    it('does not toast on a successful steer (the consumed event clears the row)', async () => {
++        renderSteerable(true)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Steer queued message' }))
++        await waitFor(() => expect(mocks.steerMessage).toHaveBeenCalled())
++        await act(async () => {
++            mocks.resolveSteer?.({ status: 'steered', localId: 'local-server-message-id' })
++            await Promise.resolve()
++        })
++
++        expect(mocks.addToast).not.toHaveBeenCalled()
++    })
++
++    it('reconciles a stale queued row when the steer returns invoked (missed consumption SSE)', async () => {
++        renderSteerable(true)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Steer queued message' }))
++        await waitFor(() => expect(mocks.steerMessage).toHaveBeenCalled())
++        await act(async () => {
++            mocks.resolveSteer?.({
++                status: 'invoked',
++                message: { localId: 'local-server-message-id', invokedAt: 5_000 },
++            })
++            await Promise.resolve()
++        })
++
++        expect(mocks.markMessagesConsumed).toHaveBeenCalledWith(
++            'session-1',
++            ['local-server-message-id'],
++            5_000,
++        )
++        expect(mocks.addToast).not.toHaveBeenCalled()
++    })
++})
+diff --git a/web/src/components/AssistantChat/QueuedMessagesBar.tsx b/web/src/components/AssistantChat/QueuedMessagesBar.tsx
+index 384b23149..0aece410e 100644
+--- a/web/src/components/AssistantChat/QueuedMessagesBar.tsx
++++ b/web/src/components/AssistantChat/QueuedMessagesBar.tsx
+@@ -7,6 +7,7 @@ import { EMPTY_STATE } from '@/hooks/queries/useMessages'
+ import { normalizeDecryptedMessage } from '@/chat/normalize'
+ import type { DecryptedMessage } from '@/types/api'
+ import { useCancelQueuedMessage } from '@/hooks/mutations/useCancelQueuedMessage'
++import { useSteerQueuedMessage } from '@/hooks/mutations/useSteerQueuedMessage'
+ import { useTranslation } from '@/lib/use-translation'
+ import { useToast } from '@/lib/toast-context'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+@@ -42,6 +43,24 @@ function ClockIcon() {
+     )
+ }
+ 
++function SteerIcon() {
++    return (
++        <svg
++            viewBox="0 0 16 16"
++            fill="none"
++            className="h-3.5 w-3.5"
++            aria-hidden="true"
++        >
++            <path
++                d="M9.5 1 3 9h3.8L6 15l6.5-8H8.7L9.5 1Z"
++                stroke="currentColor"
++                strokeWidth="1.2"
++                strokeLinejoin="round"
++            />
++        </svg>
++    )
++}
++
+ /**
+  * Orders queued messages so the floating bar reads top-down as a single timeline:
+  *   1. Immediate-queued messages first, in the order they were submitted.
+@@ -176,6 +195,7 @@ export function QueuedMessagesBar({
+     pendingSchedule,
+     pendingScheduleRevision,
+     onEdit,
++    canSteer,
+ }: {
+     sessionId: string
+     api: ApiClient | null
+@@ -189,11 +209,18 @@ export function QueuedMessagesBar({
+      * Edit is always cancel + prefill, regardless of whether the message is scheduled or immediate.
+      */
+     onEdit?: (params: { text: string; pendingSchedule: PendingSchedule | null }) => void
++    /**
++     * When true, each queued row gets a Steer button that delivers that
++     * message into the active turn (Pi native steer). The parent computes it
++     * as: pi flavor && session thinking && remote-controlled.
++     */
++    canSteer?: boolean
+ }) {
+     const queued = useQueuedMessages(sessionId)
+     const assistantApi = useAui()
+     const composerText = useAuiState((state) => state.composer.text)
+     const cancelMutation = useCancelQueuedMessage(api)
++    const steerMutation = useSteerQueuedMessage(api)
+     const { t } = useTranslation()
+     const { addToast } = useToast()
+     const pendingScheduleRef = useRef(pendingSchedule)
+@@ -339,6 +366,31 @@ export function QueuedMessagesBar({
+                             })
+                         }
+ 
++                        // Steer delivers this message into the active Pi turn. Gated
++                        // on the same server-echo + no-pending-op conditions as
++                        // Edit/Cancel, and never offered for future-scheduled rows
++                        // (the hub rejects those).
++                        const canSteerRow = Boolean(
++                            canSteer
++                            && msg.scheduledAt == null
++                            && canCancel
++                        )
++                        const steerPending = steerMutation.isPending
++                            && steerMutation.variables?.messageId === msg.id
++                        const handleSteer = () => {
++                            if (!canSteerRow) return
++                            const token = beginQueuedOperation(sessionId)
++                            if (!token) return
++                            void steerMutation.mutateAsync({
++                                sessionId,
++                                messageId: msg.id,
++                            }).catch(() => {
++                                // useSteerQueuedMessage already toasts the failure.
++                            }).finally(() => {
++                                endQueuedOperation(sessionId, token)
++                            })
++                        }
++
+                         const handleEdit = async () => {
+                             if (!canCancel) return
+                             // Edit = cancel + restore composer (text + schedule).
+@@ -452,6 +504,19 @@ export function QueuedMessagesBar({
+                                     )}
+                                 </div>
+                                 <div className="flex shrink-0 items-center gap-1">
++                                    {canSteerRow ? (
++                                        <button
++                                            type="button"
++                                            aria-label="Steer queued message"
++                                            title={t('queuedMessages.steer')}
++                                            disabled={steerPending}
++                                            onClick={handleSteer}
++                                            onMouseDown={(e) => e.preventDefault()}
++                                            className="flex h-6 w-6 items-center justify-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
++                                        >
++                                            <SteerIcon />
++                                        </button>
++                                    ) : null}
+                                     <button
+                                         type="button"
+                                         aria-label="Edit queued message"
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 52bcbdd67..e392611e3 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1819,6 +1819,7 @@ function SessionChatInner(props: SessionChatProps) {
+                                     // Restore the schedule so the clock button re-activates
+                                     updatePendingSchedule(restored)
+                                 }}
++                                canSteer={agentFlavor === 'pi' && props.session.thinking && !controlledByUser}
+                             />
+                         </div>
+ 
+diff --git a/web/src/hooks/mutations/useSteerQueuedMessage.ts b/web/src/hooks/mutations/useSteerQueuedMessage.ts
+new file mode 100644
+index 000000000..e96c951ea
+--- /dev/null
++++ b/web/src/hooks/mutations/useSteerQueuedMessage.ts
+@@ -0,0 +1,63 @@
++import { useMutation } from '@tanstack/react-query'
++import type { ApiClient } from '@/api/client'
++import { markMessagesConsumed } from '@/lib/message-window-store'
++import { useTranslation } from '@/lib/use-translation'
++import { useToast } from '@/lib/toast-context'
++
++type SteerQueuedMessageInput = {
++    sessionId: string
++    messageId: string
++}
++
++/**
++ * Mutation: deliver one queued message into the active Pi turn (native steer).
++ *
++ * Non-optimistic on purpose: the CLI acknowledges the steer via the existing
++ * `messages-consumed` event, which flips the row to invoked and removes it from
++ * the floating bar. An optimistic removal here would fight that event and
++ * would need a revert path for the failure case anyway.
++ *
++ * Failure surfaces as a toast; the row stays queued and can be retried.
++ */
++export function useSteerQueuedMessage(api: ApiClient | null) {
++    const { t } = useTranslation()
++    const { addToast } = useToast()
++
++    const mutation = useMutation({
++        mutationFn: async (input: SteerQueuedMessageInput) => {
++            if (!api) {
++                throw new Error('API unavailable')
++            }
++            return api.steerMessage(input.sessionId, input.messageId)
++        },
++        onSuccess: (result, input) => {
++            if (result.status === 'failed') {
++                addToast({
++                    title: t('queuedMessages.steerFailed'),
++                    body: result.error ?? '',
++                    sessionId: input.sessionId,
++                    url: window.location.href,
++                })
++                return
++            }
++            if (result.status === 'invoked' && result.message.localId && typeof result.message.invokedAt === 'number') {
++                // The CLI consumed this message before the steer arrived. If the
++                // messages-consumed SSE was missed while the row was still
++                // queued, reconcile it now so the queued bar cannot keep a
++                // stale actionable row (mirrors useCancelQueuedMessage).
++                markMessagesConsumed(input.sessionId, [result.message.localId], result.message.invokedAt)
++            }
++            // status === 'steered': the messages-consumed SSE will remove the row.
++        },
++        onError: (error, input) => {
++            addToast({
++                title: t('queuedMessages.steerFailed'),
++                body: error instanceof Error ? error.message : '',
++                sessionId: input.sessionId,
++                url: window.location.href,
++            })
++        },
++    })
++
++    return mutation
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 7f7117191..c2151eda2 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -600,6 +600,8 @@ export default {
+   'queuedMessages.scheduledFor': 'Scheduled for {time}',
+   'queuedMessages.editAlreadyInvoked': "Message already sent — it can't be edited",
+   'queuedMessages.editCurrentDraftKept': 'Queued message cancelled — current draft and schedule were kept.',
++  'queuedMessages.steer': 'Deliver into the running turn now',
++  'queuedMessages.steerFailed': 'Steer failed — message stays queued',
+ 
+   // Scratchlist (per-session workbench, issue #11)
+   'scratchlist.title': 'Scratchlist',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 0b95581b1..97f35a5e6 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -599,6 +599,8 @@ export default {
+   'queuedMessages.scheduledFor': '定时发送: {time}',
+   'queuedMessages.editAlreadyInvoked': '消息已发送，无法编辑',
+   'queuedMessages.editCurrentDraftKept': '队列消息已取消，已保留当前草稿和定时设置。',
++  'queuedMessages.steer': '立即插入当前回合',
++  'queuedMessages.steerFailed': '插入失败，消息仍在队列中',
+ 
+   // Scratchlist (per-session workbench, issue #11)
+   'scratchlist.title': '草稿夹',
+diff --git a/web/src/lib/messageDelivery.test.ts b/web/src/lib/messageDelivery.test.ts
+index 646b49846..90856ed7e 100644
+--- a/web/src/lib/messageDelivery.test.ts
++++ b/web/src/lib/messageDelivery.test.ts
+@@ -38,24 +38,12 @@ describe('resolveMessageDeliveryMode', () => {
+         intent: 'default' as const,
+     }
+ 
+-    it('steers an immediate fresh Pi send while the main session is thinking', () => {
+-        expect(resolveMessageDeliveryMode(base)).toBe('steer')
+-    })
+-
+-    it('keeps an explicit queue gesture queued even while Pi is thinking', () => {
+-        expect(resolveMessageDeliveryMode({ ...base, intent: 'queue' })).toBe('queue')
+-    })
+-
+-    it('queues a failed steer retry even when a later Pi generation is active', () => {
+-        const ref = { current: getRestoredComposerSendIntent('steer') }
+-        const retryIntent = consumeComposerSendIntent(ref)
+-
+-        expect(resolveMessageDeliveryMode({ ...base, intent: retryIntent })).toBe('queue')
+-        expect(ref.current).toBe('default')
+-        expect(resolveMessageDeliveryMode({ ...base, intent: consumeComposerSendIntent(ref) })).toBe('steer')
+-    })
+-
++    // Every composer submission queues — mid-turn delivery happens only via
++    // the explicit per-queued-message Steer action (issue #1466). The old Pi
++    // automatic steer while thinking was removed.
+     it.each([
++        { name: 'thinking Pi (previously auto-steered)', input: base },
++        { name: 'thinking Pi with explicit queue intent', input: { ...base, intent: 'queue' as const } },
+         { name: 'idle Pi', input: { ...base, isSessionThinking: false } },
+         { name: 'non-Pi flavor', input: { ...base, agentFlavor: 'codex' } },
+         { name: 'scheduled message', input: { ...base, scheduledAt: Date.now() + 60_000 } },
+@@ -63,4 +51,13 @@ describe('resolveMessageDeliveryMode', () => {
+     ])('queues $name', ({ input }) => {
+         expect(resolveMessageDeliveryMode(input)).toBe('queue')
+     })
++
++    it('keeps the retry-restore contract: a failed steer retry restores as queue', () => {
++        const ref = { current: getRestoredComposerSendIntent('steer') }
++        const retryIntent = consumeComposerSendIntent(ref)
++
++        expect(retryIntent).toBe('queue')
++        expect(ref.current).toBe('default')
++        expect(resolveMessageDeliveryMode({ ...base, intent: retryIntent })).toBe('queue')
++    })
+ })
+diff --git a/web/src/lib/messageDelivery.ts b/web/src/lib/messageDelivery.ts
+index 482424115..0e994280b 100644
+--- a/web/src/lib/messageDelivery.ts
++++ b/web/src/lib/messageDelivery.ts
+@@ -43,10 +43,13 @@ export function getRestoredComposerSendIntent(
+ /**
+  * Resolve the web composer intent into the durable message delivery mode.
+  *
+- * Fresh steering is deliberately narrow: it only applies to an immediate
+- * ordinary composer submission while the Pi *main session* reports that it
+- * is thinking. Scheduled messages, scratchlist additions, and retries never
+- * steer because none can prove the original turn identity.
++ * Every composer submission queues by default — for every flavor. The Pi
++ * automatic steer (deliveryMode 'steer' while the main session is thinking)
++ * was removed in favor of the explicit per-queued-message Steer action
++ * (issue #1466), matching Codex/Claude behavior: a mid-turn message waits,
++ * and the operator presses Steer to deliver it into the running turn.
++ * Scheduled messages, scratchlist additions, and retries always queued
++ * already.
+  */
+ export function resolveMessageDeliveryMode(input: {
+     agentFlavor: string | null | undefined
+@@ -55,9 +58,6 @@ export function resolveMessageDeliveryMode(input: {
+     scheduledAt?: number | null
+     routesToScratchlist?: boolean
+ }): MessageDeliveryMode {
+-    if (input.scheduledAt != null) return 'queue'
+-    if (input.routesToScratchlist === true) return 'queue'
+-    if (input.intent === 'queue') return 'queue'
+-    if (input.agentFlavor !== 'pi') return 'queue'
+-    return input.isSessionThinking ? 'steer' : 'queue'
++    void input
++    return 'queue'
+ }

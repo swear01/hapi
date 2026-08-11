@@ -1,0 +1,1281 @@
+diff --git a/hub/src/config/sessionSummaryInChat.ts b/hub/src/config/sessionSummaryInChat.ts
+new file mode 100644
+index 000000000..8f4187fcd
+--- /dev/null
++++ b/hub/src/config/sessionSummaryInChat.ts
+@@ -0,0 +1,36 @@
++import {
++    getSettingsFile,
++    readSettingsOrThrow,
++    updateSettings,
++    type Settings
++} from './settings'
++
++/**
++ * Hub-persisted opt-in to show AGENT_NOTIFY_SUMMARY in chat UI.
++ * Default is off (undefined / false): render/copy strip the footer;
++ * store, parse, FCM, and ledger capture keep the raw line.
++ */
++export function isSessionSummaryInChatSettingEnabled(settings: Settings): boolean {
++    return settings.sessionSummaryInChat === true
++}
++
++export async function readSessionSummaryInChatEnabled(dataDir: string): Promise<boolean> {
++    const settings = await readSettingsOrThrow(getSettingsFile(dataDir))
++    return isSessionSummaryInChatSettingEnabled(settings)
++}
++
++export async function writeSessionSummaryInChatEnabled(
++    dataDir: string,
++    enabled: boolean
++): Promise<boolean> {
++    return updateSettings(getSettingsFile(dataDir), (current) => {
++        const settings = {
++            ...current,
++            sessionSummaryInChat: enabled
++        }
++        return {
++            settings,
++            result: settings.sessionSummaryInChat === true
++        }
++    })
++}
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index eaa2384f6..76c5230a3 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -29,6 +29,11 @@ export interface Settings {
+      * into supported flavor system / developer instructions. Default off.
+      */
+     sessionSummaryContract?: boolean
++    /**
++     * When true, web chat shows a compact AGENT_NOTIFY_SUMMARY row.
++     * Default off: render/copy strip the footer; store stays raw.
++     */
++    sessionSummaryInChat?: boolean
+     /**
+      * Hub-side provider API keys / endpoints managed from Settings.
+      * Env vars still win when set at process start (ops override).
+diff --git a/hub/src/web/routes/hubSettings.test.ts b/hub/src/web/routes/hubSettings.test.ts
+index 9b3f54903..10ddfd6ae 100644
+--- a/hub/src/web/routes/hubSettings.test.ts
++++ b/hub/src/web/routes/hubSettings.test.ts
+@@ -6,6 +6,7 @@ import { Hono } from 'hono'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { createHubSettingsRoutes } from './hubSettings'
+ import { writeSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
++import { writeSessionSummaryInChatEnabled } from '../../config/sessionSummaryInChat'
+ 
+ const directories: string[] = []
+ 
+@@ -26,15 +27,18 @@ describe('GET/PUT /api/hub-settings', () => {
+         return { app, dataDir }
+     }
+ 
+-    it('returns default off', async () => {
++    it('returns default off for emit and chat display', async () => {
+         const { app } = await createApp()
+         const response = await app.request('/api/hub-settings')
+         expect(response.status).toBe(200)
+         expect(response.headers.get('cache-control')).toBe('no-store')
+-        expect(await response.json()).toEqual({ sessionSummaryContract: false })
++        expect(await response.json()).toEqual({
++            sessionSummaryContract: false,
++            sessionSummaryInChat: false
++        })
+     })
+ 
+-    it('persists toggle for owner', async () => {
++    it('persists emit toggle for owner without changing display', async () => {
+         const { app } = await createApp()
+         const put = await app.request('/api/hub-settings', {
+             method: 'PUT',
+@@ -42,10 +46,42 @@ describe('GET/PUT /api/hub-settings', () => {
+             body: JSON.stringify({ sessionSummaryContract: true })
+         })
+         expect(put.status).toBe(200)
+-        expect(await put.json()).toEqual({ sessionSummaryContract: true })
++        expect(await put.json()).toEqual({
++            sessionSummaryContract: true,
++            sessionSummaryInChat: false
++        })
+ 
+         const get = await app.request('/api/hub-settings')
+-        expect(await get.json()).toEqual({ sessionSummaryContract: true })
++        expect(await get.json()).toEqual({
++            sessionSummaryContract: true,
++            sessionSummaryInChat: false
++        })
++    })
++
++    it('persists chat display toggle for owner without changing emit', async () => {
++        const { app, dataDir } = await createApp()
++        await writeSessionSummaryContractEnabled(dataDir, true)
++
++        const put = await app.request('/api/hub-settings', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ sessionSummaryInChat: true })
++        })
++        expect(put.status).toBe(200)
++        expect(await put.json()).toEqual({
++            sessionSummaryContract: true,
++            sessionSummaryInChat: true
++        })
++    })
++
++    it('rejects empty body', async () => {
++        const { app } = await createApp()
++        const response = await app.request('/api/hub-settings', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({})
++        })
++        expect(response.status).toBe(400)
+     })
+ 
+     it('rejects invalid body', async () => {
+@@ -58,12 +94,25 @@ describe('GET/PUT /api/hub-settings', () => {
+         expect(response.status).toBe(400)
+     })
+ 
+-    it('rejects non-default namespaces', async () => {
+-        const { app } = await createApp('tenant')
+-        const get = await app.request('/api/hub-settings')
+-        expect(get.status).toBe(403)
++    it('rejects non-default namespaces for PUT but allows GET', async () => {
++        const { app, dataDir } = await createApp('default')
++        await writeSessionSummaryInChatEnabled(dataDir, true)
+ 
+-        const put = await app.request('/api/hub-settings', {
++        const tenantApp = new Hono<WebAppEnv>()
++        tenantApp.use('*', async (c, next) => {
++            c.set('namespace', 'tenant')
++            await next()
++        })
++        tenantApp.route('/api', createHubSettingsRoutes(dataDir))
++
++        const get = await tenantApp.request('/api/hub-settings')
++        expect(get.status).toBe(200)
++        expect(await get.json()).toEqual({
++            sessionSummaryContract: false,
++            sessionSummaryInChat: true
++        })
++
++        const put = await tenantApp.request('/api/hub-settings', {
+             method: 'PUT',
+             headers: { 'content-type': 'application/json' },
+             body: JSON.stringify({ sessionSummaryContract: true })
+@@ -71,10 +120,14 @@ describe('GET/PUT /api/hub-settings', () => {
+         expect(put.status).toBe(403)
+     })
+ 
+-    it('survives a prior write via settings helper', async () => {
++    it('survives a prior write via settings helpers', async () => {
+         const { app, dataDir } = await createApp()
+         await writeSessionSummaryContractEnabled(dataDir, true)
++        await writeSessionSummaryInChatEnabled(dataDir, true)
+         const response = await app.request('/api/hub-settings')
+-        expect(await response.json()).toEqual({ sessionSummaryContract: true })
++        expect(await response.json()).toEqual({
++            sessionSummaryContract: true,
++            sessionSummaryInChat: true
++        })
+     })
+ })
+diff --git a/hub/src/web/routes/hubSettings.ts b/hub/src/web/routes/hubSettings.ts
+index f641aa7ac..3d2a08778 100644
+--- a/hub/src/web/routes/hubSettings.ts
++++ b/hub/src/web/routes/hubSettings.ts
+@@ -1,24 +1,31 @@
+ import { Hono } from 'hono'
+ import { UpdateHubSettingsRequestSchema, type HubSettingsResponse } from '@hapi/protocol'
+ import {
+-    readSessionSummaryContractEnabled,
+-    writeSessionSummaryContractEnabled
+-} from '../../config/sessionSummaryContract'
++    getSettingsFile,
++    readSettingsOrThrow,
++    updateSettings,
++    type Settings
++} from '../../config/settings'
+ import type { WebAppEnv } from '../middleware/auth'
+ 
+ const OWNER_ONLY_ERROR = 'Hub settings are only available to the hub owner'
+ 
++function toHubSettings(settings: Settings): HubSettingsResponse {
++    return {
++        sessionSummaryContract: settings.sessionSummaryContract === true,
++        sessionSummaryInChat: settings.sessionSummaryInChat === true
++    }
++}
++
+ export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
+     const app = new Hono<WebAppEnv>()
+ 
++    // Authenticated readers (any namespace) can observe hub-wide display/emit
++    // flags. Mutations stay owner-only below.
+     app.get('/hub-settings', async (c) => {
+-        if (c.get('namespace') !== 'default') {
+-            return c.json({ error: OWNER_ONLY_ERROR }, 403)
+-        }
+         c.header('Cache-Control', 'no-store')
+-        const enabled = await readSessionSummaryContractEnabled(dataDir)
+-        const response: HubSettingsResponse = { sessionSummaryContract: enabled }
+-        return c.json(response)
++        const settings = await readSettingsOrThrow(getSettingsFile(dataDir))
++        return c.json(toHubSettings(settings))
+     })
+ 
+     app.put('/hub-settings', async (c) => {
+@@ -30,12 +37,20 @@ export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
+         if (!parsed.success) {
+             return c.json({ error: 'Invalid body' }, 400)
+         }
+-        const enabled = await writeSessionSummaryContractEnabled(
+-            dataDir,
+-            parsed.data.sessionSummaryContract
+-        )
++        const response = await updateSettings(getSettingsFile(dataDir), (current) => {
++            const settings: Settings = { ...current }
++            if (parsed.data.sessionSummaryContract !== undefined) {
++                settings.sessionSummaryContract = parsed.data.sessionSummaryContract
++            }
++            if (parsed.data.sessionSummaryInChat !== undefined) {
++                settings.sessionSummaryInChat = parsed.data.sessionSummaryInChat
++            }
++            return {
++                settings,
++                result: toHubSettings(settings)
++            }
++        })
+         c.header('Cache-Control', 'no-store')
+-        const response: HubSettingsResponse = { sessionSummaryContract: enabled }
+         return c.json(response)
+     })
+ 
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 5db9ee851..ee5aaa0ad 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -58,14 +58,22 @@ export const CreateSessionResponseSchema = z.object({
+ export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
+ 
+ export const HubSettingsResponseSchema = z.object({
+-    sessionSummaryContract: z.boolean()
++    sessionSummaryContract: z.boolean(),
++    /** Show compact AGENT_NOTIFY_SUMMARY in chat (default off / hide). */
++    sessionSummaryInChat: z.boolean()
+ })
+ 
+ export type HubSettingsResponse = z.infer<typeof HubSettingsResponseSchema>
+ 
+-export const UpdateHubSettingsRequestSchema = z.object({
+-    sessionSummaryContract: z.boolean()
+-})
++export const UpdateHubSettingsRequestSchema = z
++    .object({
++        sessionSummaryContract: z.boolean().optional(),
++        sessionSummaryInChat: z.boolean().optional()
++    })
++    .refine(
++        (data) => data.sessionSummaryContract !== undefined || data.sessionSummaryInChat !== undefined,
++        { message: 'At least one hub setting field is required' }
++    )
+ 
+ export type UpdateHubSettingsRequest = z.infer<typeof UpdateHubSettingsRequestSchema>
+ 
+diff --git a/shared/src/messages.test.ts b/shared/src/messages.test.ts
+index cd04a1316..6d706d858 100644
+--- a/shared/src/messages.test.ts
++++ b/shared/src/messages.test.ts
+@@ -3,6 +3,8 @@ import {
+     extractAssistantPlainText,
+     extractNotifySummary,
+     isRedundantGoalStatusEventContent,
++    splitNotifySummary,
++    stripNotifySummaryFooter,
+     type NotifySummary
+ } from './messages'
+ 
+@@ -132,6 +134,21 @@ describe('extractNotifySummary', () => {
+         expect(r?.summary).toBe('ok')
+     })
+ 
++    test('rejects whitespace-delimited contract examples on the last line', () => {
++        const example = 'Example: AGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}'
++        expect(extractNotifySummary(example)).toBeNull()
++        expect(splitNotifySummary(example)).toBeNull()
++        expect(stripNotifySummaryFooter(example)).toBe(example)
++    })
++
++    test('accepts a standalone footer with leading indentation', () => {
++        const indented = '    AGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}'
++        const r = extractNotifySummary(indented)
++        expect(r?.summary).toBe('Done')
++        expect(r?.status).toBe('done')
++        expect(stripNotifySummaryFooter(`Prose.\n${indented}`)).toBe('Prose.')
++    })
++
+     test('parses glued token after multi-line prose (token still on last line)', () => {
+         const text = `Did the work.\n\nOwnership session pinged.AGENT_NOTIFY_SUMMARY {"version":1,"status":"done","summary":"ok"}`
+         const r = extractNotifySummary(text)
+@@ -210,6 +227,70 @@ describe('extractNotifySummary', () => {
+         expect(r?.summary).toBe('mentions AGENT_NOTIFY_SUMMARY here')
+         expect(r?.status).toBe('done')
+     })
++
++    test('splits a clean footer into visible prose and metadata', () => {
++        const text = 'Did the work.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done","action":"Review it"}'
++        const result = splitNotifySummary(text)
++
++        expect(result?.visibleText).toBe('Did the work.')
++        expect(result?.summary).toEqual({ summary: 'Done', status: 'done', action: 'Review it' })
++    })
++
++    test('splits a footer glued to prose on the last line', () => {
++        const text = 'Did the work.\nOwnership session pinged.AGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}'
++        const result = splitNotifySummary(text)
++
++        expect(result?.visibleText).toBe('Did the work.\nOwnership session pinged.')
++        expect(result?.summary.summary).toBe('Done')
++    })
++
++    test('preserves leading indentation when a footer is glued to Markdown prose', () => {
++        const text = '- item\n    nested line.AGENT_NOTIFY_SUMMARY {"summary":"Done"}'
++        const result = splitNotifySummary(text)
++
++        expect(result?.visibleText).toBe('- item\n    nested line.')
++    })
++
++    test('returns null when the footer is not a compliant final line', () => {
++        expect(splitNotifySummary('AGENT_NOTIFY_SUMMARY {"summary":"Done"}\nMore prose')).toBeNull()
++        expect(splitNotifySummary('Plain prose')).toBeNull()
++    })
++})
++
++describe('stripNotifySummaryFooter', () => {
++    const FOOTER = 'AGENT_NOTIFY_SUMMARY {"version":1,"status":"done","summary":"ok","action":"Ship it"}'
++
++    test('removes a trailing well-formed footer and keeps prose', () => {
++        expect(stripNotifySummaryFooter(`Here is the answer.\n\n${FOOTER}`)).toBe('Here is the answer.')
++    })
++
++    test('keeps glued last-line prose when stripping the footer', () => {
++        expect(stripNotifySummaryFooter(`Ownership session pinged.${FOOTER}`)).toBe(
++            'Ownership session pinged.'
++        )
++    })
++
++    test('tolerates trailing whitespace after the footer line', () => {
++        expect(stripNotifySummaryFooter(`Done.\n${FOOTER}\n\n`)).toBe('Done.')
++    })
++
++    test('leaves malformed or truncated footers untouched', () => {
++        const truncated = 'Done.\nAGENT_NOTIFY_SUMMARY {"summary":'
++        const bogus = 'Done.\nAGENT_NOTIFY_SUMMARY {bogus}'
++        expect(stripNotifySummaryFooter(truncated)).toBe(truncated)
++        expect(stripNotifySummaryFooter(bogus)).toBe(bogus)
++    })
++
++    test('leaves mid-body mentions and non-final footers untouched', () => {
++        const mid = 'See AGENT_NOTIFY_SUMMARY {"status":"done","summary":"mid"} for the contract.'
++        const nonFinal = `${FOOTER}\nMore prose`
++        expect(stripNotifySummaryFooter(mid)).toBe(mid)
++        expect(stripNotifySummaryFooter(nonFinal)).toBe(nonFinal)
++    })
++
++    test('returns empty string when the message is only a footer', () => {
++        expect(stripNotifySummaryFooter(FOOTER)).toBe('')
++    })
+ })
+ 
+ describe('extractNotifySummary + extractAssistantPlainText (integration)', () => {
+diff --git a/shared/src/messages.ts b/shared/src/messages.ts
+index fc78a8e70..a720fb7d9 100644
+--- a/shared/src/messages.ts
++++ b/shared/src/messages.ts
+@@ -141,22 +141,33 @@ export type NotifySummary = {
+ /**
+  * Match a well-formed `AGENT_NOTIFY_SUMMARY {...}` footer on a single line.
+  *
+- * Allows an optional prose prefix on the same line (agents sometimes glue
+- * trailing text and the token without a newline). Scans left-to-right and
+- * returns the first token occurrence whose remainder is valid JSON through
+- * end of line - so a literal `AGENT_NOTIFY_SUMMARY ` inside a JSON string
+- * value does not steal the match from the real footer.
++ * Allows an optional *glued* prose prefix on the same line (agents sometimes
++ * omit the newline: `Done.AGENT_NOTIFY_SUMMARY {...}`). Whitespace-delimited
++ * mentions (`Example: AGENT_NOTIFY_SUMMARY {...}`) are not treated as footers.
++ * Scans left-to-right and returns the first token occurrence whose remainder
++ * is valid JSON through end of line - so a literal `AGENT_NOTIFY_SUMMARY `
++ * inside a JSON string value does not steal the match from the real footer.
+  */
+-function matchNotifySummaryLine(line: string): string | null {
++type NotifySummaryLineMatch = {
++    jsonPart: string
++    start: number
++}
++
++function matchNotifySummaryLine(line: string): NotifySummaryLineMatch | null {
+     for (
+         let idx = line.indexOf(NOTIFY_SUMMARY_PREFIX);
+         idx >= 0;
+         idx = line.indexOf(NOTIFY_SUMMARY_PREFIX, idx + NOTIFY_SUMMARY_PREFIX.length)
+     ) {
++        // Keep glued footers (`Done.AGENT_NOTIFY_SUMMARY ...`) and indented
++        // standalone footers, but reject ordinary prose-delimited mentions
++        // (`Example: AGENT_NOTIFY_SUMMARY ...`).
++        const prefix = line.slice(0, idx)
++        if (prefix.trim().length > 0 && /\s/.test(line[idx - 1]!)) continue
+         const jsonPart = line.slice(idx + NOTIFY_SUMMARY_PREFIX.length).trim()
+         if (!jsonPart.startsWith('{') || !jsonPart.endsWith('}')) continue
+         try {
+-            if (isObject(JSON.parse(jsonPart))) return jsonPart
++            if (isObject(JSON.parse(jsonPart))) return { jsonPart, start: idx }
+         } catch {
+             // Try the next occurrence (e.g. token mentioned inside a value).
+         }
+@@ -164,15 +175,56 @@ function matchNotifySummaryLine(line: string): string | null {
+     return null
+ }
+ 
++function parseNotifySummaryJson(jsonPart: string): NotifySummary | null {
++    try {
++        const parsed: unknown = JSON.parse(jsonPart)
++        if (!isObject(parsed)) return null
++        const result: NotifySummary = {}
++        if (typeof parsed.version === 'number') result.version = parsed.version
++        if (typeof parsed.agent === 'string') result.agent = parsed.agent
++        if (typeof parsed.project === 'string') result.project = parsed.project
++        if (typeof parsed.status === 'string') result.status = parsed.status
++        if (typeof parsed.action === 'string') result.action = parsed.action
++        if (typeof parsed.summary === 'string') result.summary = parsed.summary
++        return result
++    } catch {
++        return null
++    }
++}
++
++type NotifySummaryMatch = {
++    lines: string[]
++    lastIdx: number
++    line: string
++    match: NotifySummaryLineMatch
++    summary: NotifySummary
++}
++
++function findNotifySummary(text: string): NotifySummaryMatch | null {
++    const lines = text.split('\n')
++    let lastIdx = lines.length - 1
++    while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx -= 1
++    if (lastIdx < 0) return null
++
++    const line = lines[lastIdx].trimEnd()
++    const match = matchNotifySummaryLine(line)
++    if (match === null) return null
++
++    const summary = parseNotifySummaryJson(match.jsonPart)
++    if (summary === null) return null
++
++    return { lines, lastIdx, line, match, summary }
++}
++
+ /**
+  * Look for an `AGENT_NOTIFY_SUMMARY {...json...}` footer as the **last
+  * non-empty line** of an agent's plain-text message.
+  *
+  * End-anchor: trailing blank lines are fine, but prose on a later
+  * non-empty line is non-compliant and returns null. Mid-body quotes of
+- * the token are ignored for the same reason. An optional prose prefix on
+- * the last line itself is tolerated when the line still ends with a
+- * well-formed `AGENT_NOTIFY_SUMMARY {…}` payload.
++ * the token are ignored for the same reason. An optional *glued* prose prefix
++ * on the last line itself is tolerated (`Done.AGENT_NOTIFY_SUMMARY {…}`);
++ * whitespace-delimited examples on that line are not.
+  *
+  * Returns the parsed object on success, `null` on any deviation. The
+  * shape is intentionally loose - we only trust `summary`, `action`, and
+@@ -182,28 +234,45 @@ function matchNotifySummaryLine(line: string): string | null {
+ export function extractNotifySummary(text: unknown): NotifySummary | null {
+     if (typeof text !== 'string' || text.length === 0) return null
+ 
+-    const lines = text.split('\n')
+-    let lastIdx = lines.length - 1
+-    while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx -= 1
+-    if (lastIdx < 0) return null
++    return findNotifySummary(text)?.summary ?? null
++}
+ 
+-    const jsonPart = matchNotifySummaryLine(lines[lastIdx].trim())
+-    if (jsonPart === null) return null
++export type NotifySummaryDisplay = {
++    /** Agent prose with the machine-readable footer removed. */
++    visibleText: string
++    summary: NotifySummary
++}
+ 
+-    try {
+-        const parsed: unknown = JSON.parse(jsonPart)
+-        if (!isObject(parsed)) return null
+-        const result: NotifySummary = {}
+-        if (typeof parsed.version === 'number') result.version = parsed.version
+-        if (typeof parsed.agent === 'string') result.agent = parsed.agent
+-        if (typeof parsed.project === 'string') result.project = parsed.project
+-        if (typeof parsed.status === 'string') result.status = parsed.status
+-        if (typeof parsed.action === 'string') result.action = parsed.action
+-        if (typeof parsed.summary === 'string') result.summary = parsed.summary
+-        return result
+-    } catch {
+-        return null
++/**
++ * Split a valid trailing summary footer into user-facing prose and metadata.
++ *
++ * The original message remains untouched; callers can use `visibleText` only
++ * for presentation while retaining the raw text for copy/export/notifications.
++ */
++export function splitNotifySummary(text: unknown): NotifySummaryDisplay | null {
++    if (typeof text !== 'string' || text.length === 0) return null
++
++    const found = findNotifySummary(text)
++    if (found === null) return null
++
++    const prefix = found.line.slice(0, found.match.start).trimEnd()
++    const visibleLines = found.lines.slice(0, found.lastIdx)
++    if (prefix.length > 0) visibleLines.push(prefix)
++
++    return {
++        visibleText: visibleLines.join('\n').trimEnd(),
++        summary: found.summary
+     }
+ }
+ 
++/**
++ * Render/copy helper: remove a valid trailing AGENT_NOTIFY_SUMMARY footer.
++ * Leaves malformed, mid-body, and non-final occurrences unchanged. Store and
++ * parse/FCM paths must keep using the raw text.
++ */
++export function stripNotifySummaryFooter(text: string): string {
++    if (typeof text !== 'string' || text.length === 0) return text
++    return splitNotifySummary(text)?.visibleText ?? text
++}
++
+ export type { RoleWrappedRecord }
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 08650fdd6..515274a26 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -49,6 +49,7 @@ import type {
+     ReopenSessionResponse,
+     SqliteStorageUsageResponse,
+     HubSettingsResponse,
++    UpdateHubSettingsRequest,
+     UsageSummaryResponse,
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
+@@ -729,7 +730,7 @@ export class ApiClient {
+         return await this.request<HubSettingsResponse>('/api/hub-settings')
+     }
+ 
+-    async updateHubSettings(settings: HubSettingsResponse): Promise<HubSettingsResponse> {
++    async updateHubSettings(settings: UpdateHubSettingsRequest): Promise<HubSettingsResponse> {
+         return await this.request<HubSettingsResponse>('/api/hub-settings', {
+             method: 'PUT',
+             body: JSON.stringify(settings)
+diff --git a/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx b/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
+index c47c7d739..1e4e14c85 100644
+--- a/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
++++ b/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
+@@ -1,4 +1,5 @@
+ import { act, cleanup, fireEvent, render } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import type { PropsWithChildren } from 'react'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import { I18nProvider } from '@/lib/i18n-context'
+@@ -32,33 +33,38 @@ import type { Session } from '@/types/api'
+ const originalScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTo')
+ 
+ function renderThread(onViewModeChange = vi.fn()) {
++    const queryClient = new QueryClient({
++        defaultOptions: { queries: { retry: false } }
++    })
+     const renderHappyThread = (forceScrollToken: number) => (
+-        <I18nProvider>
+-            <HappyThread
+-                api={{} as ApiClient}
+-                session={{ metadata: {} } as Session}
+-                sessionId="mobile-scroll-session"
+-                metadata={null}
+-                disabled={false}
+-                onRefresh={vi.fn()}
+-                onViewModeChange={onViewModeChange}
+-                isSyncingTail={false}
+-                messagesWarning={null}
+-                hasMoreMessages={false}
+-                isLoadingMoreMessages={false}
+-                onLoadMore={vi.fn().mockResolvedValue({ status: 'exhausted' })}
+-                onCancelLoadMore={vi.fn()}
+-                unseenCount={0}
+-                rawMessagesCount={1}
+-                normalizedMessagesCount={1}
+-                messagesVersion={1}
+-                historyVersion={0}
+-                forceScrollToken={forceScrollToken}
+-                outlineOpen={false}
+-                outlineItems={[]}
+-                onOutlineOpenChange={vi.fn()}
+-            />
+-        </I18nProvider>
++        <QueryClientProvider client={queryClient}>
++            <I18nProvider>
++                <HappyThread
++                    api={{ getHubSettings: vi.fn().mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false }) } as unknown as ApiClient}
++                    session={{ metadata: {} } as Session}
++                    sessionId="mobile-scroll-session"
++                    metadata={null}
++                    disabled={false}
++                    onRefresh={vi.fn()}
++                    onViewModeChange={onViewModeChange}
++                    isSyncingTail={false}
++                    messagesWarning={null}
++                    hasMoreMessages={false}
++                    isLoadingMoreMessages={false}
++                    onLoadMore={vi.fn().mockResolvedValue({ status: 'exhausted' })}
++                    onCancelLoadMore={vi.fn()}
++                    unseenCount={0}
++                    rawMessagesCount={1}
++                    normalizedMessagesCount={1}
++                    messagesVersion={1}
++                    historyVersion={0}
++                    forceScrollToken={forceScrollToken}
++                    outlineOpen={false}
++                    outlineItems={[]}
++                    onOutlineOpenChange={vi.fn()}
++                />
++            </I18nProvider>
++        </QueryClientProvider>
+     )
+     const result = render(renderHappyThread(0))
+     const viewport = result.container.querySelector<HTMLElement>('.chat-scroll-y')
+diff --git a/web/src/components/AssistantChat/HappyThread.tsx b/web/src/components/AssistantChat/HappyThread.tsx
+index 7c4364b55..21474cef4 100644
+--- a/web/src/components/AssistantChat/HappyThread.tsx
++++ b/web/src/components/AssistantChat/HappyThread.tsx
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+ import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
++import { useQuery } from '@tanstack/react-query'
+ import type { ApiClient } from '@/api/client'
+ import type { HappyRuntimeExtras } from '@/lib/assistant-runtime'
+ import type { Session, SessionMetadataSummary } from '@/types/api'
+@@ -30,6 +31,7 @@ import { formatRelativeTime } from '@/lib/relativeTime'
+ import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
+ import { getShareTurnReasoningLabel, selectShareTurnMetadata } from '@/lib/shareTurnMetadata'
+ import { useMinuteTick } from '@/hooks/useMinuteTick'
++import { queryKeys } from '@/lib/query-keys'
+ 
+ type ScrollAnchor = {
+     id: string
+@@ -514,6 +516,15 @@ export function HappyThread(props: {
+         })
+     }, [headerMetadata, locale, machineLabelsById, props.serviceTier, props.session, shareDialogOpen, shareRelativeTimeTick, t])
+     const { terminalToolDisplayMode } = useTerminalToolDisplayMode()
++    const hubSettingsQuery = useQuery({
++        queryKey: queryKeys.hubSettings,
++        queryFn: async () => props.api.getHubSettings(),
++        enabled: Boolean(props.api),
++        staleTime: 30_000,
++        refetchInterval: 30_000,
++        retry: false,
++    })
++    const showSessionSummaryInChat = hubSettingsQuery.data?.sessionSummaryInChat === true
+     const runtimeExtras = useAuiState((s) => s.thread.extras) as HappyRuntimeExtras | undefined
+     const appliedMessagesVersion = runtimeExtras?.messagesVersion ?? props.messagesVersion
+     const appliedHistoryVersion = runtimeExtras?.historyVersion ?? props.historyVersion
+@@ -1570,6 +1581,7 @@ export function HappyThread(props: {
+             sessionId: props.sessionId,
+             metadata: props.metadata,
+             terminalToolDisplayMode,
++            showSessionSummaryInChat,
+             disabled: props.disabled,
+             onRefresh: props.onRefresh,
+             onRetryMessage: props.onRetryMessage,
+diff --git a/web/src/components/AssistantChat/context.tsx b/web/src/components/AssistantChat/context.tsx
+index 375c1710d..dd1a4c190 100644
+--- a/web/src/components/AssistantChat/context.tsx
++++ b/web/src/components/AssistantChat/context.tsx
+@@ -11,6 +11,8 @@ export type HappyChatContextValue = {
+     sessionId: string
+     metadata: SessionMetadataSummary | null
+     terminalToolDisplayMode: TerminalToolDisplayMode
++    /** Hub-wide AGENT_NOTIFY_SUMMARY chat display; polled once at chat shell. */
++    showSessionSummaryInChat: boolean
+     disabled: boolean
+     onRefresh: () => void
+     onRetryMessage?: (localId: string) => void
+diff --git a/web/src/components/AssistantChat/messages/AssistantMessage.tsx b/web/src/components/AssistantChat/messages/AssistantMessage.tsx
+index f89d0e9b7..7186cbe7d 100644
+--- a/web/src/components/AssistantChat/messages/AssistantMessage.tsx
++++ b/web/src/components/AssistantChat/messages/AssistantMessage.tsx
+@@ -1,5 +1,4 @@
+ import { MessagePrimitive, useAuiState, type TextMessagePart } from '@assistant-ui/react'
+-import { MarkdownText } from '@/components/assistant-ui/markdown-text'
+ import { Reasoning, ReasoningGroup } from '@/components/assistant-ui/reasoning'
+ import { HappyToolMessage } from '@/components/AssistantChat/messages/ToolMessage'
+ import { CliOutputBlock } from '@/components/CliOutputBlock'
+@@ -9,13 +8,15 @@ import { getConversationMessageAnchorId } from '@/chat/outline'
+ import { CodexReviewCard } from '@/components/AssistantChat/messages/CodexReviewCard'
+ import { MessageActions } from '@/components/AssistantChat/messages/MessageActions'
+ import { useHappyChatContext } from '@/components/AssistantChat/context'
++import { NotifySummaryText } from '@/components/AssistantChat/messages/NotifySummaryText'
++import { useSessionSummaryInChat } from '@/hooks/useSessionSummaryInChat'
+ 
+ const TOOL_COMPONENTS = {
+     Fallback: HappyToolMessage
+ } as const
+ 
+ const MESSAGE_PART_COMPONENTS = {
+-    Text: MarkdownText,
++    Text: NotifySummaryText,
+     Reasoning: Reasoning,
+     ReasoningGroup: ReasoningGroup,
+     tools: TOOL_COMPONENTS
+@@ -23,6 +24,7 @@ const MESSAGE_PART_COMPONENTS = {
+ 
+ export function HappyAssistantMessage() {
+     const ctx = useHappyChatContext()
++    const showSessionSummaryInChat = useSessionSummaryInChat()
+     const messageId = useAuiState((s) => s.message.id)
+     const elementId = getConversationMessageAnchorId(messageId)
+     const isCliOutput = useAuiState((s) => {
+@@ -45,7 +47,9 @@ export function HappyAssistantMessage() {
+     })
+     const copyText = useAuiState((s) => {
+         if (s.message.role !== 'assistant') return ''
+-        return getAssistantCopyText(s.message.content)
++        return getAssistantCopyText(s.message.content, {
++            stripNotifySummary: !showSessionSummaryInChat
++        })
+     })
+ 
+     const durationMs = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.durationMs)
+diff --git a/web/src/components/AssistantChat/messages/NotifySummaryText.test.tsx b/web/src/components/AssistantChat/messages/NotifySummaryText.test.tsx
+new file mode 100644
+index 000000000..953759948
+--- /dev/null
++++ b/web/src/components/AssistantChat/messages/NotifySummaryText.test.tsx
+@@ -0,0 +1,116 @@
++import { describe, expect, it, vi, beforeEach } from 'vitest'
++import { render, screen } from '@testing-library/react'
++import { I18nProvider } from '@/lib/i18n-context'
++import { NotifySummaryText } from './NotifySummaryText'
++
++const { mockUseSessionSummaryInChat } = vi.hoisted(() => ({
++    mockUseSessionSummaryInChat: vi.fn(() => true)
++}))
++
++vi.mock('@/hooks/useSessionSummaryInChat', () => ({
++    useSessionSummaryInChat: () => mockUseSessionSummaryInChat()
++}))
++
++vi.mock('@/components/assistant-ui/markdown-text', () => ({
++    MarkdownText: () => <div data-testid="raw-markdown">raw assistant text</div>
++}))
++
++vi.mock('@/components/MarkdownRenderer', () => ({
++    MarkdownRenderer: ({ content }: { content: string }) => (
++        <div data-testid="visible-markdown">{content}</div>
++    )
++}))
++
++function renderText(text: string, statusType: 'complete' | 'running' = 'complete') {
++    return render(
++        <I18nProvider>
++            <NotifySummaryText type="text" text={text} status={{ type: statusType }} />
++        </I18nProvider>
++    )
++}
++
++describe('NotifySummaryText', () => {
++    beforeEach(() => {
++        mockUseSessionSummaryInChat.mockReturnValue(true)
++    })
++
++    it('renders the prose and compact summary footer instead of raw JSON', () => {
++        renderText('Did the work.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done","action":"Review it"}')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Did the work.')
++        expect(screen.getByTestId('notify-summary-footer')).toHaveTextContent('Done')
++        expect(screen.getByTestId('notify-summary-footer')).toHaveTextContent('→Review it')
++        expect(screen.getByTestId('notify-summary-status')).toHaveAttribute('aria-label', 'Done')
++        expect(screen.getByTestId('notify-summary-status')).not.toHaveTextContent('Done')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeInTheDocument()
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++
++    it('strips the footer when chat display is off', () => {
++        mockUseSessionSummaryInChat.mockReturnValue(false)
++        renderText('Did the work.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Did the work.')
++        expect(screen.queryByTestId('notify-summary-footer')).toBeNull()
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++
++    it('keeps a status label and dot for non-complete summaries', () => {
++        renderText('Needs input.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Waiting","status":"needs_review"}')
++
++        expect(screen.getByTestId('notify-summary-status')).toHaveTextContent('Needs review')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeNull()
++    })
++
++    it('humanizes unknown prototype-named statuses instead of using inherited presentations', () => {
++        const view = renderText('Finished.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"constructor"}')
++
++        expect(screen.getByTestId('notify-summary-status')).toHaveTextContent('Constructor')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeNull()
++
++        view.unmount()
++        renderText('Finished.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"__proto__"}')
++
++        expect(screen.getByTestId('notify-summary-status')).toHaveTextContent('Proto')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeNull()
++    })
++
++    it('keeps prose glued to the footer in the visible message body', () => {
++        renderText('Ownership session pinged.AGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Ownership session pinged.')
++        expect(screen.getByTestId('notify-summary-footer')).toHaveTextContent('Done')
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++
++    it('uses the normal markdown renderer when there is no valid footer', () => {
++        renderText('Plain assistant prose.')
++
++        expect(screen.getByTestId('raw-markdown')).toBeInTheDocument()
++        expect(screen.queryByTestId('notify-summary-footer')).toBeNull()
++    })
++
++    it('hides a recognized footer with no displayable fields instead of raw JSON', () => {
++        renderText('Did the work.\n\nAGENT_NOTIFY_SUMMARY {"version":1,"agent":"codex"}')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Did the work.')
++        expect(screen.queryByTestId('notify-summary-footer')).toBeNull()
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++
++    it('keeps a complete-looking footer in markdown while the message is streaming', () => {
++        mockUseSessionSummaryInChat.mockReturnValue(true)
++        renderText('Still working.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}', 'running')
++
++        expect(screen.getByTestId('raw-markdown')).toBeInTheDocument()
++        expect(screen.queryByTestId('notify-summary-footer')).toBeNull()
++    })
++
++    it('strips a well-formed footer while streaming when display is off', () => {
++        mockUseSessionSummaryInChat.mockReturnValue(false)
++        renderText('Still working.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}', 'running')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Still working.')
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++})
+diff --git a/web/src/components/AssistantChat/messages/NotifySummaryText.tsx b/web/src/components/AssistantChat/messages/NotifySummaryText.tsx
+new file mode 100644
+index 000000000..73d0818b8
+--- /dev/null
++++ b/web/src/components/AssistantChat/messages/NotifySummaryText.tsx
+@@ -0,0 +1,135 @@
++import type { TextMessagePartComponent } from '@assistant-ui/react'
++import { splitNotifySummary, stripNotifySummaryFooter, type NotifySummary } from '@hapi/protocol/messages'
++import { MarkdownRenderer } from '@/components/MarkdownRenderer'
++import { MarkdownText } from '@/components/assistant-ui/markdown-text'
++import { CheckIcon } from '@/components/icons'
++import { useSessionSummaryInChat } from '@/hooks/useSessionSummaryInChat'
++import { useTranslation } from '@/lib/use-translation'
++
++type SummaryStatusPresentation = {
++    labelKey: string
++    marker: 'check' | 'dot'
++    markerClassName: string
++}
++
++const SUMMARY_STATUS_PRESENTATIONS: Record<string, SummaryStatusPresentation> = {
++    done: { labelKey: 'session.summary.status.done', marker: 'check', markerClassName: 'text-[var(--app-badge-success-text)]' },
++    blocked: { labelKey: 'session.summary.status.blocked', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' },
++    needs_review: { labelKey: 'session.summary.status.needsReview', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' },
++    needs_decision: { labelKey: 'session.summary.status.needsDecision', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' },
++    failed: { labelKey: 'session.summary.status.failed', marker: 'dot', markerClassName: 'bg-[var(--app-badge-error-text)]' },
++    stalled: { labelKey: 'session.summary.status.stalled', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' }
++}
++
++function normalizeStatus(status: string | undefined): string {
++    return status?.trim().toLowerCase() ?? ''
++}
++
++function humanizeStatus(status: string): string {
++    return status
++        .replaceAll('_', ' ')
++        .replace(/\b\w/g, (character) => character.toUpperCase())
++}
++
++function SummaryStatusIndicator({ summary }: { summary: NotifySummary }) {
++    const { t } = useTranslation()
++    const normalizedStatus = normalizeStatus(summary.status)
++    const presentation = Object.hasOwn(SUMMARY_STATUS_PRESENTATIONS, normalizedStatus)
++        ? SUMMARY_STATUS_PRESENTATIONS[normalizedStatus]
++        : undefined
++    const statusLabel = presentation
++        ? t(presentation.labelKey)
++        : normalizedStatus
++            ? humanizeStatus(normalizedStatus)
++            : t('session.summary.label')
++
++    return (
++        <span
++            data-testid="notify-summary-status"
++            aria-label={statusLabel}
++            className={`inline-flex shrink-0 items-center text-xs leading-5 text-[var(--app-hint)] ${presentation?.marker === 'check' ? 'h-5 w-4 justify-center' : 'gap-1.5'}`}
++        >
++            {presentation?.marker === 'check' ? (
++                <span aria-hidden="true">
++                    <CheckIcon className={`block h-4 w-4 ${presentation.markerClassName}`} />
++                </span>
++            ) : (
++                <>
++                    <span
++                        aria-hidden="true"
++                        className={`h-1.5 w-1.5 -translate-y-px rounded-full ${presentation?.markerClassName ?? 'bg-[var(--app-hint)]'}`}
++                    />
++                    <span>{statusLabel}</span>
++                </>
++            )}
++        </span>
++    )
++}
++
++export function NotifySummaryFooter({ summary }: { summary: NotifySummary }) {
++    const { t } = useTranslation()
++    const summaryText = summary.summary?.trim() ?? ''
++    const actionText = summary.action?.trim() ?? ''
++
++    if (!summaryText && !actionText && !summary.status?.trim()) return null
++
++    return (
++        <div
++            role="status"
++            aria-label={t('session.summary.ariaLabel')}
++            data-testid="notify-summary-footer"
++            className="mt-2 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-0.5 border-t border-[var(--app-divider)] pt-2"
++        >
++            <SummaryStatusIndicator summary={summary} />
++            {summaryText ? (
++                <span className="min-w-0 break-words text-sm leading-5 text-[var(--app-fg)]">
++                    {summaryText}
++                </span>
++            ) : null}
++            {actionText && actionText !== summaryText ? (
++                <>
++                    <span className="col-start-1 inline-flex h-5 w-4 items-center justify-center text-xs leading-none text-[var(--app-hint)]">
++                        <span aria-hidden="true">→</span>
++                    </span>
++                    <span className="col-start-2 min-w-0 break-words text-xs leading-5 text-[var(--app-hint)]">
++                        {actionText}
++                    </span>
++                </>
++            ) : null}
++        </div>
++    )
++}
++
++/** Render the machine footer as a compact row when display is on; otherwise strip it. */
++export const NotifySummaryText: TextMessagePartComponent = ({ text, status }) => {
++    const showInChat = useSessionSummaryInChat()
++
++    if (!showInChat) {
++        const stripped = stripNotifySummaryFooter(text)
++        if (!stripped) return null
++        if (stripped === text) return <MarkdownText />
++        return <MarkdownRenderer content={stripped} />
++    }
++
++    if (status.type !== 'complete') return <MarkdownText />
++
++    const display = splitNotifySummary(text)
++    if (!display) return <MarkdownText />
++
++    const hasDisplayableSummary = Boolean(
++        display.summary.summary?.trim()
++        || display.summary.action?.trim()
++        || display.summary.status?.trim()
++    )
++    if (!hasDisplayableSummary) {
++        if (!display.visibleText) return null
++        return <MarkdownRenderer content={display.visibleText} />
++    }
++
++    return (
++        <>
++            {display.visibleText ? <MarkdownRenderer content={display.visibleText} /> : null}
++            <NotifySummaryFooter summary={display.summary} />
++        </>
++    )
++}
+diff --git a/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx b/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx
+index 4703f864f..f1719b93a 100644
+--- a/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx
++++ b/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx
+@@ -16,6 +16,7 @@ function renderCard(options: {
+         sessionId: 'session-1',
+         metadata: null,
+         terminalToolDisplayMode: 'compact',
++        showSessionSummaryInChat: false,
+         disabled: false,
+         onRefresh: () => {},
+         hasMoreMessages: false,
+diff --git a/web/src/components/AssistantChat/messages/assistantCopyText.test.ts b/web/src/components/AssistantChat/messages/assistantCopyText.test.ts
+index 407eeaba7..fa1642bb7 100644
+--- a/web/src/components/AssistantChat/messages/assistantCopyText.test.ts
++++ b/web/src/components/AssistantChat/messages/assistantCopyText.test.ts
+@@ -22,4 +22,16 @@ describe('getAssistantCopyText', () => {
+ 
+         expect(getAssistantCopyText(parts)).toBe('')
+     })
++
++    it('strips trailing AGENT_NOTIFY_SUMMARY when stripNotifySummary is on', () => {
++        const parts = [
++            {
++                type: 'text',
++                text: 'Did the work.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}'
++            }
++        ] satisfies ThreadAssistantMessagePart[]
++
++        expect(getAssistantCopyText(parts, { stripNotifySummary: true })).toBe('Did the work.')
++        expect(getAssistantCopyText(parts)).toContain('AGENT_NOTIFY_SUMMARY')
++    })
+ })
+diff --git a/web/src/components/AssistantChat/messages/assistantCopyText.ts b/web/src/components/AssistantChat/messages/assistantCopyText.ts
+index 141f60e95..512a29fbd 100644
+--- a/web/src/components/AssistantChat/messages/assistantCopyText.ts
++++ b/web/src/components/AssistantChat/messages/assistantCopyText.ts
+@@ -1,9 +1,17 @@
+ import type { ThreadAssistantMessagePart } from '@assistant-ui/react'
++import { stripNotifySummaryFooter } from '@hapi/protocol/messages'
+ 
+-export function getAssistantCopyText(parts: readonly ThreadAssistantMessagePart[]): string {
++export function getAssistantCopyText(
++    parts: readonly ThreadAssistantMessagePart[],
++    options?: { stripNotifySummary?: boolean }
++): string {
++    const strip = options?.stripNotifySummary === true
+     return parts
+         .filter((part) => part.type === 'text')
+-        .map((part) => part.text.trim())
++        .map((part) => {
++            const trimmed = part.text.trim()
++            return strip ? stripNotifySummaryFooter(trimmed) : trimmed
++        })
+         .filter((text) => text.length > 0)
+         .join('\n\n')
+ }
+diff --git a/web/src/components/ToolCard/ToolGroupCard.test.tsx b/web/src/components/ToolCard/ToolGroupCard.test.tsx
+index 30496ed72..9fa7dd395 100644
+--- a/web/src/components/ToolCard/ToolGroupCard.test.tsx
++++ b/web/src/components/ToolCard/ToolGroupCard.test.tsx
+@@ -89,6 +89,7 @@ function renderCard(block: ToolGroupBlock, options?: {
+                 sessionId: 'session-1',
+                 metadata: { path: 'repo', host: 'local' },
+                 terminalToolDisplayMode: 'detailed',
++                showSessionSummaryInChat: false,
+                 disabled: false,
+                 onRefresh: vi.fn(),
+                 hasMoreMessages: options?.hasMore ?? false,
+@@ -308,6 +309,7 @@ describe('ToolGroupCard', () => {
+                         sessionId: 'session-1',
+                         metadata: { path: 'repo', host: 'local' },
+                         terminalToolDisplayMode: 'detailed',
++                        showSessionSummaryInChat: false,
+                         disabled: false,
+                         onRefresh: vi.fn(),
+                         hasMoreMessages: true,
+@@ -367,6 +369,7 @@ describe('ToolGroupCard', () => {
+                         sessionId: 'session-1',
+                         metadata: { path: 'repo', host: 'local' },
+                         terminalToolDisplayMode: 'detailed',
++                        showSessionSummaryInChat: false,
+                         disabled: false,
+                         onRefresh: vi.fn(),
+                         hasMoreMessages: true,
+@@ -435,6 +438,7 @@ describe('ToolGroupCard', () => {
+                         sessionId: 'session-1',
+                         metadata: { path: 'repo', host: 'local' },
+                         terminalToolDisplayMode: 'detailed',
++                        showSessionSummaryInChat: false,
+                         disabled: false,
+                         onRefresh: vi.fn(),
+                         hasMoreMessages: hasMore,
+@@ -491,6 +495,7 @@ describe('ToolGroupCard', () => {
+                         sessionId: 'session-1',
+                         metadata: { path: 'repo', host: 'local' },
+                         terminalToolDisplayMode: 'detailed',
++                        showSessionSummaryInChat: false,
+                         disabled: false,
+                         onRefresh: vi.fn(),
+                         hasMoreMessages: hasMore,
+diff --git a/web/src/hooks/useSessionSummaryInChat.ts b/web/src/hooks/useSessionSummaryInChat.ts
+new file mode 100644
+index 000000000..0795c20cb
+--- /dev/null
++++ b/web/src/hooks/useSessionSummaryInChat.ts
+@@ -0,0 +1,12 @@
++import { useOptionalHappyChatContext } from '@/components/AssistantChat/context'
++
++/**
++ * Hub opt-in to show compact AGENT_NOTIFY_SUMMARY in chat.
++ * Default false (hide/strip). Value is polled once in the chat shell and
++ * exposed via HappyChatContext — message renderers must not install their
++ * own refetch intervals.
++ */
++export function useSessionSummaryInChat(): boolean {
++    const ctx = useOptionalHappyChatContext()
++    return ctx?.showSessionSummaryInChat === true
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index bd22c1df3..1728b2f90 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -741,6 +741,8 @@ export default {
+   'settings.general.agents.description': 'Hub-wide defaults for how agents behave in new and resumed sessions.',
+   'settings.general.sessionSummaryContract': 'Ask agents to emit session status summary',
+   'settings.general.sessionSummaryContract.desc': 'When on, Claude, Codex, OpenCode, and remote Grok sessions are asked to end each turn with an AGENT_NOTIFY_SUMMARY line for denser ready notifications. Off by default. Local Grok and Cursor are not covered yet. Applies to new/resumed sessions.',
++  'settings.general.sessionSummaryInChat': 'Show session status summary in chat',
++  'settings.general.sessionSummaryInChat.desc': 'When on, assistant messages show a compact status row instead of raw AGENT_NOTIFY_SUMMARY JSON. Off by default (hidden from chat and copy). Stored messages, notifications, and capture are unchanged.',
+   'settings.language.title': 'Language',
+   'settings.language.label': 'Language',
+   'settings.display.title': 'Display',
+@@ -1105,4 +1107,12 @@ export default {
+   'session.status.subagent.running': 'Running',
+   'session.status.subagent.waiting': 'Waiting',
+   'session.status.subagent.error': 'Error',
++  'session.summary.label': 'Session summary',
++  'session.summary.ariaLabel': 'Session status summary',
++  'session.summary.status.done': 'Done',
++  'session.summary.status.blocked': 'Blocked',
++  'session.summary.status.needsReview': 'Needs review',
++  'session.summary.status.needsDecision': 'Needs decision',
++  'session.summary.status.failed': 'Failed',
++  'session.summary.status.stalled': 'Stalled',
+ } as const
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 395e0ec72..629e2885f 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -740,6 +740,8 @@ export default {
+   'settings.general.agents.description': '适用于新建与恢复会话的中心级智能体默认行为。',
+   'settings.general.sessionSummaryContract': '要求智能体输出会话状态摘要',
+   'settings.general.sessionSummaryContract.desc': '开启后，Claude、Codex、OpenCode 以及远程 Grok 会话会在每轮结束时追加 AGENT_NOTIFY_SUMMARY 行，便于更清晰的就绪通知。默认关闭。本地 Grok 与 Cursor 暂不覆盖。对新开/恢复的会话生效。',
++  'settings.general.sessionSummaryInChat': '在聊天中显示会话状态摘要',
++  'settings.general.sessionSummaryInChat.desc': '开启后，助手消息以紧凑状态行显示，而不是原始 AGENT_NOTIFY_SUMMARY JSON。默认关闭（聊天与复制中隐藏）。已存储消息、通知与采集路径不受影响。',
+   'settings.language.title': '语言',
+   'settings.language.label': '语言',
+   'settings.display.title': '显示',
+@@ -1104,4 +1106,12 @@ export default {
+   'session.status.subagent.running': '运行中',
+   'session.status.subagent.waiting': '等待中',
+   'session.status.subagent.error': '错误',
++  'session.summary.label': '会话摘要',
++  'session.summary.ariaLabel': '会话状态摘要',
++  'session.summary.status.done': '已完成',
++  'session.summary.status.blocked': '已阻塞',
++  'session.summary.status.needsReview': '需要审阅',
++  'session.summary.status.needsDecision': '需要决策',
++  'session.summary.status.failed': '失败',
++  'session.summary.status.stalled': '已停滞',
+ } as const
+diff --git a/web/src/routes/settings/general.tsx b/web/src/routes/settings/general.tsx
+index e4180d8ba..ac281e395 100644
+--- a/web/src/routes/settings/general.tsx
++++ b/web/src/routes/settings/general.tsx
+@@ -41,9 +41,9 @@ export default function SettingsGeneralPage() {
+     })
+ 
+     const hubSettingsMutation = useMutation({
+-        mutationFn: async (sessionSummaryContract: boolean) => {
++        mutationFn: async (patch: { sessionSummaryContract?: boolean; sessionSummaryInChat?: boolean }) => {
+             if (!api) throw new Error('API unavailable')
+-            return await api.updateHubSettings({ sessionSummaryContract })
++            return await api.updateHubSettings(patch)
+         },
+         onSuccess: (data) => {
+             queryClient.setQueryData(queryKeys.hubSettings, data)
+@@ -58,15 +58,26 @@ export default function SettingsGeneralPage() {
+             {isOwner ? (
+                 <SettingsSection title={t('settings.general.agents.title')} description={t('settings.general.agents.description')}>
+                     {hubSettingsQuery.data ? (
+-                        <SettingsSwitch
+-                            label={t('settings.general.sessionSummaryContract')}
+-                            description={t('settings.general.sessionSummaryContract.desc')}
+-                            checked={hubSettingsQuery.data.sessionSummaryContract}
+-                            onChange={(checked) => {
+-                                if (hubSettingsMutation.isPending) return
+-                                hubSettingsMutation.mutate(checked)
+-                            }}
+-                        />
++                        <>
++                            <SettingsSwitch
++                                label={t('settings.general.sessionSummaryContract')}
++                                description={t('settings.general.sessionSummaryContract.desc')}
++                                checked={hubSettingsQuery.data.sessionSummaryContract}
++                                onChange={(checked) => {
++                                    if (hubSettingsMutation.isPending) return
++                                    hubSettingsMutation.mutate({ sessionSummaryContract: checked })
++                                }}
++                            />
++                            <SettingsSwitch
++                                label={t('settings.general.sessionSummaryInChat')}
++                                description={t('settings.general.sessionSummaryInChat.desc')}
++                                checked={hubSettingsQuery.data.sessionSummaryInChat}
++                                onChange={(checked) => {
++                                    if (hubSettingsMutation.isPending) return
++                                    hubSettingsMutation.mutate({ sessionSummaryInChat: checked })
++                                }}
++                            />
++                        </>
+                     ) : null}
+                 </SettingsSection>
+             ) : null}
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index 114099b52..4f0b3d978 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -23,8 +23,8 @@ const { context, navigate, setAppearance, setColorTheme, setFontScale, setTermin
+     setVoice: vi.fn(),
+ }))
+ 
+-const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: false })
+-const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: true })
++const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false })
++const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: true, sessionSummaryInChat: false })
+ 
+ vi.mock('@/hooks/useColorTheme', () => ({
+     useColorTheme: () => ({ colorTheme: 'default', setColorTheme }),
+@@ -216,8 +216,8 @@ describe('responsive settings pages', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
+         localStorage.clear()
+-        getHubSettings.mockResolvedValue({ sessionSummaryContract: false })
+-        updateHubSettings.mockResolvedValue({ sessionSummaryContract: true })
++        getHubSettings.mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false })
++        updateHubSettings.mockResolvedValue({ sessionSummaryContract: true, sessionSummaryInChat: false })
+         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`
+     })
+ 
+@@ -246,6 +246,7 @@ describe('responsive settings pages', () => {
+         expect(screen.getByText('Companion')).toBeInTheDocument()
+         expect(screen.getByText('Companion pairing')).toBeInTheDocument()
+         expect(await screen.findByRole('checkbox', { name: 'Ask agents to emit session status summary' })).toBeInTheDocument()
++        expect(screen.getByRole('checkbox', { name: 'Show session status summary in chat' })).toBeInTheDocument()
+         fireEvent.click(screen.getByRole('radio', { name: '简体中文' }))
+         expect(localStorage.getItem('hapi-lang')).toBe('zh-CN')
+     })

@@ -1,0 +1,359 @@
+diff --git a/docs/guide/voice-assistant.md b/docs/guide/voice-assistant.md
+index 6690e6796..6df1585e1 100644
+--- a/docs/guide/voice-assistant.md
++++ b/docs/guide/voice-assistant.md
+@@ -48,7 +48,7 @@ You need API credentials for at least one assistant backend:
+ - **Gemini Live** - a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+ - **Qwen Realtime** - a DashScope API key from [Alibaba Cloud Model Studio](https://www.alibabacloud.com/help/en/model-studio/get-api-key)
+ 
+-Dictation needs at least one configured transcription provider from the list above, or an OpenAI-compatible local server.
++Dictation needs at least one configured transcription provider from the list above, or an OpenAI-compatible local server. In **Settings → Voice → Dictation**, the credential presets are **ElevenLabs**, **OpenAI**, and **Groq**; already-configured Deepgram / OpenAI-compatible credentials stay manageable there too. Saving a key updates the provider list without restarting the hub.
+ 
+ ## Setup
+ 
+diff --git a/hub/src/web/routes/voice.test.ts b/hub/src/web/routes/voice.test.ts
+index 36f7714c4..729203133 100644
+--- a/hub/src/web/routes/voice.test.ts
++++ b/hub/src/web/routes/voice.test.ts
+@@ -98,6 +98,7 @@ describe('voice transcription routes', () => {
+         delete process.env.TRANSCRIPTION_BASE_URL
+         delete process.env.TRANSCRIPTION_MODEL
+         process.env.OPENAI_API_KEY = 'server-only-key'
++        process.env.GROQ_API_KEY = 'groq-server-key'
+         process.env.TRANSCRIPTION_BASE_URL = 'http://localhost:8000/v1'
+         process.env.TRANSCRIPTION_MODEL = 'local-whisper'
+ 
+@@ -105,6 +106,7 @@ describe('voice transcription routes', () => {
+         expect(res.status).toBe(200)
+         expect(await res.json()).toEqual({ providers: [
+             { id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] },
++            { id: 'groq', label: 'Groq', modes: ['standard'] },
+             { id: 'openai-compatible', label: 'OpenAI-compatible / local', modes: ['standard'] }
+         ] })
+ 
+@@ -201,6 +203,41 @@ describe('voice transcription routes', () => {
+         }
+     })
+ 
++    test('proxies a bounded recording to Groq with whisper-large-v3', async () => {
++        const app = createApp()
++        const headers = await authHeaders()
++        const previousKey = process.env.GROQ_API_KEY
++        process.env.GROQ_API_KEY = 'groq-server-key'
++        const originalFetch = global.fetch
++        let upstreamUrl = ''
++        let upstreamInit: RequestInit | undefined
++        // @ts-expect-error test override
++        global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
++            upstreamUrl = String(input)
++            upstreamInit = init
++            return new Response(JSON.stringify({ text: 'groq transcription', language: 'zh' }), { status: 200 })
++        }) as typeof fetch
++
++        const form = new FormData()
++        form.set('provider', 'groq')
++        form.set('mode', 'standard')
++        form.set('language', 'zh-CN')
++        form.set('file', new File(['audio bytes'], 'speech.webm', { type: 'audio/webm' }))
++        const res = await app.request('/api/voice/transcription', { method: 'POST', headers, body: form })
++
++        expect(res.status).toBe(200)
++        expect(await res.json()).toEqual({ text: 'groq transcription', language: 'zh' })
++        expect(upstreamUrl).toBe('https://api.groq.com/openai/v1/audio/transcriptions')
++        expect(new Headers(upstreamInit?.headers).get('authorization')).toBe('Bearer groq-server-key')
++        expect(upstreamInit?.body).toBeInstanceOf(FormData)
++        expect((upstreamInit?.body as FormData).get('model')).toBe('whisper-large-v3')
++        expect((upstreamInit?.body as FormData).get('language')).toBe('zh')
++
++        global.fetch = originalFetch
++        if (previousKey === undefined) delete process.env.GROQ_API_KEY
++        else process.env.GROQ_API_KEY = previousKey
++    })
++
+     test('rejects unsupported files before calling a provider', async () => {
+         const app = createApp()
+         const headers = await authHeaders()
+diff --git a/shared/src/voice.backends.test.ts b/shared/src/voice.backends.test.ts
+index b336206e8..8b38a4774 100644
+--- a/shared/src/voice.backends.test.ts
++++ b/shared/src/voice.backends.test.ts
+@@ -13,12 +13,14 @@ describe('listConfiguredTranscriptionProviders', () => {
+             OPENAI_API_KEY: 'openai',
+             ELEVENLABS_API_KEY: 'elevenlabs',
+             DEEPGRAM_API_KEY: 'deepgram',
++            GROQ_API_KEY: 'groq',
+             TRANSCRIPTION_BASE_URL: 'http://localhost:8000/v1',
+             TRANSCRIPTION_MODEL: 'whisper-large-v3'
+         })).toEqual([
+             { id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] },
+             { id: 'elevenlabs', label: 'ElevenLabs', modes: ['standard', 'realtime'] },
+             { id: 'deepgram', label: 'Deepgram', modes: ['standard', 'realtime'] },
++            { id: 'groq', label: 'Groq', modes: ['standard'] },
+             { id: 'openai-compatible', label: 'OpenAI-compatible / local', modes: ['standard'] }
+         ])
+     })
+diff --git a/web/src/components/settings/TranscriptionProviderOnboard.tsx b/web/src/components/settings/TranscriptionProviderOnboard.tsx
+index 53293556c..d1ce8aeb5 100644
+--- a/web/src/components/settings/TranscriptionProviderOnboard.tsx
++++ b/web/src/components/settings/TranscriptionProviderOnboard.tsx
+@@ -3,19 +3,12 @@ import { ApiError, type ApiClient, type TranscriptionCredentialStatus, type Tran
+ import { useTranslation } from '@/lib/use-translation'
+ import { SelectControl } from '@/components/ui/select-control'
+ import { Button } from '@/components/ui/button'
++import { DICTATION_PROVIDER_PRESETS, dictationOnboardProviders, hasOpenAICompatibleCredentials, type DictationProviderPreset } from './transcriptionProviders'
+ 
+-type DictationProvider = 'openai' | 'elevenlabs' | 'deepgram' | 'groq' | 'openai-compatible'
++type DictationProvider = DictationProviderPreset | 'deepgram' | 'openai-compatible'
+ type AssistantProvider = 'elevenlabs' | 'gemini-live' | 'qwen-realtime'
+ type CloudProvider = DictationProvider | AssistantProvider
+ 
+-const DICTATION_PROVIDERS: DictationProvider[] = [
+-    'openai',
+-    'elevenlabs',
+-    'deepgram',
+-    'groq',
+-    'openai-compatible',
+-]
+-
+ const ASSISTANT_PROVIDERS: AssistantProvider[] = [
+     'elevenlabs',
+     'gemini-live',
+@@ -28,10 +21,10 @@ function providerLabel(provider: CloudProvider, t: (key: string) => string): str
+             return 'OpenAI'
+         case 'elevenlabs':
+             return 'ElevenLabs'
+-        case 'deepgram':
+-            return 'Deepgram'
+         case 'groq':
+             return 'Groq'
++        case 'deepgram':
++            return 'Deepgram'
+         case 'openai-compatible':
+             return t('settings.voice.credentials.openaiCompatible')
+         case 'gemini-live':
+@@ -81,9 +74,8 @@ export function TranscriptionProviderOnboard(props: {
+     onConfigured: () => void
+ }) {
+     const { t } = useTranslation()
+-    const providers: CloudProvider[] = props.mode === 'assistant' ? ASSISTANT_PROVIDERS : DICTATION_PROVIDERS
+     const [status, setStatus] = useState<TranscriptionCredentialStatus | null>(null)
+-    const [provider, setProvider] = useState<CloudProvider>(providers[0]!)
++    const [provider, setProvider] = useState<CloudProvider>(props.mode === 'assistant' ? ASSISTANT_PROVIDERS[0]! : DICTATION_PROVIDER_PRESETS[0]!)
+     const [apiKey, setApiKey] = useState('')
+     const [baseUrl, setBaseUrl] = useState('')
+     const [model, setModel] = useState('')
+@@ -91,13 +83,28 @@ export function TranscriptionProviderOnboard(props: {
+     const [error, setError] = useState<string | null>(null)
+     const [message, setMessage] = useState<string | null>(null)
+ 
++    const providers: CloudProvider[] = props.mode === 'assistant'
++        ? ASSISTANT_PROVIDERS
++        : dictationOnboardProviders(
++            status?.deepgram.configured ?? false,
++            hasOpenAICompatibleCredentials(status)
++        )
++
+     useEffect(() => {
+-        setProvider(providers[0]!)
++        setProvider(props.mode === 'assistant' ? ASSISTANT_PROVIDERS[0]! : DICTATION_PROVIDER_PRESETS[0]!)
+         setApiKey('')
+         setError(null)
+         setMessage(null)
+     }, [props.mode])
+ 
++    // If the selected provider left the list (e.g. its credentials were cleared),
++    // fall back to the mode-appropriate first option.
++    useEffect(() => {
++        if (!providers.some((option) => option === provider)) {
++            setProvider(props.mode === 'assistant' ? ASSISTANT_PROVIDERS[0]! : DICTATION_PROVIDER_PRESETS[0]!)
++        }
++    }, [providers, provider, props.mode])
++
+     const reload = useCallback(async () => {
+         try {
+             const next = await props.api.fetchTranscriptionCredentials()
+diff --git a/web/src/components/settings/transcriptionProviders.test.ts b/web/src/components/settings/transcriptionProviders.test.ts
+new file mode 100644
+index 000000000..cb90b39db
+--- /dev/null
++++ b/web/src/components/settings/transcriptionProviders.test.ts
+@@ -0,0 +1,79 @@
++import { describe, expect, test } from 'vitest'
++import { DICTATION_PROVIDER_PRESETS, dictationOnboardProviders, hasOpenAICompatibleCredentials } from './transcriptionProviders'
++import type { TranscriptionCredentialStatus } from '@/api/client'
++
++describe('dictation provider presets', () => {
++    test('offers the supported hosted presets in the intended order', () => {
++        expect(DICTATION_PROVIDER_PRESETS).toEqual(['elevenlabs', 'openai', 'groq'])
++    })
++})
++
++describe('dictationOnboardProviders', () => {
++    test('shows only the curated presets when no legacy credentials exist', () => {
++        expect(dictationOnboardProviders(false, false)).toEqual(['elevenlabs', 'openai', 'groq'])
++    })
++
++    test('keeps legacy providers manageable once their credentials exist', () => {
++        expect(dictationOnboardProviders(true, true)).toEqual([
++            'elevenlabs',
++            'openai',
++            'groq',
++            'deepgram',
++            'openai-compatible',
++        ])
++        expect(dictationOnboardProviders(true, false)).toEqual([
++            'elevenlabs',
++            'openai',
++            'groq',
++            'deepgram',
++        ])
++    })
++})
++
++describe('hasOpenAICompatibleCredentials', () => {
++    const base = {
++        openai: { configured: false, source: 'none' as const, hint: null, editable: true },
++        elevenlabs: { configured: false, source: 'none' as const, hint: null, editable: true },
++        deepgram: { configured: false, source: 'none' as const, hint: null, editable: true },
++        groq: { configured: false, source: 'none' as const, hint: null, editable: true },
++        openaiCompatible: {
++            configured: false,
++            source: 'none' as const,
++            baseUrl: null,
++            model: null,
++            baseUrlEditable: true,
++            modelEditable: true,
++            apiKey: { configured: false, source: 'none' as const, hint: null, editable: true },
++        },
++        voiceBackends: {
++            elevenlabs: { configured: false, source: 'none' as const, hint: null, editable: true },
++            geminiLive: { configured: false, source: 'none' as const, hint: null, editable: true },
++            qwenRealtime: { configured: false, source: 'none' as const, hint: null, editable: true },
++        },
++    } satisfies TranscriptionCredentialStatus
++
++    test('is false when no OpenAI-compatible field is present', () => {
++        expect(hasOpenAICompatibleCredentials(base)).toBe(false)
++        expect(hasOpenAICompatibleCredentials(null)).toBe(false)
++        expect(hasOpenAICompatibleCredentials(undefined)).toBe(false)
++    })
++
++    test('is true for api-key-only, base-url-only, and model-only partial entries', () => {
++        expect(hasOpenAICompatibleCredentials({
++            ...base,
++            openaiCompatible: { ...base.openaiCompatible, apiKey: { ...base.openaiCompatible.apiKey, configured: true } },
++        })).toBe(true)
++        expect(hasOpenAICompatibleCredentials({
++            ...base,
++            openaiCompatible: { ...base.openaiCompatible, baseUrl: 'http://127.0.0.1:8000/v1' },
++        })).toBe(true)
++        expect(hasOpenAICompatibleCredentials({
++            ...base,
++            openaiCompatible: { ...base.openaiCompatible, model: 'whisper-large-v3' },
++        })).toBe(true)
++        expect(hasOpenAICompatibleCredentials({
++            ...base,
++            openaiCompatible: { ...base.openaiCompatible, configured: true, baseUrl: 'http://127.0.0.1:8000/v1', model: 'whisper-large-v3' },
++        })).toBe(true)
++    })
++})
+diff --git a/web/src/components/settings/transcriptionProviders.ts b/web/src/components/settings/transcriptionProviders.ts
+new file mode 100644
+index 000000000..495fa0d13
+--- /dev/null
++++ b/web/src/components/settings/transcriptionProviders.ts
+@@ -0,0 +1,44 @@
++import type { TranscriptionProvider } from '@hapi/protocol/voice'
++import type { TranscriptionCredentialStatus } from '@/api/client'
++
++/** Curated cloud presets shown when onboarding dictation credentials. */
++export const DICTATION_PROVIDER_PRESETS = [
++    'elevenlabs',
++    'openai',
++    'groq',
++] as const satisfies readonly TranscriptionProvider[]
++
++export type DictationProviderPreset = typeof DICTATION_PROVIDER_PRESETS[number]
++
++/**
++ * True when any OpenAI-compatible credential field is stored/configured.
++ * Hub status marks `openaiCompatible.configured` only when both base URL and
++ * model exist, but the API stores base URL, model, and API key independently
++ * — partial entries must stay manageable too.
++ */
++export function hasOpenAICompatibleCredentials(
++    status: TranscriptionCredentialStatus | null | undefined
++): boolean {
++    if (!status) return false
++    return Boolean(
++        status.openaiCompatible.baseUrl
++        || status.openaiCompatible.model
++        || status.openaiCompatible.apiKey.configured
++    )
++}
++
++/**
++ * Providers offered in the dictation credential onboard panel: the curated
++ * presets, plus legacy providers that already have hub credentials so
++ * existing keys stay rotatable/clearable from the UI.
++ */
++export function dictationOnboardProviders(
++    includeDeepgram: boolean,
++    includeOpenAICompatible: boolean
++): Array<DictationProviderPreset | 'deepgram' | 'openai-compatible'> {
++    return [
++        ...DICTATION_PROVIDER_PRESETS,
++        ...(includeDeepgram ? ['deepgram' as const] : []),
++        ...(includeOpenAICompatible ? ['openai-compatible' as const] : []),
++    ]
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index bd22c1df3..0b7fcb9df 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -874,9 +874,9 @@ export default {
+   'settings.voice.inputMode.dictation': 'Dictation',
+   'settings.voice.inputMode.dictation.hint': 'Speech-to-text input only',
+   'settings.voice.transcriptionProvider': 'Transcription provider',
+-  'settings.voice.noTranscriptionProvider': 'No hub transcription provider yet — add one below (or use Browser on-device if available).',
++  'settings.voice.noTranscriptionProvider': 'No hub transcription provider yet — add OpenAI, ElevenLabs, or Groq below (or use Browser on-device if available).',
+   'settings.voice.noVoiceBackend': 'No voice assistant backend is configured on the hub — add one below.',
+-  'settings.voice.credentials.hint': 'Keys stay on the hub. The browser never keeps long-lived provider secrets.',
++  'settings.voice.credentials.hint': 'Choose OpenAI, ElevenLabs, or Groq. Keys stay on the hub; the browser never keeps long-lived provider secrets.',
+   'settings.voice.credentials.assistantHint': 'Add an ElevenLabs, Gemini Live, or Qwen Realtime key. Keys stay on the hub.',
+   'settings.voice.credentials.provider': 'Provider',
+   'settings.voice.credentials.openaiCompatible': 'OpenAI-compatible / local',
+@@ -897,7 +897,7 @@ export default {
+   'settings.voice.credentials.source.settings': 'Settings',
+   'settings.voice.credentials.envLocked': 'This key comes from the hub environment and cannot be changed here.',
+   'settings.voice.credentials.manage': 'Add or manage providers',
+-  'settings.voice.credentials.manageHint': 'Paste an API key to enable another transcription provider on the hub.',
++  'settings.voice.credentials.manageHint': 'Add OpenAI, ElevenLabs, or Groq to enable dictation on the hub.',
+   'settings.voice.credentials.manageAssistantHint': 'Paste an API key to enable ElevenLabs, Gemini Live, or Qwen Realtime on the hub.',
+   'settings.voice.transcriptionMode': 'Transcription mode',
+   'settings.voice.transcriptionMode.standard': 'Standard',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 395e0ec72..ea6bbdbbf 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -873,9 +873,9 @@ export default {
+   'settings.voice.inputMode.dictation': '语音输入',
+   'settings.voice.inputMode.dictation.hint': '只做语音转文字',
+   'settings.voice.transcriptionProvider': '转录提供商',
+-  'settings.voice.noTranscriptionProvider': 'Hub 尚未配置转录提供商 — 请在下方添加（或在可用时使用浏览器本地识别）。',
++  'settings.voice.noTranscriptionProvider': 'Hub 尚未配置转录提供商 — 请在下方添加 OpenAI、ElevenLabs 或 Groq（或在可用时使用浏览器本地识别）。',
+   'settings.voice.noVoiceBackend': 'Hub 尚未配置语音助手后端 — 请在下方添加。',
+-  'settings.voice.credentials.hint': '密钥保存在 Hub 上。浏览器不会长期保存提供商密钥。',
++  'settings.voice.credentials.hint': '可选择 OpenAI、ElevenLabs 或 Groq。密钥保存在 Hub 上，浏览器不会长期保存提供商密钥。',
+   'settings.voice.credentials.assistantHint': '添加 ElevenLabs、Gemini Live 或 Qwen Realtime 密钥。密钥保存在 Hub 上。',
+   'settings.voice.credentials.provider': '提供商',
+   'settings.voice.credentials.openaiCompatible': 'OpenAI 兼容 / 本地',
+@@ -896,7 +896,7 @@ export default {
+   'settings.voice.credentials.source.settings': '设置',
+   'settings.voice.credentials.envLocked': '该密钥来自 Hub 环境变量，无法在此修改。',
+   'settings.voice.credentials.manage': '添加或管理提供商',
+-  'settings.voice.credentials.manageHint': '粘贴 API 密钥以在 Hub 上启用其他转录提供商。',
++  'settings.voice.credentials.manageHint': '添加 OpenAI、ElevenLabs 或 Groq，即可在 Hub 上启用语音转文字。',
+   'settings.voice.credentials.manageAssistantHint': '粘贴 API 密钥以在 Hub 上启用 ElevenLabs、Gemini Live 或 Qwen Realtime。',
+   'settings.voice.transcriptionMode': '转录模式',
+   'settings.voice.transcriptionMode.standard': '标准',
