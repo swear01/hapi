@@ -24,7 +24,7 @@
  */
 
 import type { ChildProcess } from 'node:child_process'
-import { isProcessAlive, killProcessTreeByPid } from '../utils/process'
+import { isProcessAlive } from '../utils/process'
 import { listRunnerSessions, stopRunnerSession } from '../runner/controlClient'
 
 export interface RegisteredProcess {
@@ -128,8 +128,8 @@ export async function cleanupAllRegisteredProcesses(): Promise<void> {
         new Promise((resolve) => setTimeout(resolve, LOGICAL_PHASE_BUDGET_MS)),
     ])
 
-    // Stage 2: bounded process-tree termination for anything still alive.
-    // The runner itself is deliberately NOT killed here: it is always stopped
+    // Stage 2: bounded termination for anything still alive. The runner
+    // itself is deliberately NOT killed here: it is always stopped
     // via `stopRunner()` (graceful HTTP stop, which also removes its state
     // file). SIGKILLing the runner would leave a stale runner.state.json that
     // the next test's beforeEach can mistake for a live runner.
@@ -139,14 +139,20 @@ export async function cleanupAllRegisteredProcesses(): Promise<void> {
             pidsToKill.add(entry.pid)
         }
     }
-    // Signals are all delivered synchronously inside killProcessTreeByPid
-    // (children first), so racing the awaits against a budget only bounds the
-    // waiting, never skips the kill. A large or stuck tree must not consume
-    // the whole hook before stopRunner and the marker sweep run.
-    await Promise.race([
-        Promise.allSettled([...pidsToKill].map((pid) => killProcessTreeByPid(pid, true))),
-        new Promise((resolve) => setTimeout(resolve, 5_000)),
-    ])
+    // Kill registered roots with a bare synchronous SIGKILL: no recursive
+    // pgrep tree walk (unbounded under a large tree, and it would run before
+    // any await could race it) and no per-PID waits. Descendants are reaped
+    // by the unconditional marker sweep the suite runs right after this
+    // cleanup — every descendant inherits the run marker.
+    for (const pid of pidsToKill) {
+        try {
+            process.kill(pid, 'SIGKILL')
+        } catch {
+            // Already dead or racing exit; the wait below re-checks.
+        }
+    }
+
+    await waitForAllDead([...pidsToKill], 5_000)
 
     await waitForAllDead([...pidsToKill], 5_000)
 
