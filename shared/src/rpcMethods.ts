@@ -49,6 +49,7 @@ export const RPC_METHODS = {
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
     /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
+    /** Deliver one queued message into the active Pi turn (native steer). */
     SteerQueuedMessage: 'steer-queued-message',
     ForkConversation: 'fork-conversation',
     RewindConversation: 'rewind-conversation',

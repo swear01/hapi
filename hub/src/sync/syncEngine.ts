@@ -21,6 +21,7 @@ import {
     type RunnerSelfUpgradeResponse,
 } from '@hapi/protocol/upgradeChannel'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'

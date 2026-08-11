@@ -215,6 +215,7 @@ export function QueuedMessagesBar({
     pendingSchedule,
     pendingScheduleRevision,
     onEdit,
+    canSteer,
 }: {
     sessionId: string
     api: ApiClient | null
@@ -236,6 +237,12 @@ export function QueuedMessagesBar({
      * Edit is always cancel + prefill, regardless of whether the message is scheduled or immediate.
      */
     onEdit?: (params: { text: string; pendingSchedule: PendingSchedule | null }) => void
+    /**
+     * When true, each queued row gets a Steer button that delivers that
+     * message into the active turn (Pi native steer). The parent computes it
+     * as: pi flavor && session thinking && remote-controlled.
+     */
+    canSteer?: boolean
 }) {
     const queued = useQueuedMessages(sessionId)
     const assistantApi = useAui()
@@ -517,6 +524,19 @@ export function QueuedMessagesBar({
                                     )}
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
+                                    {canSteerRow ? (
+                                        <button
+                                            type="button"
+                                            aria-label="Steer queued message"
+                                            title={t('queuedMessages.steer')}
+                                            disabled={steerPending}
+                                            onClick={handleSteer}
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            className="flex h-6 w-6 items-center justify-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            <SteerIcon />
+                                        </button>
+                                    ) : null}
                                     <button
                                         type="button"
                                         aria-label={t('queuedMessages.edit')}
