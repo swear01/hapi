@@ -612,6 +612,10 @@ export class ApiClient {
         const response = await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
             { method: 'POST', body: JSON.stringify({}) }
+        )
+        return response as SteerQueuedMessageResponse
+    }
+
     async steerMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
         const response = await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
