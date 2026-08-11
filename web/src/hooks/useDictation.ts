@@ -108,6 +108,14 @@ export function useDictation(config: {
                 if (event.data.size > 0) chunksRef.current.push(event.data)
             }
 
+            // A MediaRecorder error can still be followed by dataavailable +
+            // stop with partial bytes; treat it as a failed recording instead
+            // of transcribing (and possibly auto-sending) corrupt audio.
+            let recordingFailed = false
+            recorder.onerror = () => {
+                recordingFailed = true
+            }
+
             recorder.onstop = async () => {
                 stopTracks()
                 try {
@@ -122,6 +130,19 @@ export function useDictation(config: {
                     const draftUnchanged = (sid: string, baseline: string) => {
                         const cur = getDraft(sid)
                         return cur === '' || cur === baseline
+                    }
+
+                    if (recordingFailed) {
+                        transcribingRef.current = false
+                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        }
+                        if (mountedRef.current) {
+                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
+                            setError('Audio recording failed')
+                            setStatus('error')
+                        }
+                        return
                     }
 
                     if (!blob.size) {

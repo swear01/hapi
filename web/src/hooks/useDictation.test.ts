@@ -321,6 +321,60 @@ describe('useDictation', () => {
         expect(onTextChange).not.toHaveBeenCalledWith('initial')
     })
 
+    it('does not transcribe or send when MediaRecorder fails after partial data', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockFailingRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                // MediaRecorder lifecycle: an error can still be followed by
+                // dataavailable (partial bytes) and stop.
+                this.onerror?.()
+                this.ondataavailable?.({ data: new Blob(['partial'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockFailingRecorder)
+
+        const onTextChange = vi.fn()
+        let currentText = ''
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'should not be transcribed' })),
+            sendMessage: vi.fn(async () => {})
+        }
+
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => currentText,
+            onTextChange: (value) => { currentText = value; onTextChange(value) }
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'draft text'))
+
+        await waitFor(() => {
+            expect(result.current.status).toBe('error')
+            expect(result.current.error).toBe('Audio recording failed')
+        })
+        expect(api.transcribeVoice).not.toHaveBeenCalled()
+        expect(api.sendMessage).not.toHaveBeenCalled()
+        // Draft restored for the failed recording instead of being sent.
+        expect(onTextChange).toHaveBeenCalledWith('draft text')
+    })
+
     it('does not transcribe when unmounted without stopAndSend', async () => {
         const stopTrack = vi.fn()
         Object.defineProperty(navigator, 'mediaDevices', {
