@@ -53,7 +53,7 @@ function normalizeTokenUsage(value: unknown): CodexTokenUsage | undefined {
 }
 
 function parseResetAt(record: Record<string, unknown>, now: number): number | undefined {
-    const direct = record.reset_at ?? record.resetAt;
+    const direct = record.resets_at ?? record.resetsAt ?? record.reset_at ?? record.resetAt;
     if (typeof direct === 'string') {
         const parsed = Date.parse(direct);
         if (Number.isFinite(parsed)) return parsed;
@@ -81,7 +81,7 @@ function normalizeRateLimit(value: unknown, now: number): CodexUsageRateLimit | 
     if (!record) return undefined;
 
     const usedPercent = firstNumber(record, ['used_percent', 'usedPercent', 'percent', 'usage_percent', 'usagePercent']);
-    const windowMinutes = firstNumber(record, ['window_minutes', 'windowMinutes', 'window', 'minutes']);
+    const windowMinutes = firstNumber(record, ['window_duration_mins', 'windowDurationMins', 'window_minutes', 'windowMinutes', 'window', 'minutes']);
     if (usedPercent === null || windowMinutes === null) {
         return undefined;
     }
