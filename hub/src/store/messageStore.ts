@@ -20,6 +20,7 @@ import {
     getMatureScheduledMessages,
     getImmediateQueuedLocalMessages,
     countFutureScheduledBySessionIds,
+    countUninvokedScheduledBySessionIds,
     countFutureScheduledLocalMessages,
     minFutureScheduledAtBySessionIds,
     countMessages,
@@ -141,6 +142,10 @@ export class MessageStore {
 
     countFutureScheduledBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
         return countFutureScheduledBySessionIds(this.db, sessionIds, now)
+    }
+
+    countUninvokedScheduledBySessionIds(sessionIds: string[]): Map<string, number> {
+        return countUninvokedScheduledBySessionIds(this.db, sessionIds)
     }
 
     minFutureScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
