@@ -770,7 +770,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         });
     }
 
-    private handleAgentMessage(message: AgentMessage): void {
     private handleAgentMessage(message: AgentMessage, createdAt?: number, positionAt?: number): void {
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
