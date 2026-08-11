@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Outlet, useLocation, useMatchRoute, useRouter } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
+import { configureTelegramWebApp, getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
 import { initializeChatSurfaceColors } from '@/hooks/useChatSurfaceColors'
 import { initializeTheme } from '@/hooks/useTheme'
 import { initializeThemeColors } from '@/hooks/useThemeColors'
@@ -14,6 +14,10 @@ import { useSyncingState } from '@/hooks/useSyncingState'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { useViewportHeight } from '@/hooks/useViewportHeight'
 import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
+import { usePlatform, type HapticNotification } from '@/hooks/usePlatform'
+import { queryKeys } from '@/lib/query-keys'
+import { AppContextProvider } from '@/lib/app-context'
+import { clearMessageWindow, syncTailMessages } from '@/lib/message-window-store'
 import { useAppGoBack } from '@/hooks/useAppGoBack'
 import { useTranslation } from '@/lib/use-translation'
 import { VoiceProvider } from '@/lib/voice-context'
@@ -40,6 +44,14 @@ import type { SyncEvent } from '@/types/api'
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
 const REQUIRE_SERVER_URL = requireHubUrlForLogin()
+
+function getToastHapticNotification(title: string): HapticNotification | null {
+    const normalizedTitle = title.trim()
+    if (normalizedTitle === 'Task completed') return 'success'
+    if (normalizedTitle === 'Task failed') return 'error'
+    if (normalizedTitle === 'Permission Request' || normalizedTitle === 'Ready for input') return 'warning'
+    return null
+}
 
 function withPwaBanner(content: ReactNode) {
     return (
@@ -70,14 +82,13 @@ function AppInner() {
     const matchRoute = useMatchRoute()
     const router = useRouter()
     const { addToast } = useToast()
+    const { haptic } = usePlatform()
 
     useEffect(() => {
-        const tg = getTelegramWebApp()
-        tg?.ready()
-        tg?.expand()
         initializeTheme()
         initializeThemeColors()
         initializeChatSurfaceColors()
+        configureTelegramWebApp()
     }, [])
 
     // Track visual viewport height for mobile keyboard avoidance (see useViewportHeight.ts)
@@ -360,6 +371,11 @@ function AppInner() {
     }, [t])
 
     const handleToast = useCallback((event: ToastEvent) => {
+        const feedback = getToastHapticNotification(event.data.title)
+        if (feedback && isTelegramApp()) {
+            haptic.notification(feedback)
+        }
+
         const localized = translateIncomingToast(event.data.title, event.data.body)
         addToast({
             title: localized.title,
@@ -367,7 +383,7 @@ function AppInner() {
             sessionId: event.data.sessionId,
             url: event.data.url
         })
-    }, [addToast, translateIncomingToast])
+    }, [addToast, haptic, translateIncomingToast])
 
     const globalEventSubscription = useMemo(() => getAppGlobalSseSubscription(), [])
     const sessionEventSubscription = useMemo(
