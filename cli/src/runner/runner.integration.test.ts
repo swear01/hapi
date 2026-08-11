@@ -138,12 +138,24 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     console.log(`[TEST] Runner log file: ${runnerState?.runnerLogPath}`);
   });
 
+  /** Bounded wrapper around the graceful runner stop. */
+  async function stopRunnerBounded(): Promise<void> {
+    // stopRunner()'s HTTP stop can burn the worker-wide 60s timeout
+    // (HAPI_RUNNER_HTTP_TIMEOUT) on a hung-but-live runner, which would
+    // exhaust the hook budget before the marker sweep runs. Bound it: if the
+    // runner does not stop in time, the sweep below force-reaps it (it
+    // carries the run marker) and the next beforeEach's alive-PID guard
+    // ignores any stale state file.
+    await Promise.race([stopRunner(), new Promise((resolve) => setTimeout(resolve, 10_000))])
+  }
+
   afterEach(async () => {
     // Two-stage cleanup must run BEFORE stopRunner() so the runner is still
     // alive to logically stop tracked sessions and report their PIDs.
     await cleanupAllRegisteredProcesses()
-    // Graceful stop (the runner removes its own state file).
-    await stopRunner()
+    // Graceful stop (the runner removes its own state file), bounded so a
+    // hung runner cannot starve the sweep below.
+    await stopRunnerBounded()
     // Regression check: the detached child registered by the deliberately
     // failing test must already be dead from the registry cleanup alone.
     if (regressionChildPid !== undefined) {
@@ -161,7 +173,7 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
 
   afterAll(async () => {
     await cleanupAllRegisteredProcesses()
-    await stopRunner()
+    await stopRunnerBounded()
     await reapTestOwnedProcesses(testOwnedMarker())
   });
 
@@ -563,7 +575,7 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     // teardown performs at the end of the whole run: reap anything still
     // carrying the run marker, and require zero remain. Agent grandchildren
     // of the failing test that reparented to PID 1 are caught here.
-    await stopRunner()
+    await stopRunnerBounded()
     const leftovers = await reapTestOwnedProcesses(testOwnedMarker());
     expect(
       leftovers,

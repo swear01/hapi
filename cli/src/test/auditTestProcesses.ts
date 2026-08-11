@@ -29,6 +29,10 @@ export interface TestOwnedProcess {
  * scan failure (unsupported flags, buffer exhaustion, permission errors) so
  * the audit can never silently report "zero survivors" while detached
  * test-owned processes remain alive.
+ *
+ * The environment-bearing scan is used ONLY to identify marked PIDs.
+ * Diagnostics (the `command` field) are fetched with a separate `ps` call
+ * WITHOUT `e`, so inherited credentials in the env dump never reach logs.
  */
 export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
     if (process.platform === 'win32') return []
@@ -50,21 +54,49 @@ export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
         )
     }
 
-    const found: TestOwnedProcess[] = []
+    const matchedPids: number[] = []
+    const ppidByPid = new Map<number, number>()
+    const rssByPid = new Map<number, number>()
     for (const line of output.split('\n')) {
         const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/)
         if (!match) continue
-        const command = match[4]
-        if (command.includes(marker)) {
-            found.push({
-                pid: Number(match[1]),
-                ppid: Number(match[2]),
-                rssKb: Number(match[3]),
-                command: command.slice(0, 500),
-            })
+        if (match[4].includes(marker)) {
+            const pid = Number(match[1])
+            matchedPids.push(pid)
+            ppidByPid.set(pid, Number(match[2]))
+            rssByPid.set(pid, Number(match[3]))
         }
     }
-    return found
+    if (matchedPids.length === 0) return []
+
+    // Fetch clean command lines (no environment) for diagnostics.
+    const commandByPid = new Map<number, string>()
+    try {
+        const clean = execFileSync(
+            'ps',
+            ['-p', matchedPids.join(','), '-o', 'pid=,command='],
+            {
+                encoding: 'utf8',
+                maxBuffer: 16 * 1024 * 1024,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            }
+        )
+        for (const line of clean.split('\n')) {
+            const match = line.match(/^\s*(\d+)\s+(.*)$/)
+            if (match) {
+                commandByPid.set(Number(match[1]), match[2].trim())
+            }
+        }
+    } catch {
+        // Diagnostics are best-effort; never fall back to the env dump.
+    }
+
+    return matchedPids.map((pid) => ({
+        pid,
+        ppid: ppidByPid.get(pid) ?? 0,
+        rssKb: rssByPid.get(pid) ?? 0,
+        command: (commandByPid.get(pid) ?? '(command unavailable)').slice(0, 500),
+    }))
 }
 
 /**
