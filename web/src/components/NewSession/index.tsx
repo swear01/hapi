@@ -103,7 +103,7 @@ export function NewSession(props: {
     const pendingCursorBaseRef = useRef<string | null>(null)
     const [effort, setEffort] = useState<LaunchEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
-    const [opencodeSelectedModel, setOpencodeSelectedModel] = useState<string | null>(null)
+    const [opencodeSelectedModel, setOpencodeSelectedModel] = useState<string | null | undefined>(undefined)
     const [serviceTier, setServiceTier] = useState<NewSessionServiceTier>('standard')
     const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>('default')
     const [copilotAgentMode, setCopilotAgentMode] = useState<CopilotAgentMode>('interactive')
@@ -622,8 +622,14 @@ export function NewSession(props: {
         ) {
             return
         }
+        // null = explicit "Default" choice (or a restored Default preference) —
+        // never overwrite it with a concrete model. Only `undefined` (no choice
+        // made yet) triggers initialization.
+        if (opencodeSelectedModel === null) {
+            return
+        }
         if (
-            opencodeSelectedModel !== null
+            opencodeSelectedModel !== undefined
             && opencodeModelsState.availableModels.some(
                 (candidate) => candidate.modelId === opencodeSelectedModel
             )
@@ -655,10 +661,11 @@ export function NewSession(props: {
     ])
     useEffect(() => {
         // Reset selection when agent / machine / directory changes; new probe = new defaults.
+        // `undefined` = uninitialized (probe again); `null` = explicit Default choice.
         if (preserveRestoredDraftRef.current) {
             return
         }
-        setOpencodeSelectedModel(null)
+        setOpencodeSelectedModel(undefined)
     }, [agent, machineId, deferredDirectory])
 
     useEffect(() => {
