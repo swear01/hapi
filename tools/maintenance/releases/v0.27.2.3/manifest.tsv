@@ -1,0 +1,42 @@
+patch	state	upstream_ref	source_commits
+# v0.27.2.3 — rebuilt from upstream/main d147ae00a (5 commits past v0.27.2.2 base f63d4bb8)
+# Dropped this cycle (merged upstream into base d147ae00a): #1483 #1487 #1493 #1494 #1479
+# pr-1473 deferred — 9461-line security/peer-provenance PR; deep V28-schema conflicts; exceeds audit gate
+# pr-1462 absorbed — same feature as carried pr-1477 (pi queue mid-turn steer); ours is the superset
+01-pr-1091.patch	carry	pr-1091	0cf0d70310e9c58c5a41509793260a003822a9b4
+02-pr-987.patch	carry	pr-987	2c0362f4f20c127faab55e6a53d29dc0acad67f6
+03-pr-986.patch	carry	pr-986	a989dda1822be4e54893908d4baf7c2afeca19e6
+04-pr-847.patch	carry	pr-847	9a83fc8f08974f24c880b547b726f45ac231b2f2
+05-pr-1108.patch	carry	pr-1108	fee9084b2658cea8d97a3585c8e4c015c0975cb4
+06-pr-1424.patch	carry	pr-1424	c751690c275a397381436684c2a7a025700a1284
+07-pr-1422.patch	carry	pr-1422	5ae02d6caed360298761decc20e1f23db6d880da
+08-pr-1414.patch	carry	pr-1414	242beb9e6bd400804aa0057e862e50f94d34bcc2
+09-pr-1413.patch	carry	pr-1413	54603b788c03a41efbecdfc3649eaf4cb42da90b
+10-pr-1158.patch	carry	pr-1158	9ea45c1497bb1a15b796ee23fd4059dcb3e7b2c2
+11-pr-955.patch	carry	pr-955	f6a624251cb125182965dc343351c362035d071a
+12-pr-906.patch	carry	pr-906	d652eafdb885d5b2e09ff76461564f3f316b78e1
+13-pr-1436.patch	carry	pr-1436	d2f3f698fcc1c68c5293d6c2fef38b08f531e9f4
+14-pr-1421.patch	carry	pr-1421	ed7c7cf5e39907e18aaf34fb86b01f0fd72ddf03
+15-pr-1419.patch	carry	pr-1419	adb0ad029640aeae8dd821d62af7ee790ec95b12
+16-pr-769.patch	carry	pr-769	60c11607ce3bba734f38b6fcf87be07b32298683
+17-pr-1469.patch	carry	pr-1469	c912274f4946d8b6c515aafd750068444c7827e8
+18-pr-1468.patch	carry	pr-1468	fd2e0775c42463bb122f40b0c7b2c4872a729308
+19-pr-1475.patch	carry	pr-1475	952b4a2836c1ba5420838b2497512ab0e055661e
+20-pr-1474.patch	carry	pr-1474	aaabfb2efb9995b299b0ce0bda4cd242fb51aa1b
+21-pr-1451.patch	carry	pr-1451	f489209f15333faf17666cbadfdd6a219a7d6d74
+22-pr-1418.patch	carry	pr-1418	b556e137cf3971b432902b0b88b028715b7337e0
+23-pr-1477.patch	carry	pr-1477	ba518f2ec868cefb5f5daf3045af7aa623526d68
+24-pr-1447.patch	carry	pr-1447	1f42793d05aa3f12471019175e75b3a358c235b6
+25-pr-1429.patch	carry	pr-1429	b48a8a7630daece19f8e49058e7f52db08434eb1
+26-pr-1360.patch	carry	pr-1360	eb2db235e2c61e271405099d439afe2df1a7c401
+27-pr-1501.patch	carry	pr-1501	da7b37c66aecae4da2b5c03108baa844c73f06dd
+28-pr-1498.patch	carry	pr-1498	f6468faaa155505ee5111f5c53c630361c8bfada
+29-pr-1497.patch	carry	pr-1497	08533ebbfd3b0fe83ce0af6b827ffb6d63b20ccb
+30-pr-1496.patch	carry	pr-1496	390b8df42689e2acc6318d3a58beef591172d846
+31-pr-1495.patch	carry	pr-1495	a0de77881531f3df564a42860ddcc992813ff109
+32-pr-1490.patch	carry	pr-1490	df02f89bc3815e5c4fe96156acb82e21757b7b34
+33-pr-1473.patch	defer	pr-1473	(see audit — large security/peer-provenance, V28 conflicts)
+34-pr-1471.patch	carry	pr-1471	bf96cf679f2d568702a509a4ba6ec76f00fd33c0
+35-pr-1462.patch	absorbed	pr-1462	(absorbed by pr-1477 — pi queue mid-turn steer superset)
+36-pr-1480.patch	carry	pr-1480	c700a0531bd0a155ddcff48780688b806e51f10d
+37-pr-1484.patch	carry	pr-1484	d798e64d82fd552755ea64def06205134c2fe1a0
