@@ -1,0 +1,37 @@
+patch	state	upstream_ref	source_commits
+# v0.27.2.2 — rebuilt from upstream/main f63d4bb8
+# pr-1430 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1442 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1420 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1415 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1411 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1410 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1433 dropped — merged upstream (inherited via base f63d4bb8)
+# pr-1443 dropped — superseded by carried pr-906 (mid-turn steer, 37-file overlap)
+01-pr-1091.patch	carry	pr-1091	0cf0d70310e9c58c5a41509793260a003822a9b4
+02-pr-987.patch	carry	pr-987	2c0362f4f20c127faab55e6a53d29dc0acad67f6
+03-pr-986.patch	carry	pr-986	a989dda1822be4e54893908d4baf7c2afeca19e6
+04-pr-847.patch	carry	pr-847	9a83fc8f08974f24c880b547b726f45ac231b2f2
+05-pr-1108.patch	carry	pr-1108	01c30eccd3cc960f2bfea9968a2060846a852566
+06-pr-1424.patch	carry	pr-1424	65eb54481de26da1c1875b3eed006a5b2dfd13e5
+07-pr-1422.patch	carry	pr-1422	5ae02d6caed360298761decc20e1f23db6d880da
+08-pr-1414.patch	carry	pr-1414	242beb9e6bd400804aa0057e862e50f94d34bcc2
+09-pr-1413.patch	carry	pr-1413	54603b788c03a41efbecdfc3649eaf4cb42da90b
+10-pr-1158.patch	carry	pr-1158	9ea45c1497bb1a15b796ee23fd4059dcb3e7b2c2
+11-pr-955.patch	carry	pr-955	cd37fc60386cd61f342af8f603cbfb534c478883
+12-pr-906.patch	carry	pr-906	d652eafdb885d5b2e09ff76461564f3f316b78e1
+13-pr-1436.patch	carry	pr-1436	7a57fc142d2dd6f19857c79d5c529b82b23063a6
+14-pr-1421.patch	carry	pr-1421	3f0cfe6578405338b295e97f0c8a874874076ad0
+15-pr-1419.patch	carry	pr-1419	adb0ad029640aeae8dd821d62af7ee790ec95b12
+16-pr-769.patch	carry	pr-769	60c11607ce3bba734f38b6fcf87be07b32298683
+17-pr-1475.patch	carry	pr-1475	9132211487318215429e9339422ec271f75035f8
+18-pr-1474.patch	carry	pr-1474	aaabfb2efb9995b299b0ce0bda4cd242fb51aa1b
+19-pr-1469.patch	carry	pr-1469	77f668678a4e27e251136773e5569a024cbbf6dd
+20-pr-1468.patch	carry	pr-1468	f16fe64c2e86023e1ab40bc530477b7b4d4d5632
+21-pr-1451.patch	carry	pr-1451	2877e73d28921019bfae786a6406cbf38aa1a70d
+22-pr-1418.patch	carry	pr-1418	58a84ed53ab9beb12b678882dd2430a1c3a09f98
+23-pr-1477.patch	carry	pr-1477	ba518f2ec868cefb5f5daf3045af7aa623526d68
+24-pr-1447.patch	carry	pr-1447	df3e0e9e78f02ffdd6e4d84395fb26aaa7830d1a
+26-pr-1429.patch	carry	pr-1429	860771570f3c775780040f2ad815ca022677e182
+27-pr-1360.patch	carry	pr-1360	0eda13503288d2016fc766ae7e7322cd3027f184
+28-pr-1093.patch	carry	pr-1093	c94fa5fccd41f5f8113585b0afef737664d5f0c6

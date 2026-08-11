@@ -1,0 +1,886 @@
+diff --git a/cli/src/api/apiMachine.test.ts b/cli/src/api/apiMachine.test.ts
+index db88cf320..a442be113 100644
+--- a/cli/src/api/apiMachine.test.ts
++++ b/cli/src/api/apiMachine.test.ts
+@@ -761,7 +761,7 @@ describe('ApiMachineClient connect runner-state advertisement', () => {
+             expect(emitWithAck).toHaveBeenCalledWith('machine-update-state', expect.objectContaining({
+                 runnerState: expect.objectContaining({
+                     status: 'running',
+-                    capabilities: { piExistingSessionResume: true }
++                    capabilities: expect.objectContaining({ piExistingSessionResume: true })
+                 })
+             }))
+         } finally {
+diff --git a/shared/src/agentConfig.test.ts b/shared/src/agentConfig.test.ts
+new file mode 100644
+index 000000000..4730ea7ed
+--- /dev/null
++++ b/shared/src/agentConfig.test.ts
+@@ -0,0 +1,75 @@
++import { describe, expect, test } from 'bun:test'
++import {
++    AgentConfigDescriptorSchema,
++    getAgentConfigDescriptor,
++    getBuiltinAgentConfigDescriptors,
++    resolveHapiYoloPermissionMode
++} from './agentConfig'
++
++describe('agent config descriptors', () => {
++    test('exposes the three primary fields with their intended placements', () => {
++        const descriptor = getAgentConfigDescriptor('codex')
++        expect(descriptor.fields.map((field) => [field.id, field.section])).toEqual([
++            ['model', 'model'],
++            ['effort', 'effort'],
++            ['permission', 'permission'],
++            ['serviceTier', 'settings'],
++            ['collaborationMode', 'settings']
++        ])
++    })
++
++    test('models Cursor variant as a dependent model field rather than a page-specific control', () => {
++        const descriptor = getAgentConfigDescriptor('cursor')
++        expect(descriptor.fields).toContainEqual(expect.objectContaining({
++            id: 'model',
++            kind: 'dependent-select',
++            optionSource: 'machine'
++        }))
++    })
++
++    test('reports Pi permission as managed rather than pretending YOLO applies', () => {
++        const descriptor = getAgentConfigDescriptor('pi')
++        expect(descriptor.fields).toContainEqual(expect.objectContaining({
++            id: 'permission',
++            kind: 'status',
++            availability: 'managed'
++        }))
++        expect(resolveHapiYoloPermissionMode('pi')).toBeNull()
++    })
++
++    test('maps HAPI YOLO to each supported agent native permission mode', () => {
++        expect(resolveHapiYoloPermissionMode('claude')).toBe('bypassPermissions')
++        expect(resolveHapiYoloPermissionMode('grok')).toBe('bypassPermissions')
++        expect(resolveHapiYoloPermissionMode('codex')).toBe('yolo')
++        expect(resolveHapiYoloPermissionMode('cursor')).toBe('yolo')
++        expect(resolveHapiYoloPermissionMode('opencode')).toBe('yolo')
++        expect(resolveHapiYoloPermissionMode('kimi')).toBe('yolo')
++    })
++
++    test('validates descriptors received from a runner', () => {
++        expect(AgentConfigDescriptorSchema.safeParse({
++            flavor: 'example-agent',
++            fields: [{
++                id: 'model',
++                section: 'model',
++                kind: 'grouped-select',
++                optionSource: 'directory',
++                availability: 'both'
++            }]
++        }).success).toBe(true)
++    })
++
++    test('every builtin descriptor validates and carries a permission field', () => {
++        const descriptors = getBuiltinAgentConfigDescriptors()
++        expect(descriptors.length).toBeGreaterThan(0)
++        for (const descriptor of descriptors) {
++            expect(AgentConfigDescriptorSchema.safeParse(descriptor).success).toBe(true)
++            expect(descriptor.fields.some((field) => field.id === 'permission')).toBe(true)
++        }
++    })
++})
++
++test('runner capabilities carry descriptors for every built-in agent', async () => {
++    const { RUNNER_CAPABILITIES } = await import('./runnerCapabilities')
++    expect(RUNNER_CAPABILITIES.agentConfigs.map((descriptor) => descriptor.flavor)).toContain('cursor')
++})
+diff --git a/shared/src/agentConfig.ts b/shared/src/agentConfig.ts
+new file mode 100644
+index 000000000..c5194285c
+--- /dev/null
++++ b/shared/src/agentConfig.ts
+@@ -0,0 +1,115 @@
++import { z } from 'zod'
++import { AGENT_FLAVORS, type AgentFlavor, type PermissionMode } from './modes'
++
++export const AgentConfigFieldIdSchema = z.enum([
++    'model',
++    'effort',
++    'permission',
++    'serviceTier',
++    'collaborationMode'
++])
++export type AgentConfigFieldId = z.infer<typeof AgentConfigFieldIdSchema>
++
++export const AgentConfigSectionSchema = z.enum(['model', 'effort', 'permission', 'settings'])
++export type AgentConfigSection = z.infer<typeof AgentConfigSectionSchema>
++
++export const AgentConfigFieldKindSchema = z.enum(['select', 'grouped-select', 'dependent-select', 'status'])
++export type AgentConfigFieldKind = z.infer<typeof AgentConfigFieldKindSchema>
++
++export const AgentConfigOptionSourceSchema = z.enum(['static', 'machine', 'directory', 'session', 'model'])
++export type AgentConfigOptionSource = z.infer<typeof AgentConfigOptionSourceSchema>
++
++export const AgentConfigAvailabilitySchema = z.enum(['create', 'session', 'both', 'managed'])
++export type AgentConfigAvailability = z.infer<typeof AgentConfigAvailabilitySchema>
++
++export const AgentConfigFieldDescriptorSchema = z.object({
++    id: AgentConfigFieldIdSchema,
++    section: AgentConfigSectionSchema,
++    kind: AgentConfigFieldKindSchema,
++    optionSource: AgentConfigOptionSourceSchema.optional(),
++    availability: AgentConfigAvailabilitySchema,
++    unavailableReason: z.string().optional()
++})
++export type AgentConfigFieldDescriptor = z.infer<typeof AgentConfigFieldDescriptorSchema>
++
++export const AgentConfigDescriptorSchema = z.object({
++    flavor: z.string().min(1),
++    fields: z.array(AgentConfigFieldDescriptorSchema)
++})
++export type AgentConfigDescriptor = z.infer<typeof AgentConfigDescriptorSchema>
++
++const MODEL: AgentConfigFieldDescriptor = {
++    id: 'model', section: 'model', kind: 'select', optionSource: 'static', availability: 'both'
++}
++const PERMISSION: AgentConfigFieldDescriptor = {
++    id: 'permission', section: 'permission', kind: 'select', optionSource: 'static', availability: 'both'
++}
++const MANAGED_PERMISSION: AgentConfigFieldDescriptor = {
++    id: 'permission',
++    section: 'permission',
++    kind: 'status',
++    availability: 'managed',
++    unavailableReason: 'Managed by agent'
++}
++
++function fields(...fields: AgentConfigFieldDescriptor[]): AgentConfigFieldDescriptor[] {
++    return fields
++}
++
++const BUILTIN_DESCRIPTORS: Record<AgentFlavor, AgentConfigFieldDescriptor[]> = {
++    agy: fields({ ...MODEL, optionSource: 'machine' }, PERMISSION),
++    claude: fields(MODEL, { id: 'effort', section: 'effort', kind: 'select', optionSource: 'static', availability: 'both' }, PERMISSION),
++    codex: fields(
++        { ...MODEL, optionSource: 'machine' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'both' },
++        PERMISSION,
++        { id: 'serviceTier', section: 'settings', kind: 'select', optionSource: 'model', availability: 'both' },
++        { id: 'collaborationMode', section: 'settings', kind: 'select', optionSource: 'static', availability: 'both' }
++    ),
++    copilot: fields({ ...MODEL, optionSource: 'directory' }, PERMISSION),
++    cursor: fields({ id: 'model', section: 'model', kind: 'dependent-select', optionSource: 'machine', availability: 'both' }, PERMISSION),
++    gemini: fields(MODEL, PERMISSION),
++    grok: fields(
++        { ...MODEL, optionSource: 'directory' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'both' },
++        PERMISSION
++    ),
++    kimi: fields(MODEL, PERMISSION),
++    opencode: fields(
++        { ...MODEL, optionSource: 'directory' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'both' },
++        PERMISSION
++    ),
++    pi: fields(
++        { id: 'model', section: 'model', kind: 'grouped-select', optionSource: 'session', availability: 'session' },
++        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'session' },
++        MANAGED_PERMISSION
++    )
++}
++
++export function getAgentConfigDescriptor(flavor: AgentFlavor): AgentConfigDescriptor {
++    return { flavor, fields: BUILTIN_DESCRIPTORS[flavor] }
++}
++
++export function getBuiltinAgentConfigDescriptors(): AgentConfigDescriptor[] {
++    return AGENT_FLAVORS.map(getAgentConfigDescriptor)
++}
++
++export function resolveHapiYoloPermissionMode(flavor: AgentFlavor): PermissionMode | null {
++    switch (flavor) {
++        case 'claude':
++        case 'grok':
++            return 'bypassPermissions'
++        case 'agy':
++            return 'always-proceed'
++        case 'codex':
++        case 'copilot':
++        case 'cursor':
++        case 'gemini':
++        case 'kimi':
++        case 'opencode':
++            return 'yolo'
++        case 'pi':
++            return null
++    }
++}
+diff --git a/shared/src/index.ts b/shared/src/index.ts
+index 7d182039e..62b9f71ff 100644
+--- a/shared/src/index.ts
++++ b/shared/src/index.ts
+@@ -16,6 +16,7 @@ export * from './sessionCitation'
+ export * from './sessionExport'
+ export * from './piThinkingLevel'
+ export * from './runnerCapabilities'
++export * from './agentConfig'
+ export * from './copilotModes'
+ export * from './slashCommands'
+ export * from './utils'
+diff --git a/shared/src/runnerCapabilities.ts b/shared/src/runnerCapabilities.ts
+index 4b2c59b8b..87cd86897 100644
+--- a/shared/src/runnerCapabilities.ts
++++ b/shared/src/runnerCapabilities.ts
+@@ -10,8 +10,11 @@
+  * socket-side advertisement, a runner upgraded in place would never get its
+  * new capabilities observed by the hub.
+  */
++import { getBuiltinAgentConfigDescriptors } from './agentConfig'
++
+ export const RUNNER_CAPABILITIES = {
+-    piExistingSessionResume: true
+-} as const
++    piExistingSessionResume: true as const,
++    agentConfigs: getBuiltinAgentConfigDescriptors()
++}
+ 
+ export type RunnerCapabilities = typeof RUNNER_CAPABILITIES
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index dc9288ae3..6332a09a4 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -1,6 +1,7 @@
+ import { z } from 'zod'
+ import { COPILOT_AGENT_MODES, type CopilotAgentMode } from './copilotModes'
+ import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
++import { AgentConfigDescriptorSchema } from './agentConfig'
+ 
+ export const PermissionModeSchema = z.enum(PERMISSION_MODES)
+ export const CodexCollaborationModeSchema = z.enum(CODEX_COLLABORATION_MODES)
+@@ -442,7 +443,10 @@ export const RunnerStateSchema = z.object({
+     pid: z.number().optional(),
+     httpPort: z.number().optional(),
+     startedAt: z.number().optional(),
+-    capabilities: z.object({ piExistingSessionResume: z.literal(true).optional() }).optional(),
++    capabilities: z.object({
++        piExistingSessionResume: z.literal(true).optional(),
++        agentConfigs: z.array(AgentConfigDescriptorSchema).optional()
++    }).optional(),
+     shutdownRequestedAt: z.number().optional(),
+     shutdownSource: z.union([z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']), z.string()]).optional(),
+     lastSpawnError: z.object({
+diff --git a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx b/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx
+deleted file mode 100644
+index 7f9efebb9..000000000
+--- a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.test.tsx
++++ /dev/null
+@@ -1,47 +0,0 @@
+-import { fireEvent, render, screen } from '@testing-library/react'
+-import { describe, expect, it, vi } from 'vitest'
+-import { I18nProvider } from '@/lib/i18n-context'
+-import { CodexFamilyPermissionModeSelector } from './CodexFamilyPermissionModeSelector'
+-
+-function renderSelector(props: Parameters<typeof CodexFamilyPermissionModeSelector>[0]) {
+-    return render(
+-        <I18nProvider>
+-            <CodexFamilyPermissionModeSelector {...props} />
+-        </I18nProvider>
+-    )
+-}
+-
+-describe('CodexFamilyPermissionModeSelector', () => {
+-    it('renders permission modes for copilot', () => {
+-        renderSelector({
+-            agent: 'copilot',
+-            value: 'default',
+-            isDisabled: false,
+-            onChange: vi.fn(),
+-        })
+-        expect(screen.getByRole('combobox')).toBeTruthy()
+-        expect(screen.getByRole('option', { name: 'Yolo' })).toBeTruthy()
+-    })
+-
+-    it('hides for claude', () => {
+-        const { container } = renderSelector({
+-            agent: 'claude',
+-            value: 'default',
+-            isDisabled: false,
+-            onChange: vi.fn(),
+-        })
+-        expect(container.firstChild).toBeNull()
+-    })
+-
+-    it('calls onChange when a mode is selected', () => {
+-        const onChange = vi.fn()
+-        renderSelector({
+-            agent: 'copilot',
+-            value: 'default',
+-            isDisabled: false,
+-            onChange,
+-        })
+-        fireEvent.change(screen.getByRole('combobox'), { target: { value: 'yolo' } })
+-        expect(onChange).toHaveBeenCalledWith('yolo')
+-    })
+-})
+diff --git a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx b/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx
+deleted file mode 100644
+index 37543e5d6..000000000
+--- a/web/src/components/NewSession/CodexFamilyPermissionModeSelector.tsx
++++ /dev/null
+@@ -1,39 +0,0 @@
+-import { getPermissionModeOptionsForFlavor, type PermissionMode } from '@hapi/protocol'
+-import { useTranslation } from '@/lib/use-translation'
+-import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
+-import type { AgentType } from './types'
+-
+-export function CodexFamilyPermissionModeSelector(props: {
+-    agent: AgentType
+-    value: PermissionMode
+-    isDisabled: boolean
+-    onChange: (value: PermissionMode) => void
+-}) {
+-    const { t } = useTranslation()
+-
+-    if (!usesCodexFamilyPermissionModes(props.agent)) {
+-        return null
+-    }
+-
+-    const options = getPermissionModeOptionsForFlavor(props.agent)
+-
+-    return (
+-        <div className="flex flex-col gap-1.5 px-3 py-3">
+-            <label className="text-xs font-medium text-[var(--app-hint)]">
+-                {t('misc.permissionMode')}
+-            </label>
+-            <select
+-                value={props.value}
+-                onChange={(event) => props.onChange(event.target.value as PermissionMode)}
+-                disabled={props.isDisabled}
+-                className="w-full rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] px-3 py-2 text-sm text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
+-            >
+-                {options.map((option) => (
+-                    <option key={option.mode} value={option.mode}>
+-                        {option.label}
+-                    </option>
+-                ))}
+-            </select>
+-        </div>
+-    )
+-}
+diff --git a/web/src/components/NewSession/GrokPermissionModeSelector.test.tsx b/web/src/components/NewSession/GrokPermissionModeSelector.test.tsx
+deleted file mode 100644
+index 519b744ad..000000000
+--- a/web/src/components/NewSession/GrokPermissionModeSelector.test.tsx
++++ /dev/null
+@@ -1,35 +0,0 @@
+-import { render, screen } from '@testing-library/react'
+-import { describe, expect, it, vi } from 'vitest'
+-import { I18nProvider } from '@/lib/i18n-context'
+-import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
+-
+-describe('GrokPermissionModeSelector', () => {
+-    it('offers Auto when Grok advertises the account feature', () => {
+-        render(<I18nProvider>
+-            <GrokPermissionModeSelector
+-                agent="grok"
+-                value="default"
+-                autoPermissionModeSupported={true}
+-                isDisabled={false}
+-                onChange={vi.fn()}
+-            />
+-        </I18nProvider>)
+-
+-        expect(screen.getByRole('option', { name: 'Auto' })).not.toBeDisabled()
+-    })
+-
+-    it('shows Auto as unavailable when Grok does not advertise it', () => {
+-        render(<I18nProvider>
+-            <GrokPermissionModeSelector
+-                agent="grok"
+-                value="default"
+-                autoPermissionModeSupported={false}
+-                isDisabled={false}
+-                onChange={vi.fn()}
+-            />
+-        </I18nProvider>)
+-
+-        expect(screen.getByRole('option', { name: 'Auto (unavailable)' })).toBeDisabled()
+-        expect(screen.getByText(/did not enable Auto permissions/i)).toBeInTheDocument()
+-    })
+-})
+diff --git a/web/src/components/NewSession/GrokPermissionModeSelector.tsx b/web/src/components/NewSession/GrokPermissionModeSelector.tsx
+deleted file mode 100644
+index 480434db1..000000000
+--- a/web/src/components/NewSession/GrokPermissionModeSelector.tsx
++++ /dev/null
+@@ -1,48 +0,0 @@
+-import {
+-    getPermissionModeOptionsForFlavor,
+-    type GrokPermissionMode
+-} from '@hapi/protocol'
+-import { useTranslation } from '@/lib/use-translation'
+-import type { AgentType } from './types'
+-import { SelectControl } from '@/components/ui/select-control'
+-
+-export function GrokPermissionModeSelector(props: {
+-    agent: AgentType
+-    value: GrokPermissionMode
+-    autoPermissionModeSupported: boolean | null
+-    isDisabled: boolean
+-    onChange: (value: GrokPermissionMode) => void
+-}) {
+-    const { t } = useTranslation()
+-
+-    if (props.agent !== 'grok') return null
+-
+-    return (
+-        <div className="flex flex-col gap-1.5 px-3 py-3">
+-            <label className="text-xs font-medium text-[var(--app-hint)]">
+-                {t('misc.permissionMode')}
+-            </label>
+-            <SelectControl
+-                value={props.value}
+-                onChange={(event) => props.onChange(event.target.value as GrokPermissionMode)}
+-                disabled={props.isDisabled}
+-                className="py-2 pl-3 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
+-            >
+-                {getPermissionModeOptionsForFlavor('grok').map((option) => {
+-                    const unavailable = option.mode === 'auto'
+-                        && props.autoPermissionModeSupported === false
+-                    return (
+-                        <option key={option.mode} value={option.mode} disabled={unavailable}>
+-                            {option.label}{unavailable ? ` (${t('newSession.grokAutoUnavailable')})` : ''}
+-                        </option>
+-                    )
+-                })}
+-            </SelectControl>
+-            {props.autoPermissionModeSupported === false ? (
+-                <span className="text-xs text-[var(--app-hint)]">
+-                    {t('newSession.grokAutoUnavailableDesc')}
+-                </span>
+-            ) : null}
+-        </div>
+-    )
+-}
+diff --git a/web/src/components/NewSession/OpencodeModelSelector.test.tsx b/web/src/components/NewSession/OpencodeModelSelector.test.tsx
+new file mode 100644
+index 000000000..3af1c8901
+--- /dev/null
++++ b/web/src/components/NewSession/OpencodeModelSelector.test.tsx
+@@ -0,0 +1,25 @@
++import { fireEvent, render, screen } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { OpencodeModelSelector } from './OpencodeModelSelector'
++
++describe('OpencodeModelSelector', () => {
++    it('uses the shared combobox interaction for discovered models', () => {
++        const onModelChange = vi.fn()
++        render(<I18nProvider>
++            <OpencodeModelSelector
++                cwd="/project"
++                machineId="machine-1"
++                isLoading={false}
++                error={null}
++                availableModels={[{ modelId: 'openai/gpt-5.4', name: 'GPT-5.4' }]}
++                currentModelId="openai/gpt-5.4"
++                selectedModel={null}
++                onModelChange={onModelChange}
++            />
++        </I18nProvider>)
++
++        fireEvent.change(screen.getByRole('combobox'), { target: { value: 'openai/gpt-5.4' } })
++        expect(onModelChange).toHaveBeenCalledWith('openai/gpt-5.4')
++    })
++})
+diff --git a/web/src/components/NewSession/OpencodeModelSelector.tsx b/web/src/components/NewSession/OpencodeModelSelector.tsx
+index 0b1b1dbdf..60dc6927a 100644
+--- a/web/src/components/NewSession/OpencodeModelSelector.tsx
++++ b/web/src/components/NewSession/OpencodeModelSelector.tsx
+@@ -1,5 +1,6 @@
+ import { useTranslation } from '@/lib/use-translation'
+ import type { OpencodeModelSummary } from '@/types/api'
++import { SelectControl } from '@/components/ui/select-control'
+ 
+ export type OpencodeModelSelectorProps = {
+     cwd: string
+@@ -62,40 +63,19 @@ export function OpencodeModelSelector(props: OpencodeModelSelectorProps) {
+                     {t('newSession.opencodeModel.empty')}
+                 </div>
+             ) : (
+-                <div className="flex flex-col" data-testid="opencode-model-list">
+-                    {props.availableModels.map((model) => {
+-                        const isSelected = props.selectedModel === model.modelId
+-                        const isDefault = props.currentModelId === model.modelId
+-                        return (
+-                            <button
+-                                key={model.modelId}
+-                                type="button"
+-                                onClick={() => props.onModelChange(model.modelId)}
+-                                className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm transition-colors hover:bg-[var(--app-secondary-bg)]"
+-                            >
+-                                <div
+-                                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
+-                                        isSelected
+-                                            ? 'border-[var(--app-link)]'
+-                                            : 'border-[var(--app-hint)]'
+-                                    }`}
+-                                >
+-                                    {isSelected && (
+-                                        <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+-                                    )}
+-                                </div>
+-                                <span className={`flex-1 truncate ${isSelected ? 'text-[var(--app-link)]' : ''}`}>
+-                                    {model.name ?? model.modelId}
+-                                </span>
+-                                {isDefault ? (
+-                                    <span className="rounded border border-[var(--app-divider)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--app-hint)]">
+-                                        {t('newSession.opencodeModel.default')}
+-                                    </span>
+-                                ) : null}
+-                            </button>
+-                        )
+-                    })}
+-                </div>
++                <SelectControl
++                    data-testid="opencode-model-list"
++                    value={props.selectedModel ?? ''}
++                    onChange={(event) => props.onModelChange(event.target.value || null)}
++                    className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)]"
++                >
++                    <option value="">{t('newSession.model.default')}</option>
++                    {props.availableModels.map((model) => (
++                        <option key={model.modelId} value={model.modelId}>
++                            {model.name ?? model.modelId}{props.currentModelId === model.modelId ? ` (${t('newSession.opencodeModel.default')})` : ''}
++                        </option>
++                    ))}
++                </SelectControl>
+             )}
+         </div>
+     )
+diff --git a/web/src/components/NewSession/PermissionField.test.tsx b/web/src/components/NewSession/PermissionField.test.tsx
+new file mode 100644
+index 000000000..555f54281
+--- /dev/null
++++ b/web/src/components/NewSession/PermissionField.test.tsx
+@@ -0,0 +1,62 @@
++import { fireEvent, render, screen } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { PermissionField } from './PermissionField'
++
++function renderField(props: Partial<Parameters<typeof PermissionField>[0]> = {}) {
++    return render(
++        <I18nProvider>
++            <PermissionField
++                agent="claude"
++                nativeValue="default"
++                yoloMode={false}
++                isDisabled={false}
++                onNativeChange={vi.fn()}
++                onYoloToggle={vi.fn()}
++                {...props}
++            />
++        </I18nProvider>
++    )
++}
++
++describe('PermissionField', () => {
++    it('renders native permission modes for codex-family agents', () => {
++        const onChange = vi.fn()
++        renderField({ agent: 'copilot', nativeValue: 'default', onNativeChange: onChange })
++        expect(screen.getByRole('combobox')).toBeTruthy()
++        expect(screen.getByRole('option', { name: 'Yolo' })).toBeTruthy()
++        fireEvent.change(screen.getByRole('combobox'), { target: { value: 'yolo' } })
++        expect(onChange).toHaveBeenCalledWith('yolo')
++    })
++
++    it('offers Auto when Grok advertises the account feature', () => {
++        renderField({ agent: 'grok', autoPermissionModeSupported: true })
++        expect(screen.getByRole('option', { name: 'Auto' })).not.toBeDisabled()
++    })
++
++    it('shows Auto as unavailable when Grok does not advertise it', () => {
++        renderField({ agent: 'grok', autoPermissionModeSupported: false })
++        expect(screen.getByRole('option', { name: 'Auto (unavailable)' })).toBeDisabled()
++        expect(screen.getByText(/did not enable Auto permissions/i)).toBeInTheDocument()
++    })
++
++    it('renders the YOLO toggle with its native mapping for toggle flavors', () => {
++        renderField({ agent: 'claude' })
++        expect(screen.getByRole('checkbox')).toBeTruthy()
++        expect(screen.getByText(/applies native Yolo mode/i)).toBeInTheDocument()
++    })
++
++    it('maps agy YOLO to its native always-proceed mode', () => {
++        renderField({ agent: 'agy' })
++        expect(screen.getByText(/applies native Always Proceed mode/i)).toBeInTheDocument()
++    })
++
++    it('reports Pi permission as managed instead of offering a silent YOLO toggle', () => {
++        const { container } = renderField({ agent: 'pi' })
++        expect(screen.getByTestId('permission-managed')).toBeTruthy()
++        expect(screen.getByText(/managed by agent/i)).toBeInTheDocument()
++        expect(screen.queryByRole('checkbox')).toBeNull()
++        expect(screen.queryByRole('combobox')).toBeNull()
++        expect(container.firstChild).not.toBeNull()
++    })
++})
+diff --git a/web/src/components/NewSession/PermissionField.tsx b/web/src/components/NewSession/PermissionField.tsx
+new file mode 100644
+index 000000000..4d8c67635
+--- /dev/null
++++ b/web/src/components/NewSession/PermissionField.tsx
+@@ -0,0 +1,105 @@
++import {
++    getAgentConfigDescriptor,
++    getPermissionModeLabel,
++    getPermissionModeOptionsForFlavor,
++    resolveHapiYoloPermissionMode,
++    type PermissionMode
++} from '@hapi/protocol'
++import { useTranslation } from '@/lib/use-translation'
++import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
++import type { AgentType } from './types'
++import { SelectControl } from '@/components/ui/select-control'
++import { YoloToggle } from './YoloToggle'
++
++export type PermissionFieldProps = {
++    agent: AgentType
++    /** Native permission mode for flavors rendered as a native-mode select. */
++    nativeValue: PermissionMode
++    yoloMode: boolean
++    isDisabled: boolean
++    autoPermissionModeSupported?: boolean | null
++    onNativeChange: (value: PermissionMode) => void
++    onYoloToggle: (value: boolean) => void
++}
++
++/**
++ * Renders the Permission section of the create-session form from the agent's
++ * configuration descriptor (see shared/src/agentConfig.ts).
++ *
++ * - `status` fields (Pi) surface a managed note instead of a control so the
++ *   HAPI YOLO policy is never silently ignored for agents that cannot apply it.
++ * - `select` fields render the agent's native permission modes.
++ * - Flavors whose create surface still carries the persistent HAPI YOLO
++ *   preference render the YOLO toggle with the native mode it maps to.
++ */
++export function PermissionField(props: PermissionFieldProps) {
++    const { t } = useTranslation()
++    const descriptor = getAgentConfigDescriptor(props.agent)
++    const field = descriptor.fields.find((candidate) => candidate.id === 'permission')
++    if (!field) {
++        return null
++    }
++
++    if (field.kind === 'status') {
++        return (
++            <div className="flex flex-col gap-1.5 px-3 py-3" data-testid="permission-managed">
++                <label className="text-xs font-medium text-[var(--app-hint)]">
++                    {t('misc.permissionMode')}
++                </label>
++                <div className="flex flex-col gap-0.5">
++                    <span className="text-sm text-[var(--app-fg)]">
++                        {t('newSession.permission.managedTitle')}
++                    </span>
++                    <span className="text-xs text-[var(--app-hint)]">
++                        {t('newSession.permission.managedDesc')}
++                    </span>
++                </div>
++            </div>
++        )
++    }
++
++    if (field.kind === 'select' && (props.agent === 'grok' || usesCodexFamilyPermissionModes(props.agent))) {
++        const options = getPermissionModeOptionsForFlavor(props.agent)
++        return (
++            <div className="flex flex-col gap-1.5 px-3 py-3">
++                <label className="text-xs font-medium text-[var(--app-hint)]">
++                    {t('misc.permissionMode')}
++                </label>
++                <SelectControl
++                    value={props.nativeValue}
++                    onChange={(event) => props.onNativeChange(event.target.value as PermissionMode)}
++                    disabled={props.isDisabled}
++                    className="py-2 pl-3 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
++                >
++                    {options.map((option) => {
++                        const unavailable = option.mode === 'auto'
++                            && props.autoPermissionModeSupported === false
++                        return (
++                            <option key={option.mode} value={option.mode} disabled={unavailable}>
++                                {option.label}{unavailable ? ` (${t('newSession.grokAutoUnavailable')})` : ''}
++                            </option>
++                        )
++                    })}
++                </SelectControl>
++                {props.autoPermissionModeSupported === false ? (
++                    <span className="text-xs text-[var(--app-hint)]">
++                        {t('newSession.grokAutoUnavailableDesc')}
++                    </span>
++                ) : null}
++            </div>
++        )
++    }
++
++    // Remaining flavors still carry the persistent HAPI YOLO preference at
++    // create time. The descriptor advertises the native modes their session
++    // surface supports; surface the mapping so the preference is explicit.
++    const nativeHint = resolveHapiYoloPermissionMode(props.agent)
++    return (
++        <YoloToggle
++            yoloMode={props.yoloMode}
++            isDisabled={props.isDisabled}
++            onToggle={props.onYoloToggle}
++            nativeHint={nativeHint ? getPermissionModeLabel(nativeHint) : undefined}
++        />
++    )
++}
+diff --git a/web/src/components/NewSession/YoloToggle.tsx b/web/src/components/NewSession/YoloToggle.tsx
+index f0d0d25f5..478a51216 100644
+--- a/web/src/components/NewSession/YoloToggle.tsx
++++ b/web/src/components/NewSession/YoloToggle.tsx
+@@ -4,6 +4,8 @@ export function YoloToggle(props: {
+     yoloMode: boolean
+     isDisabled: boolean
+     onToggle: (value: boolean) => void
++    /** Native permission mode this preference maps to for the current agent. */
++    nativeHint?: string
+ }) {
+     const { t } = useTranslation()
+ 
+@@ -20,6 +22,11 @@ export function YoloToggle(props: {
+                     <span className="text-xs text-[var(--app-hint)]">
+                         {t('newSession.yolo.desc')}
+                     </span>
++                    {props.nativeHint ? (
++                        <span className="text-xs text-[var(--app-hint)]">
++                            {t('newSession.yolo.mapsTo', { mode: props.nativeHint })}
++                        </span>
++                    ) : null}
+                 </div>
+                 <label className="relative inline-flex h-5 w-9 items-center">
+                     <input
+diff --git a/web/src/components/NewSession/index.test.tsx b/web/src/components/NewSession/index.test.tsx
+index c8ab6ed27..84951a0f5 100644
+--- a/web/src/components/NewSession/index.test.tsx
++++ b/web/src/components/NewSession/index.test.tsx
+@@ -160,10 +160,8 @@ vi.mock('./MachineSelector', () => ({
+     )
+ }))
+ vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
+-vi.mock('./GrokPermissionModeSelector', () => ({ GrokPermissionModeSelector: () => null }))
+-vi.mock('./CodexFamilyPermissionModeSelector', () => ({ CodexFamilyPermissionModeSelector: () => null }))
++vi.mock('./PermissionField', () => ({ PermissionField: () => null }))
+ vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
+-vi.mock('./YoloToggle', () => ({ YoloToggle: () => null }))
+ vi.mock('./OpencodeModelSelector', () => ({ OpencodeModelSelector: () => null }))
+ vi.mock('./AgyModelSelector', () => ({
+     AgyModelSelector: (props: { selectedModel: string | null; onModelChange: (model: string | null) => void }) => (
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index f73b17e26..89aa430da 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -45,8 +45,6 @@ import { PiImportActions } from './PiImportActions'
+ import { clearBatchImportedCodexSelection, resolveCodexImportRedirectSessionId } from './codexImportMerge'
+ import { AgyModelSelector } from './AgyModelSelector'
+ import { DirectorySection } from './DirectorySection'
+-import { GrokPermissionModeSelector } from './GrokPermissionModeSelector'
+-import { CodexFamilyPermissionModeSelector } from './CodexFamilyPermissionModeSelector'
+ import { CopilotAgentModeSelector } from './CopilotAgentModeSelector'
+ import { FastModeSelector } from './FastModeSelector'
+ import { MachineSelector } from './MachineSelector'
+@@ -66,7 +64,7 @@ import {
+     savePreferredYoloMode,
+ } from './preferences'
+ import { SessionTypeSelector } from './SessionTypeSelector'
+-import { YoloToggle } from './YoloToggle'
++import { PermissionField } from './PermissionField'
+ import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
+ import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
+ import { PiSessionImportDialog } from '@/components/PiSessionImportDialog'
+@@ -1668,18 +1666,20 @@ export function NewSession(props: {
+                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
+                 onChange={setModelReasoningEffort}
+             />
+-            <GrokPermissionModeSelector
++            <PermissionField
+                 agent={agent}
+-                value={grokPermissionMode}
++                nativeValue={agent === 'grok' ? grokPermissionMode : codexFamilyPermissionMode}
++                yoloMode={yoloMode}
+                 autoPermissionModeSupported={grokModelsState.autoPermissionModeSupported}
+                 isDisabled={isFormDisabled}
+-                onChange={setGrokPermissionMode}
+-            />
+-            <CodexFamilyPermissionModeSelector
+-                agent={agent}
+-                value={codexFamilyPermissionMode}
+-                isDisabled={isFormDisabled}
+-                onChange={setCodexFamilyPermissionMode}
++                onNativeChange={(mode) => {
++                    if (agent === 'grok') {
++                        setGrokPermissionMode(mode as GrokPermissionMode)
++                    } else {
++                        setCodexFamilyPermissionMode(mode)
++                    }
++                }}
++                onYoloToggle={setYoloMode}
+             />
+             <CollaborationModeSelector
+                 agent={agent}
+@@ -1699,13 +1699,6 @@ export function NewSession(props: {
+                 isDisabled={isFormDisabled}
+                 onChange={setServiceTier}
+             />
+-            {agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) ? (
+-                <YoloToggle
+-                    yoloMode={yoloMode}
+-                    isDisabled={isFormDisabled}
+-                    onToggle={setYoloMode}
+-                />
+-            ) : null}
+ 
+             {(error ?? spawnError) ? (
+                 <div className="px-3 py-2 text-sm text-red-600">
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index bd22c1df3..a86ea1ebd 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -331,6 +331,8 @@ export default {
+   'newSession.opencodeModel.retry': 'Retry',
+   'newSession.opencodeModel.empty': 'No OpenCode models discovered for this directory',
+   'newSession.opencodeModel.default': 'Default',
++  'newSession.permission.managedTitle': 'Managed by agent',
++  'newSession.permission.managedDesc': 'This agent manages its own permissions. YOLO mode is not available.',
+   'newSession.reasoningEffort': 'Reasoning effort',
+   'newSession.collaborationMode': 'Collaboration mode',
+   'newSession.copilotAgentMode': 'Agent mode',
+@@ -338,6 +340,7 @@ export default {
+   'newSession.yolo': 'YOLO mode',
+   'newSession.yolo.title': 'Bypass approvals and sandbox',
+   'newSession.yolo.desc': 'Uses dangerous agent flags when spawning.',
++  'newSession.yolo.mapsTo': 'Applies native {mode} mode.',
+   'newSession.grokAutoUnavailable': 'unavailable',
+   'newSession.grokAutoUnavailableDesc': 'Grok did not enable Auto permissions for this account or CLI build.',
+   'newSession.create': 'Create',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 395e0ec72..25192db51 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -330,6 +330,8 @@ export default {
+   'newSession.opencodeModel.retry': '重试',
+   'newSession.opencodeModel.empty': '未在此目录发现 OpenCode 模型',
+   'newSession.opencodeModel.default': '默认',
++  'newSession.permission.managedTitle': '由代理管理',
++  'newSession.permission.managedDesc': '此代理自行管理权限，YOLO 模式不适用。',
+   'newSession.reasoningEffort': '推理强度',
+   'newSession.collaborationMode': '协作模式',
+   'newSession.copilotAgentMode': '代理模式',
+@@ -337,6 +339,7 @@ export default {
+   'newSession.yolo': 'YOLO 模式',
+   'newSession.yolo.title': '跳过审批和沙箱',
+   'newSession.yolo.desc': '启动时使用危险的代理标志。',
++  'newSession.yolo.mapsTo': '将应用原生的 {mode} 模式。',
+   'newSession.grokAutoUnavailable': '不可用',
+   'newSession.grokAutoUnavailableDesc': 'Grok 尚未为此账号或 CLI 版本启用自动权限模式。',
+   'newSession.create': '创建',
