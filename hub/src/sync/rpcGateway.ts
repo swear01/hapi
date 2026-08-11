@@ -499,6 +499,12 @@ export class RpcGateway {
         ) as RpcListCopilotModelsResponse
     }
 
+    /** Generic Pi RPC call — routes all Pi-specific session RPCs through
+     *  a single entry point instead of per-method wrappers. */
+    async callPiRpc<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+        return await this.sessionRpc(sessionId, method, params ?? {}, timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS) as T
+    }
+
     async steerQueuedMessage(
         sessionId: string,
         localId: string
