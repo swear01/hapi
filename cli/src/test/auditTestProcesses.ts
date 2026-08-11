@@ -14,7 +14,6 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { killProcessTreeByPid } from '../utils/process'
 
 export interface TestOwnedProcess {
     pid: number
@@ -100,25 +99,28 @@ export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
 }
 
 /**
- * Force-reaps every process carrying `marker` (whole trees), waiting a
- * bounded window for them to disappear, and returns whatever still remains.
+ * Force-reaps every process carrying `marker`, waiting a bounded window for
+ * them to disappear, and returns whatever still remains.
  *
- * The kill loop re-runs on every re-scan: a process that survived its first
- * SIGKILL (e.g. mid-exec, D-state) or that spawned after the previous scan
- * (a grandchild racing the kill) must not be given a free pass.
+ * Every process in a test-owned tree carries the marker (env is inherited),
+ * so there is no need to tree-walk: each scan finds the whole marked set and
+ * SIGKILLs it directly. Kills are fire-and-forget — no per-PID wait — so the
+ * 10s deadline strictly bounds this function even with many stuck processes.
+ * The loop re-runs on every re-scan so a process that survived its first
+ * SIGKILL (e.g. mid-exec, D-state) or spawned after the previous scan is
+ * never given a free pass.
  */
 export async function reapTestOwnedProcesses(marker: string): Promise<TestOwnedProcess[]> {
     const deadline = Date.now() + 10_000
     let found = findTestOwnedProcesses(marker)
     while (found.length > 0 && Date.now() < deadline) {
-        for (const process of found) {
+        for (const { pid } of found) {
             try {
-                await killProcessTreeByPid(process.pid, true)
+                process.kill(pid, 'SIGKILL')
             } catch {
                 // Already dead or racing exit; re-scan below decides.
             }
         }
-        if (Date.now() >= deadline) break
         await new Promise((resolve) => setTimeout(resolve, 250))
         found = findTestOwnedProcesses(marker)
     }

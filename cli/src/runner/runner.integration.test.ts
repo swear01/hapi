@@ -156,19 +156,25 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     // Graceful stop (the runner removes its own state file), bounded so a
     // hung runner cannot starve the sweep below.
     await stopRunnerBounded()
-    // Regression check: the detached child registered by the deliberately
-    // failing test must already be dead from the registry cleanup alone.
-    if (regressionChildPid !== undefined) {
-      expect(
-        isProcessAlive(regressionChildPid),
-        'registered detached child survived registry cleanup'
-      ).toBe(false);
-      regressionChildPid = undefined;
-    }
+    // Snapshot the regression child BEFORE the sweep: if registry cleanup
+    // failed to kill it, the sweep would hide that fact.
+    const registryLeak =
+      regressionChildPid !== undefined && isProcessAlive(regressionChildPid);
+    regressionChildPid = undefined;
     // Marker sweep: sessions/agents can reparent to PID 1 before the registry
     // tree-kill runs, so reap anything still carrying the run's test marker
-    // (same audit globalSetup teardown performs at the end of the run).
-    await reapTestOwnedProcesses(testOwnedMarker())
+    // (same audit globalSetup teardown performs at the end of the run). This
+    // runs unconditionally — even if the assertion below fails — and its
+    // survivors are verified, never ignored.
+    const leftovers = await reapTestOwnedProcesses(testOwnedMarker())
+    expect(
+      registryLeak,
+      'registered detached child survived registry cleanup'
+    ).toBe(false);
+    expect(
+      leftovers,
+      'test-owned processes survived the marker sweep'
+    ).toEqual([]);
   });
 
   afterAll(async () => {
