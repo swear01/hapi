@@ -10,15 +10,17 @@ import {
 } from '@/components/settings/storageUsageSlices'
 
 const SLICE_FILL: Record<StorageUsageSliceKey, string> = {
-    database: 'var(--app-link)',
-    wal: 'color-mix(in srgb, var(--app-link) 55%, var(--app-hint))',
-    shm: 'var(--app-hint)',
+    used: 'var(--app-link)',
+    freelist: 'color-mix(in srgb, var(--app-link) 55%, var(--app-hint))',
+    wal: 'var(--app-hint)',
+    shm: 'color-mix(in srgb, var(--app-hint) 60%, var(--app-bg))',
 }
 
 type Labels = {
     title: string
     empty: string
-    database: string
+    used: string
+    freelist: string
     wal: string
     shm: string
     total: string
