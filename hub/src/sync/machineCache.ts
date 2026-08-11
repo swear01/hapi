@@ -3,6 +3,7 @@ import { MachineHealthSchema, MachineMetadataSchema, RunnerStateSchema } from '@
 import type { Store } from '../store'
 import type { RpcRegistry } from '../socket/rpcRegistry'
 import { clampAliveTime } from './aliveTime'
+import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { EventPublisher } from './eventPublisher'
 
 type MachineAlivePayload = {
@@ -69,7 +70,8 @@ export class MachineCache {
     }
 
     getMachine(machineId: string): Machine | undefined {
-        return this.machines.get(machineId)
+        const machine = this.machines.get(machineId)
+        return machine ? this.withLiveCapabilities(machine) : undefined
     }
 
     getMachineByNamespace(machineId: string, namespace: string): Machine | undefined {
@@ -196,7 +198,36 @@ export class MachineCache {
 
         this.machines.set(machineId, machine)
         this.publisher.emit({ type: 'machine-updated', machineId, data: machine })
-        return machine
+        return this.withLiveCapabilities(machine)
+    }
+
+
+    /** Overlay live RPC registrations onto advertised metadata capabilities for API/SSE consumers. */
+    private withLiveCapabilities(machine: Machine): Machine {
+        if (!machine.metadata || !this.rpcRegistry) {
+            return machine
+        }
+        const advertised = machine.metadata.capabilities ?? []
+        const live = CURRENT_MACHINE_CAPABILITIES.filter((cap) => (
+            this.rpcRegistry!.hasMethod(`${machine.id}:${cap}`)
+        ))
+        if (live.length === 0) {
+            return machine
+        }
+        const merged = Array.from(new Set([...advertised, ...live]))
+        if (
+            merged.length === advertised.length
+            && merged.every((cap) => advertised.includes(cap))
+        ) {
+            return machine
+        }
+        return {
+            ...machine,
+            metadata: {
+                ...machine.metadata,
+                capabilities: merged,
+            },
+        }
     }
 
     reloadAll(): void {

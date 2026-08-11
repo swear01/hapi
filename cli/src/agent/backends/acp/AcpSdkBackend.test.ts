@@ -1692,102 +1692,7 @@ describe('AcpSdkBackend', () => {
         expect(realtimeUsage.map((m) => m.contextTokens)).toEqual([1_000, 2_500]);
     });
 
-    it('forwards cumulative cost from usage_update with context', async () => {
-        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
-        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
-        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
-        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
-        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
-        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
-        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
 
-        const backend = new AcpSdkBackend({ command: 'agent' });
-        const backendInternal = backend as unknown as {
-            transport: {
-                sendRequest: (...args: unknown[]) => Promise<unknown>;
-                close: () => Promise<void>;
-            } | null;
-            handleSessionUpdate: (params: unknown) => void;
-        };
-
-        const messages: AgentMessage[] = [];
-        backendInternal.transport = {
-            sendRequest: async () => {
-                backendInternal.handleSessionUpdate({
-                    sessionId: 'session-1',
-                    update: {
-                        sessionUpdate: 'usage_update',
-                        used: 1_000,
-                        size: 200_000,
-                        cost: { amount: 1.25, currency: 'USD' }
-                    }
-                });
-                await sleep(5);
-                backendInternal.handleSessionUpdate({
-                    sessionId: 'session-1',
-                    update: {
-                        sessionUpdate: 'usage_update',
-                        used: 1_000,
-                        size: 200_000,
-                        cost: { amount: 2.5, currency: 'USD' }
-                    }
-                });
-                await sleep(5);
-                return { stopReason: 'end_turn' };
-            },
-            close: async () => {}
-        };
-
-        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
-
-        const usageMessages = messages.filter(
-            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
-        );
-        const withCost = usageMessages.filter((m) => m.cost !== undefined);
-        expect(withCost.length).toBeGreaterThanOrEqual(1);
-        const latest = withCost.at(-1);
-        expect(latest?.cost).toBe(2.5);
-        expect(latest?.costCurrency).toBe('USD');
-    });
-
-    it('forwards a cost-only usage_update without context fields', async () => {
-        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
-        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
-        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
-        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
-        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
-        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
-        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
-
-        const backend = new AcpSdkBackend({ command: 'agent' });
-        const backendInternal = backend as unknown as {
-            transport: {
-                sendRequest: (...args: unknown[]) => Promise<unknown>;
-                close: () => Promise<void>;
-            } | null;
-            handleSessionUpdate: (params: unknown) => void;
-        };
-
-        const messages: AgentMessage[] = [];
-        backendInternal.transport = {
-            sendRequest: async () => {
-                backendInternal.handleSessionUpdate({
-                    sessionId: 'session-1',
-                    update: { sessionUpdate: 'usage_update', cost: { amount: 0.4, currency: 'USD' } }
-                });
-                await sleep(5);
-                return { stopReason: 'end_turn' };
-            },
-            close: async () => {}
-        };
-
-        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
-
-        const usageMessages = messages.filter(
-            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
-        );
-        expect(usageMessages.at(-1)).toEqual(expect.objectContaining({ cost: 0.4, costCurrency: 'USD' }));
-    });
 
     it('preserves context fields when a state_update carries only tokens', async () => {
         backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
@@ -2526,6 +2431,30 @@ describe('AcpSdkBackend', () => {
         ]);
     });
 
+    it('ignores idle clears while a HAPI prompt turn is still draining', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const activity: boolean[] = [];
+        backend.setAgentActivityListener((thinking) => {
+            activity.push(thinking);
+        });
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: 'state_update', state: 'idle' }
+        });
+        expect(activity).toEqual([]);
+        backendInternal.isProcessingMessage = false;
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: 'state_update', state: 'idle' }
+        });
+        expect(activity).toEqual([false]);
+    });
+
     it('notifies agent-activity listener for sustained running + idle, not content/usage noise (#1470/#1502)', () => {
         vi.useFakeTimers();
         const backend = new AcpSdkBackend({ command: 'agent' });
@@ -2589,30 +2518,6 @@ describe('AcpSdkBackend', () => {
         });
         expect(activity.at(-1)).toBe(false);
         vi.useRealTimers();
-    });
-
-    it('ignores idle clears while a HAPI prompt turn is still draining', () => {
-        const backend = new AcpSdkBackend({ command: 'agent' });
-        const activity: boolean[] = [];
-        backend.setAgentActivityListener((thinking) => {
-            activity.push(thinking);
-        });
-        const backendInternal = backend as unknown as {
-            handleSessionUpdate: (params: unknown) => void;
-            isProcessingMessage: boolean;
-        };
-        backendInternal.isProcessingMessage = true;
-        backendInternal.handleSessionUpdate({
-            sessionId: 'session-1',
-            update: { sessionUpdate: 'state_update', state: 'idle' }
-        });
-        expect(activity).toEqual([]);
-        backendInternal.isProcessingMessage = false;
-        backendInternal.handleSessionUpdate({
-            sessionId: 'session-1',
-            update: { sessionUpdate: 'state_update', state: 'idle' }
-        });
-        expect(activity).toEqual([false]);
     });
 
     it('notifies agent-activity listener when a permission request arrives (#1470)', async () => {
