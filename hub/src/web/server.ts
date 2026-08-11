@@ -296,7 +296,6 @@ function createWebApp(options: {
 
     app.route('/api', createStorageRoutes(options.store))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
->>>>>>> ff0c7af94 (feat(hub+web): show logical SQLite usage breakdown and add manual VACUUM cleanup)
 
     app.route('/api', createUsageRoutes(options.store))
     app.route('/api', createUpgradeRoutes(options.getSyncEngine))

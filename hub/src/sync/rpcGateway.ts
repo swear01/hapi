@@ -515,16 +515,6 @@ export class RpcGateway {
         return await this.sessionRpc(sessionId, method, params ?? {}, timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS) as T
     }
 
-    async steerQueuedMessage(
-        sessionId: string,
-        localId: string
-    ): Promise<{ steered: boolean; error?: string }> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
-            steered: boolean
-            error?: string
-        }
-    }
-
     async forkConversation(
         sessionId: string,
         params: { messageLocalId?: string }

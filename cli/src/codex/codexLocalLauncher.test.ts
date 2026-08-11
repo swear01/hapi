@@ -86,7 +86,6 @@ function createSessionStub(
         type: 'agent-message';
         message: unknown;
     }> = [];
-    const usagePayloads: unknown[] = [];
     let userActivityCount = 0;
     let localLaunchFailure: { message: string; exitReason: 'switch' | 'exit' } | null = null;
     let sessionId: string | null = null;
