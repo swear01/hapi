@@ -24,7 +24,7 @@
  */
 
 import type { ChildProcess } from 'node:child_process'
-import { isProcessAlive, killProcessByChildProcess, killProcessTreeByPid } from '../utils/process'
+import { isProcessAlive, killProcessTreeByPid } from '../utils/process'
 import { listRunnerSessions, stopRunnerSession } from '../runner/controlClient'
 
 export interface RegisteredProcess {
@@ -33,7 +33,6 @@ export interface RegisteredProcess {
     kind: 'child' | 'runner' | 'session'
     pid?: number
     sessionId?: string
-    child?: ChildProcess
 }
 
 const registered: RegisteredProcess[] = []
@@ -41,7 +40,7 @@ const registered: RegisteredProcess[] = []
 /** Registers a ChildProcess immediately after spawn; auto-removes on exit. */
 export function trackChildProcess(child: ChildProcess, label: string): ChildProcess {
     if (!child.pid) return child
-    const entry: RegisteredProcess = { label, kind: 'child', pid: child.pid, child }
+    const entry: RegisteredProcess = { label, kind: 'child', pid: child.pid }
     registered.push(entry)
     child.once('exit', () => {
         const index = registered.indexOf(entry)
