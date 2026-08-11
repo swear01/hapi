@@ -56,6 +56,7 @@ import type {
     QueuedStateResponse,
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
+    VacuumStorageResponse,
     HubSettingsResponse,
     UpdateHubSettingsRequest,
     UsageSummaryResponse,
@@ -868,6 +869,12 @@ export class ApiClient {
 
     async getSqliteStorageUsage(): Promise<SqliteStorageUsageResponse> {
         return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
+    }
+
+    async vacuumStorage(): Promise<VacuumStorageResponse> {
+        return await this.request<VacuumStorageResponse>('/api/storage/vacuum', {
+            method: 'POST',
+        })
     }
 
     async getHubSettings(): Promise<HubSettingsResponse> {
