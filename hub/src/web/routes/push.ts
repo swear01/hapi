@@ -71,7 +71,7 @@ export function createPushRoutes(
                     url: '/settings/notifications'
                 }
             })
-            if (delivered === 0) {
+            if (delivered.sent === 0) {
                 return c.json({ error: 'No push notification was delivered' }, 503)
             }
             return c.json({ ok: true })

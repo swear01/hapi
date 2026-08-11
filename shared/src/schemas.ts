@@ -214,7 +214,10 @@ export const MetadataSchema = z.object({
         sourceFile: z.string(),
         startedAt: z.number(),
         updatedAt: z.number(),
-        error: z.string().optional()
+        error: z.string().optional(),
+        messageCount: z.number().optional(),
+        lastLocalId: z.string().nullish(),
+        prefixDigest: z.string().optional()
     }).optional(),
     // Latest Pi append-log entry observed by HAPI. Import uses it as the
     // incremental cursor so native history already streamed live is not copied twice.

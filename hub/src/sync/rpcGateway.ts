@@ -509,26 +509,6 @@ export class RpcGateway {
         }
     }
 
-    /** Generic Pi RPC call — routes all Pi-specific session RPCs through
-     *  a single entry point instead of per-method wrappers. */
-    async callPiRpc<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
-        return await this.sessionRpc(sessionId, method, params ?? {}, timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS) as T
-    }
-
-    /**
-     * Ask the CLI to deliver one queued message into the active Pi turn
-     * (Pi native steer). Only the pi flavor registers this handler.
-     */
-    async steerQueuedMessage(
-        sessionId: string,
-        localId: string
-    ): Promise<{ steered: boolean; error?: string }> {
-        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
-            steered: boolean
-            error?: string
-        }
-    }
-
     async forkConversation(
         sessionId: string,
         params: { messageLocalId?: string }
