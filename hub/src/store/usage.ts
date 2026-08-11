@@ -18,6 +18,11 @@ export type UsageEvent = {
     lastOutputTokens: number | null
     lastCacheReadTokens: number | null
     lastCacheCreationTokens: number | null
+    /** True when the event carries context-window occupancy only (no tokens). */
+    contextOnly: boolean
+    /** Cumulative session cost from the source message, when supplied. */
+    cost: number | null
+    costCurrency: string | null
 }
 
 export type UsageScanState = {
