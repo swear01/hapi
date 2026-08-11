@@ -154,8 +154,6 @@ export async function cleanupAllRegisteredProcesses(): Promise<void> {
 
     await waitForAllDead([...pidsToKill], 5_000)
 
-    await waitForAllDead([...pidsToKill], 5_000)
-
     // Prune dead entries so the registry does not grow across tests.
     for (let i = registered.length - 1; i >= 0; i--) {
         const entry = registered[i]
