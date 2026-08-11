@@ -874,7 +874,7 @@ function SessionItem(props: {
     const { t } = useTranslation()
     const { addToast } = useToast()
     const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel } = props
-    const { haptic } = usePlatform()
+    const { haptic, isTouch } = usePlatform()
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
     const [renameOpen, setRenameOpen] = useState(false)
@@ -979,8 +979,12 @@ function SessionItem(props: {
             <button
                 type="button"
                 {...longPressHandlers}
-                draggable
+                draggable={!isTouch}
                 onDragStart={(event) => {
+                    // A drag supersedes the press gesture: cancel any pending
+                    // long-press and close a menu already opened by a slow grab.
+                    longPressHandlers.onDragStart(event)
+                    setMenuOpen(false)
                     event.dataTransfer.effectAllowed = 'copy'
                     event.dataTransfer.setData(SESSION_MENTION_DRAG_MIME, JSON.stringify({
                         id: s.id,
