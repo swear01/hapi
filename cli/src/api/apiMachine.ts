@@ -367,7 +367,7 @@ export class ApiMachineClient {
                     return { success: true, mode: 'summaries', sessions }
                 }
                 try {
-                    const page = listLocalClaudeSessionMessagesPageById(parsed.data.sessionId, parsed.data.cursor, parsed.data.maxBytes)
+                    const page = await listLocalClaudeSessionMessagesPageById(parsed.data.sessionId, parsed.data.cursor, parsed.data.maxBytes)
                     if (!page) return { success: false, error: 'Claude session transcript not found' }
                     if (!await this.isLocalSessionWithinWorkspaceRoots(page.session)) {
                         return { success: false, error: 'Path is outside workspace roots' }
