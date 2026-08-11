@@ -40,7 +40,7 @@ import { getLatestRunnerLog } from '@/ui/logger';
 import { isProcessAlive, isWindows, killProcess, killProcessByChildProcess } from '@/utils/process';
 import { buildTestChildEnv, testOwnedMarker } from '@/test/integrationEnv';
 import { trackChildProcess, trackRunnerPid, trackSession, cleanupAllRegisteredProcesses } from '@/test/processRegistry';
-import { reapTestOwnedProcesses } from '@/test/auditTestProcesses';
+import { findTestOwnedProcesses, reapTestOwnedProcesses } from '@/test/auditTestProcesses';
 
 // Utility to wait for condition
 async function waitFor(
@@ -570,16 +570,21 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
   });
 
   it('regression: final audit finds zero test-owned processes after the failing test', async () => {
-    // Stop this test's runner gracefully first so the sweep below does not
-    // have to force-kill it, then run the same audit the globalSetup
-    // teardown performs at the end of the whole run: reap anything still
-    // carrying the run marker, and require zero remain. Agent grandchildren
-    // of the failing test that reparented to PID 1 are caught here.
+    // The runner from this test's beforeEach legitimately spawns model-catalog
+    // probe children (agent --list-models / agent acp) at startup; stopping
+    // it orphans them with the run marker. Reap first to clear that noise,
+    // then INSPECT: anything still marked at this point is a genuine survivor
+    // the reaper could not remove within its bounded window and must fail the
+    // suite (same audit globalSetup teardown performs at the end of the run).
+    // Killable leaks from the failing test are already gone here: its direct
+    // child is asserted dead in afterEach before the sweep, and the failing
+    // test's own sweep re-kills for its full bounded window.
     await stopRunnerBounded()
-    const leftovers = await reapTestOwnedProcesses(testOwnedMarker());
+    await reapTestOwnedProcesses(testOwnedMarker())
+    const leftovers = findTestOwnedProcesses(testOwnedMarker());
     expect(
       leftovers,
-      'test-owned processes survived the failing test — cleanup did not run'
+      'test-owned processes survived the bounded reaper — cleanup guarantee broken'
     ).toEqual([]);
   });
 

@@ -100,22 +100,27 @@ export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
 }
 
 /**
- * Force-reaps every process carrying `marker` (whole trees), waits a bounded
- * window for them to disappear, and returns whatever still remains.
+ * Force-reaps every process carrying `marker` (whole trees), waiting a
+ * bounded window for them to disappear, and returns whatever still remains.
+ *
+ * The kill loop re-runs on every re-scan: a process that survived its first
+ * SIGKILL (e.g. mid-exec, D-state) or that spawned after the previous scan
+ * (a grandchild racing the kill) must not be given a free pass.
  */
 export async function reapTestOwnedProcesses(marker: string): Promise<TestOwnedProcess[]> {
-    const found = findTestOwnedProcesses(marker)
-    for (const process of found) {
-        try {
-            await killProcessTreeByPid(process.pid, true)
-        } catch {
-            // Already dead or racing exit; re-scan below decides.
-        }
-    }
-
     const deadline = Date.now() + 10_000
-    while (Date.now() < deadline && findTestOwnedProcesses(marker).length > 0) {
+    let found = findTestOwnedProcesses(marker)
+    while (found.length > 0 && Date.now() < deadline) {
+        for (const process of found) {
+            try {
+                await killProcessTreeByPid(process.pid, true)
+            } catch {
+                // Already dead or racing exit; re-scan below decides.
+            }
+        }
+        if (Date.now() >= deadline) break
         await new Promise((resolve) => setTimeout(resolve, 250))
+        found = findTestOwnedProcesses(marker)
     }
     return findTestOwnedProcesses(marker)
 }
