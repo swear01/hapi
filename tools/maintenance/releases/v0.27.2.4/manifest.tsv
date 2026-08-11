@@ -1,0 +1,37 @@
+patch	state	upstream_ref	source_commits
+# v0.27.2.4 — rebuilt from upstream/main 11964b4b0 (10 commits past v0.27.2.3 base d147ae00a)
+# Dropped this cycle: #1474 #1480 #1108 #986 #1413 (merged upstream into base), #1468 (bug in usage display — dropped per operator)
+# Deferred: #1511 (peer spawn, large feature), #1512 (session recency, review-large), #1517 (draft); #1473 still deferred (V28 conflicts)
+01-pr-1091.patch	carry	pr-1091	0cf0d70310e9c58c5a41509793260a003822a9b4
+02-pr-987.patch	carry	pr-987	2c0362f4f20c127faab55e6a53d29dc0acad67f6
+03-pr-847.patch	carry	pr-847	9a83fc8f08974f24c880b547b726f45ac231b2f2
+04-pr-1424.patch	carry	pr-1424	c751690c275a397381436684c2a7a025700a1284
+05-pr-1422.patch	carry	pr-1422	5ae02d6caed360298761decc20e1f23db6d880da
+06-pr-1414.patch	carry	pr-1414	242beb9e6bd400804aa0057e862e50f94d34bcc2
+07-pr-1158.patch	carry	pr-1158	9ea45c1497bb1a15b796ee23fd4059dcb3e7b2c2
+08-pr-955.patch	carry	pr-955	f6a624251cb125182965dc343351c362035d071a
+09-pr-906.patch	carry	pr-906	d652eafdb885d5b2e09ff76461564f3f316b78e1
+10-pr-1436.patch	carry	pr-1436	d2f3f698fcc1c68c5293d6c2fef38b08f531e9f4
+11-pr-1421.patch	carry	pr-1421	ed7c7cf5e39907e18aaf34fb86b01f0fd72ddf03
+12-pr-1419.patch	carry	pr-1419	adb0ad029640aeae8dd821d62af7ee790ec95b12
+13-pr-769.patch	carry	pr-769	60c11607ce3bba734f38b6fcf87be07b32298683
+14-pr-1469.patch	carry	pr-1469	c912274f4946d8b6c515aafd750068444c7827e8
+15-pr-1451.patch	carry	pr-1451	f489209f15333faf17666cbadfdd6a219a7d6d74
+16-pr-1418.patch	carry	pr-1418	b556e137cf3971b432902b0b88b028715b7337e0
+17-pr-1447.patch	carry	pr-1447	1f42793d05aa3f12471019175e75b3a358c235b6
+18-pr-1429.patch	carry	pr-1429	b48a8a7630daece19f8e49058e7f52db08434eb1
+19-pr-1360.patch	carry	pr-1360	eb2db235e2c61e271405099d439afe2df1a7c401
+20-pr-1501.patch	carry	pr-1501	da7b37c66aecae4da2b5c03108baa844c73f06dd
+21-pr-1498.patch	carry	pr-1498	f6468faaa155505ee5111f5c53c630361c8bfada
+22-pr-1497.patch	carry	pr-1497	08533ebbfd3b0fe83ce0af6b827ffb6d63b20ccb
+23-pr-1496.patch	carry	pr-1496	390b8df42689e2acc6318d3a58beef591172d846
+24-pr-1495.patch	carry	pr-1495	a0de77881531f3df564a42860ddcc992813ff109
+25-pr-1490.patch	carry	pr-1490	df02f89bc3815e5c4fe96156acb82e21757b7b34
+26-pr-1471.patch	carry	pr-1471	bf96cf679f2d568702a509a4ba6ec76f00fd33c0
+27-pr-1484.patch	carry	pr-1484	d798e64d82fd552755ea64def06205134c2fe1a0
+28-pr-1475.patch	carry	pr-1475	4591052676fcd69a3ac3e5b00e2c81a22992c59b
+29-pr-1477.patch	carry	pr-1477	64fb4b227bf7e4b60f099d8ace4ecbe655679cdb
+30-pr-1503.patch	carry	pr-1503	81af5350e0fff54421b8d48ad56fc3237963fee6
+31-pr-1518.patch	carry	pr-1518	22fc20343b08baf661852b1490d1af15b84d5b51
+32-pr-1519.patch	carry	pr-1519	7a16256d8221a95df17f1c94467a825423bd50dc
+33-pr-1521.patch	carry	pr-1521	d563ef47774fc8f8030e0f28743d113b1aa15197
