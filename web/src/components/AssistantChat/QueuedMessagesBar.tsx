@@ -524,12 +524,12 @@ export function QueuedMessagesBar({
                                     )}
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
-                                    {canSteerRow ? (
+                                    {canSteer ? (
                                         <button
                                             type="button"
                                             aria-label="Steer queued message"
                                             title={t('queuedMessages.steer')}
-                                            disabled={steerPending}
+                                            disabled={isSteerPending}
                                             onClick={handleSteer}
                                             onMouseDown={(e) => e.preventDefault()}
                                             className="flex h-6 w-6 items-center justify-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
