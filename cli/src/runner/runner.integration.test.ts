@@ -560,8 +560,14 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     }
 
     // Give the detached child time to fully start (including its agent
-    // probes), so a leak would be real and observable.
+    // probes), so a leak would be real and observable. Require the fixture to
+    // actually be alive: if it exited on its own, the registry exit listener
+    // would remove it and the dead assertion below would pass vacuously.
     await new Promise(resolve => setTimeout(resolve, 2_000));
+    expect(
+      isProcessAlive(child.pid),
+      'regression fixture exited before cleanup — test is vacuous'
+    ).toBe(true);
 
     // Simulate the failure path: only the spawn-time registered cleanup runs.
     await cleanupAllRegisteredProcesses()

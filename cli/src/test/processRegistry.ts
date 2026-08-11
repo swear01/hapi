@@ -139,13 +139,14 @@ export async function cleanupAllRegisteredProcesses(): Promise<void> {
             pidsToKill.add(entry.pid)
         }
     }
-    for (const pid of pidsToKill) {
-        try {
-            await killProcessTreeByPid(pid, true)
-        } catch {
-            // Already dead or racing exit; the wait below re-checks.
-        }
-    }
+    // Signals are all delivered synchronously inside killProcessTreeByPid
+    // (children first), so racing the awaits against a budget only bounds the
+    // waiting, never skips the kill. A large or stuck tree must not consume
+    // the whole hook before stopRunner and the marker sweep run.
+    await Promise.race([
+        Promise.allSettled([...pidsToKill].map((pid) => killProcessTreeByPid(pid, true))),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ])
 
     await waitForAllDead([...pidsToKill], 5_000)
 
