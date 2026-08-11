@@ -6,8 +6,6 @@ export const COMPOSER_TOOLBAR_ITEM_IDS = [
     'expand',
     'model',
     'effort',
-    'piModel',
-    'piThinking',
     'terminal',
     'abort',
     'switch',

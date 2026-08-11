@@ -112,8 +112,6 @@ vi.mock('@/hooks/useActiveSuggestions', () => ({ useActiveSuggestions: () => [[]
 vi.mock('@/components/ChatInput/FloatingOverlay', () => ({ FloatingOverlay: ({ children }: { children: ReactNode }) => <>{children}</> }))
 vi.mock('@/components/ChatInput/Autocomplete', () => ({ Autocomplete: () => null }))
 vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }))
-vi.mock('./PiModelPanel', () => ({ PiModelPanel: () => null }))
-vi.mock('./PiThinkingLevelPanel', () => ({ PiThinkingLevelPanel: () => null }))
 
 function renderComposer(agentFlavor: string, overrides: Partial<Parameters<typeof HappyComposer>[0]> = {}) {
     render(
@@ -174,10 +172,34 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.getByText('Effort')).toBeTruthy()
     })
 
-    it('keeps Pi on its dedicated model/thinking buttons', () => {
-        renderComposer('pi')
-        // Generic value buttons are Pi-excluded; Pi panels stay the quick path.
-        expect(screen.queryByRole('button', { name: 'Sonnet 4' })).toBeNull()
+    it('shows generic value buttons for Pi with the provider-qualified model label', () => {
+        renderComposer('pi', {
+            piModels: [
+                { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+                { provider: 'vertex', modelId: 'gemini-2.5-pro', name: 'Vertex Gemini 2.5 Pro', reasoning: true },
+            ],
+            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
+        })
+        // Pi uses the same value buttons as every other flavor.
+        expect(screen.getByRole('button', { name: 'Gemini 2.5 Pro' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
+    })
+
+    it('opens the settings sheet with provider-grouped model rows for Pi', () => {
+        renderComposer('pi', {
+            piModels: [
+                { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+                { provider: 'vertex', modelId: 'gemini-2.5-pro', name: 'Vertex Gemini 2.5 Pro', reasoning: true },
+            ],
+            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'Gemini 2.5 Pro' }))
+        expect(screen.getByText('Model')).toBeTruthy()
+        // The value button label and the matching sheet row share the model name.
+        expect(screen.getAllByText('Gemini 2.5 Pro').length).toBeGreaterThan(1)
+        expect(screen.getByText('Vertex Gemini 2.5 Pro')).toBeTruthy()
+        expect(screen.getByText('Effort')).toBeTruthy()
     })
 
     it('maps the default selection (model=null) onto the localized default option label', () => {

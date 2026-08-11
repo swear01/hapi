@@ -58,8 +58,6 @@ import { getCodexComposerReasoningEffortOptions } from './codexReasoningEffortOp
 import { getDisplayedCodexServiceTier } from './codexFastMode'
 import { getPiThinkingLevelOptions, getHighestThinkingLevel, isThinkingLevelSupported } from './piThinkingLevelOptions'
 import { groupModelsByProvider } from './piModelGroups'
-import { PiModelPanel } from './PiModelPanel'
-import { PiThinkingLevelPanel } from './PiThinkingLevelPanel'
 import type { ApiClient } from '@/api/client'
 import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
 import { useDictation } from '@/hooks/useDictation'
@@ -527,8 +525,6 @@ export function HappyComposer(props: {
     const lastSendAcceptanceRef = useRef(props.sendAcceptance)
     const pendingSendAttemptIdRef = useRef<string | null>(null)
     const [showSettings, setShowSettings] = useState(false)
-    const [showPiModelPanel, setShowPiModelPanel] = useState(false)
-    const [showPiThinkingPanel, setShowPiThinkingPanel] = useState(false)
     const [isAborting, setIsAborting] = useState(false)
     const [isSwitching, setIsSwitching] = useState(false)
     const [showContinueHint, setShowContinueHint] = useState(false)
@@ -1340,7 +1336,8 @@ export function HappyComposer(props: {
             // Pi needs { provider, modelId } to disambiguate duplicate model IDs,
             // but this generic cycler only emits a bare modelId (or null), which
             // would lose the provider and can pick the wrong cached match or clear
-            // the model. Pi model changes go only through the dedicated PiModelPanel.
+            // the model. Pi model changes go through the settings sheet's
+            // provider-qualified picker (piModelGroups) only.
             if (agentFlavor === 'pi') return
             if (e.key === 'm' && (e.metaKey || e.ctrlKey) && onModelChange && supportsModelChange(agentFlavor)) {
                 e.preventDefault()
@@ -1572,30 +1569,23 @@ export function HappyComposer(props: {
     const showAbortButton = true
     const voiceEnabled = Boolean(effectiveVoiceToggle)
 
-    // Pi: selected model info for UI labels and thinking level filtering
-    const piModelLabel = agentFlavor === 'pi'
-        ? (selectedPiModel?.name ?? selectedPiModel?.modelId ?? 'Model')
-        : undefined
-    const piThinkingLabel = agentFlavor === 'pi'
-        ? (() => {
-            if (!selectedPiModel) return 'Thinking'
-            const effectiveLevel = effort && isThinkingLevelSupported(effort, selectedPiModel.thinkingLevelMap)
-                ? effort
-                : getHighestThinkingLevel(selectedPiModel.thinkingLevelMap)
-            return effectiveLevel
-                ? (PI_THINKING_LEVEL_LABELS[effectiveLevel as PiThinkingLevel] ?? effectiveLevel)
-                : 'Thinking'
-        })()
-        : undefined
-    const piHasModels = piModels && piModels.length > 0
-
-    // Generic model/effort value buttons (non-Pi flavors). The current value
-    // label doubles as the button caption; clicking opens the settings sheet.
-    // Hidden on narrow viewports where only the settings button remains.
+    // Generic model/effort value buttons. The current value label doubles as
+    // the button caption; clicking opens the settings sheet. Hidden on narrow
+    // viewports where only the settings button remains.
     const isNarrowViewport = useNarrowViewport()
+    // Pi turns run for minutes with thread.isDisabled set the whole time, so
+    // Pi keeps its model/effort controls live mid-turn (#1442) — the generic
+    // disable rule (controlsDisabled) would lock them for the entire turn.
+    const modelEffortControlsDisabled = agentFlavor === 'pi' ? configurationControlsDisabled : controlsDisabled
     const modelValueLabel = useMemo(() => {
-        if (agentFlavor === 'pi' || isNarrowViewport) return undefined
-        if (!onModelChange || !supportsModelChange(agentFlavor) || modelOptions.length === 0) return undefined
+        if (isNarrowViewport) return undefined
+        if (!onModelChange || !supportsModelChange(agentFlavor)) return undefined
+        // Pi models come from the dynamic piModels catalog; show the
+        // provider-qualified selection name (fall back to the session wire id).
+        if (agentFlavor === 'pi') {
+            return selectedPiModel?.name ?? selectedPiModel?.modelId ?? model ?? undefined
+        }
+        if (modelOptions.length === 0) return undefined
         const rawKey = selectedModelBase !== undefined ? selectedModelBase : model
         // `null` (default selection) and the `auto`/`default` wire values all
         // mean "let the agent pick" — normalize them onto the `value: null`
@@ -1603,101 +1593,43 @@ export function HappyComposer(props: {
         const normalizedKey = !rawKey || rawKey === 'auto' || rawKey === 'default' ? null : rawKey
         const option = modelOptions.find((candidate) => candidate.value === normalizedKey)
         return option?.label ?? rawKey ?? undefined
-    }, [agentFlavor, isNarrowViewport, onModelChange, modelOptions, model, selectedModelBase])
+    }, [isNarrowViewport, onModelChange, agentFlavor, selectedPiModel, model, modelOptions, selectedModelBase])
     const effortValueLabel = useMemo(() => {
-        if (agentFlavor === 'pi' || isNarrowViewport) return undefined
+        if (isNarrowViewport) return undefined
         if (!onEffortChange || !supportsEffort(agentFlavor)) return undefined
+        // Pi: non-reasoning models have no effort control; otherwise resolve the
+        // effective thinking level the same way the old dedicated button did.
+        if (agentFlavor === 'pi') {
+            if (selectedPiModel?.reasoning === false) return undefined
+            const effectiveLevel = effort && isThinkingLevelSupported(effort, selectedPiModel?.thinkingLevelMap)
+                ? effort
+                : getHighestThinkingLevel(selectedPiModel?.thinkingLevelMap)
+            return effectiveLevel
+                ? (PI_THINKING_LEVEL_LABELS[effectiveLevel as PiThinkingLevel] ?? effectiveLevel)
+                : undefined
+        }
         const option = claudeEffortOptions.find((candidate) => candidate.value === effort)
         return option?.label ?? (effort ? effort : undefined)
-    }, [agentFlavor, isNarrowViewport, onEffortChange, claudeEffortOptions, effort])
+    }, [isNarrowViewport, onEffortChange, agentFlavor, selectedPiModel, effort, claudeEffortOptions])
 
     const handleModelValueToggle = useCallback(() => {
-        if (controlsDisabled) return
-        setShowPiModelPanel(false)
-        setShowPiThinkingPanel(false)
+        if (modelEffortControlsDisabled) return
         setShowSettings((open) => !open)
         haptic('light')
-    }, [controlsDisabled, haptic])
+    }, [modelEffortControlsDisabled, haptic])
 
     const handleEffortValueToggle = useCallback(() => {
-        if (controlsDisabled) return
-        setShowPiModelPanel(false)
-        setShowPiThinkingPanel(false)
+        if (modelEffortControlsDisabled) return
         setShowSettings((open) => !open)
         haptic('light')
-    }, [controlsDisabled, haptic])
-
-    const closeAllPanels = useCallback(() => {
-        clearCursorDrillDown()
-        setShowSettings(false)
-        setShowPiModelPanel(false)
-        setShowPiThinkingPanel(false)
-    }, [clearCursorDrillDown])
-
-    const handlePiModelToggle = useCallback(() => {
-        if (configurationControlsDisabled) return
-        setShowPiModelPanel((v) => !v)
-        setShowSettings(false)
-        setShowPiThinkingPanel(false)
-        haptic('light')
-    }, [configurationControlsDisabled, haptic])
-
-    const handlePiThinkingToggle = useCallback(() => {
-        if (configurationControlsDisabled) return
-        setShowPiThinkingPanel((v) => !v)
-        setShowSettings(false)
-        setShowPiModelPanel(false)
-        haptic('light')
-    }, [configurationControlsDisabled, haptic])
+    }, [modelEffortControlsDisabled, haptic])
 
     const overlayPositionClass = isExpanded
         ? 'absolute z-10 bottom-12 mb-2'
         : 'absolute z-10 bottom-[100%] mb-2'
 
     const overlays = useMemo(() => {
-        // Pi flavor: separate floating panels for model and thinking level.
-        // (Pi RPC mode has no runtime permission switching → no permission panel.)
-        if (agentFlavor === 'pi') {
-            const panels: React.ReactNode[] = []
-
-            // Model selection panel
-            if (showPiModelPanel && piModels && piModels.length > 0) {
-                const currentPiModel = selectedPiModel ?? null
-                panels.push(
-                    <div key="model" className={`${overlayPositionClass} left-2 w-64`}>
-                        <PiModelPanel
-                            models={piModels}
-                            currentModel={currentPiModel ? { provider: currentPiModel.provider, modelId: currentPiModel.modelId } : null}
-                            controlsDisabled={configurationControlsDisabled}
-                            onSelect={(piModel) => {
-                                handleModelChange({ provider: piModel.provider, modelId: piModel.modelId })
-                            }}
-                            onClose={closeAllPanels}
-                        />
-                    </div>
-                )
-            }
-
-            // Thinking level panel
-            if (showPiThinkingPanel && selectedPiModel?.reasoning !== false) {
-                panels.push(
-                    <div key="thinking" className={`${overlayPositionClass} left-2 w-48`}>
-                        <PiThinkingLevelPanel
-                            currentLevel={effort}
-                            reasoning={selectedPiModel?.reasoning}
-                            thinkingLevelMap={selectedPiModel?.thinkingLevelMap}
-                            controlsDisabled={configurationControlsDisabled}
-                            onSelect={(level) => handleEffortChange(level)}
-                            onClose={closeAllPanels}
-                        />
-                    </div>
-                )
-            }
-
-            if (panels.length > 0) return <>{panels}</>
-        }
-
-        // Non-Pi flavors: original unified gear menu
+        // Unified settings sheet for every flavor (Pi included).
         if (showSettings && (showCollaborationSettings || showCopilotAgentModeSettings || showPermissionSettings || showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings || showFastModeSettings)) {
             return (
                 <div ref={settingsOverlayRef} className={`${overlayPositionClass} w-full`}>
@@ -1717,9 +1649,9 @@ export function HappyComposer(props: {
                                                 <button
                                                     key={piModel.modelId}
                                                     type="button"
-                                                    disabled={controlsDisabled}
+                                                    disabled={modelEffortControlsDisabled}
                                                     className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                                        controlsDisabled
+                                                        modelEffortControlsDisabled
                                                             ? 'cursor-not-allowed opacity-50'
                                                             : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
                                                     }`}
@@ -1753,9 +1685,9 @@ export function HappyComposer(props: {
                                         <button
                                             key={option.value ?? 'auto'}
                                             type="button"
-                                            disabled={controlsDisabled}
+                                            disabled={modelEffortControlsDisabled}
                                             className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                                controlsDisabled
+                                                modelEffortControlsDisabled
                                                     ? 'cursor-not-allowed opacity-50'
                                                     : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
                                             }`}
@@ -1866,9 +1798,9 @@ export function HappyComposer(props: {
                                     <button
                                         key={option.value ?? 'auto'}
                                         type="button"
-                                        disabled={controlsDisabled}
+                                        disabled={modelEffortControlsDisabled}
                                         className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                            controlsDisabled
+                                            modelEffortControlsDisabled
                                                 ? 'cursor-not-allowed opacity-50'
                                                 : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
                                         }`}
@@ -2077,12 +2009,9 @@ export function HappyComposer(props: {
         return null
     }, [
         showSettings,
-        showPiModelPanel,
-        showPiThinkingPanel,
         agentFlavor,
         piModels,
         selectedPiModel,
-        closeAllPanels,
         showCollaborationSettings,
         showCopilotAgentModeSettings,
         showPermissionSettings,
@@ -2346,21 +2275,13 @@ export function HappyComposer(props: {
                             onClearSchedule={onUserClearSchedule}
                             hasAttachments={blocksScheduling}
                             modelValueLabel={modelValueLabel}
-                            modelValueDisabled={controlsDisabled}
+                            modelValueDisabled={modelEffortControlsDisabled}
                             modelValueOpen={showSettings}
                             onModelValueToggle={handleModelValueToggle}
                             effortValueLabel={effortValueLabel}
-                            effortValueDisabled={controlsDisabled}
+                            effortValueDisabled={modelEffortControlsDisabled}
                             effortValueOpen={showSettings}
                             onEffortValueToggle={handleEffortValueToggle}
-                            piModelLabel={piModelLabel}
-                            piModelDisabled={configurationControlsDisabled || !piHasModels}
-                            piModelOpen={showPiModelPanel}
-                            onPiModelToggle={handlePiModelToggle}
-                            piThinkingLabel={piThinkingLabel}
-                            piThinkingDisabled={configurationControlsDisabled || !piHasModels || !selectedPiModel || selectedPiModel.reasoning === false}
-                            piThinkingOpen={showPiThinkingPanel}
-                            onPiThinkingToggle={handlePiThinkingToggle}
                             scratchlistMode={props.scratchlistMode}
                             scratchlistCount={props.scratchlistCount}
                             onScratchlistToggle={props.onScratchlistToggle}
