@@ -42,7 +42,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 24
+const SCHEMA_VERSION: number = 28
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -308,6 +308,14 @@ export class Store {
             21: () => this.migrateFromV21ToV22(),
             22: () => this.migrateFromV22ToV23(),
             23: () => this.migrateFromV23ToV24(),
+            // Fork steps (v0.27.2.x ladder): run_id fence (#1424), A2A events
+            // ledger repair for pre-V23 fork DBs, then schema-alignment no-ops
+            // so deployed V26–V28 DBs (v0.27.2.2/3, incl. dropped #1468 cost
+            // columns) keep matching SCHEMA_VERSION without a migration.
+            24: () => this.migrateFromV24ToV25(),
+            25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
         })
 
         if (currentVersion === 0) {
@@ -1000,6 +1008,82 @@ export class Store {
                 updated_at INTEGER NOT NULL
             );
         `)
+    }
+
+    private migrateFromV24ToV25(): void {
+        // Supervisor run generation — CAS fence for key reuse (#1424).
+        const cols = this.db.prepare('PRAGMA table_info(session_jobs)').all() as Array<{ name: string }>
+        if (!cols.some((c) => c.name === 'run_id')) {
+            this.db.exec('ALTER TABLE session_jobs ADD COLUMN run_id TEXT')
+        }
+    }
+
+    private migrateFromV25ToV26(): void {
+        // Fork repair: upstream #1467's V22→V23 creates the A2A events ledger,
+        // but fork-maintained DBs that were already past V22 skipped that step.
+        // Idempotently create the ledger tables when missing (v0.27.2.2 hub).
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                ts INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                sink_kind TEXT,
+                sink_ref TEXT,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                payload_json TEXT,
+                artifact_refs TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                related_session_id TEXT,
+                related_event_id TEXT,
+                provenance TEXT,
+                idempotency_key TEXT,
+                dedupe_key TEXT,
+                confidence REAL,
+                severity TEXT,
+                expires_at INTEGER,
+                namespace TEXT NOT NULL,
+                principal_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_ts
+                ON events(namespace, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_related_session
+                ON events(namespace, related_session_id, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_expires
+                ON events(namespace, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_namespace_idempotency
+                ON events(namespace, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS event_links (
+                id TEXT PRIMARY KEY,
+                from_event_id TEXT NOT NULL,
+                to_event_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                metadata_json TEXT,
+                namespace TEXT NOT NULL,
+                FOREIGN KEY (from_event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (to_event_id) REFERENCES events(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_from
+                ON event_links(namespace, from_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
+                ON event_links(namespace, to_event_id);
+        `)
+    }
+
+    private migrateFromV26ToV27(): void {
+        // Schema-alignment no-op: v0.27.2.2/3 carried the dropped #1468 cost
+        // columns (context_only/cost/cost_currency) at this ladder position.
+        // They are inert and remain untouched on deployed DBs; fresh DBs
+        // simply never create them.
+    }
+
+    private migrateFromV27ToV28(): void {
+        // Schema-alignment no-op: keep SCHEMA_VERSION at 28 so deployed
+        // v0.27.2.3 hub DBs (user_version=28) stay consistent.
     }
 
     private getSessionColumnNames(): Set<string> {

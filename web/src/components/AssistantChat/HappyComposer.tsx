@@ -19,6 +19,7 @@ import {
     useRef,
     useState
 } from 'react'
+import { useNarrowViewport } from '@/hooks/useNarrowViewport'
 import { isRichComposerMentionsEnabled, resolveComposerPlaceholderKey } from '@/lib/composerSegments'
 import type { SessionMentionResolveResult } from '@/components/AssistantChat/RichComposerInput'
 import {
@@ -28,6 +29,7 @@ import {
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
 import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary } from '@/types/api'
+import type { CodexUsage } from '@hapi/protocol/types'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
@@ -300,6 +302,7 @@ export function HappyComposer(props: {
     contextWindow?: number | null
     /** Model for the context-window heuristic; see StatusBar.contextModel. */
     contextModel?: string | null
+    codexUsage?: CodexUsage | null
     controlledByUser?: boolean
     agentFlavor?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string }>
@@ -404,6 +407,7 @@ export function HappyComposer(props: {
         contextCacheRead,
         contextWindow,
         contextModel,
+        codexUsage,
         controlledByUser = false,
         agentFlavor,
         availableModelOptions,
@@ -489,6 +493,21 @@ export function HappyComposer(props: {
         await dictation.toggle()
     }, [dictation])
 
+    const handleDictationSend = useCallback(async () => {
+        if (!dictationActive || dictation.status !== 'connected') return
+        if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
+            await dictation.toggle()
+            return
+        }
+        const targetSessionId = props.sessionId ?? ''
+        const initialText = api.composer().getState().text
+        api.composer().setText('')
+        if (targetSessionId) {
+            await dictation.stopAndSend?.(targetSessionId, initialText)
+        } else {
+            await dictation.toggle()
+        }
+    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)
@@ -1131,14 +1150,9 @@ export function HappyComposer(props: {
                 richInputRef.current?.flushSerializedText()
                 const targetSessionId = props.sessionId ?? ''
                 const initialText = api.composer().getState().text
-                const deliveryMode = resolveMessageDeliveryMode({
-                    agentFlavor: props.agentFlavor,
-                    isSessionThinking: props.thinking ?? false,
-                    intent: 'default'
-                })
                 api.composer().setText('')
                 if (targetSessionId && dictation.stopAndSend) {
-                    await dictation.stopAndSend(targetSessionId, initialText, deliveryMode)
+                    await dictation.stopAndSend(targetSessionId, initialText)
                 } else {
                     await dictation.toggle()
                 }
@@ -1174,11 +1188,19 @@ export function HappyComposer(props: {
             && pendingSchedule == null
             && props.onParkScratchlist
         ) {
-            if (!canSend || parkInFlightRef.current) return
+            const snapshot = api.composer().getState()
+            const liveAttachmentsReady = snapshot.attachments.every((attachment) => {
+                if (attachment.status.type === 'complete') return true
+                if (attachment.status.type !== 'requires-action') return false
+                return Boolean((attachment as { path?: string }).path)
+            })
+            const liveCanSend = (
+                snapshot.text.trim().length > 0 || snapshot.attachments.length > 0
+            ) && liveAttachmentsReady && !controlsDisabled
+            if (!liveCanSend || parkInFlightRef.current) return
             parkInFlightRef.current = true
             setIsParkingScratchlist(true)
             try {
-                const snapshot = api.composer().getState()
                 const prepared = await props.onParkScratchlist(
                     snapshot.text,
                     snapshot.attachments,
@@ -1259,6 +1281,9 @@ export function HappyComposer(props: {
         resetPendingSendIntent,
         dictationActive,
         dictation.status,
+        dictationActive,
+        dictation.status,
+        handleDictationToggle,
         dictation.toggle,
         dictation.stopAndSend,
         props.sessionId,
@@ -1604,6 +1629,8 @@ export function HappyComposer(props: {
     const piEffortHidden = piModels && selectedPiModel && selectedPiModel.reasoning === false
     const showEffortSettings = Boolean(onEffortChange && supportsEffort(agentFlavor) && !piEffortHidden)
     const showFastModeSettings = Boolean(onServiceTierChange)
+    const showModelAreaSettings = showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings
+    const showOtherSettings = showFastModeSettings || showCollaborationSettings || showCopilotAgentModeSettings
     const showSettingsButton = Boolean(
         showCollaborationSettings
         || showCopilotAgentModeSettings
@@ -1633,6 +1660,40 @@ export function HappyComposer(props: {
         })()
         : undefined
     const piHasModels = piModels && piModels.length > 0
+
+    // Generic model/effort value buttons (non-Pi flavors). The current value
+    // label doubles as the button caption; clicking opens the settings sheet.
+    // Hidden on narrow viewports where only the settings button remains.
+    const isNarrowViewport = useNarrowViewport()
+    const modelValueLabel = useMemo(() => {
+        if (agentFlavor === 'pi' || isNarrowViewport) return undefined
+        if (!onModelChange || !supportsModelChange(agentFlavor) || modelOptions.length === 0) return undefined
+        const key = selectedModelBase !== undefined ? selectedModelBase : model
+        const option = typeof key === 'string' ? modelOptions.find((candidate) => candidate.value === key) : undefined
+        return option?.label ?? (typeof key === 'string' && key ? key : undefined)
+    }, [agentFlavor, isNarrowViewport, onModelChange, modelOptions, model, selectedModelBase])
+    const effortValueLabel = useMemo(() => {
+        if (agentFlavor === 'pi' || isNarrowViewport) return undefined
+        if (!onEffortChange || !supportsEffort(agentFlavor)) return undefined
+        const option = claudeEffortOptions.find((candidate) => candidate.value === effort)
+        return option?.label ?? (effort ? effort : undefined)
+    }, [agentFlavor, isNarrowViewport, onEffortChange, claudeEffortOptions, effort])
+
+    const handleModelValueToggle = useCallback(() => {
+        if (controlsDisabled) return
+        setShowPiModelPanel(false)
+        setShowPiThinkingPanel(false)
+        setShowSettings((open) => !open)
+        haptic('light')
+    }, [controlsDisabled, haptic])
+
+    const handleEffortValueToggle = useCallback(() => {
+        if (controlsDisabled) return
+        setShowPiModelPanel(false)
+        setShowPiThinkingPanel(false)
+        setShowSettings((open) => !open)
+        haptic('light')
+    }, [controlsDisabled, haptic])
 
     const closeAllPanels = useCallback(() => {
         clearCursorDrillDown()
@@ -1709,125 +1770,6 @@ export function HappyComposer(props: {
             return (
                 <div ref={settingsOverlayRef} className={`${overlayPositionClass} w-full`}>
                     <FloatingOverlay maxHeight={320}>
-                        {showCollaborationSettings ? (
-                            <div className="py-2">
-                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
-                                    {t('misc.collaborationMode')}
-                                </div>
-                                {collaborationModeOptions.map((option) => (
-                                    <button
-                                        key={option.mode}
-                                        type="button"
-                                        disabled={controlsDisabled}
-                                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                            controlsDisabled
-                                                ? 'cursor-not-allowed opacity-50'
-                                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                        }`}
-                                        onClick={() => handleCollaborationChange(option.mode)}
-                                        onMouseDown={(e) => e.preventDefault()}
-                                    >
-                                        <div
-                                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                collaborationMode === option.mode
-                                                    ? 'border-[var(--app-link)]'
-                                                    : 'border-[var(--app-hint)]'
-                                            }`}
-                                        >
-                                            {collaborationMode === option.mode && (
-                                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                            )}
-                                        </div>
-                                        <span className={collaborationMode === option.mode ? 'text-[var(--app-link)]' : ''}>
-                                            {option.label}
-                                        </span>
-                                    </button>
-                                ))}
-                            </div>
-                        ) : null}
-
-                        {showCopilotAgentModeSettings ? (
-                            <div className="py-2">
-                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
-                                    {t('misc.copilotAgentMode')}
-                                </div>
-                                {copilotAgentModeOptions.map((option) => (
-                                    <button
-                                        key={option.mode}
-                                        type="button"
-                                        disabled={controlsDisabled}
-                                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                            controlsDisabled
-                                                ? 'cursor-not-allowed opacity-50'
-                                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                        }`}
-                                        onClick={() => handleCopilotAgentModeChange(option.mode)}
-                                        onMouseDown={(e) => e.preventDefault()}
-                                    >
-                                        <div
-                                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                copilotAgentMode === option.mode
-                                                    ? 'border-[var(--app-link)]'
-                                                    : 'border-[var(--app-hint)]'
-                                            }`}
-                                        >
-                                            {copilotAgentMode === option.mode && (
-                                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                            )}
-                                        </div>
-                                        <span className={copilotAgentMode === option.mode ? 'text-[var(--app-link)]' : ''}>
-                                            {option.label}
-                                        </span>
-                                    </button>
-                                ))}
-                            </div>
-                        ) : null}
-
-                        {(showCollaborationSettings || showCopilotAgentModeSettings) && (showPermissionSettings || showModelSettings || showModelReasoningEffortSettings || showEffortSettings) ? (
-                            <div className="mx-3 h-px bg-[var(--app-divider)]" />
-                        ) : null}
-
-                        {showPermissionSettings ? (
-                            <div className="py-2">
-                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
-                                    {t('misc.permissionMode')}
-                                </div>
-                                {permissionModeOptions.map((option) => (
-                                    <button
-                                        key={option.mode}
-                                        type="button"
-                                        disabled={controlsDisabled}
-                                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                            controlsDisabled
-                                                ? 'cursor-not-allowed opacity-50'
-                                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                        }`}
-                                        onClick={() => handlePermissionChange(option.mode)}
-                                        onMouseDown={(e) => e.preventDefault()}
-                                    >
-                                        <div
-                                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                permissionMode === option.mode
-                                                    ? 'border-[var(--app-link)]'
-                                                    : 'border-[var(--app-hint)]'
-                                            }`}
-                                        >
-                                            {permissionMode === option.mode && (
-                                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                            )}
-                                        </div>
-                                        <span className={permissionMode === option.mode ? 'text-[var(--app-link)]' : ''}>
-                                            {option.label}
-                                        </span>
-                                    </button>
-                                ))}
-                            </div>
-                        ) : null}
-
-                        {(showCollaborationSettings || showCopilotAgentModeSettings || showPermissionSettings) && (showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings) ? (
-                            <div className="mx-3 h-px bg-[var(--app-divider)]" />
-                        ) : null}
-
                         {showModelSettings ? (
                             <div className="py-2">
                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
@@ -1871,44 +1813,48 @@ export function HappyComposer(props: {
                                         </div>
                                     ))
                                 ) : (
-                                    modelOptions.map((option) => {
+                                    modelOptions.map((option, index) => {
                                         const isSelected = selectedModelBase !== undefined
                                             ? selectedModelBase === option.value
                                             : model === option.value
                                         return (
-                                        <button
-                                            key={option.value ?? 'auto'}
-                                            type="button"
-                                            disabled={controlsDisabled}
-                                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                                controlsDisabled
-                                                    ? 'cursor-not-allowed opacity-50'
-                                                    : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                            }`}
-                                            onClick={() => {
-                                                if (resolveModelVariantsForBase) {
-                                                    handleCursorModelRowClick(option.value)
-                                                } else {
-                                                    handleModelChange(option.value)
-                                                }
-                                            }}
-                                            onMouseDown={(e) => e.preventDefault()}
-                                        >
-                                            <div
-                                                className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                    isSelected
-                                                        ? 'border-[var(--app-link)]'
-                                                        : 'border-[var(--app-hint)]'
-                                                }`}
-                                            >
-                                                {isSelected && (
-                                                    <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                                )}
+                                            <div key={option.value ?? 'auto'}>
+                                                {option.group && option.group !== modelOptions[index - 1]?.group ? (
+                                                    <div className="px-3 pt-2 pb-0.5 text-xs font-medium text-[var(--app-hint)]">{option.group}</div>
+                                                ) : null}
+                                                <button
+                                                    type="button"
+                                                    disabled={controlsDisabled}
+                                                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                                        controlsDisabled
+                                                            ? 'cursor-not-allowed opacity-50'
+                                                            : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                                    }`}
+                                                    onClick={() => {
+                                                        if (resolveModelVariantsForBase) {
+                                                            handleCursorModelRowClick(option.value)
+                                                        } else {
+                                                            handleModelChange(option.value)
+                                                        }
+                                                    }}
+                                                    onMouseDown={(e) => e.preventDefault()}
+                                                >
+                                                    <div
+                                                        className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                                                            isSelected
+                                                                ? 'border-[var(--app-link)]'
+                                                                : 'border-[var(--app-hint)]'
+                                                        }`}
+                                                    >
+                                                        {isSelected && (
+                                                            <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                                        )}
+                                                    </div>
+                                                    <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+                                                        {option.label}
+                                                    </span>
+                                                </button>
                                             </div>
-                                            <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
-                                                {option.label}
-                                            </span>
-                                        </button>
                                         )
                                     })
                                 )}
@@ -2020,7 +1966,48 @@ export function HappyComposer(props: {
                             </div>
                         ) : null}
 
-                        {(showModelReasoningEffortSettings || showEffortSettings) && showFastModeSettings ? (
+                        {showModelAreaSettings && showPermissionSettings ? (
+                            <div className="mx-3 h-px bg-[var(--app-divider)]" />
+                        ) : null}
+
+                        {showPermissionSettings ? (
+                            <div className="py-2">
+                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+                                    {t('misc.permissionMode')}
+                                </div>
+                                {permissionModeOptions.map((option) => (
+                                    <button
+                                        key={option.mode}
+                                        type="button"
+                                        disabled={controlsDisabled}
+                                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                            controlsDisabled
+                                                ? 'cursor-not-allowed opacity-50'
+                                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                        }`}
+                                        onClick={() => handlePermissionChange(option.mode)}
+                                        onMouseDown={(e) => e.preventDefault()}
+                                    >
+                                        <div
+                                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                                                permissionMode === option.mode
+                                                    ? 'border-[var(--app-link)]'
+                                                    : 'border-[var(--app-hint)]'
+                                            }`}
+                                        >
+                                            {permissionMode === option.mode && (
+                                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                            )}
+                                        </div>
+                                        <span className={permissionMode === option.mode ? 'text-[var(--app-link)]' : ''}>
+                                            {option.label}
+                                        </span>
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
+
+                        {(showPermissionSettings || showModelAreaSettings) && showOtherSettings ? (
                             <div className="mx-3 h-px bg-[var(--app-divider)]" />
                         ) : null}
 
@@ -2060,6 +2047,86 @@ export function HappyComposer(props: {
                                 ))}
                             </div>
                         ) : null}
+
+                        {showFastModeSettings && (showCollaborationSettings || showCopilotAgentModeSettings) ? (
+                            <div className="mx-3 h-px bg-[var(--app-divider)]" />
+                        ) : null}
+
+                        {showCollaborationSettings ? (
+                            <div className="py-2">
+                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+                                    {t('misc.collaborationMode')}
+                                </div>
+                                {collaborationModeOptions.map((option) => (
+                                    <button
+                                        key={option.mode}
+                                        type="button"
+                                        disabled={controlsDisabled}
+                                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                            controlsDisabled
+                                                ? 'cursor-not-allowed opacity-50'
+                                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                        }`}
+                                        onClick={() => handleCollaborationChange(option.mode)}
+                                        onMouseDown={(e) => e.preventDefault()}
+                                    >
+                                        <div
+                                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                                                collaborationMode === option.mode
+                                                    ? 'border-[var(--app-link)]'
+                                                    : 'border-[var(--app-hint)]'
+                                            }`}
+                                        >
+                                            {collaborationMode === option.mode && (
+                                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                            )}
+                                        </div>
+                                        <span className={collaborationMode === option.mode ? 'text-[var(--app-link)]' : ''}>
+                                            {option.label}
+                                        </span>
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
+
+                        {showCopilotAgentModeSettings ? (
+                            <div className="py-2">
+                                <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
+                                    {t('misc.copilotAgentMode')}
+                                </div>
+                                {copilotAgentModeOptions.map((option) => (
+                                    <button
+                                        key={option.mode}
+                                        type="button"
+                                        disabled={controlsDisabled}
+                                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                            controlsDisabled
+                                                ? 'cursor-not-allowed opacity-50'
+                                                : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                        }`}
+                                        onClick={() => handleCopilotAgentModeChange(option.mode)}
+                                        onMouseDown={(e) => e.preventDefault()}
+                                    >
+                                        <div
+                                            className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                                                copilotAgentMode === option.mode
+                                                    ? 'border-[var(--app-link)]'
+                                                    : 'border-[var(--app-hint)]'
+                                            }`}
+                                        >
+                                            {copilotAgentMode === option.mode && (
+                                                <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                            )}
+                                        </div>
+                                        <span className={copilotAgentMode === option.mode ? 'text-[var(--app-link)]' : ''}>
+                                            {option.label}
+                                        </span>
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
+
+                        
                     </FloatingOverlay>
                 </div>
             )
@@ -2343,12 +2410,21 @@ export function HappyComposer(props: {
                             voiceStatus={effectiveVoiceStatus}
                             voiceMicMuted={dictationActive ? false : voiceMicMuted}
                             onVoiceToggle={effectiveVoiceToggle ?? (() => {})}
+                            onVoiceSend={dictationActive ? handleDictationSend : undefined}
                             onVoiceMicToggle={dictationActive ? undefined : onVoiceMicToggle}
                             onSend={handleSend}
                             pendingSchedule={pendingSchedule}
                             onSchedule={handleUserSchedule}
                             onClearSchedule={onUserClearSchedule}
                             hasAttachments={blocksScheduling}
+                            modelValueLabel={modelValueLabel}
+                            modelValueDisabled={controlsDisabled}
+                            modelValueOpen={showSettings}
+                            onModelValueToggle={handleModelValueToggle}
+                            effortValueLabel={effortValueLabel}
+                            effortValueDisabled={controlsDisabled}
+                            effortValueOpen={showSettings}
+                            onEffortValueToggle={handleEffortValueToggle}
                             piModelLabel={piModelLabel}
                             piModelDisabled={configurationControlsDisabled || !piHasModels}
                             piModelOpen={showPiModelPanel}
@@ -2360,6 +2436,7 @@ export function HappyComposer(props: {
                             scratchlistMode={props.scratchlistMode}
                             scratchlistCount={props.scratchlistCount}
                             onScratchlistToggle={props.onScratchlistToggle}
+                            codexUsage={agentFlavor === 'codex' ? codexUsage : undefined}
                         />
                     </div>
                 </ComposerPrimitive.Root>

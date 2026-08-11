@@ -12,7 +12,9 @@ import type {
     PermissionMode,
     Session,
     PiModelSummary,
-    SlashCommand
+    SlashCommand,
+    AgentProvider,
+    ProviderProfileView
 } from '@/types/api'
 import type { ChatBlock, NormalizedMessage } from '@/chat/types'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
@@ -78,6 +80,7 @@ import type { SendMessageAcceptance, SendMessageSettlement } from '@/hooks/mutat
 import { handoffComposerDraft, transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
+import { ModelErrorBanner, hasActiveModelError } from '@/components/ModelErrorBanner'
 import { TeamPanel } from '@/components/TeamPanel'
 import { SessionStatusPanel } from '@/components/SessionStatusPanel'
 import { buildSessionStatusData } from '@/chat/sessionStatus'
@@ -110,6 +113,8 @@ import { useVoiceOptional } from '@/lib/voice-context'
 import { AgentTerminalView } from '@/components/AgentTerminal/AgentTerminalView'
 import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
+import { AGENT_PROVIDER_CAPABILITIES } from '@hapi/protocol'
+import { activeProviderProfile, mergeModelOptions } from '@/lib/provider-models'
 
 type SessionModelSelection = { provider: string; modelId: string } | string | null
 
@@ -846,6 +851,45 @@ function SessionChatInner(props: SessionChatProps) {
         enabled: agentFlavor === 'cursor' && props.session.active
     })
     const sessionMachineId = props.session.metadata?.machineId ?? null
+    const [providerProfiles, setProviderProfiles] = useState<ProviderProfileView[]>([])
+    const [providerDefaults, setProviderDefaults] = useState<Partial<Record<AgentProvider, string | null>>>({})
+    const providerAgent = agentFlavor === 'gemini' || !agentFlavor || !AGENT_PROVIDER_CAPABILITIES[agentFlavor as AgentProvider] ? null : agentFlavor as AgentProvider
+    const providerManaged = providerAgent ? AGENT_PROVIDER_CAPABILITIES[providerAgent].managed : false
+    useEffect(() => {
+        if (!sessionMachineId || !providerAgent || !providerManaged) {
+            setProviderProfiles([])
+            setProviderDefaults({})
+            return
+        }
+        let cancelled = false
+        void props.api.listProviderProfiles(sessionMachineId, providerAgent).then((result) => {
+            if (cancelled || !result.success) return
+            setProviderProfiles(result.profiles ?? [])
+            setProviderDefaults(result.defaults ?? {})
+        })
+        return () => { cancelled = true }
+    }, [props.api, providerAgent, providerManaged, sessionMachineId])
+    const sessionProviderProfile = useMemo(() => activeProviderProfile({
+        agent: providerAgent,
+        profiles: providerProfiles,
+        defaults: providerDefaults,
+        requestedId: props.session.metadata?.providerProfileId
+    }), [props.session.metadata?.providerProfileId, providerAgent, providerDefaults, providerProfiles])
+    const managedProviderModelOptions = useMemo(() => {
+        if (!providerManaged) return undefined
+        const withoutDefault = (options: Array<{ value: string | null; label: string }>) => options.filter(
+            (option): option is { value: string; label: string } => option.value !== null
+        )
+        const native = agentFlavor === 'codex'
+            ? withoutDefault(codexModelOptions ?? [])
+            : agentFlavor === 'grok'
+                ? withoutDefault(grokModelOptions ?? [])
+                : agentFlavor === 'claude'
+                    ? []
+                    : []
+        return mergeModelOptions(native.map((option) => ({ ...option, group: 'Native' })), sessionProviderProfile, props.session.model ?? undefined)
+            .map((option) => ({ ...option, value: option.value as string | null }))
+    }, [agentFlavor, codexModelOptions, grokModelOptions, props.session.model, providerManaged, sessionProviderProfile])
     const machineCursorModelsState = useCursorModelsForMachine({
         api: props.api,
         machineId: sessionMachineId,
@@ -1006,6 +1050,51 @@ function SessionChatInner(props: SessionChatProps) {
         codexCollaborationModeSupported
     )
 
+    const handleAcknowledgeModelError = useCallback(async () => {
+        const eventId = props.session.metadata?.lastModelError?.eventId
+        if (typeof eventId !== 'string' || eventId.length === 0) {
+            props.onRefresh()
+            return
+        }
+        await props.api.acknowledgeModelError(props.session.id, eventId).catch(() => {})
+        props.onRefresh()
+    }, [props.api, props.session.id, props.session.metadata?.lastModelError?.eventId, props.onRefresh])
+
+    const [isBridgingModelError, setIsBridgingModelError] = useState(false)
+    const [bridgeModelErrorReason, setBridgeModelErrorReason] = useState<string | null>(null)
+
+    const handleBridgeModelError = useCallback(async () => {
+        if (isBridgingModelError) {
+            return
+        }
+        const eventId = props.session.metadata?.lastModelError?.eventId
+        if (typeof eventId !== 'string' || eventId.length === 0) {
+            props.onRefresh()
+            return
+        }
+        setIsBridgingModelError(true)
+        setBridgeModelErrorReason(null)
+        try {
+            const result = await props.api.bridgeModelError(props.session.id, eventId)
+            if (!result.ok) {
+                setBridgeModelErrorReason(result.reason ?? 'not_bridgeable')
+            }
+            props.onRefresh()
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'bridge_failed'
+            setBridgeModelErrorReason(message)
+            console.warn('[SessionChat] model error bridge failed:', error)
+        } finally {
+            setIsBridgingModelError(false)
+        }
+    }, [
+        isBridgingModelError,
+        props.api,
+        props.session.id,
+        props.session.metadata?.lastModelError?.eventId,
+        props.onRefresh
+    ])
+
     // Voice assistant integration
     const voice = useVoiceOptional()
     const [voiceBackendReady, setVoiceBackendReady] = useState(false)
@@ -1024,14 +1113,14 @@ function SessionChatInner(props: SessionChatProps) {
                     return null
                 }
             },
-            sendMessage: async (sessionId: string, message: string) => {
+            sendMessage: async (sessionId: string, message: string, deliveryMode?: MessageDeliveryMode) => {
                 if (sessionId === props.session.id) {
-                    const accepted = await props.onSend(message)
+                    const accepted = await props.onSend(message, undefined, undefined, deliveryMode)
                     if (!accepted) {
                         throw new Error('Message was not accepted')
                     }
                 } else {
-                    await props.api.sendMessage(sessionId, message)
+                    await props.api.sendMessage(sessionId, message, undefined, undefined, undefined, deliveryMode)
                 }
             },
             approvePermission: async (sessionId: string, requestId: string) => {
@@ -1635,6 +1724,16 @@ function SessionChatInner(props: SessionChatProps) {
 
             {sessionStatus ? <SessionStatusPanel data={sessionStatus} /> : null}
 
+            <ModelErrorBanner
+                metadata={props.session.metadata}
+                onDismiss={handleAcknowledgeModelError}
+                onBridge={agentFlavor === 'cursor' && props.session.active
+                    ? handleBridgeModelError
+                    : undefined}
+                isBridging={isBridgingModelError}
+                bridgeErrorReason={bridgeModelErrorReason}
+            />
+
             <div className="flex flex-col min-h-0 flex-1">
             {props.session.teamState && (
                 <TeamPanel teamState={props.session.teamState} />
@@ -1708,7 +1807,6 @@ function SessionChatInner(props: SessionChatProps) {
                                 </div>
                             </div>
                         ) : null}
-
                         {/*
                          * tiann/hapi#893: one-time banner shown on first
                          * v2-load when localStorage entries got migrated to
@@ -1745,6 +1843,8 @@ function SessionChatInner(props: SessionChatProps) {
                             <QueuedMessagesBar
                                 sessionId={props.session.id}
                                 api={props.api}
+                                sessionMetadata={props.session.metadata}
+                                steeringActive={props.session.agentState?.steeringActive === true}
                                 pendingSchedule={pendingSchedule}
                                 pendingScheduleRevision={pendingScheduleRevision}
                                 onEdit={({ pendingSchedule: restored }) => {
@@ -1777,8 +1877,8 @@ function SessionChatInner(props: SessionChatProps) {
                         effort={props.session.effort}
                         agentFlavor={agentFlavor}
                         availableModelOptions={
-                            agentFlavor === 'codex'
-                                ? codexModelOptions
+                            agentFlavor === 'claude' || agentFlavor === 'codex'
+                                ? managedProviderModelOptions
                                 : agentFlavor === 'cursor'
                                     ? (
                                         cursorCatalogPending
@@ -1790,9 +1890,9 @@ function SessionChatInner(props: SessionChatProps) {
                                     : agentFlavor === 'opencode'
                                         ? opencodeModelOptions
                                         : agentFlavor === 'grok'
-                                            ? grokModelOptions
-                                        : agentFlavor === 'copilot'
-                                            ? copilotModelOptions
+                                            ? managedProviderModelOptions
+                                            : agentFlavor === 'copilot'
+                                                ? copilotModelOptions
                                         // Pi uses its own provider-qualified picker (piModels prop).
                                         // Feeding piModelOptions here would make the generic Ctrl/Cmd+M
                                         // cycler (getNextModelForFlavor) post a bare modelId string,
@@ -1825,6 +1925,7 @@ function SessionChatInner(props: SessionChatProps) {
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
                         contextModel={reduced.latestUsage?.model ?? props.session.model}
+                        codexUsage={agentFlavor === 'codex' ? props.session.metadata?.codexUsage : undefined}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser
