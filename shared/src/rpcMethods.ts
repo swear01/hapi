@@ -35,6 +35,7 @@ export const RPC_METHODS = {
     ListCodexModels: 'listCodexModels',
     ListCodexSessions: 'listCodexSessions',
     ArchiveCodexSession: 'archiveCodexSession',
+    ListClaudeSessions: 'listClaudeSessions',
     ListCursorModels: 'listCursorModels',
     ListPiModels: 'listPiModels',
     ListPiSessions: 'listPiSessions',
@@ -47,9 +48,12 @@ export const RPC_METHODS = {
     ListCopilotModels: 'listCopilotModels',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
+    /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
+    SteerQueuedMessage: 'steer-queued-message',
     ForkConversation: 'fork-conversation',
     RewindConversation: 'rewind-conversation',
-    BridgeModelError: 'bridge-model-error'
+    BridgeModelError: 'bridge-model-error',
+    RunnerSelfUpgrade: 'runner-self-upgrade',
 } as const
 
 export const RPC_TARGET_MISSING_ERROR_CODE = 'rpc_target_missing' as const
