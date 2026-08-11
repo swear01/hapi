@@ -58,7 +58,8 @@ const REQUIRED_TABLES = [
     'usage_scan_state',
     'events',
     'event_links',
-    'notification_preferences'
+    'notification_preferences',
+    'session_jobs'
 ] as const
 
 export class Store {
@@ -689,6 +690,27 @@ export class Store {
                 session_completion INTEGER NOT NULL DEFAULT 1,
                 updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS session_jobs (
+                session_id TEXT NOT NULL,
+                job_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done REAL,
+                total REAL,
+                remaining REAL,
+                unit TEXT,
+                detail TEXT,
+                run_id TEXT,
+                heartbeat_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, job_key),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_jobs_session_status_updated
+                ON session_jobs(session_id, status, updated_at DESC);
+
         `)
     }
 
@@ -1133,6 +1155,30 @@ export class Store {
     }
 
     private migrateFromV24ToV25(): void {
+        // Fork carry #1404: session-attached jobs table. Upstream 11964b4b0
+        // lacks it (its V23→V24 is notification_preferences from merged #1360),
+        // so create the table here for both fresh DBs and upstream-shaped DBs.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS session_jobs (
+                session_id TEXT NOT NULL,
+                job_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done REAL,
+                total REAL,
+                remaining REAL,
+                unit TEXT,
+                detail TEXT,
+                run_id TEXT,
+                heartbeat_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, job_key),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_jobs_session_status_updated
+                ON session_jobs(session_id, status, updated_at DESC);
+        `)
         // Supervisor run generation — CAS fence for key reuse (#1424).
         const cols = this.db.prepare('PRAGMA table_info(session_jobs)').all() as Array<{ name: string }>
         if (!cols.some((c) => c.name === 'run_id')) {

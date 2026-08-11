@@ -9,6 +9,7 @@ import type { PendingSchedule } from './ScheduleTimePicker'
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
 import { useComposerToolbarLayout, type ComposerToolbarItemId, type ComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
+import { useLongPress } from '@/hooks/useLongPress'
 import type { ComposerSendIntent } from '@/lib/messageDelivery'
 import { AgentBudgetIndicator } from './AgentBudgetIndicator'
 import { toCodexBudgetState } from './codexBudgetAdapter'
@@ -497,6 +498,8 @@ export function UnifiedButton(props: {
      * would fall back to chat, the button must look like a normal chat send.
      */
     routesToScratchlist?: boolean
+    /** Touch-hold = explicit queue intent for an in-flight Pi turn (#1480). */
+    allowQueueGesture?: boolean
 }) {
     const { t } = useTranslation()
     const voiceSendPendingRef = useRef(false)
@@ -521,6 +524,78 @@ export function UnifiedButton(props: {
         } else if (props.voiceEnabled && !routesToScratchlist) {
             props.onVoiceToggle() // Start voice (suppressed in scratchlist mode)
         }
+    }
+
+    // This is intentionally narrower than the button's general enabled state:
+    // a touch hold changes only an active Pi-main-thread chat submission. Voice
+    // controls, scratchlist routing, scheduled sends, and desktop input retain
+    // their existing native behavior.
+    const canQueueGesture = Boolean(
+        props.allowQueueGesture
+        && hasText
+        && !isVoiceActive
+        && !routesToScratchlist
+        && !props.controlsDisabled,
+    )
+    const sendButtonHandlers = useLongPress({
+        interaction: 'touch-only-native-click',
+        onClick: handleClick,
+        onLongPress: () => props.onSend('queue'),
+        longPressEnabled: canQueueGesture,
+        disabled: props.controlsDisabled,
+    })
+
+    if (isVoiceActive) {
+        const stopIcon = isConnecting ? <LoadingIcon /> : <StopIcon />
+        const stopAriaLabel = isConnecting ? t('voice.connecting') : t('composer.stop')
+        const sendAriaLabel = routesToScratchlist ? t('scratchlist.sendToScratchlist') : t('composer.send')
+        const sendClassName = routesToScratchlist
+            ? 'bg-amber-500 text-white hover:bg-amber-600'
+            : 'bg-black text-white'
+
+        const handleVoiceSendClick = async () => {
+            if (voiceSendPendingRef.current) return
+            voiceSendPendingRef.current = true
+            try {
+                if (props.onVoiceSend) {
+                    await props.onVoiceSend()
+                } else {
+                    const committed = await props.onVoiceToggle()
+                    if (committed === true) {
+                        setVoiceSendRequested(true)
+                    }
+                }
+            } finally {
+                voiceSendPendingRef.current = false
+            }
+        }
+
+        return (
+            <div className="flex items-center gap-1">
+                <button
+                    type="button"
+                    onClick={props.onVoiceToggle}
+                    disabled={props.controlsDisabled}
+                    aria-label={stopAriaLabel}
+                    title={stopAriaLabel}
+                    className="ml-1 flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 bg-black text-white"
+                >
+                    {stopIcon}
+                </button>
+                {isDictation && isConnected ? (
+                    <button
+                        type="button"
+                        onClick={handleVoiceSendClick}
+                        disabled={props.controlsDisabled}
+                        aria-label={sendAriaLabel}
+                        title={sendAriaLabel}
+                        className={`ml-1 flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${sendClassName}`}
+                    >
+                        <SendIcon />
+                    </button>
+                ) : null}
+            </div>
+        )
     }
 
     let icon: React.ReactNode
@@ -944,26 +1019,31 @@ export function ComposerButtons(props: {
                 onVoiceToggle={props.onVoiceToggle}
             />
 
-            <CodexUsageIndicator usage={props.codexUsage} />
-            <UnifiedButton
-                canSend={props.canSend}
-                voiceStatus={props.voiceStatus}
-                voiceEnabled={props.voiceEnabled}
-                controlsDisabled={props.controlsDisabled}
-                onSend={props.onSend}
-                onVoiceToggle={props.onVoiceToggle}
-                voiceLabel={props.dictationEnabled ? t('composer.dictate') : undefined}
-                /*
-                 * Derived, NOT raw scratchlistMode. Mirror SessionChat's
-                 * shouldRouteToScratchlist: amber + "Send to scratchlist"
-                 * whenever mode is on and there is no pending schedule.
-                 * Attachments route to scratchlist too (hub upload adapter).
-                 */
-                routesToScratchlist={
-                    (props.scratchlistMode ?? false)
-                    && props.pendingSchedule == null
-                }
-            />
+            <div className="flex items-center gap-1">
+                <CodexUsageIndicator usage={props.codexUsage} />
+                <UnifiedButton
+                    canSend={props.canSend}
+                    voiceStatus={props.voiceStatus}
+                    voiceEnabled={props.voiceEnabled}
+                    dictationEnabled={props.dictationEnabled}
+                    controlsDisabled={props.controlsDisabled}
+                    onSend={props.onSend}
+                    onVoiceToggle={props.onVoiceToggle}
+                    onVoiceSend={props.onVoiceSend}
+                    voiceLabel={props.dictationEnabled ? t('composer.dictate') : undefined}
+                    /*
+                     * Derived, NOT raw scratchlistMode. Mirror SessionChat's
+                     * shouldRouteToScratchlist: amber + "Send to scratchlist"
+                     * whenever mode is on and there is no pending schedule.
+                     * Attachments route to scratchlist too (hub upload adapter).
+                     */
+                    routesToScratchlist={
+                        (props.scratchlistMode ?? false)
+                        && props.pendingSchedule == null
+                    }
+                    allowQueueGesture={props.allowQueueGesture && props.pendingSchedule == null}
+                />
+            </div>
         </div>
     )
 }
