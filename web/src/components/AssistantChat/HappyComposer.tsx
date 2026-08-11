@@ -568,6 +568,8 @@ export function HappyComposer(props: {
     const richInputRef = useRef<RichComposerInputHandle>(null)
     const richComposerFueAnchorRef = useRef<HTMLDivElement>(null)
     const settingsButtonRef = useRef<HTMLButtonElement>(null)
+    const modelValueButtonRef = useRef<HTMLButtonElement>(null)
+    const effortValueButtonRef = useRef<HTMLButtonElement>(null)
     const settingsOverlayRef = useRef<HTMLDivElement>(null)
     // `composer.text === ''` alone is not enough to identify the empty state
     // created by a send. A user can type and delete a fresh draft before the
@@ -1472,6 +1474,8 @@ export function HappyComposer(props: {
             if (!(target instanceof Node)) return
             if (settingsOverlayRef.current?.contains(target)) return
             if (settingsButtonRef.current?.contains(target)) return
+            if (modelValueButtonRef.current?.contains(target)) return
+            if (effortValueButtonRef.current?.contains(target)) return
             dismissSettings()
         }
 
@@ -1592,9 +1596,13 @@ export function HappyComposer(props: {
     const modelValueLabel = useMemo(() => {
         if (agentFlavor === 'pi' || isNarrowViewport) return undefined
         if (!onModelChange || !supportsModelChange(agentFlavor) || modelOptions.length === 0) return undefined
-        const key = selectedModelBase !== undefined ? selectedModelBase : model
-        const option = typeof key === 'string' ? modelOptions.find((candidate) => candidate.value === key) : undefined
-        return option?.label ?? (typeof key === 'string' && key ? key : undefined)
+        const rawKey = selectedModelBase !== undefined ? selectedModelBase : model
+        // `null` (default selection) and the `auto`/`default` wire values all
+        // mean "let the agent pick" — normalize them onto the `value: null`
+        // option so the localized option label is always found.
+        const normalizedKey = !rawKey || rawKey === 'auto' || rawKey === 'default' ? null : rawKey
+        const option = modelOptions.find((candidate) => candidate.value === normalizedKey)
+        return option?.label ?? rawKey ?? undefined
     }, [agentFlavor, isNarrowViewport, onModelChange, modelOptions, model, selectedModelBase])
     const effortValueLabel = useMemo(() => {
         if (agentFlavor === 'pi' || isNarrowViewport) return undefined
@@ -2309,6 +2317,8 @@ export function HappyComposer(props: {
                             controlsDisabled={controlsDisabled}
                             showSettingsButton={showSettingsButton}
                             settingsButtonRef={settingsButtonRef}
+                            modelValueButtonRef={modelValueButtonRef}
+                            effortValueButtonRef={effortValueButtonRef}
                             onSettingsToggle={handleSettingsToggle}
                             expanded={isExpanded}
                             onExpandedToggle={handleExpandedToggle}

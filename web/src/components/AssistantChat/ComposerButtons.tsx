@@ -637,10 +637,12 @@ export function ComposerButtons(props: {
     hasAttachments?: boolean
     // Generic model/effort value buttons (non-Pi flavors)
     modelValueLabel?: string
+    modelValueButtonRef?: Ref<HTMLButtonElement>
     modelValueDisabled?: boolean
     modelValueOpen?: boolean
     onModelValueToggle?: () => void
     effortValueLabel?: string
+    effortValueButtonRef?: Ref<HTMLButtonElement>
     effortValueDisabled?: boolean
     effortValueOpen?: boolean
     onEffortValueToggle?: () => void
@@ -716,6 +718,7 @@ export function ComposerButtons(props: {
                 <ToolbarItemSlot item="model">
                 {props.modelValueLabel ? (
                     <button
+                        ref={props.modelValueButtonRef}
                         type="button"
                         aria-label={props.modelValueLabel}
                         title={props.modelValueLabel}
@@ -736,6 +739,7 @@ export function ComposerButtons(props: {
                 <ToolbarItemSlot item="effort">
                 {props.effortValueLabel ? (
                     <button
+                        ref={props.effortValueButtonRef}
                         type="button"
                         aria-label={props.effortValueLabel}
                         title={props.effortValueLabel}

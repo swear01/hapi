@@ -115,7 +115,7 @@ vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }
 vi.mock('./PiModelPanel', () => ({ PiModelPanel: () => null }))
 vi.mock('./PiThinkingLevelPanel', () => ({ PiThinkingLevelPanel: () => null }))
 
-function renderComposer(agentFlavor: string) {
+function renderComposer(agentFlavor: string, overrides: Partial<Parameters<typeof HappyComposer>[0]> = {}) {
     render(
         <I18nProvider>
             <HappyComposer
@@ -130,6 +130,7 @@ function renderComposer(agentFlavor: string) {
                 onPermissionModeChange={vi.fn()}
                 availableModelOptions={[{ value: 'claude-sonnet-4', label: 'Sonnet 4' }]}
                 pendingSendIntentRef={runtime.pendingSendIntentRef as { current: ComposerSendIntent }}
+                {...overrides}
             />
         </I18nProvider>
     )
@@ -177,5 +178,34 @@ describe('HappyComposer generic model/effort value buttons', () => {
         renderComposer('pi')
         // Generic value buttons are Pi-excluded; Pi panels stay the quick path.
         expect(screen.queryByRole('button', { name: 'Sonnet 4' })).toBeNull()
+    })
+
+    it('maps the default selection (model=null) onto the localized default option label', () => {
+        renderComposer('claude', { model: null })
+        expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
+        expect(screen.queryByRole('button', { name: 'Sonnet 4' })).toBeNull()
+    })
+
+    it('maps auto/default wire values onto the localized default option label', () => {
+        renderComposer('claude', { model: 'auto' })
+        expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
+    })
+
+    it('toggles the settings sheet closed when the model value button is clicked again', () => {
+        renderComposer('claude')
+        const modelButton = screen.getAllByRole('button', { name: 'Sonnet 4' })[0]
+        fireEvent.click(modelButton)
+        expect(screen.getByText('Model')).toBeTruthy()
+        fireEvent.click(modelButton)
+        expect(screen.queryByText('Model')).toBeNull()
+    })
+
+    it('toggles the settings sheet closed when the effort value button is clicked again', () => {
+        renderComposer('claude')
+        const effortButton = screen.getAllByRole('button', { name: 'High' })[0]
+        fireEvent.click(effortButton)
+        expect(screen.getByText('Effort')).toBeTruthy()
+        fireEvent.click(effortButton)
+        expect(screen.queryByText('Effort')).toBeNull()
     })
 })
