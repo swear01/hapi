@@ -100,6 +100,9 @@ export function NewSession(props: {
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
+    const [legacyCodexYolo] = useState(
+        () => loadPreferredAgent() === 'codex' && loadPreferredYoloMode()
+    )
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
@@ -670,24 +673,28 @@ export function NewSession(props: {
 
         const preferred = resolvePreferredLaunchSettings(
             agent,
-            loadPreferredLaunchSettings(machineId, agent)
+            loadPreferredLaunchSettings(machineId, agent),
+            legacyCodexYolo
         )
 
         setModel(agent === 'opencode' ? 'auto' : preferred.model)
         setCursorSelectedBase(preferred.cursorSelectedBase)
         setEffort(preferred.effort)
         setModelReasoningEffort(preferred.modelReasoningEffort)
-        setServiceTier(preferred.serviceTier)
-        setCollaborationMode(preferred.collaborationMode)
-        setGrokPermissionMode(preferred.grokPermissionMode)
-        setSessionType(preferred.sessionType)
+        setServiceTier(preferred.serviceTier ?? 'standard')
+        setCollaborationMode(preferred.collaborationMode ?? 'default')
+        setGrokPermissionMode(preferred.grokPermissionMode ?? 'default')
+        setSessionType(preferred.sessionType ?? 'simple')
+        if (usesCodexFamilyPermissionModes(agent)) {
+            setCodexFamilyPermissionMode(preferred.permissionMode ?? 'default')
+        }
         setOpencodeSelectedModel(
             agent === 'opencode' && preferred.model !== 'auto' ? preferred.model : null
         )
         setAgySelectedModel(
             agent === 'agy' && preferred.model !== 'auto' ? preferred.model : null
         )
-    }, [agent, machineId])
+    }, [agent, legacyCodexYolo, machineId])
 
     useEffect(() => {
         if (
@@ -1323,6 +1330,7 @@ export function NewSession(props: {
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
+            const usesCodexFamilyPermissions = usesCodexFamilyPermissionModes(agent)
             const preferredLaunchSettings = {
                 model: agent === 'agy'
                     ? (agySelectedModel ?? 'auto')
@@ -1335,7 +1343,8 @@ export function NewSession(props: {
                 serviceTier,
                 collaborationMode,
                 grokPermissionMode,
-                sessionType
+                sessionType,
+                ...(usesCodexFamilyPermissions ? { permissionMode: codexFamilyPermissionMode } : {})
             }
             const resolvedServiceTier = agent === 'codex' && showCodexFastMode
                 ? serviceTier
@@ -1343,8 +1352,6 @@ export function NewSession(props: {
             const resolvedCollaborationMode = agent === 'codex' && collaborationMode !== 'default'
                 ? collaborationMode
                 : undefined
-
-            const usesCodexFamilyPermissions = usesCodexFamilyPermissionModes(agent)
 
             if (agent === 'codex' && selectedCodexImportSession) {
                 setIsImportingCodexSession(true)

@@ -1,8 +1,10 @@
 import {
     CREATABLE_AGENT_FLAVORS,
     GROK_PERMISSION_MODES,
+    getPermissionModesForFlavor,
     type CodexCollaborationMode,
-    type GrokPermissionMode
+    type GrokPermissionMode,
+    type PermissionMode
 } from '@hapi/protocol'
 import {
     CLAUDE_EFFORT_OPTIONS,
@@ -14,6 +16,7 @@ import {
     type NewSessionServiceTier,
     type SessionType
 } from './types'
+import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
 
 const AGENT_STORAGE_KEY = 'hapi:newSession:agent'
 const YOLO_STORAGE_KEY = 'hapi:newSession:yolo'
@@ -28,6 +31,7 @@ export type PreferredLaunchSettings = {
     collaborationMode?: CodexCollaborationMode
     grokPermissionMode?: GrokPermissionMode
     sessionType?: SessionType
+    permissionMode?: PermissionMode
 }
 
 // Only launchable flavors are valid defaults; a stale 'gemini' preference
@@ -87,6 +91,10 @@ export function loadPreferredLaunchSettings(
         if (!parsed || typeof parsed !== 'object' || typeof parsed.model !== 'string') {
             return null
         }
+        const permissionMode = typeof parsed.permissionMode === 'string'
+            && getPermissionModesForFlavor(agent).includes(parsed.permissionMode as PermissionMode)
+            ? parsed.permissionMode as PermissionMode
+            : undefined
         return {
             model: parsed.model,
             cursorSelectedBase: typeof parsed.cursorSelectedBase === 'string'
@@ -101,7 +109,8 @@ export function loadPreferredLaunchSettings(
             grokPermissionMode: (GROK_PERMISSION_MODES as readonly string[]).includes(parsed.grokPermissionMode ?? '')
                 ? (parsed.grokPermissionMode as GrokPermissionMode)
                 : 'default',
-            sessionType: parsed.sessionType === 'worktree' ? 'worktree' : 'simple'
+            sessionType: parsed.sessionType === 'worktree' ? 'worktree' : 'simple',
+            ...(permissionMode ? { permissionMode } : {})
         }
     } catch {
         return null
@@ -133,8 +142,9 @@ function resolvePreferredOptionValue(
 
 export function resolvePreferredLaunchSettings(
     agent: AgentType,
-    preferred: PreferredLaunchSettings | null
-): Required<PreferredLaunchSettings> {
+    preferred: PreferredLaunchSettings | null,
+    legacyCodexYolo = false
+): PreferredLaunchSettings {
     const preferredModel = preferred?.model ?? 'auto'
     const staticModelValues = MODEL_OPTIONS[agent].map((option) => option.value)
     const model = staticModelValues.length > 0 && agent !== 'codex' && agent !== 'copilot'
@@ -156,6 +166,16 @@ export function resolvePreferredLaunchSettings(
             'default'
         )
         : (preferred?.modelReasoningEffort ?? 'default')
+    const supportsCodexFamilyPermissionMode = usesCodexFamilyPermissionModes(agent)
+    const availablePermissionModes = getPermissionModesForFlavor(agent)
+    const preferredPermissionMode = preferred?.permissionMode
+    const permissionMode = supportsCodexFamilyPermissionMode
+        ? preferredPermissionMode && availablePermissionModes.includes(preferredPermissionMode)
+            ? preferredPermissionMode
+            : agent === 'codex' && legacyCodexYolo
+                ? 'yolo'
+                : 'default'
+        : undefined
 
     return {
         model,
@@ -167,6 +187,7 @@ export function resolvePreferredLaunchSettings(
         grokPermissionMode: (GROK_PERMISSION_MODES as readonly string[]).includes(preferred?.grokPermissionMode ?? '')
             ? (preferred!.grokPermissionMode as GrokPermissionMode)
             : 'default',
-        sessionType: preferred?.sessionType === 'worktree' ? 'worktree' : 'simple'
+        sessionType: preferred?.sessionType === 'worktree' ? 'worktree' : 'simple',
+        ...(permissionMode ? { permissionMode } : {})
     }
 }
