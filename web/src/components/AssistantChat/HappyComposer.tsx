@@ -2246,6 +2246,7 @@ export function HappyComposer(props: {
                             controlsDisabled={controlsDisabled}
                             showSettingsButton={showSettingsButton}
                             settingsButtonRef={settingsButtonRef}
+                            settingsDisabled={modelEffortControlsDisabled}
                             modelValueButtonRef={modelValueButtonRef}
                             effortValueButtonRef={effortValueButtonRef}
                             onSettingsToggle={handleSettingsToggle}

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '@/lib/i18n-context'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import type { ComposerSendIntent } from '@/lib/messageDelivery'
+import type { ComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
 import { HappyComposer } from './HappyComposer'
 
 /**
@@ -34,6 +35,7 @@ const runtime = vi.hoisted(() => ({
     pendingSendIntentRef: { current: 'default' },
     sentIntents: [] as ComposerSendIntent[],
     narrowViewport: false,
+    toolbarLayout: null as ComposerToolbarLayout | null,
 }))
 
 vi.mock('@assistant-ui/react', async () => {
@@ -95,7 +97,7 @@ vi.mock('@/hooks/useComposerToolbarLayout', async () => {
     const actual = await import('@/hooks/useComposerToolbarLayout')
     return {
         ...actual,
-        useComposerToolbarLayout: () => ({ layout: actual.DEFAULT_COMPOSER_TOOLBAR_LAYOUT }),
+        useComposerToolbarLayout: () => ({ layout: runtime.toolbarLayout ?? actual.DEFAULT_COMPOSER_TOOLBAR_LAYOUT }),
     }
 })
 vi.mock('@/hooks/useNarrowViewport', () => ({
@@ -139,6 +141,8 @@ describe('HappyComposer generic model/effort value buttons', () => {
         cleanup()
         runtime.setSnapshot = null
         runtime.narrowViewport = false
+        runtime.toolbarLayout = null
+        runtime.snapshot.thread.isDisabled = false
         runtime.sentIntents = []
     })
 
@@ -200,6 +204,39 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.getAllByText('Gemini 2.5 Pro').length).toBeGreaterThan(1)
         expect(screen.getByText('Vertex Gemini 2.5 Pro')).toBeTruthy()
         expect(screen.getByText('Effort')).toBeTruthy()
+    })
+
+    it('keeps the gear reachable on narrow viewports even when the toolbar layout hides it', () => {
+        runtime.narrowViewport = true
+        runtime.toolbarLayout = {
+            mode: 'left',
+            left: ['attachment', 'expand', 'terminal'],
+            right: [],
+            hidden: ['settings', 'abort'],
+        }
+        renderComposer('claude')
+        // Narrow mode collapses the value buttons into the settings sheet, so the
+        // gear must stay visible regardless of the persisted layout.
+        expect(screen.queryByRole('button', { name: 'Sonnet 4' })).toBeNull()
+        expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
+    })
+
+    it('keeps the Pi settings gear live mid-turn on narrow viewports', () => {
+        runtime.narrowViewport = true
+        runtime.snapshot.thread.isDisabled = true
+        renderComposer('pi', {
+            piModels: [
+                { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+            ],
+            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
+        })
+        // Value buttons are collapsed on narrow; the gear is the only trigger and
+        // must stay clickable while a Pi turn is running (#1442).
+        const gear = screen.getByRole('button', { name: 'Settings' })
+        expect(gear).not.toBeDisabled()
+        fireEvent.click(gear)
+        expect(screen.getByText('Model')).toBeTruthy()
+        expect(screen.getByText('Gemini 2.5 Pro')).toBeTruthy()
     })
 
     it('maps the default selection (model=null) onto the localized default option label', () => {
