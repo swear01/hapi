@@ -37,13 +37,17 @@ import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { useSendMessage, type SendErrorInfo } from '@/hooks/mutations/useSendMessage'
 import type { ComposerSendError } from '@/components/AssistantChat/HappyComposer'
 import { ApiError } from '@/api/client'
+import type { MessageDeliveryMode } from '@hapi/protocol'
 import { queryKeys } from '@/lib/query-keys'
 import { useToast } from '@/lib/toast-context'
 import { useTranslation } from '@/lib/use-translation'
 import { seedMessageWindowFromSession, syncTailMessages } from '@/lib/message-window-store'
 import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
+import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+import { getDraftAttachments } from '@/lib/composer-attachment-drafts'
+import { refreshSessionDetailPreservingActive } from '@/lib/session-detail-optimistic'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
-import { markSessionSeen } from '@/lib/sessionLastSeen'
+import { initializeSessionLastSeen, markSessionSeen } from '@/lib/sessionLastSeen'
 import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
 import { clearCodexImportedSession } from '@/lib/codexImportedSessions'
 import { getSupersedingSessionId, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
@@ -147,13 +151,14 @@ function SettingsIcon(props: { className?: string }) {
 }
 
 function SessionsPage() {
-    const { api } = useAppContext()
+    const { api, baseUrl } = useAppContext()
     const navigate = useNavigate()
     const pathname = useLocation({ select: location => location.pathname })
     const matchRoute = useMatchRoute()
     const { t } = useTranslation()
     const { addToast } = useToast()
     const { sessions, isLoading, error, refetch } = useSessions(api)
+    const [initializedHub, setInitializedHub] = useState<string | null>(null)
     const { machines } = useMachines(api, true)
     const handleRefresh = useCallback(() => {
         return (async () => {
@@ -191,6 +196,13 @@ function SessionsPage() {
         [selectedSessionId, sessions]
     )
     useEffect(() => {
+        if (isLoading || error) {
+            return
+        }
+        initializeSessionLastSeen(baseUrl, sessions)
+        setInitializedHub(baseUrl)
+    }, [baseUrl, error, isLoading, sessions])
+    useEffect(() => {
         if (!selectedSessionId || !selectedSession) {
             return
         }
@@ -221,6 +233,7 @@ function SessionsPage() {
                         </div>
                     ) : null}
                     <SessionList
+                        key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
                         sessions={sessions}
                         selectedSessionId={selectedSessionId}
                         onSelect={(sessionId) => navigate({
@@ -372,6 +385,7 @@ function SessionPage() {
         message: string
         code: string | null
         scheduledAt: number | null
+        deliveryMode: MessageDeliveryMode
         mutationStarted: boolean
         restoreSuppressed: boolean
     }
@@ -422,11 +436,15 @@ function SessionPage() {
                 await queryClient.invalidateQueries({ queryKey: queryKeys.session(result.sessionId) })
                 await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
                 if (result.sessionId && result.sessionId !== errorSessionId) {
-                    navigate({
-                        to: '/sessions/$sessionId',
-                        params: { sessionId: result.sessionId },
-                        replace: true
-                    })
+                    await transferComposerDraftThenNavigate(
+                        errorSessionId,
+                        result.sessionId,
+                        () => navigate({
+                            to: '/sessions/$sessionId',
+                            params: { sessionId: result.sessionId },
+                            replace: true
+                        }),
+                    )
                 }
             } catch (err) {
                 const message = err instanceof Error ? err.message : t('dialog.error.default')
@@ -459,6 +477,7 @@ function SessionPage() {
             text: rawSendError.text,
             message: rawSendError.message,
             scheduledAt: rawSendError.scheduledAt,
+            deliveryMode: rawSendError.deliveryMode,
             mutationStarted: rawSendError.mutationStarted,
             restoreSuppressed: rawSendError.restoreSuppressed,
             action: rawSendError.code === 'session_inactive' && canOfferInactiveReopen
@@ -471,10 +490,80 @@ function SessionPage() {
         }
         : null
 
+    const resolvedSessionRef = useRef<{ source: string; target: Promise<string> } | null>(null)
+    // Clear when the session id or active flag changes so a same-id resume
+    // that later archives again cannot reuse a stale in-flight/cached resume.
+    useEffect(() => {
+        resolvedSessionRef.current = null
+    }, [session?.id, session?.active])
+    const resolveSessionId = useCallback(async (currentSessionId: string) => {
+        if (!api || !session || session.active) {
+            return { sessionId: currentSessionId, resumed: false }
+        }
+        const cached = resolvedSessionRef.current
+        if (cached?.source === currentSessionId) {
+            return { sessionId: await cached.target, resumed: true }
+        }
+        if (!inactiveSessionCanResume(session, messages.length, cursorChatStoreStatus?.onDisk)) {
+            throw new ApiError(
+                t('chat.sendError.sessionInactive'),
+                409,
+                'session_inactive',
+            )
+        }
+        try {
+            const target = api.resumeSession(currentSessionId, { permissionMode: session.permissionMode ?? undefined })
+            resolvedSessionRef.current = { source: currentSessionId, target }
+            return { sessionId: await target, resumed: true }
+        } catch (error) {
+            if (resolvedSessionRef.current?.source === currentSessionId) {
+                resolvedSessionRef.current = null
+            }
+            const message = error instanceof Error ? error.message : t('dialog.error.default')
+            addToast({
+                title: t('resume.failed.title'),
+                body: message,
+                sessionId: currentSessionId,
+                url: ''
+            })
+            throw new ApiError(
+                t('chat.sendError.sessionInactive'),
+                409,
+                'session_inactive',
+            )
+        }
+    }, [api, session, messages.length, cursorChatStoreStatus?.onDisk, t, addToast])
+
+    const handleSessionResolved = useCallback((resolvedSessionId: string) => {
+        if (session) {
+            if (resolvedSessionId !== session.id) {
+                seedMessageWindowFromSession(session.id, resolvedSessionId)
+            }
+            queryClient.setQueryData(queryKeys.session(resolvedSessionId), (previous: { session?: typeof session } | undefined) => ({
+                session: { ...(previous?.session ?? session), id: resolvedSessionId, active: true }
+            }))
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+        }
+        navigate({
+            to: '/sessions/$sessionId',
+            params: { sessionId: resolvedSessionId },
+            replace: true
+        })
+        if (api) {
+            void refreshSessionDetailPreservingActive(
+                queryClient,
+                resolvedSessionId,
+                () => api.getSession(resolvedSessionId),
+            )
+            void syncTailMessages(api, resolvedSessionId).catch(() => {})
+        }
+    }, [api, navigate, queryClient, session])
+
     const {
         sendMessage,
         retryMessage,
         isSending,
+        sendSettlement,
     } = useSendMessage(api, sessionId, {
         isSessionThinking: session?.thinking ?? false,
         onSuccess: (sentSessionId) => {
@@ -501,88 +590,35 @@ function SessionPage() {
                     message,
                     code,
                     scheduledAt: info.scheduledAt,
+                    deliveryMode: info.deliveryMode,
                     mutationStarted: info.mutationStarted,
                     restoreSuppressed: false,
                 }
             }))
         },
-        resolveSessionId: async (currentSessionId) => {
-            if (!api || !session || session.active) {
-                return currentSessionId
-            }
-            if (!inactiveSessionCanResume(session, messages.length, cursorChatStoreStatus?.onDisk)) {
-                // #918: surface as a session_inactive ApiError so the
-                // onError consumer's classifier renders the Reopen
-                // affordance.  `status: 409` mirrors the hub guard for
-                // structural parity; no HTTP call was made.
-                throw new ApiError(
-                    t('chat.sendError.sessionInactive'),
-                    409,
-                    'session_inactive',
-                )
-            }
-            try {
-                return await api.resumeSession(currentSessionId, { permissionMode: session.permissionMode ?? undefined })
-            } catch (error) {
-                const message = error instanceof Error ? error.message : t('dialog.error.default')
-                addToast({
-                    title: t('resume.failed.title'),
-                    body: message,
-                    sessionId: currentSessionId,
-                    url: ''
-                })
-                // Rebrand as a session_inactive ApiError so the inline
-                // affordance offers Reopen (a separate code path from the
-                // failed Resume) and the operator has a recovery click.
-                throw new ApiError(
-                    t('chat.sendError.sessionInactive'),
-                    409,
-                    'session_inactive',
-                )
-            }
-        },
-        onSessionResolved: (resolvedSessionId) => {
-            // A direct retry retains its old alert with restoreSuppressed=true.
-            // Move it to the target session before navigation so the mutation's
-            // onSuccess/onError can clear or replace the same record.
-            setSendErrors((previous) => migrateSuppressedSendError(
-                previous,
+        resolveSessionId,
+        onSessionResolved: async (resolvedSessionId, context) => {
+            if (!sessionId) return undefined
+            setSendErrors((prev) => migrateSuppressedSendError(prev, sessionId, resolvedSessionId))
+            await transferComposerDraftThenNavigate(
                 sessionId,
                 resolvedSessionId,
-            ))
-            void (async () => {
-                if (api) {
-                    if (session) {
-                        if (resolvedSessionId !== session.id) {
-                            seedMessageWindowFromSession(session.id, resolvedSessionId)
-                        }
-                        void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
-                    }
-                    try {
-                        await Promise.all([
-                            queryClient.prefetchQuery({
-                                queryKey: queryKeys.session(resolvedSessionId),
-                                queryFn: () => api.getSession(resolvedSessionId),
-                            }),
-                            syncTailMessages(api, resolvedSessionId),
-                        ])
-                    } catch {
-                    }
-                    if (session) {
-                        // 中文注释：恢复接口成功后，REST/SSE 可能仍有短暂竞态；最后再乐观置为在线，
-                        // 避免刚 prefetch 到旧 inactive 快照导致状态栏继续显示离线。
-                        queryClient.setQueryData(queryKeys.session(resolvedSessionId), (previous: { session?: typeof session } | undefined) => ({
-                            session: { ...(previous?.session ?? session), id: resolvedSessionId, active: true }
-                        }))
-                    }
-                }
-                navigate({
-                    to: '/sessions/$sessionId',
-                    params: { sessionId: resolvedSessionId },
-                    replace: true
-                })
-            })()
+                () => handleSessionResolved(resolvedSessionId),
+                [],
+                // assistant-ui clears composer text without awaiting this path;
+                // keep the submitted snapshot so deferred hydration still has it.
+                { textOverride: context.text },
+            )
+            // Cross-session resume: visible metadata may still carry source-scoped
+            // upload paths, and inactive remounts hide stored files entirely.
+            // Always defer so the active target can hydrate/re-upload before POST.
+            const stored = await getDraftAttachments(resolvedSessionId)
+            if ((context.attachments?.length ?? 0) > 0 || stored.length > 0) {
+                return { deferUntilDraftHydrated: true }
+            }
+            return undefined
         },
+
         onBlocked: (reason) => {
             if (reason === 'no-api') {
                 addToast({
@@ -647,11 +683,14 @@ function SessionPage() {
             })
 
             const fileHits: Suggestion[] = []
-            if (agentType === 'codex' && api && sessionId) {
+            if ((agentType === 'codex' || agentType === 'copilot') && api && sessionId) {
                 const response = await api.searchSessionFiles(sessionId, search, 50)
                 if (response.success && response.files) {
                     for (const file of response.files) {
-                        const mentionText = `@"${file.fullPath.replace(/(["\\])/g, '\\$1')}"`
+                        // Codex App Server expects @"path"; Copilot CLI uses @path (relative preferred).
+                        const mentionText = agentType === 'copilot'
+                            ? `@${file.fullPath}`
+                            : `@"${file.fullPath.replace(/(["\\])/g, '\\$1')}"`
                         fileHits.push({
                             key: mentionText,
                             text: mentionText,
@@ -735,6 +774,7 @@ function SessionPage() {
             isSyncingTail={messagesSyncingTail}
             isLoadingMoreMessages={messagesLoadingMore}
             isSending={isSending}
+            sendSettlement={sendSettlement}
             viewMode={messagesViewMode}
             messagesVersion={messagesVersion}
             historyVersion={historyVersion}
@@ -743,6 +783,8 @@ function SessionPage() {
             onLoadMore={loadMoreMessages}
             onCancelLoadMore={cancelLoadMoreMessages}
             onSend={sendMessage}
+            resolveSessionIdForUpload={async (id) => (await resolveSessionId(id)).sessionId}
+            onUploadSessionResolved={handleSessionResolved}
             onViewModeChange={setViewMode}
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}
@@ -752,6 +794,22 @@ function SessionPage() {
             onSuppressSendErrorRestore={suppressSendErrorRestore}
             initialOutlineOpen={outline}
             onInitialOutlineConsumed={handleInitialOutlineConsumed}
+            onAbortRestore={(text) => {
+                sendErrorIdRef.current += 1
+                setSendErrors((prev) => ({
+                    ...prev,
+                    [sessionId]: {
+                        id: sendErrorIdRef.current,
+                        text,
+                        message: t('chat.sendError.aborted'),
+                        code: 'abort',
+                        scheduledAt: null,
+                        deliveryMode: 'queue',
+                        mutationStarted: true,
+                        restoreSuppressed: false
+                    }
+                }))
+            }}
         />
     )
 }
@@ -794,7 +852,7 @@ function SessionDetailRoute() {
             return
         }
         navigate({ to: '/sessions', replace: true })
-    }, [navigate, sessionNotFound])
+    }, [navigate, sessionNotFound, sessionId])
 
     if (sessionNotFound) {
         return (
@@ -1001,6 +1059,7 @@ type SessionFileSearch = {
     staged?: boolean
     tab?: 'changes' | 'directories'
     query?: string
+    origin?: 'chat'
 }
 
 const sessionFileRoute = createRoute({
@@ -1023,6 +1082,7 @@ const sessionFileRoute = createRoute({
         const query = typeof search.query === 'string' && search.query.length > 0
             ? search.query
             : undefined
+        const origin = search.origin === 'chat' ? 'chat' : undefined
 
         const result: SessionFileSearch = { path }
         if (staged !== undefined) {
@@ -1033,6 +1093,9 @@ const sessionFileRoute = createRoute({
         }
         if (query !== undefined) {
             result.query = query
+        }
+        if (origin !== undefined) {
+            result.origin = origin
         }
         return result
     },

@@ -75,6 +75,7 @@ export class AcpSdkBackend implements AgentBackend {
     private initializeResult: AcpInitializeResult | null = null;
     private setModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
+    private promptRequestInFlight = false;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -82,6 +83,7 @@ export class AcpSdkBackend implements AgentBackend {
     private usageUpdateListener: ((msg: AgentMessage) => void) | null = null;
     private sessionInfoUpdateListener: ((update: AcpSessionInfoUpdate) => void) | null = null;
     private lastForwardedUsageUpdate: AcpUsageUpdate | null = null;
+    private sessionUpdateQueue: Promise<void> = Promise.resolve();
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -119,6 +121,7 @@ export class AcpSdkBackend implements AgentBackend {
         args?: string[];
         env?: Record<string, string>;
         textChunkMode?: AcpTextChunkMode;
+        flavor?: AgentFlavor;
     }) {}
 
     async initialize(): Promise<void> {
@@ -508,8 +511,12 @@ export class AcpSdkBackend implements AgentBackend {
             AcpSdkBackend.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
             AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
         );
+        await this.sessionUpdateQueue;
         this.messageHandler?.drainBuffers();
-        this.messageHandler = new AcpMessageHandler(onUpdate, { textChunkMode: this.options.textChunkMode });
+        this.messageHandler = new AcpMessageHandler(onUpdate, {
+            textChunkMode: this.options.textChunkMode,
+            flavor: this.options.flavor,
+        });
         this.isProcessingMessage = true;
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
@@ -521,10 +528,16 @@ export class AcpSdkBackend implements AgentBackend {
         try {
             // No timeout for prompt requests - they can run for extended periods
             // during complex tasks, tool-heavy operations, or slow model responses
-            const response = await this.transport.sendRequest('session/prompt', {
-                sessionId,
-                prompt: content
-            }, { timeoutMs: Infinity });
+            this.promptRequestInFlight = true;
+            let response: unknown;
+            try {
+                response = await this.transport.sendRequest('session/prompt', {
+                    sessionId,
+                    prompt: content
+                }, { timeoutMs: Infinity });
+            } finally {
+                this.promptRequestInFlight = false;
+            }
 
             stopReason = isObject(response) ? asString(response.stopReason) : null;
             promptUsage = this.extractPromptUsage(response);
@@ -533,12 +546,17 @@ export class AcpSdkBackend implements AgentBackend {
                 AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
                 AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
             );
+            await this.sessionUpdateQueue;
             this.messageHandler?.drainBuffers();
             // Block here until the model truly stops streaming straggler
             // chunks (or LATE_FLUSH_WINDOW_MS elapses), so turn_complete and
             // the launcher's ready signal only fire once every chunk has been
             // emitted to this turn's onUpdate.
             await this.drainLateBuffers();
+            // Late window can enqueue async image registration; drain again
+            // before turn_complete so generated_image precedes turn boundary.
+            await this.sessionUpdateQueue;
+            this.messageHandler?.drainBuffers();
             try {
                 const latestUsageUpdate = this.readLatestUsageUpdate();
                 if (promptUsage) {
@@ -695,6 +713,10 @@ export class AcpSdkBackend implements AgentBackend {
         return this.isProcessingMessage;
     }
 
+    isPromptRequestInFlight(): boolean {
+        return this.promptRequestInFlight;
+    }
+
     getLastSessionUpdateAt(): number {
         return this.lastSessionUpdateAt;
     }
@@ -720,6 +742,7 @@ export class AcpSdkBackend implements AgentBackend {
             clearTimeout(timer);
         }
         this.sessionInfoRefreshTimers.clear();
+        await this.sessionUpdateQueue;
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
@@ -741,12 +764,28 @@ export class AcpSdkBackend implements AgentBackend {
         }
         this.lastSessionUpdateAt = Date.now();
         const update = params.update;
+        // Title/usage/commands stay synchronous (#1028). Only message-handler
+        // work is queued so async image registration preserves event order.
         if (sessionId) {
             this.captureAvailableCommands(sessionId, update);
         }
         this.forwardSessionInfoUpdate(sessionId, update);
         this.captureUsageUpdate(update);
-        this.messageHandler?.handleUpdate(update);
+        // Capture the handler at enqueue time. Looking up `this.messageHandler`
+        // when the queued microtask runs can leak a suppressUpdatesDuring
+        // update into the restored handler if earlier async image work kept
+        // the queue busy past restore.
+        const handler = this.messageHandler;
+        this.sessionUpdateQueue = this.sessionUpdateQueue
+            .then(async () => {
+                await handler?.handleUpdate(update);
+            })
+            .catch((error) => {
+                logger.debug(
+                    '[AcpSdkBackend] session update failed:',
+                    error instanceof Error ? error.message : String(error)
+                );
+            });
     }
 
     private forwardSessionInfoUpdate(sessionId: string | null, update: unknown): void {

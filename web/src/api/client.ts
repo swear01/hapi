@@ -9,10 +9,13 @@ import type {
     CodexDesktopStatusResponse,
     CodexArchiveSessionResponse,
     CodexCollaborationMode,
+    CopilotAgentMode,
     FileSearchResponse,
     MachinesResponse,
     MessagesResponse,
     PermissionMode,
+    PiImportSessionsResponse,
+    PiLocalSessionsResponse,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
     PushVapidPublicKeyResponse,
@@ -25,6 +28,7 @@ import type {
     SessionsResponse
 } from '@/types/api'
 import type {
+    AgyModelsResponse,
     CodexModelsResponse,
     CursorMigrateOutcome,
     CursorMigrateToAcpRequest,
@@ -34,6 +38,7 @@ import type {
     FileReadResponse,
     GitCommandResponse,
     GrokModelsResponse,
+    CopilotModelsResponse,
     GrokReasoningEffortResponse,
     ListDirectoryResponse,
     MachineListDirectoryResponse,
@@ -43,12 +48,57 @@ import type {
     QueuedStateResponse,
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
+    HubSettingsResponse,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
-import type { AgentFlavor } from '@hapi/protocol'
+import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+
+export type ProviderCredentialSource = 'env' | 'settings' | 'none'
+
+export interface MaskedCredentialStatus {
+    configured: boolean
+    source: ProviderCredentialSource
+    hint: string | null
+    editable: boolean
+}
+
+export interface TranscriptionCredentialStatus {
+    openai: MaskedCredentialStatus
+    elevenlabs: MaskedCredentialStatus
+    deepgram: MaskedCredentialStatus
+    groq: MaskedCredentialStatus
+    openaiCompatible: {
+        configured: boolean
+        source: ProviderCredentialSource
+        baseUrl: string | null
+        model: string | null
+        baseUrlEditable: boolean
+        modelEditable: boolean
+        apiKey: MaskedCredentialStatus
+    }
+    voiceBackends: {
+        elevenlabs: MaskedCredentialStatus
+        geminiLive: MaskedCredentialStatus
+        qwenRealtime: MaskedCredentialStatus
+    }
+}
+
+export interface TranscriptionCredentialsUpdate {
+    openai?: string | null
+    elevenlabs?: string | null
+    deepgram?: string | null
+    groq?: string | null
+    openaiCompatible?: {
+        baseUrl?: string | null
+        model?: string | null
+        apiKey?: string | null
+    }
+    geminiLive?: string | null
+    qwenRealtime?: string | null
+}
 
 type ApiClientOptions = {
     baseUrl?: string
@@ -223,6 +273,21 @@ export class ApiClient {
         return await this.request<CodexLocalSessionsResponse>(`/api/codex/sessions${query}`)
     }
 
+    async getPiSessions(cwd?: string | null, machineId?: string | null): Promise<PiLocalSessionsResponse> {
+        const params = new URLSearchParams()
+        if (cwd?.trim()) params.set('cwd', cwd.trim())
+        if (machineId?.trim()) params.set('machineId', machineId.trim())
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
+    }
+
+    async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
+        return await this.request<PiImportSessionsResponse>('/api/pi/import-sessions', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })
+    }
+
     async archiveCodexSession(sessionId: string, machineId?: string | null): Promise<CodexArchiveSessionResponse> {
         return await this.request<CodexArchiveSessionResponse>('/api/codex/archive-session', {
             method: 'POST',
@@ -365,9 +430,13 @@ export class ApiClient {
         if (authToken) {
             headers.set('authorization', `Bearer ${authToken}`)
         }
-        const res = await fetch(this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`), {
-            headers
-        })
+        const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`)
+        let res = await fetch(url, { headers })
+        // Hub returns ETag + immutable Cache-Control (#927). Default fetch cache stores 200
+        // responses so remounts avoid RPC; on 304 the body is empty — read from cache.
+        if (res.status === 304) {
+            res = await fetch(url, { headers, cache: 'force-cache' })
+        }
         if (res.status === 401 && attempt === 0 && this.onUnauthorized) {
             const refreshed = await this.onUnauthorized()
             if (refreshed) {
@@ -432,14 +501,22 @@ export class ApiClient {
         )
     }
 
-    async sendMessage(sessionId: string, text: string, localId?: string | null, attachments?: AttachmentMetadata[], scheduledAt?: number | null): Promise<void> {
+    async sendMessage(
+        sessionId: string,
+        text: string,
+        localId?: string | null,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        deliveryMode?: MessageDeliveryMode,
+    ): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
             method: 'POST',
             body: JSON.stringify({
                 text,
                 localId: localId ?? undefined,
                 attachments: attachments ?? undefined,
-                scheduledAt: scheduledAt ?? undefined
+                scheduledAt: scheduledAt ?? undefined,
+                deliveryMode: deliveryMode ?? undefined,
             })
         })
     }
@@ -648,6 +725,17 @@ export class ApiClient {
         return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
     }
 
+    async getHubSettings(): Promise<HubSettingsResponse> {
+        return await this.request<HubSettingsResponse>('/api/hub-settings')
+    }
+
+    async updateHubSettings(settings: HubSettingsResponse): Promise<HubSettingsResponse> {
+        return await this.request<HubSettingsResponse>('/api/hub-settings', {
+            method: 'PUT',
+            body: JSON.stringify(settings)
+        })
+    }
+
     async getUsageSummary(
         range: '7d' | '30d' | 'all' = '7d',
         timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -698,7 +786,9 @@ export class ApiClient {
         effort?: string,
         permissionMode?: PermissionMode,
         serviceTier?: 'fast' | 'standard',
-        collaborationMode?: 'default' | 'plan'
+        collaborationMode?: CodexCollaborationMode,
+        copilotAgentMode?: CopilotAgentMode,
+        startingMode?: 'remote' | 'pty'
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
@@ -713,14 +803,28 @@ export class ApiClient {
                 effort,
                 permissionMode,
                 serviceTier,
-                collaborationMode
+                collaborationMode,
+                copilotAgentMode,
+                startingMode
             })
         })
+    }
+
+    async getMachineAgyModels(machineId: string): Promise<AgyModelsResponse> {
+        return await this.request<AgyModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/agy-models`
+        )
     }
 
     async getMachineCodexModels(machineId: string): Promise<CodexModelsResponse> {
         return await this.request<CodexModelsResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/codex-models`
+        )
+    }
+
+    async getSessionCodexModels(sessionId: string): Promise<CodexModelsResponse> {
+        return await this.request<CodexModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/codex-models`
         )
     }
 
@@ -768,10 +872,29 @@ export class ApiClient {
         )
     }
 
+    async getMachineCopilotModelsForCwd(machineId: string, cwd: string): Promise<CopilotModelsResponse> {
+        return await this.request<CopilotModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/copilot-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
     async getSessionGrokModels(sessionId: string): Promise<GrokModelsResponse> {
         return await this.request<GrokModelsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/grok-models`
         )
+    }
+
+    async getSessionCopilotModels(sessionId: string): Promise<CopilotModelsResponse> {
+        return await this.request<CopilotModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/copilot-models`
+        )
+    }
+
+    async setCopilotAgentMode(sessionId: string, mode: CopilotAgentMode): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/copilot-agent-mode`, {
+            method: 'POST',
+            body: JSON.stringify({ mode })
+        })
     }
 
     async getSessionGrokReasoningEffortOptions(sessionId: string): Promise<GrokReasoningEffortResponse> {
@@ -796,6 +919,13 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
             method: 'PATCH',
             body: JSON.stringify({ name })
+        })
+    }
+
+    async setSessionPinMode(sessionId: string, mode: 'none' | 'project' | 'global'): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+            method: 'PUT',
+            body: JSON.stringify({ mode })
         })
     }
 
@@ -973,6 +1103,19 @@ export class ApiClient {
 
     async fetchTranscriptionProviders(): Promise<{ providers: TranscriptionProviderInfo[] }> {
         return await this.request('/api/voice/transcription/providers')
+    }
+
+    async fetchTranscriptionCredentials(): Promise<TranscriptionCredentialStatus> {
+        return await this.request('/api/voice/transcription/credentials')
+    }
+
+    async updateTranscriptionCredentials(
+        update: TranscriptionCredentialsUpdate
+    ): Promise<TranscriptionCredentialStatus> {
+        return await this.request('/api/voice/transcription/credentials', {
+            method: 'PUT',
+            body: JSON.stringify(update),
+        })
     }
 
     async transcribeVoice(options: {

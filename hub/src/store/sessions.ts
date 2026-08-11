@@ -61,6 +61,7 @@ const SIMPLE_RESUME_TOKENS = [
     'grokSessionId',
     'cursorSessionId',
     'kimiSessionId',
+    'copilotSessionId',
     'piSessionId'
 ] as const
 
@@ -138,6 +139,8 @@ type DbSessionRow = {
     machine_id: string | null
     created_at: number
     updated_at: number
+    pinned: number
+    global_pinned: number
     metadata: string | null
     metadata_version: number
     agent_state: string | null
@@ -163,6 +166,8 @@ function toStoredSession(row: DbSessionRow): StoredSession {
         machineId: row.machine_id,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        pinned: row.pinned === 1,
+        globalPinned: row.global_pinned === 1,
         metadata: safeJsonParse(row.metadata),
         metadataVersion: row.metadata_version,
         agentState: safeJsonParse(row.agent_state),
@@ -376,12 +381,22 @@ export function setSessionTodos(
     }
 }
 
-/** Force-replace todos after rewind/fork (ignores monotonic timestamp guard). */
+/**
+ * Force-replace todos after rewind/fork (ignores the normal
+ * `todos_updated_at < candidate` guard so an older remaining TodoWrite can
+ * land). The watermark itself MUST still advance: SSE clients gate structured
+ * todos patches on `todosUpdatedAt`, and dual EventSources can deliver a
+ * buffered pre-rewind patch after the post-rewind Session. Writing the
+ * remaining message's older `createdAt` here would let that stale patch win
+ * and resurrect deleted todos (PR #897 HAPI Bot 2026-08-03 Major).
+ *
+ * Ratchet: `null → now`, else `previous + 1`. Always strictly greater than any
+ * prior write on this row, so lagged pre-rewind versions are rejected.
+ */
 export function replaceSessionTodos(
     db: Database,
     id: string,
     todos: unknown,
-    todosUpdatedAt: number | null,
     namespace: string
 ): boolean {
     try {
@@ -390,16 +405,18 @@ export function replaceSessionTodos(
         const result = db.prepare(`
             UPDATE sessions
             SET todos = @todos,
-                todos_updated_at = @todos_updated_at,
-                updated_at = CASE WHEN updated_at > @updated_at THEN updated_at ELSE @updated_at END,
+                todos_updated_at = CASE
+                    WHEN todos_updated_at IS NULL THEN @now
+                    ELSE todos_updated_at + 1
+                END,
+                updated_at = CASE WHEN updated_at > @now THEN updated_at ELSE @now END,
                 seq = seq + 1
             WHERE id = @id
               AND namespace = @namespace
         `).run({
             id,
             todos: json,
-            todos_updated_at: todosUpdatedAt,
-            updated_at: now,
+            now,
             namespace
         })
         return result.changes === 1
@@ -602,6 +619,27 @@ export function setSessionActive(
     } catch {
         return false
     }
+}
+
+export type SessionPinMode = 'none' | 'project' | 'global'
+
+export function setSessionPinMode(db: Database, id: string, mode: SessionPinMode, namespace: string): boolean {
+    const pinned = mode === 'project' ? 1 : 0
+    const globalPinned = mode === 'global' ? 1 : 0
+    const result = db.prepare(`
+        UPDATE sessions
+        SET pinned = @pinned,
+            global_pinned = @global_pinned
+        WHERE id = @id
+          AND namespace = @namespace
+          AND (pinned != @pinned OR global_pinned != @global_pinned)
+    `).run({ id, namespace, pinned, global_pinned: globalPinned })
+    return result.changes === 1
+}
+
+/** @deprecated Prefer setSessionPinMode — kept for project-pin merge helpers. */
+export function setSessionPinned(db: Database, id: string, pinned: boolean, namespace: string): boolean {
+    return setSessionPinMode(db, id, pinned ? 'project' : 'none', namespace)
 }
 
 export function touchSessionUpdatedAt(

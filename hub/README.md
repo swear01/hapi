@@ -26,8 +26,12 @@ See `src/configuration.ts` for all options.
 
 ### Optional (Voice)
 
-- `ELEVENLABS_API_KEY` - ElevenLabs API key for voice assistant.
+Dictation and voice-assistant provider keys can also be added from **Settings → Voice** (stored in `settings.json` under `providerCredentials`; env vars still win when set at process start).
+
+- `ELEVENLABS_API_KEY` - ElevenLabs API key for voice assistant + dictation.
 - `ELEVENLABS_AGENT_ID` - Custom ElevenLabs agent ID (auto-created if not set).
+- `GEMINI_API_KEY` / `GOOGLE_API_KEY` - Gemini Live voice assistant.
+- `DASHSCOPE_API_KEY` / `QWEN_API_KEY` - Qwen Realtime voice assistant.
 - `OPENAI_API_KEY` - OpenAI dictation (`gpt-transcribe` / `gpt-live-transcribe`).
 - `DEEPGRAM_API_KEY` - Deepgram dictation (`nova-3`, standard and realtime).
 - `GROQ_API_KEY` - Groq dictation (`whisper-large-v3`).
@@ -43,7 +47,7 @@ See `src/configuration.ts` for all options.
 - `DB_PATH` - SQLite database path (default: HAPI_HOME/hapi.db).
 - `TELEGRAM_NOTIFICATION` - Enable/disable Telegram notifications (default: true).
 - `HAPI_RELAY_API` - Relay API domain (default: relay.hapi.run).
-- `HAPI_RELAY_AUTH` - Relay auth key (default: hapi).
+- `HAPI_RELAY_AUTH` - Explicit relay auth key. By default the hub obtains and persists an individually revocable key from the relay. A persisted key rejected with HTTP 403 is discarded and reissued once; an explicitly configured environment key must be updated manually.
 - `HAPI_RELAY_FORCE_TCP` - Force TCP relay mode (true/1).
 - `VAPID_SUBJECT` - Contact email/URL for Web Push.
 

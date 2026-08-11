@@ -12,7 +12,7 @@ import {
     writeStoredVoiceSelection,
 } from '@/lib/voicePickerPreferences'
 import type { VoiceBackendType } from '@hapi/protocol/voice'
-import { useVoiceInputPreferences, VOICE_LANGUAGE_CHANGE_EVENT } from '@/hooks/useVoiceInputPreferences'
+import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
 
 export function useVoiceSettings() {
     const { api } = useAppContext()
@@ -27,21 +27,34 @@ export function useVoiceSettings() {
     const audioRef = useRef<HTMLAudioElement | null>(null)
 
     useEffect(() => {
+        if (!api) return
         let cancelled = false
-        fetchVoiceBackend(api).then((response) => {
-            if (cancelled) return
-            setConfiguredBackends(response.backends)
-            const selected = resolveSelectedVoiceBackend(response.backends, response.backend)
-            setBackendState(selected)
-            setVoiceIdState(selected ? readStoredVoiceSelection(selected) : null)
-        }).catch(() => {
-            if (cancelled) return
-            setConfiguredBackends(['elevenlabs'])
-            setBackendState('elevenlabs')
-            setVoiceIdState(readStoredVoiceSelection('elevenlabs'))
-        })
-        return () => { cancelled = true }
+        const load = () => {
+            fetchVoiceBackend(api).then((response) => {
+                if (cancelled) return
+                setConfiguredBackends(response.backends)
+                const selected = resolveSelectedVoiceBackend(response.backends, response.backend)
+                setBackendState(selected)
+                setVoiceIdState(selected ? readStoredVoiceSelection(selected) : null)
+            }).catch(() => {
+                if (cancelled) return
+                setConfiguredBackends(['elevenlabs'])
+                setBackendState('elevenlabs')
+                setVoiceIdState(readStoredVoiceSelection('elevenlabs'))
+            })
+        }
+        load()
+        const onRefresh = () => load()
+        window.addEventListener('hapi-voice-backends-refresh', onRefresh)
+        return () => {
+            cancelled = true
+            window.removeEventListener('hapi-voice-backends-refresh', onRefresh)
+        }
     }, [api])
+
+    const refreshBackends = useCallback(() => {
+        window.dispatchEvent(new Event('hapi-voice-backends-refresh'))
+    }, [])
 
     useEffect(() => {
         if (backend !== 'elevenlabs') {
@@ -83,7 +96,6 @@ export function useVoiceSettings() {
         setVoiceLanguageState(language.code)
         if (language.code === null) localStorage.removeItem('hapi-voice-lang')
         else localStorage.setItem('hapi-voice-lang', language.code)
-        window.dispatchEvent(new Event(VOICE_LANGUAGE_CHANGE_EVENT))
     }, [])
 
     const stopPreview = useCallback(() => {
@@ -121,5 +133,6 @@ export function useVoiceSettings() {
         voiceLanguages: getElevenLabsSupportedLanguages(),
         playingVoiceId,
         previewVoice,
+        refreshBackends,
     }
 }
