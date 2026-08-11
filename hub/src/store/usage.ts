@@ -64,7 +64,10 @@ function toUsageEvent(row: UsageEventRow): UsageEvent {
         lastInputTokens: row.last_input_tokens,
         lastOutputTokens: row.last_output_tokens,
         lastCacheReadTokens: row.last_cache_read_tokens,
-        lastCacheCreationTokens: row.last_cache_creation_tokens
+        lastCacheCreationTokens: row.last_cache_creation_tokens,
+        contextOnly: row.context_only === 1,
+        cost: row.cost,
+        costCurrency: row.cost_currency
     }
 }
 
