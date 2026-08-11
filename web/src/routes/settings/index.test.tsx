@@ -117,10 +117,6 @@ vi.mock('@/hooks/usePinActiveSessions', () => ({
     usePinActiveSessions: () => ({ pinActiveSessions: false, setPinActiveSessions: vi.fn() }),
 }))
 
-vi.mock('@/hooks/usePinActiveSessions', () => ({
-    usePinActiveSessions: () => ({ pinActiveSessions: false, setPinActiveSessions: vi.fn() }),
-}))
-
 vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
     useSessionHeaderMetadata: () => ({
         preferences: {

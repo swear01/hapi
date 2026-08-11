@@ -1714,7 +1714,7 @@ export function NewSession(props: {
             && cursorModelsState.isLoading)
         || (agent === 'grok'
             && deferredDirectory !== ''
-            && (model !== 'auto' || effort !== 'auto' || grokPermissionMode === 'auto')
+            && (model !== 'auto' || effort !== 'auto')
             && (
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && grokModelsState.isLoading)
