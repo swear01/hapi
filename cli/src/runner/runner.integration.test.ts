@@ -88,6 +88,10 @@ async function isServerHealthy(): Promise<boolean> {
 
 describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout: 20_000 }, () => {
   let runnerPid: number;
+  // PID of the regression test's detached child, asserted dead by afterEach
+  // right after registry cleanup (before the marker sweep, so the check does
+  // not rely on the reaper to hide a leak).
+  let regressionChildPid: number | undefined;
 
   /** Spawn a runner session and register it in the test-owned registry immediately. */
   async function spawnTrackedSession(directory: string, sessionId?: string): Promise<any> {
@@ -140,6 +144,15 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     await cleanupAllRegisteredProcesses()
     // Graceful stop (the runner removes its own state file).
     await stopRunner()
+    // Regression check: the detached child registered by the deliberately
+    // failing test must already be dead from the registry cleanup alone.
+    if (regressionChildPid !== undefined) {
+      expect(
+        isProcessAlive(regressionChildPid),
+        'registered detached child survived registry cleanup'
+      ).toBe(false);
+      regressionChildPid = undefined;
+    }
     // Marker sweep: sessions/agents can reparent to PID 1 before the registry
     // tree-kill runs, so reap anything still carrying the run's test marker
     // (same audit globalSetup teardown performs at the end of the run).
@@ -536,6 +549,7 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     if (!child.pid) {
       throw new Error('Failed to spawn regression terminal hapi process');
     }
+    regressionChildPid = child.pid;
 
     // Give the detached child time to fully start before failing.
     await new Promise(resolve => setTimeout(resolve, 3_000));
@@ -544,10 +558,12 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
   });
 
   it('regression: final audit finds zero test-owned processes after the failing test', async () => {
-    // Same audit the globalSetup teardown runs at the end of the whole run:
-    // reap anything still carrying the run marker, then require zero remain.
-    // If the failing test above leaked any process (including agent
-    // grandchildren reparented to PID 1), this finds and cleans them.
+    // Stop this test's runner gracefully first so the sweep below does not
+    // have to force-kill it, then run the same audit the globalSetup
+    // teardown performs at the end of the whole run: reap anything still
+    // carrying the run marker, and require zero remain. Agent grandchildren
+    // of the failing test that reparented to PID 1 are caught here.
+    await stopRunner()
     const leftovers = await reapTestOwnedProcesses(testOwnedMarker());
     expect(
       leftovers,

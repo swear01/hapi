@@ -25,7 +25,10 @@ export interface TestOwnedProcess {
 
 /**
  * Scans for live processes whose environment dump contains `marker`.
- * Returns an empty array on platforms without `ps eww` (Windows).
+ * Returns an empty array on platforms without `ps eww` (Windows); THROWS on
+ * scan failure (unsupported flags, buffer exhaustion, permission errors) so
+ * the audit can never silently report "zero survivors" while detached
+ * test-owned processes remain alive.
  */
 export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
     if (process.platform === 'win32') return []
@@ -33,17 +36,18 @@ export function findTestOwnedProcesses(marker: string): TestOwnedProcess[] {
     let output: string
     try {
         // `-eo` (not `-axo`): procps-ng 4.x rejects `-x` with "must set
-        // personality" on some Linux builds, which would silently disable the
-        // audit. `e` shows the environment after the command; `ww` removes
-        // width truncation so the env dump is not cut off.
+        // personality" on some Linux builds. `e` shows the environment after
+        // the command; `ww` removes width truncation so the env dump is not
+        // cut off.
         output = execFileSync('ps', ['eww', '-eo', 'pid=,ppid=,rss=,command='], {
             encoding: 'utf8',
-            maxBuffer: 32 * 1024 * 1024,
+            maxBuffer: 64 * 1024 * 1024,
             stdio: ['ignore', 'pipe', 'pipe'],
         })
-    } catch {
-        // ps unavailable — nothing we can audit with.
-        return []
+    } catch (error) {
+        throw new Error(
+            `[test process audit] failed to inspect process table: ${error instanceof Error ? error.message : String(error)}`
+        )
     }
 
     const found: TestOwnedProcess[] = []

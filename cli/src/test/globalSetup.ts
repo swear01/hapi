@@ -120,14 +120,20 @@ export async function teardown() {
     // is always removed so a leak cannot also accumulate DB rows on disk.
     let auditError: Error | null = null
     if (tmpHome && process.platform !== 'win32') {
-        const leftovers = await reapTestOwnedProcesses(`${TEST_OWNED_MARKER_KEY}=${tmpHome}`)
-        if (leftovers.length > 0) {
-            const detail = leftovers
-                .map((p) => `  pid=${p.pid} ppid=${p.ppid} rss=${p.rssKb}KB ${p.command}`)
-                .join('\n')
-            auditError = new Error(
-                `[globalSetup] ${leftovers.length} test-owned process(es) survived teardown:\n${detail}`
-            )
+        try {
+            const leftovers = await reapTestOwnedProcesses(`${TEST_OWNED_MARKER_KEY}=${tmpHome}`)
+            if (leftovers.length > 0) {
+                const detail = leftovers
+                    .map((p) => `  pid=${p.pid} ppid=${p.ppid} rss=${p.rssKb}KB ${p.command}`)
+                    .join('\n')
+                auditError = new Error(
+                    `[globalSetup] ${leftovers.length} test-owned process(es) survived teardown:\n${detail}`
+                )
+            }
+        } catch (error) {
+            // A failed process-table scan must fail the run, never pass as a
+            // "clean" audit.
+            auditError = error instanceof Error ? error : new Error(String(error))
         }
     }
     if (tmpHome) {
