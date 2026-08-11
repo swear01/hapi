@@ -88,10 +88,6 @@ async function isServerHealthy(): Promise<boolean> {
 
 describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout: 20_000 }, () => {
   let runnerPid: number;
-  // PID of the regression test's detached child, asserted dead by afterEach
-  // right after registry cleanup (before the marker sweep, so the check does
-  // not rely on the reaper to hide a leak).
-  let regressionChildPid: number | undefined;
 
   /** Spawn a runner session and register it in the test-owned registry immediately. */
   async function spawnTrackedSession(directory: string, sessionId?: string): Promise<any> {
@@ -156,21 +152,11 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     // Graceful stop (the runner removes its own state file), bounded so a
     // hung runner cannot starve the sweep below.
     await stopRunnerBounded()
-    // Snapshot the regression child BEFORE the sweep: if registry cleanup
-    // failed to kill it, the sweep would hide that fact.
-    const registryLeak =
-      regressionChildPid !== undefined && isProcessAlive(regressionChildPid);
-    regressionChildPid = undefined;
     // Marker sweep: sessions/agents can reparent to PID 1 before the registry
     // tree-kill runs, so reap anything still carrying the run's test marker
     // (same audit globalSetup teardown performs at the end of the run). This
-    // runs unconditionally — even if the assertion below fails — and its
-    // survivors are verified, never ignored.
+    // runs unconditionally and its survivors are verified, never ignored.
     const leftovers = await reapTestOwnedProcesses(testOwnedMarker())
-    expect(
-      registryLeak,
-      'registered detached child survived registry cleanup'
-    ).toBe(false);
     expect(
       leftovers,
       'test-owned processes survived the marker sweep'
@@ -545,13 +531,18 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
   });
 
   /**
-   * Regression coverage for issue #1515: a failing test must not leak the
-   * detached children it registered. The child is tracked immediately after
-   * spawn; the test body then deliberately fails BEFORE any happy-path
-   * cleanup runs. `afterEach` still executes the registry cleanup, so the
-   * follow-up audit test must find zero test-owned processes.
+   * Regression coverage for issue #1515: a test that never reaches its own
+   * happy-path cleanup must not leak the detached children it registered at
+   * spawn time. The child is tracked immediately after spawn; the test body
+   * then runs ONLY the spawn-time registered cleanup and asserts the child is
+   * gone.
+   *
+   * A deliberately-failing (`it.fails`) variant would be weaker here: Vitest
+   * applies the expected-failure inversion after afterEach, so a broken
+   * registry assertion inside the hook would be masked as "expected". A
+   * normal test asserts directly.
    */
-  it.fails('regression: deliberately failing after registering a detached child must not leak it', async () => {
+  it('regression: registered detached child is reaped even when the test body never reaches its own cleanup', async () => {
     const child = spawnHappyCLI([
       '--hapi-starting-mode', 'remote',
       '--started-by', 'terminal'
@@ -561,30 +552,35 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
       stdio: 'ignore',
       env: buildTestChildEnv()
     });
-    // Register immediately after spawn — cleanup must run even though the
-    // test body below never reaches its own teardown.
+    // Register immediately after spawn — cleanup must run even though this
+    // test deliberately performs no per-test teardown of its own.
     trackChildProcess(child, 'regression-terminal');
     if (!child.pid) {
       throw new Error('Failed to spawn regression terminal hapi process');
     }
-    regressionChildPid = child.pid;
 
-    // Give the detached child time to fully start before failing.
-    await new Promise(resolve => setTimeout(resolve, 3_000));
+    // Give the detached child time to fully start (including its agent
+    // probes), so a leak would be real and observable.
+    await new Promise(resolve => setTimeout(resolve, 2_000));
 
-    expect.unreachable('deliberate failure — the spawn-time registry cleanup must still reap the detached child');
+    // Simulate the failure path: only the spawn-time registered cleanup runs.
+    await cleanupAllRegisteredProcesses()
+    expect(
+      isProcessAlive(child.pid),
+      'registered detached child survived registry cleanup'
+    ).toBe(false);
   });
 
-  it('regression: final audit finds zero test-owned processes after the failing test', async () => {
+  it('regression: final audit finds zero test-owned processes after the reaping regression test', async () => {
     // The runner from this test's beforeEach legitimately spawns model-catalog
     // probe children (agent --list-models / agent acp) at startup; stopping
     // it orphans them with the run marker. Reap first to clear that noise,
     // then INSPECT: anything still marked at this point is a genuine survivor
     // the reaper could not remove within its bounded window and must fail the
     // suite (same audit globalSetup teardown performs at the end of the run).
-    // Killable leaks from the failing test are already gone here: its direct
-    // child is asserted dead in afterEach before the sweep, and the failing
-    // test's own sweep re-kills for its full bounded window.
+    // Killable leaks from the reaping regression test are already gone here:
+    // its direct child is asserted dead in the test body, and its afterEach
+    // sweep re-kills for its full bounded window.
     await stopRunnerBounded()
     await reapTestOwnedProcesses(testOwnedMarker())
     const leftovers = findTestOwnedProcesses(testOwnedMarker());
