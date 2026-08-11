@@ -8,6 +8,7 @@ import { addMessage } from './messages'
 import type { StoredMessage } from './types'
 import { PushStore } from './pushStore'
 import { FcmStore } from './fcmStore'
+import { NotificationPreferenceStore } from './notificationPreferenceStore'
 import { ScratchlistStore } from './scratchlistStore'
 import { SessionJobsStore } from './sessionJobsStore'
 import { SessionStore } from './sessionStore'
@@ -31,6 +32,7 @@ export { MachineStore } from './machineStore'
 export { MessageStore } from './messageStore'
 export { PushStore } from './pushStore'
 export { FcmStore } from './fcmStore'
+export { NotificationPreferenceStore } from './notificationPreferenceStore'
 export { ScratchlistStore } from './scratchlistStore'
 export { SessionJobsStore } from './sessionJobsStore'
 export { SessionStore } from './sessionStore'
@@ -43,7 +45,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 25
+const SCHEMA_VERSION: number = 28
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -57,7 +59,8 @@ const REQUIRED_TABLES = [
     'usage_events',
     'usage_scan_state',
     'events',
-    'event_links'
+    'event_links',
+    'notification_preferences'
 ] as const
 
 export class Store {
@@ -75,6 +78,7 @@ export class Store {
     readonly sessionJobs: SessionJobsStore
     readonly usage: UsageStore
     readonly workGraph: WorkGraphStore
+    readonly notificationPrefs: NotificationPreferenceStore
 
     /**
      * Filesystem path of the underlying SQLite database, or ':memory:' for
@@ -130,6 +134,7 @@ export class Store {
         this.sessionJobs = new SessionJobsStore(this.db)
         this.usage = new UsageStore(this.db)
         this.workGraph = new WorkGraphStore(this.db)
+        this.notificationPrefs = new NotificationPreferenceStore(this.db)
     }
 
     /**
@@ -312,6 +317,9 @@ export class Store {
             22: () => this.migrateFromV22ToV23(),
             23: () => this.migrateFromV23ToV24(),
             24: () => this.migrateFromV24ToV25(),
+            25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
         })
 
         if (currentVersion === 0) {
@@ -511,6 +519,9 @@ export class Store {
                 last_output_tokens INTEGER,
                 last_cache_read_tokens INTEGER,
                 last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -574,6 +585,15 @@ export class Store {
                 ON event_links(namespace, from_event_id);
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
+
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                namespace TEXT PRIMARY KEY,
+                permission_requests INTEGER NOT NULL DEFAULT 1,
+                session_ready INTEGER NOT NULL DEFAULT 1,
+                task_notifications INTEGER NOT NULL DEFAULT 1,
+                session_completion INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
         `)
     }
 
@@ -860,6 +880,13 @@ export class Store {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                last_input_tokens INTEGER,
+                last_output_tokens INTEGER,
+                last_cache_read_tokens INTEGER,
+                last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -1035,6 +1062,98 @@ export class Store {
         }
     }
 
+
+    private migrateFromV25ToV26(): void {
+        // PR #1468 — ACP cumulative cost + currency on usage events (rebuildable index).
+        const columns = new Set(
+            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        if (!columns.has('context_only')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
+        }
+        if (!columns.has('cost')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
+        }
+        if (!columns.has('cost_currency')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
+        }
+        this.db.exec(`
+            DELETE FROM usage_events;
+            DELETE FROM usage_scan_state;
+        `)
+    }
+
+    private migrateFromV26ToV27(): void {
+        // PR #1360 — per-namespace notification preferences. Defaults are
+        // all-enabled so existing namespaces keep the pre-preferences behavior.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                namespace TEXT PRIMARY KEY,
+                permission_requests INTEGER NOT NULL DEFAULT 1,
+                session_ready INTEGER NOT NULL DEFAULT 1,
+                task_notifications INTEGER NOT NULL DEFAULT 1,
+                session_completion INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
+        `)
+    }
+
+    private migrateFromV27ToV28(): void {
+        // Fork repair: upstream #1467's V22→V23 creates the A2A events ledger,
+        // but fork-maintained DBs that were already past V22 skipped that step.
+        // Idempotently create the ledger tables when missing (v0.27.2.2 hub).
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                ts INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                sink_kind TEXT,
+                sink_ref TEXT,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                payload_json TEXT,
+                artifact_refs TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                related_session_id TEXT,
+                related_event_id TEXT,
+                provenance TEXT,
+                idempotency_key TEXT,
+                dedupe_key TEXT,
+                confidence REAL,
+                severity TEXT,
+                expires_at INTEGER,
+                namespace TEXT NOT NULL,
+                principal_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_ts
+                ON events(namespace, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_related_session
+                ON events(namespace, related_session_id, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_expires
+                ON events(namespace, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_namespace_idempotency
+                ON events(namespace, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS event_links (
+                id TEXT PRIMARY KEY,
+                from_event_id TEXT NOT NULL,
+                to_event_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                metadata_json TEXT,
+                namespace TEXT NOT NULL,
+                FOREIGN KEY (from_event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (to_event_id) REFERENCES events(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_from
+                ON event_links(namespace, from_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
+                ON event_links(namespace, to_event_id);
+        `)
+    }
     private getSessionColumnNames(): Set<string> {
         const rows = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
         return new Set(rows.map((row) => row.name))

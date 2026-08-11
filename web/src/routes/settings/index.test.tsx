@@ -27,10 +27,12 @@ const { context, navigate, setAppearance, setColorTheme, setFontScale, setTermin
 
 const getHubSettings = vi.fn().mockResolvedValue({
     sessionSummaryContract: false,
+    sessionSummaryInChat: false,
     autoBridgeTransientModelErrors: false
 })
 const updateHubSettings = vi.fn().mockResolvedValue({
     sessionSummaryContract: true,
+    sessionSummaryInChat: false,
     autoBridgeTransientModelErrors: false
 })
 
@@ -53,7 +55,7 @@ vi.mock('@tanstack/react-router', () => ({
     },
 }))
 
-vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1 }))
+vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1, CREATABLE_AGENT_FLAVORS: ['claude', 'codex'], getFlavorLabel: (agent: string) => agent }))
 
 vi.mock('@/lib/app-context', () => ({
     useAppContext: () => ({ api: null, token: context.token }),
@@ -109,6 +111,14 @@ vi.mock('@/hooks/usePinInProgressSessions', () => ({
         pinInProgressSessions: false,
         setPinInProgressSessions: vi.fn(),
     }),
+}))
+
+vi.mock('@/hooks/usePinActiveSessions', () => ({
+    usePinActiveSessions: () => ({ pinActiveSessions: false, setPinActiveSessions: vi.fn() }),
+}))
+
+vi.mock('@/hooks/usePinActiveSessions', () => ({
+    usePinActiveSessions: () => ({ pinActiveSessions: false, setPinActiveSessions: vi.fn() }),
 }))
 
 vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
@@ -244,10 +254,12 @@ describe('responsive settings pages', () => {
         localStorage.clear()
         getHubSettings.mockResolvedValue({
             sessionSummaryContract: false,
+            sessionSummaryInChat: false,
             autoBridgeTransientModelErrors: false
         })
         updateHubSettings.mockResolvedValue({
             sessionSummaryContract: true,
+            sessionSummaryInChat: false,
             autoBridgeTransientModelErrors: false
         })
         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`
@@ -278,6 +290,7 @@ describe('responsive settings pages', () => {
         expect(screen.getByText('Companion')).toBeInTheDocument()
         expect(screen.getByText('Companion pairing')).toBeInTheDocument()
         expect(await screen.findByRole('checkbox', { name: 'Ask agents to emit session status summary' })).toBeInTheDocument()
+        expect(screen.getByRole('checkbox', { name: 'Show session status summary in chat' })).toBeInTheDocument()
         fireEvent.click(screen.getByRole('radio', { name: '简体中文' }))
         expect(localStorage.getItem('hapi-lang')).toBe('zh-CN')
     })
@@ -325,6 +338,20 @@ describe('responsive settings pages', () => {
         expect(screen.getByRole('checkbox', { name: 'Created time' })).not.toBeChecked()
         expect(screen.getByRole('checkbox', { name: 'Updated time' })).not.toBeChecked()
         expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    })
+
+    it('persists Create agent visibility across remounts', () => {
+        const first = renderPage(<SettingsDisplayPage />)
+        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'codex' })).toBeChecked()
+
+        fireEvent.click(screen.getByRole('checkbox', { name: 'codex' }))
+        expect(JSON.parse(localStorage.getItem('hapi:newSession:agentVisibility:v1') ?? '{}')).toEqual({ claude: true, codex: false })
+        first.unmount()
+
+        renderPage(<SettingsDisplayPage />)
+        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'codex' })).not.toBeChecked()
     })
 
     it('keeps the session status description visible with its choice group', () => {

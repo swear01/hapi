@@ -8,6 +8,10 @@ import {
     readSessionSummaryContractEnabled,
     writeSessionSummaryContractEnabled
 } from '../../config/sessionSummaryContract'
+import {
+    readSessionSummaryInChatEnabled,
+    writeSessionSummaryInChatEnabled
+} from '../../config/sessionSummaryInChat'
 import type { SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 
@@ -24,12 +28,14 @@ export function createHubSettingsRoutes(
             return c.json({ error: OWNER_ONLY_ERROR }, 403)
         }
         c.header('Cache-Control', 'no-store')
-        const [sessionSummaryContract, autoBridgeTransientModelErrors] = await Promise.all([
+        const [sessionSummaryContract, sessionSummaryInChat, autoBridgeTransientModelErrors] = await Promise.all([
             readSessionSummaryContractEnabled(dataDir),
+            readSessionSummaryInChatEnabled(dataDir),
             readAutoBridgeTransientModelErrorsEnabled(dataDir)
         ])
         const response: HubSettingsResponse = {
             sessionSummaryContract,
+            sessionSummaryInChat,
             autoBridgeTransientModelErrors
         }
         return c.json(response)
@@ -50,31 +56,36 @@ export function createHubSettingsRoutes(
                 parsed.data.sessionSummaryContract
             )
         }
+        if (parsed.data.sessionSummaryInChat !== undefined) {
+            await writeSessionSummaryInChatEnabled(dataDir, parsed.data.sessionSummaryInChat)
+        }
         if (parsed.data.autoBridgeTransientModelErrors !== undefined) {
             const enabled = parsed.data.autoBridgeTransientModelErrors
+            const previous = await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+            await writeAutoBridgeTransientModelErrorsEnabled(dataDir, enabled)
             const engine = getSyncEngine?.() ?? null
             if (engine) {
                 try {
-                    // Disk write + fanout + rollback share SyncEngine's lock so
-                    // concurrent PUTs cannot leave CLI prefs ahead of settings.json.
-                    await engine.applyAutoBridgeTransientModelErrorsSetting(dataDir, enabled)
+                    await engine.fanoutAutoBridgeTransientModelErrors(enabled)
                 } catch (error) {
+                    await writeAutoBridgeTransientModelErrorsEnabled(dataDir, previous)
+                    await engine.fanoutAutoBridgeTransientModelErrors(previous).catch(() => {})
                     const message = error instanceof Error
                         ? error.message
                         : 'Failed to update every active Cursor session'
                     return c.json({ error: message }, 409)
                 }
-            } else {
-                await writeAutoBridgeTransientModelErrorsEnabled(dataDir, enabled)
             }
         }
         c.header('Cache-Control', 'no-store')
-        const [sessionSummaryContract, autoBridgeTransientModelErrors] = await Promise.all([
+        const [sessionSummaryContract, sessionSummaryInChat, autoBridgeTransientModelErrors] = await Promise.all([
             readSessionSummaryContractEnabled(dataDir),
+            readSessionSummaryInChatEnabled(dataDir),
             readAutoBridgeTransientModelErrorsEnabled(dataDir)
         ])
         const response: HubSettingsResponse = {
             sessionSummaryContract,
+            sessionSummaryInChat,
             autoBridgeTransientModelErrors
         }
         return c.json(response)

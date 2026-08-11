@@ -71,6 +71,7 @@ export type {
 
 export const MessageMetaSchema = z.object({
     sentFrom: z.string().optional(),
+    claudeTranscriptLocalId: z.string().optional(),
     // Queue remains the default for existing clients. Pi-aware callers may
     // explicitly request native steering while a turn is streaming.
     deliveryMode: z.enum(['queue', 'steer']).optional(),

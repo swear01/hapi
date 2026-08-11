@@ -1,5 +1,5 @@
 import { ComposerPrimitive } from '@assistant-ui/react'
-import { Children, isValidElement, useCallback, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react'
+import { Children, isValidElement, useCallback, useLayoutEffect, useEffect, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react'
 import type { CodexUsage } from '@hapi/protocol/types'
 import type { ConversationStatus } from '@/realtime/types'
 import { useTranslation } from '@/lib/use-translation'
@@ -345,12 +345,15 @@ export function ComposerToolbarItemPreview(props: { item: ComposerToolbarItemId;
             case 'voiceMic': return <SpeakerIcon />
             case 'scratchlist': return <ScratchlistToggleIcon />
             case 'schedule': return <ScheduleIcon className="h-[18px] w-[18px]" />
+            case 'model':
+            case 'effort':
             case 'piModel':
             case 'piThinking':
                 return <><span className="max-w-24 truncate text-xs font-medium">{props.label}</span><ChevronIcon /></>
         }
     })()
-    const isTextControl = props.item === 'piModel' || props.item === 'piThinking'
+    const isTextControl = props.item === 'model' || props.item === 'effort'
+        || props.item === 'piModel' || props.item === 'piThinking'
     return (
         <span
             className={`flex h-8 items-center justify-center rounded-full text-[var(--app-fg)]/60 ${isTextControl ? 'gap-1 px-3' : 'w-8'}`}
@@ -477,9 +480,11 @@ export function UnifiedButton(props: {
     canSend: boolean
     voiceStatus: ConversationStatus
     voiceEnabled: boolean
+    dictationEnabled?: boolean
     controlsDisabled: boolean
     onSend: (intent?: ComposerSendIntent) => void
-    onVoiceToggle: () => void
+    onVoiceToggle: () => void | boolean | Promise<void | boolean>
+    onVoiceSend?: () => void | Promise<void>
     voiceLabel?: string
     /**
      * When true, the send button repaints amber and the aria-label
@@ -497,17 +502,24 @@ export function UnifiedButton(props: {
     allowQueueGesture?: boolean
 }) {
     const { t } = useTranslation()
+    const voiceSendPendingRef = useRef(false)
+    const [voiceSendRequested, setVoiceSendRequested] = useState(false)
+
+    useEffect(() => {
+        if (!voiceSendRequested) return
+        setVoiceSendRequested(false)
+        props.onSend('default')
+    }, [voiceSendRequested, props.onSend])
 
     const isConnecting = props.voiceStatus === 'connecting'
     const isConnected = props.voiceStatus === 'connected'
     const isVoiceActive = isConnecting || isConnected
     const hasText = props.canSend
     const routesToScratchlist = props.routesToScratchlist ?? false
+    const isDictation = props.dictationEnabled ?? false
 
     const handleClick = () => {
-        if (isVoiceActive) {
-            props.onVoiceToggle() // Stop voice
-        } else if (hasText) {
+        if (hasText) {
             props.onSend('default') // Send message (or scratchlist add — wrapper decides)
         } else if (props.voiceEnabled && !routesToScratchlist) {
             props.onVoiceToggle() // Start voice (suppressed in scratchlist mode)
@@ -533,19 +545,64 @@ export function UnifiedButton(props: {
         disabled: props.controlsDisabled,
     })
 
+    if (isVoiceActive) {
+        const stopIcon = isConnecting ? <LoadingIcon /> : <StopIcon />
+        const stopAriaLabel = isConnecting ? t('voice.connecting') : t('composer.stop')
+        const sendAriaLabel = routesToScratchlist ? t('scratchlist.sendToScratchlist') : t('composer.send')
+        const sendClassName = routesToScratchlist
+            ? 'bg-amber-500 text-white hover:bg-amber-600'
+            : 'bg-black text-white'
+
+        const handleVoiceSendClick = async () => {
+            if (voiceSendPendingRef.current) return
+            voiceSendPendingRef.current = true
+            try {
+                if (props.onVoiceSend) {
+                    await props.onVoiceSend()
+                } else {
+                    const committed = await props.onVoiceToggle()
+                    if (committed === true) {
+                        setVoiceSendRequested(true)
+                    }
+                }
+            } finally {
+                voiceSendPendingRef.current = false
+            }
+        }
+
+        return (
+            <div className="flex items-center gap-1">
+                <button
+                    type="button"
+                    onClick={props.onVoiceToggle}
+                    disabled={props.controlsDisabled}
+                    aria-label={stopAriaLabel}
+                    title={stopAriaLabel}
+                    className="ml-1 flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 bg-black text-white"
+                >
+                    {stopIcon}
+                </button>
+                {isDictation && isConnected ? (
+                    <button
+                        type="button"
+                        onClick={handleVoiceSendClick}
+                        disabled={props.controlsDisabled}
+                        aria-label={sendAriaLabel}
+                        title={sendAriaLabel}
+                        className={`ml-1 flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${sendClassName}`}
+                    >
+                        <SendIcon />
+                    </button>
+                ) : null}
+            </div>
+        )
+    }
+
     let icon: React.ReactNode
     let className: string
     let ariaLabel: string
 
-    if (isConnecting) {
-        icon = <LoadingIcon />
-        className = 'bg-black text-white'
-        ariaLabel = t('voice.connecting')
-    } else if (isConnected) {
-        icon = <StopIcon />
-        className = 'bg-black text-white'
-        ariaLabel = t('composer.stop')
-    } else if (routesToScratchlist) {
+    if (routesToScratchlist) {
         // Amber send button - matches the scratchlist drawer accent.
         // Single visual signal carries the "this goes to the scratchlist"
         // contract; without it, the modal state is invisible to the user.
@@ -574,7 +631,7 @@ export function UnifiedButton(props: {
     const isDisabled = props.controlsDisabled || (
         routesToScratchlist
             ? !hasText
-            : !hasText && !props.voiceEnabled && !isVoiceActive
+            : !hasText && !props.voiceEnabled
     )
 
     return (
@@ -652,6 +709,7 @@ export function ComposerButtons(props: {
     voiceStatus: ConversationStatus
     voiceMicMuted?: boolean
     onVoiceToggle: () => void
+    onVoiceSend?: () => void | Promise<void>
     onVoiceMicToggle?: () => void
     onSend: (intent?: ComposerSendIntent) => void
     pendingSchedule?: PendingSchedule | null
@@ -662,6 +720,15 @@ export function ComposerButtons(props: {
     // The composer must surface that constraint at UI time so the user never
     // builds a submission the hub will reject — see hub/web/routes/messages.ts.
     hasAttachments?: boolean
+    // Generic model/effort value buttons (non-Pi flavors)
+    modelValueLabel?: string
+    modelValueDisabled?: boolean
+    modelValueOpen?: boolean
+    onModelValueToggle?: () => void
+    effortValueLabel?: string
+    effortValueDisabled?: boolean
+    effortValueOpen?: boolean
+    onEffortValueToggle?: () => void
     // Pi-specific toolbar buttons
     piModelLabel?: string
     piModelDisabled?: boolean
@@ -732,6 +799,46 @@ export function ComposerButtons(props: {
                     expanded={props.expanded}
                     onToggle={props.onExpandedToggle}
                 />
+                </ToolbarItemSlot>
+
+                <ToolbarItemSlot item="model">
+                {props.modelValueLabel ? (
+                    <button
+                        type="button"
+                        aria-label={props.modelValueLabel}
+                        title={props.modelValueLabel}
+                        className={`flex h-8 items-center gap-1 rounded-full px-3 text-xs font-medium transition-colors ${
+                            props.modelValueOpen
+                                ? 'bg-[var(--app-secondary-bg)] text-[var(--app-link)]'
+                                : 'text-[var(--app-fg)]/60 hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)]'
+                        }`}
+                        onClick={props.onModelValueToggle}
+                        disabled={props.modelValueDisabled}
+                    >
+                        {props.modelValueLabel}
+                        <ChevronIcon />
+                    </button>
+                ) : null}
+                </ToolbarItemSlot>
+
+                <ToolbarItemSlot item="effort">
+                {props.effortValueLabel ? (
+                    <button
+                        type="button"
+                        aria-label={props.effortValueLabel}
+                        title={props.effortValueLabel}
+                        className={`flex h-8 items-center gap-1 rounded-full px-3 text-xs font-medium transition-colors ${
+                            props.effortValueOpen
+                                ? 'bg-[var(--app-secondary-bg)] text-[var(--app-link)]'
+                                : 'text-[var(--app-fg)]/60 hover:bg-[var(--app-bg)] hover:text-[var(--app-fg)]'
+                        }`}
+                        onClick={props.onEffortValueToggle}
+                        disabled={props.effortValueDisabled}
+                    >
+                        {props.effortValueLabel}
+                        <ChevronIcon />
+                    </button>
+                ) : null}
                 </ToolbarItemSlot>
 
                 <ToolbarItemSlot item="piModel">
@@ -918,9 +1025,11 @@ export function ComposerButtons(props: {
                     canSend={props.canSend}
                     voiceStatus={props.voiceStatus}
                     voiceEnabled={props.voiceEnabled}
+                    dictationEnabled={props.dictationEnabled}
                     controlsDisabled={props.controlsDisabled}
                     onSend={props.onSend}
                     onVoiceToggle={props.onVoiceToggle}
+                    onVoiceSend={props.onVoiceSend}
                     voiceLabel={props.dictationEnabled ? t('composer.dictate') : undefined}
                     /*
                      * Derived, NOT raw scratchlistMode. Mirror SessionChat's

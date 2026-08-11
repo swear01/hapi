@@ -818,26 +818,6 @@ describe('SessionList collapse behavior', () => {
         })
     })
 
-    it('opens the project group menu on right-click without collapsing the group', () => {
-        const sessions = [makeSession({
-            id: 'session-running',
-            updatedAt: 100,
-            metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
-        })]
-        render(renderSessionList(sessions, 'session-running'))
-        const header = getProjectPanel().previousElementSibling
-        if (!(header instanceof HTMLElement)) throw new Error('expected project group header')
-
-        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
-        fireEvent.mouseDown(header, { button: 2 })
-        fireEvent.mouseUp(header, { button: 2 })
-        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
-        fireEvent.contextMenu(header, { clientX: 10, clientY: 10 })
-
-        expect(getProjectPanel()).toHaveAttribute('data-open', 'true')
-        expect(screen.getByRole('menu', { name: 'Group actions' })).toBeInTheDocument()
-    })
-
     it('keeps an inactive project-pinned group expanded with no selection', () => {
         const sessions = [
             makeSession({

@@ -349,6 +349,12 @@ function AppInner() {
                 body: normalizedBody,
             }
         }
+        if (normalizedTitle === 'Session completed') {
+            return {
+                title: t('toast.session.completed'),
+                body: normalizedBody
+            }
+        }
 
         return { title, body }
     }, [t])

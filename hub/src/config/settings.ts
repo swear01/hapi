@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path'
 import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
 import type { FleetUpgradePolicy } from '@hapi/protocol/upgradeChannel'
 
+import type { NotificationCopyConfig } from '../push/notificationCopy'
+
 export interface Settings {
     machineId?: string
     machineIdConfirmedByServer?: boolean
@@ -36,12 +38,19 @@ export interface Settings {
      */
     autoBridgeTransientModelErrors?: boolean
     /**
+     * When true, web chat shows a compact AGENT_NOTIFY_SUMMARY row.
+     * Default off: render/copy strip the footer; store stays raw.
+     */
+    sessionSummaryInChat?: boolean
+    /**
      * Hub-side provider API keys / endpoints managed from Settings.
      * Env vars still win when set at process start (ops override).
      */
     providerCredentials?: Partial<Record<string, string>>
     // Operator fleet-upgrade policy (no alert / alert / auto-upgrade)
     fleetUpgradePolicy?: FleetUpgradePolicy
+    /** Custom push notification copy templates (web push only). Empty fields fall back to defaults. */
+    notificationCopy?: NotificationCopyConfig
 }
 
 export function getSettingsFile(dataDir: string): string {

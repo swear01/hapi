@@ -12,6 +12,7 @@ import { getProviderEnvironment } from '../config/providerCredentials'
 import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
+import type { PushService } from '../push/pushService'
 import { createAuthMiddleware, type WebAppEnv } from './middleware/auth'
 import { createAuthRoutes } from './routes/auth'
 import { createBindRoutes } from './routes/bind'
@@ -26,12 +27,15 @@ import { createUpgradeRoutes, createUpgradeCliRoutes } from './routes/upgrade'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
+import { createClaudeSessionRoutes } from './routes/claudeSessions'
 import { createPiSessionRoutes } from './routes/piSessions'
 import { createPushRoutes } from './routes/push'
+import { createNotificationPreferencesRoutes } from './routes/notificationPreferences'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
 import { createHubSettingsRoutes } from './routes/hubSettings'
 import { createWorkGraphRoutes } from './routes/workGraph'
+import { createNotificationCopyRoutes } from './routes/notificationCopy'
 import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
@@ -224,6 +228,7 @@ function createWebApp(options: {
     jwtSecret: Uint8Array
     store: Store
     vapidPublicKey: string
+    pushService: PushService
     corsOrigins?: string[]
     embeddedAssetMap: Map<string, EmbeddedWebAsset> | null
     relayMode?: boolean
@@ -298,11 +303,17 @@ function createWebApp(options: {
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))
+    app.route('/api', createClaudeSessionRoutes({
+        store: options.store,
+        getSyncEngine: options.getSyncEngine
+    }))
     app.route('/api', createPiSessionRoutes({
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))
-    app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
+    app.route('/api', createPushRoutes(options.store, options.vapidPublicKey, options.pushService))
+    app.route('/api', createNotificationPreferencesRoutes(options.store))
+    app.route('/api', createNotificationCopyRoutes(configuration.dataDir))
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes({ dataDir: configuration.dataDir }))
     // Path is intentionally NOT `/api/events` — that route is the SSE stream.
@@ -418,6 +429,7 @@ export async function startWebServer(options: {
     jwtSecret: Uint8Array
     store: Store
     vapidPublicKey: string
+    pushService: PushService
     socketEngine: SocketEngine
     corsOrigins?: string[]
     relayMode?: boolean
@@ -432,6 +444,7 @@ export async function startWebServer(options: {
         jwtSecret: options.jwtSecret,
         store: options.store,
         vapidPublicKey: options.vapidPublicKey,
+        pushService: options.pushService,
         corsOrigins: options.corsOrigins,
         embeddedAssetMap,
         relayMode: options.relayMode,

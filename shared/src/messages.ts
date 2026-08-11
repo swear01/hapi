@@ -6,6 +6,88 @@ type RoleWrappedRecord = {
     meta?: unknown
 }
 
+export const DISPLAY_HISTORY_STRING_LIMIT = 64 * 1024
+export const CLAUDE_IMPORTED_USER_TRUNCATION_MARKER = '\n…[hapi: oversized imported prompt truncated]…'
+const DISPLAY_HISTORY_TRUNCATE_HEAD = 48 * 1024
+const DISPLAY_HISTORY_TRUNCATE_TAIL = 12 * 1024
+
+export function normalizeClaudeImportedUserText(value: string): string {
+    return value.length > DISPLAY_HISTORY_STRING_LIMIT
+        ? `${value.slice(0, DISPLAY_HISTORY_STRING_LIMIT - CLAUDE_IMPORTED_USER_TRUNCATION_MARKER.length)}${CLAUDE_IMPORTED_USER_TRUNCATION_MARKER}`
+        : value
+}
+
+const CLAUDE_AGENT_IMPORT_RUNTIME_FIELDS = [
+    'uuid',
+    'parentUuid',
+    'timestamp',
+    'cwd',
+    'version',
+    'gitBranch',
+    'requestId'
+] as const
+
+/** Removes SDK/native runtime metadata before comparing imported Claude agent events. */
+export function normalizeClaudeAgentEventForImport(value: unknown): unknown {
+    if (!isObject(value)) return value
+
+    const normalized: Record<string, unknown> = { ...value }
+    for (const field of CLAUDE_AGENT_IMPORT_RUNTIME_FIELDS) {
+        delete normalized[field]
+    }
+
+    if (!isObject(normalized.message) || !isObject(normalized.message.usage)) {
+        return normalized
+    }
+
+    const usage = { ...normalized.message.usage }
+    delete usage.context_window
+    normalized.message = { ...normalized.message, usage }
+    return normalized
+}
+
+function truncateDisplayHistoryString(value: string): string {
+    const removed = value.length - DISPLAY_HISTORY_TRUNCATE_HEAD - DISPLAY_HISTORY_TRUNCATE_TAIL
+    return `${value.slice(0, DISPLAY_HISTORY_TRUNCATE_HEAD)}\n…[hapi: truncated ${removed} chars]…\n${value.slice(value.length - DISPLAY_HISTORY_TRUNCATE_TAIL)}`
+}
+
+function truncateDisplayHistoryValue(value: unknown): unknown {
+    if (typeof value === 'string') {
+        return value.length > DISPLAY_HISTORY_STRING_LIMIT ? truncateDisplayHistoryString(value) : value
+    }
+    if (Array.isArray(value)) {
+        let copy: unknown[] | null = null
+        for (let index = 0; index < value.length; index += 1) {
+            const item = truncateDisplayHistoryValue(value[index])
+            if (item !== value[index]) {
+                copy ??= value.slice()
+                copy[index] = item
+            }
+        }
+        return copy ?? value
+    }
+    if (value !== null && typeof value === 'object') {
+        const record = value as Record<string, unknown>
+        let copy: Record<string, unknown> | null = null
+        for (const key of Object.keys(record)) {
+            const item = truncateDisplayHistoryValue(record[key])
+            if (item !== record[key]) {
+                copy ??= { ...record }
+                copy[key] = item
+            }
+        }
+        return copy ?? value
+    }
+    return value
+}
+
+/** Caps strings in agent history before transport and persistence. */
+export function truncateOversizedAgentMessageContent(content: unknown): unknown {
+    if (content === null || typeof content !== 'object') return content
+    if ((content as Record<string, unknown>).role !== 'agent') return content
+    return truncateDisplayHistoryValue(content)
+}
+
 const VISIBLE_CLAUDE_SYSTEM_SUBTYPES = new Set([
     'api_error',
     'turn_duration',
@@ -150,22 +232,33 @@ export type NotifySummary = {
 /**
  * Match a well-formed `AGENT_NOTIFY_SUMMARY {...}` footer on a single line.
  *
- * Allows an optional prose prefix on the same line (agents sometimes glue
- * trailing text and the token without a newline). Scans left-to-right and
- * returns the first token occurrence whose remainder is valid JSON through
- * end of line - so a literal `AGENT_NOTIFY_SUMMARY ` inside a JSON string
- * value does not steal the match from the real footer.
+ * Allows an optional *glued* prose prefix on the same line (agents sometimes
+ * omit the newline: `Done.AGENT_NOTIFY_SUMMARY {...}`). Whitespace-delimited
+ * mentions (`Example: AGENT_NOTIFY_SUMMARY {...}`) are not treated as footers.
+ * Scans left-to-right and returns the first token occurrence whose remainder
+ * is valid JSON through end of line - so a literal `AGENT_NOTIFY_SUMMARY `
+ * inside a JSON string value does not steal the match from the real footer.
  */
-function matchNotifySummaryLine(line: string): string | null {
+type NotifySummaryLineMatch = {
+    jsonPart: string
+    start: number
+}
+
+function matchNotifySummaryLine(line: string): NotifySummaryLineMatch | null {
     for (
         let idx = line.indexOf(NOTIFY_SUMMARY_PREFIX);
         idx >= 0;
         idx = line.indexOf(NOTIFY_SUMMARY_PREFIX, idx + NOTIFY_SUMMARY_PREFIX.length)
     ) {
+        // Keep glued footers (`Done.AGENT_NOTIFY_SUMMARY ...`) and indented
+        // standalone footers, but reject ordinary prose-delimited mentions
+        // (`Example: AGENT_NOTIFY_SUMMARY ...`).
+        const prefix = line.slice(0, idx)
+        if (prefix.trim().length > 0 && /\s/.test(line[idx - 1]!)) continue
         const jsonPart = line.slice(idx + NOTIFY_SUMMARY_PREFIX.length).trim()
         if (!jsonPart.startsWith('{') || !jsonPart.endsWith('}')) continue
         try {
-            if (isObject(JSON.parse(jsonPart))) return jsonPart
+            if (isObject(JSON.parse(jsonPart))) return { jsonPart, start: idx }
         } catch {
             // Try the next occurrence (e.g. token mentioned inside a value).
         }
@@ -173,32 +266,7 @@ function matchNotifySummaryLine(line: string): string | null {
     return null
 }
 
-/**
- * Look for an `AGENT_NOTIFY_SUMMARY {...json...}` footer as the **last
- * non-empty line** of an agent's plain-text message.
- *
- * End-anchor: trailing blank lines are fine, but prose on a later
- * non-empty line is non-compliant and returns null. Mid-body quotes of
- * the token are ignored for the same reason. An optional prose prefix on
- * the last line itself is tolerated when the line still ends with a
- * well-formed `AGENT_NOTIFY_SUMMARY {…}` payload.
- *
- * Returns the parsed object on success, `null` on any deviation. The
- * shape is intentionally loose - we only trust `summary`, `action`, and
- * `status` for notification rendering, but the full object is forwarded
- * onto the meta-event bus when Phase 2 lands.
- */
-export function extractNotifySummary(text: unknown): NotifySummary | null {
-    if (typeof text !== 'string' || text.length === 0) return null
-
-    const lines = text.split('\n')
-    let lastIdx = lines.length - 1
-    while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx -= 1
-    if (lastIdx < 0) return null
-
-    const jsonPart = matchNotifySummaryLine(lines[lastIdx].trim())
-    if (jsonPart === null) return null
-
+function parseNotifySummaryJson(jsonPart: string): NotifySummary | null {
     try {
         const parsed: unknown = JSON.parse(jsonPart)
         if (!isObject(parsed)) return null
@@ -213,6 +281,89 @@ export function extractNotifySummary(text: unknown): NotifySummary | null {
     } catch {
         return null
     }
+}
+
+type NotifySummaryMatch = {
+    lines: string[]
+    lastIdx: number
+    line: string
+    match: NotifySummaryLineMatch
+    summary: NotifySummary
+}
+
+function findNotifySummary(text: string): NotifySummaryMatch | null {
+    const lines = text.split('\n')
+    let lastIdx = lines.length - 1
+    while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx -= 1
+    if (lastIdx < 0) return null
+
+    const line = lines[lastIdx].trimEnd()
+    const match = matchNotifySummaryLine(line)
+    if (match === null) return null
+
+    const summary = parseNotifySummaryJson(match.jsonPart)
+    if (summary === null) return null
+
+    return { lines, lastIdx, line, match, summary }
+}
+
+/**
+ * Look for an `AGENT_NOTIFY_SUMMARY {...json...}` footer as the **last
+ * non-empty line** of an agent's plain-text message.
+ *
+ * End-anchor: trailing blank lines are fine, but prose on a later
+ * non-empty line is non-compliant and returns null. Mid-body quotes of
+ * the token are ignored for the same reason. An optional *glued* prose prefix
+ * on the last line itself is tolerated (`Done.AGENT_NOTIFY_SUMMARY {…}`);
+ * whitespace-delimited examples on that line are not.
+ *
+ * Returns the parsed object on success, `null` on any deviation. The
+ * shape is intentionally loose - we only trust `summary`, `action`, and
+ * `status` for notification rendering, but the full object is forwarded
+ * onto the meta-event bus when Phase 2 lands.
+ */
+export function extractNotifySummary(text: unknown): NotifySummary | null {
+    if (typeof text !== 'string' || text.length === 0) return null
+
+    return findNotifySummary(text)?.summary ?? null
+}
+
+export type NotifySummaryDisplay = {
+    /** Agent prose with the machine-readable footer removed. */
+    visibleText: string
+    summary: NotifySummary
+}
+
+/**
+ * Split a valid trailing summary footer into user-facing prose and metadata.
+ *
+ * The original message remains untouched; callers can use `visibleText` only
+ * for presentation while retaining the raw text for copy/export/notifications.
+ */
+export function splitNotifySummary(text: unknown): NotifySummaryDisplay | null {
+    if (typeof text !== 'string' || text.length === 0) return null
+
+    const found = findNotifySummary(text)
+    if (found === null) return null
+
+    const prefix = found.line.slice(0, found.match.start).trimEnd()
+    const visibleLines = found.lines.slice(0, found.lastIdx)
+    if (prefix.length > 0) visibleLines.push(prefix)
+
+    return {
+        visibleText: visibleLines.join('\n').trimEnd(),
+        summary: found.summary
+    }
+}
+
+/**
+ * Render/copy helper: remove a valid trailing AGENT_NOTIFY_SUMMARY footer.
+ * Leaves malformed, mid-body, and non-final occurrences unchanged. Store and
+ * parse/FCM paths must keep using the raw text.
+ */
+export function stripNotifySummaryFooter(text: string): string {
+    if (typeof text !== 'string' || text.length === 0) return text
+    return splitNotifySummary(text)?.visibleText ?? text
 }
 
 export type { RoleWrappedRecord }

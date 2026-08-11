@@ -22,9 +22,22 @@ type AcpPromptUsage = {
     cacheCreationTokens?: number;
 };
 
+type AcpUsageCost = {
+    amount: number;
+    currency: string;
+};
+
+function sameCost(a: AcpUsageCost | null | undefined, b: AcpUsageCost | null | undefined): boolean {
+    return a === b || (a !== null && a !== undefined && b !== null && b !== undefined
+        && a.amount === b.amount && a.currency === b.currency)
+}
+
 type AcpUsageUpdate = {
     contextTokens: number | undefined;
     contextWindow: number | undefined;
+    tokenUsage: AcpPromptUsage | null;
+    /** Cumulative session cost reported by ACP `usage_update.cost`. */
+    cost: AcpUsageCost | null;
 };
 
 export type AcpModelDescriptor = {
@@ -77,6 +90,7 @@ export class AcpSdkBackend implements AgentBackend {
     private setModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
     private promptRequestInFlight = false;
+    private activePromptRequests = 0;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -530,7 +544,7 @@ export class AcpSdkBackend implements AgentBackend {
             textChunkMode: this.options.textChunkMode,
             flavor: this.options.flavor,
         });
-        this.isProcessingMessage = true;
+        this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
@@ -572,35 +586,44 @@ export class AcpSdkBackend implements AgentBackend {
             this.messageHandler?.drainBuffers();
             try {
                 const latestUsageUpdate = this.readLatestUsageUpdate();
-                if (promptUsage) {
+                const finalPromptUsage = promptUsage ?? latestUsageUpdate?.tokenUsage ?? null;
+                if (finalPromptUsage) {
                     onUpdate({
                         type: 'usage',
-                        inputTokens: promptUsage.inputTokens,
-                        outputTokens: promptUsage.outputTokens,
-                        totalTokens: promptUsage.totalTokens,
-                        thoughtTokens: promptUsage.thoughtTokens,
-                        cacheReadTokens: promptUsage.cacheReadTokens,
-                        ...(promptUsage.cacheCreationTokens !== undefined
-                            ? { cacheCreationTokens: promptUsage.cacheCreationTokens }
+                        inputTokens: finalPromptUsage.inputTokens,
+                        outputTokens: finalPromptUsage.outputTokens,
+                        totalTokens: finalPromptUsage.totalTokens,
+                        thoughtTokens: finalPromptUsage.thoughtTokens,
+                        cacheReadTokens: finalPromptUsage.cacheReadTokens,
+                        ...(finalPromptUsage.cacheCreationTokens !== undefined
+                            ? { cacheCreationTokens: finalPromptUsage.cacheCreationTokens }
                             : {}),
                         contextTokens: latestUsageUpdate ? latestUsageUpdate.contextTokens : undefined,
-                        contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined
+                        contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined,
+                        ...(latestUsageUpdate?.cost
+                            ? { cost: latestUsageUpdate.cost.amount, costCurrency: latestUsageUpdate.cost.currency }
+                            : {})
                     });
                 } else if (
                     latestUsageUpdate
-                    && (latestUsageUpdate.contextTokens !== undefined || latestUsageUpdate.contextWindow !== undefined)
+                    && (latestUsageUpdate.contextTokens !== undefined
+                        || latestUsageUpdate.contextWindow !== undefined
+                        || latestUsageUpdate.cost !== null)
                     && !this.hasForwardedUsage(latestUsageUpdate)
                 ) {
                     // Agent did not return prompt usage (slash-handled turns,
                     // errored turns), but we did see ACP usage updates during
                     // the turn. Emit a context-only usage so the status bar
-                    // reflects the current context size.
+                    // reflects the current context size and cumulative cost.
                     onUpdate({
                         type: 'usage',
                         inputTokens: 0,
                         outputTokens: 0,
                         contextTokens: latestUsageUpdate.contextTokens,
-                        contextWindow: latestUsageUpdate.contextWindow
+                        contextWindow: latestUsageUpdate.contextWindow,
+                        ...(latestUsageUpdate.cost
+                            ? { cost: latestUsageUpdate.cost.amount, costCurrency: latestUsageUpdate.cost.currency }
+                            : {})
                     });
                 }
                 if (stopReason) {
@@ -608,8 +631,7 @@ export class AcpSdkBackend implements AgentBackend {
                 }
             } finally {
                 this.promptUsageCallback = null;
-                this.isProcessingMessage = false;
-                this.notifyResponseComplete();
+                this.finishPromptRequest();
             }
         }
     }
@@ -620,6 +642,83 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         this.transport.sendNotification('session/cancel', { sessionId });
+    }
+
+    /**
+     * Soft-inject a follow-up `session/prompt` while another prompt is in flight.
+     *
+     * Used for Cursor mid-turn steer (GUI "Send" / next-opportune soft send).
+     * Does **not** cancel the active prompt and does **not** swap message handlers —
+     * `session/update` notifications keep flowing to the in-flight turn's handler.
+     *
+     * Awaits the full concurrent `session/prompt` JSON-RPC response (turn completion
+     * for that inject). Do **not** call this from the hub `SteerQueuedMessage` handler —
+     * that RPC uses a 30s Socket.IO timeout. Use {@link beginSoftSteerPrompt} there.
+     */
+    async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        this.beginPromptRequest();
+        try {
+            await this.transport.sendRequest('session/prompt', {
+                sessionId,
+                prompt: content
+            }, { timeoutMs: Infinity });
+        } finally {
+            this.finishPromptRequest();
+        }
+    }
+
+    /**
+     * Kick off a soft steer without blocking the hub RPC on turn completion.
+     * Separates transport dispatch from prompt completion so callers can commit
+     * queue state only after stdin accepted the request without waiting for the turn.
+     */
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): {
+        dispatched: Promise<void>;
+        completed: Promise<void>;
+    } {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        const transport = this.transport;
+        this.beginPromptRequest();
+        const request = transport.sendRequestWithDispatch('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+        const completed = (async () => {
+            try {
+                await request.completed;
+            } finally {
+                try {
+                    await this.waitForSessionUpdateQuiet(
+                        AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
+                        AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
+                    );
+                    this.messageHandler?.drainBuffers();
+                    await this.drainLateBuffers();
+                    this.messageHandler?.drainBuffers();
+                } finally {
+                    this.finishPromptRequest();
+                }
+            }
+        })();
+
+        void completed.catch((error) => {
+            logger.warn('[ACP] soft-steer session/prompt failed', error);
+        });
+
+        return { dispatched: request.dispatched, completed };
     }
 
     async respondToPermission(
@@ -723,7 +822,7 @@ export class AcpSdkBackend implements AgentBackend {
      * Useful for checking if it's safe to perform session operations.
      */
     get processingMessage(): boolean {
-        return this.isProcessingMessage;
+        return this.activePromptRequests > 0;
     }
 
     isPromptRequestInFlight(): boolean {
@@ -741,7 +840,7 @@ export class AcpSdkBackend implements AgentBackend {
      * like session swap or sending task_complete.
      */
     async waitForResponseComplete(): Promise<void> {
-        if (!this.isProcessingMessage) {
+        if (this.activePromptRequests === 0) {
             return;
         }
         return new Promise<void>((resolve) => {
@@ -759,6 +858,7 @@ export class AcpSdkBackend implements AgentBackend {
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
+        this.activePromptRequests = 0;
         this.isProcessingMessage = false;
         this.sessionModelsMetadata.clear();
         this.initialAvailableCommands.clear();
@@ -832,10 +932,15 @@ export class AcpSdkBackend implements AgentBackend {
         const sessionUpdate = asString(update.sessionUpdate);
         let contextTokens: number | null = null;
         let contextWindow: number | null = null;
+        let cost: AcpUsageCost | null = null;
+        const tokenUsage = sessionUpdate === ACP_SESSION_UPDATE_TYPES.stateUpdate
+            ? this.extractUsage(update.usage)
+            : null;
 
         if (sessionUpdate === ACP_SESSION_UPDATE_TYPES.usageUpdate) {
             contextTokens = this.asFiniteNumber(update.used);
             contextWindow = this.asFiniteNumber(update.size);
+            cost = this.extractCost(update.cost);
         } else if (sessionUpdate === ACP_SESSION_UPDATE_TYPES.sessionInfoUpdate) {
             contextTokens = this.asFiniteNumber(
                 update.used
@@ -849,13 +954,16 @@ export class AcpSdkBackend implements AgentBackend {
                 ?? update.context_window
                 ?? update.contextLimit
             );
-        } else {
+        } else if (sessionUpdate !== ACP_SESSION_UPDATE_TYPES.stateUpdate) {
             return;
         }
 
+        const previous = this.latestUsageUpdate
         this.latestUsageUpdate = {
-            contextTokens: contextTokens ?? undefined,
-            contextWindow: contextWindow ?? undefined
+            contextTokens: contextTokens ?? previous?.contextTokens,
+            contextWindow: contextWindow ?? previous?.contextWindow,
+            tokenUsage: tokenUsage ?? previous?.tokenUsage ?? null,
+            cost: cost ?? previous?.cost ?? null
         };
         this.forwardUsageUpdate();
     }
@@ -863,14 +971,15 @@ export class AcpSdkBackend implements AgentBackend {
     private hasForwardedUsage(update: AcpUsageUpdate): boolean {
         return this.lastForwardedUsageUpdate !== null
             && this.lastForwardedUsageUpdate.contextTokens === update.contextTokens
-            && this.lastForwardedUsageUpdate.contextWindow === update.contextWindow;
+            && this.lastForwardedUsageUpdate.contextWindow === update.contextWindow
+            && sameCost(this.lastForwardedUsageUpdate.cost, update.cost);
     }
 
     private forwardUsageUpdate(): void {
         const update = this.latestUsageUpdate;
         if (
             !update
-            || (update.contextTokens === undefined && update.contextWindow === undefined)
+            || (update.contextTokens === undefined && update.contextWindow === undefined && update.cost === null)
         ) {
             return;
         }
@@ -879,6 +988,7 @@ export class AcpSdkBackend implements AgentBackend {
             this.lastForwardedUsageUpdate
             && this.lastForwardedUsageUpdate.contextTokens === update.contextTokens
             && this.lastForwardedUsageUpdate.contextWindow === update.contextWindow
+            && sameCost(this.lastForwardedUsageUpdate.cost, update.cost)
         ) {
             return;
         }
@@ -889,7 +999,8 @@ export class AcpSdkBackend implements AgentBackend {
             inputTokens: 0,
             outputTokens: 0,
             contextTokens: update.contextTokens,
-            contextWindow: update.contextWindow
+            contextWindow: update.contextWindow,
+            ...(update.cost ? { cost: update.cost.amount, costCurrency: update.cost.currency } : {})
         };
 
         if (this.promptUsageCallback) {
@@ -1007,6 +1118,19 @@ export class AcpSdkBackend implements AgentBackend {
         return await responsePromise;
     }
 
+    private beginPromptRequest(): void {
+        this.activePromptRequests++;
+        this.isProcessingMessage = true;
+    }
+
+    private finishPromptRequest(): void {
+        this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
+        this.isProcessingMessage = this.activePromptRequests > 0;
+        if (!this.isProcessingMessage) {
+            this.notifyResponseComplete();
+        }
+    }
+
     private notifyResponseComplete(): void {
         const resolvers = this.responseCompleteResolvers;
         this.responseCompleteResolvers = [];
@@ -1045,8 +1169,22 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     private extractPromptUsage(response: unknown): AcpPromptUsage | null {
-        if (!isObject(response) || !isObject(response.usage)) return null;
-        const usage = response.usage;
+        return isObject(response) ? this.extractUsage(response.usage) : null;
+    }
+
+    private extractCost(value: unknown): AcpUsageCost | null {
+        if (!isObject(value)) return null;
+        const amount = this.asFiniteNumber(value.amount);
+        const currency = typeof value.currency === 'string' && value.currency.trim()
+            ? value.currency.trim()
+            : null;
+        if (amount === null || currency === null) return null;
+        return { amount, currency };
+    }
+
+    private extractUsage(value: unknown): AcpPromptUsage | null {
+        if (!isObject(value)) return null;
+        const usage = value;
         const inputTokens = this.asFiniteNumber(usage.inputTokens ?? usage.input_tokens);
         const outputTokens = this.asFiniteNumber(usage.outputTokens ?? usage.output_tokens);
         if (inputTokens === null || outputTokens === null) return null;
