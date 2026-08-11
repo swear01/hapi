@@ -1,0 +1,1234 @@
+diff --git a/web/e2e-fixtures/markdown-file-link-failclosed-fixture.html b/web/e2e-fixtures/markdown-file-link-failclosed-fixture.html
+new file mode 100644
+index 000000000..94404a88c
+--- /dev/null
++++ b/web/e2e-fixtures/markdown-file-link-failclosed-fixture.html
+@@ -0,0 +1,19 @@
++<!doctype html>
++<html lang="en">
++    <head>
++        <meta charset="UTF-8" />
++        <meta name="viewport" content="width=device-width, initial-scale=1" />
++        <title>HAPI markdown file-link fail-closed fixture (#1452)</title>
++        <style>
++            html { background: #fff }
++            body { margin: 0; padding: 16px; font-family: system-ui, sans-serif }
++            #root { max-width: 720px; margin: 0 auto }
++            .case { margin-bottom: 1.25rem; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px }
++            .case h2 { font-size: 0.85rem; margin: 0 0 0.5rem; color: #555 }
++        </style>
++    </head>
++    <body>
++        <div id="root"></div>
++        <script type="module" src="./markdown-file-link-failclosed-fixture.tsx"></script>
++    </body>
++</html>
+diff --git a/web/e2e-fixtures/markdown-file-link-failclosed-fixture.tsx b/web/e2e-fixtures/markdown-file-link-failclosed-fixture.tsx
+new file mode 100644
+index 000000000..481fbc3dd
+--- /dev/null
++++ b/web/e2e-fixtures/markdown-file-link-failclosed-fixture.tsx
+@@ -0,0 +1,79 @@
++/*
++ * Visual fixture for #1452 fail-closed markdown file links.
++ * Chat-mode MarkdownRenderer (+ HappyChatContext) so FilePathAnchor can paint.
++ */
++
++import React from 'react'
++import ReactDOM from 'react-dom/client'
++import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router'
++import '../src/index.css'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { MarkdownRenderer } from '../src/components/MarkdownRenderer'
++import { HappyChatProvider, type HappyChatContextValue } from '../src/components/AssistantChat/context'
++import type { ApiClient } from '../src/api/client'
++
++const SAMPLE = `## Fail-closed markdown file links (#1452)
++
++Allowlisted relative (preview): [docs](docs/foo.md)
++
++Absolute in workspace (preview): [abs](/home/ada/coding/hapi/docs/a.md)
++
++Tilde in workspace (preview): [tilde](~/coding/hapi/docs/a.md)
++
++Fragment (preview): [frag](docs/foo.md#section)
++
++Outside workspace (inert, not blue): [etc](/etc/passwd.sh)
++
++No extension (inert): [bare](docs/foo)
++
++Parent escape (inert): [up](../escape.md)
++
++Real app route (SPA): [settings](/settings)
++
++Hash / query (SPA): [hash](#section) · [query](?q=1)
++`
++
++function chatValue(): HappyChatContextValue {
++    return {
++        api: {} as ApiClient,
++        sessionId: 'fixture-session',
++        metadata: { path: '/home/ada/coding/hapi', host: 'local' },
++        terminalToolDisplayMode: 'compact',
++        disabled: false,
++        onRefresh: () => {},
++        hasMoreMessages: false,
++        isSyncingTail: false,
++        isLoadingMoreMessages: false,
++        loadOlderMessagesPreservingScroll: async () => 'loaded',
++    }
++}
++
++function FixtureBody() {
++    return (
++        <div data-testid="markdown-file-link-failclosed-fixture">
++            <div className="case">
++                <h2>Chat surface (HappyChatContext + workspace path)</h2>
++                <HappyChatProvider value={chatValue()}>
++                    <MarkdownRenderer content={SAMPLE} />
++                </HappyChatProvider>
++            </div>
++        </div>
++    )
++}
++
++const rootRoute = createRootRoute({ component: FixtureBody })
++const router = createRouter({
++    routeTree: rootRoute,
++    history: createMemoryHistory({ initialEntries: ['/'] }),
++})
++
++const rootEl = document.getElementById('root')
++if (rootEl) {
++    ReactDOM.createRoot(rootEl).render(
++        <React.StrictMode>
++            <I18nProvider>
++                <RouterProvider router={router} />
++            </I18nProvider>
++        </React.StrictMode>
++    )
++}
+diff --git a/web/src/components/assistant-ui/markdown-a.test.tsx b/web/src/components/assistant-ui/markdown-a.test.tsx
+index 8ab221681..d2053f0c7 100644
+--- a/web/src/components/assistant-ui/markdown-a.test.tsx
++++ b/web/src/components/assistant-ui/markdown-a.test.tsx
+@@ -13,7 +13,18 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
+ import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
+ import React from 'react'
+ import { defaultComponents, classifyScheme, denyOnlyTransform, UriConfirmProvider } from '@/components/assistant-ui/markdown-text'
++import { HappyChatProvider, type HappyChatContextValue } from '@/components/AssistantChat/context'
+ import { I18nProvider } from '@/lib/i18n-context'
++import type { ApiClient } from '@/api/client'
++
++const navigate = vi.fn()
++vi.mock('@tanstack/react-router', async () => {
++    const actual = await vi.importActual<typeof import('@tanstack/react-router')>('@tanstack/react-router')
++    return {
++        ...actual,
++        useNavigate: () => navigate,
++    }
++})
+ 
+ // defaultComponents.a is the memoized A component.
+ const AnchorComponent = (defaultComponents as Record<string, unknown>).a as React.ComponentType<
+@@ -24,14 +35,33 @@ const AnchorComponent = (defaultComponents as Record<string, unknown>).a as Reac
+ // Previously <A> had a localHook fallback for bare renders, but that fallback
+ // added a storage listener per link (N links → N+1 listeners). The fallback is
+ // removed; tests must provide the context instead.
+-function renderA(props: React.ComponentPropsWithoutRef<'a'>) {
+-    return render(
++function renderA(props: React.ComponentPropsWithoutRef<'a'>, chat?: HappyChatContextValue) {
++    const tree = (
+         <I18nProvider>
+             <UriConfirmProvider>
+                 <AnchorComponent {...props} />
+             </UriConfirmProvider>
+         </I18nProvider>
+     )
++    return render(
++        chat ? <HappyChatProvider value={chat}>{tree}</HappyChatProvider> : tree
++    )
++}
++
++function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatContextValue {
++    return {
++        api: {} as ApiClient,
++        sessionId: 'session-1',
++        metadata: { path: '/home/ada/coding/hapi', host: 'local' },
++        terminalToolDisplayMode: 'compact',
++        disabled: false,
++        onRefresh: () => {},
++        hasMoreMessages: false,
++        isSyncingTail: false,
++        isLoadingMoreMessages: false,
++        loadOlderMessagesPreservingScroll: async () => 'loaded',
++        ...overrides,
++    }
+ }
+ 
+ const STORAGE_KEY = 'hapi-allowed-schemes'
+@@ -216,20 +246,17 @@ describe('markdown <A> component — click handler', () => {
+     })
+ })
+ 
+-// ── relative / no-scheme hrefs — regression guard ────────────────────────────
++// ── relative / no-scheme hrefs — fail-closed (#1452) ─────────────────────────
+ //
+-// Finding 2: denyOnlyTransform passes relative hrefs through unchanged (no colon
+-// → not a scheme URL), but the <A> onClick handler called classifyScheme(href)
+-// which returned 'deny' for inputs with no valid scheme → preventDefault was
+-// called → relative/internal links were silently blocked.
++// Finding 2 (historical): denyOnlyTransform passes relative hrefs through, but
++// classifyScheme returned 'deny' for no-scheme inputs → preventDefault blocked
++// internal links. Fixed by treating scheme-less as 'iana' when SPA-safe.
+ //
+-// Fix: <A> must detect hrefs that have no scheme and treat them as 'iana' so the
+-// browser/router can navigate normally.
+-
+-describe('markdown <A> component — relative / no-scheme hrefs navigate normally', () => {
+-    // Each of these hrefs has no URL scheme. Clicks must NOT be prevented.
+-    // We verify by checking that preventDefault is NOT called on the click event.
++// #1452: scheme-less path-like hrefs that are NOT real app routes must not
++// remain clickable SPA dead-ends. They become inert <span>s (or FilePathAnchor
++// when they resolve to a workspace file).
+ 
++describe('markdown <A> component — SPA-safe no-scheme hrefs still navigate', () => {
+     function clickAndCheckNotPrevented(href: string) {
+         renderA({ href, children: 'link' })
+         const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true })
+@@ -243,10 +270,6 @@ describe('markdown <A> component — relative / no-scheme hrefs navigate normall
+         clickAndCheckNotPrevented('/settings')
+     })
+ 
+-    it('./foo → click not prevented (relative-path link)', () => {
+-        clickAndCheckNotPrevented('./foo')
+-    })
+-
+     it('#section → click not prevented (hash fragment link)', () => {
+         clickAndCheckNotPrevented('#section')
+     })
+@@ -255,14 +278,7 @@ describe('markdown <A> component — relative / no-scheme hrefs navigate normall
+         clickAndCheckNotPrevented('?q=1')
+     })
+ 
+-    it('/path:colon → click not prevented (path with colon, no scheme)', () => {
+-        // "/" appears before ":" so this is a path, not a scheme.
+-        clickAndCheckNotPrevented('/path:colon')
+-    })
+-
+     it('//example.com → click not prevented (protocol-relative URL, no colon)', () => {
+-        // Protocol-relative URLs have no colon; browsers navigate them as the
+-        // current origin's protocol, same as any other relative href.
+         clickAndCheckNotPrevented('//example.com/path')
+     })
+ 
+@@ -271,6 +287,140 @@ describe('markdown <A> component — relative / no-scheme hrefs navigate normall
+     })
+ })
+ 
++describe('markdown <A> component — fail-closed path-like hrefs (#1452)', () => {
++    it('renders ./foo as inert text (not a navigable <a>)', () => {
++        renderA({ href: './foo', children: 'dead' })
++        expect(document.querySelector('a')).toBeNull()
++        const inert = document.querySelector('.aui-md-a-inert')
++        expect(inert).not.toBeNull()
++        expect(inert!.getAttribute('title')).toBe('./foo')
++        expect(inert!.textContent).toBe('dead')
++    })
++
++    it('renders /home/... absolute file href as inert without chat context', () => {
++        renderA({ href: '/home/ada/proj/docs/a.md', children: 'abs' })
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('abs')
++    })
++
++    it('renders ~/... as inert without workspace metadata', () => {
++        renderA({ href: '~/proj/docs/a.md', children: 'tilde' })
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('tilde')
++    })
++
++    it('renders /path:colon as inert (path-like, not an app route)', () => {
++        renderA({ href: '/path:colon', children: 'weird' })
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')).not.toBeNull()
++    })
++
++    it('routes in-workspace absolute file href to FilePathAnchor when chat is present', () => {
++        renderA(
++            { href: '/home/ada/coding/hapi/docs/a.md', children: 'abs' },
++            chatContext()
++        )
++        const link = document.querySelector('a')
++        expect(link).not.toBeNull()
++        expect(link!.getAttribute('href')).toContain('/sessions/session-1/file?')
++        expect(document.querySelector('.aui-md-a-inert')).toBeNull()
++    })
++
++    it('keeps outside-workspace absolute file href inert even with chat present', () => {
++        renderA(
++            { href: '/etc/passwd.sh', children: 'etc' },
++            chatContext()
++        )
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('etc')
++    })
++
++    it('keeps outside-workspace Windows absolute href inert despite drive colon looking like a scheme', () => {
++        renderA(
++            { href: 'D:/outside/secret.ts#L1', children: 'win' },
++            chatContext()
++        )
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('win')
++    })
++
++    it('routes hapi-file-candidate Windows href through containment to FilePathAnchor', () => {
++        const path = 'C:\\Users\\ada\\coding\\hapi\\docs\\a.md'
++        renderA(
++            {
++                href: 'hapi-file-candidate:' + encodeURIComponent(path),
++                children: 'win',
++            },
++            chatContext({
++                metadata: { path: 'C:\\Users\\ada\\coding\\hapi', host: 'local' },
++            })
++        )
++        const link = document.querySelector('a')
++        expect(link).not.toBeNull()
++        expect(link!.getAttribute('href')).toContain('/sessions/session-1/file?')
++    })
++
++    it('renders non-Windows hapi-file-candidate payloads as inert (no SPA navigate bypass)', () => {
++        renderA(
++            {
++                href: 'hapi-file-candidate:' + encodeURIComponent('/settings'),
++                children: 'spoof',
++            },
++            chatContext()
++        )
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('spoof')
++    })
++
++    it('renders empty hapi-file-candidate payload as inert (no custom-scheme confirm)', () => {
++        renderA({ href: 'hapi-file-candidate:', children: 'empty' }, chatContext())
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('empty')
++    })
++
++    it('renders uppercase hapi-file-candidate scheme as inert when payload is empty', () => {
++        renderA({ href: 'HAPI-FILE-CANDIDATE:', children: 'upper' }, chatContext())
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('upper')
++    })
++
++    it('renders percent-encoded hapi-file-candidate scheme as inert when payload is empty', () => {
++        renderA({ href: 'hapi%2Dfile%2Dcandidate:', children: 'enc' }, chatContext())
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('enc')
++    })
++
++    it('treats percent-encoded backslash Windows href as inert when outside workspace', () => {
++        renderA(
++            { href: 'D:%5Coutside%5Csecret.ts', children: 'win' },
++            chatContext()
++        )
++        expect(document.querySelector('a')).toBeNull()
++        expect(document.querySelector('.aui-md-a-inert')?.textContent).toBe('win')
++    })
++
++    it('expands ~/ and routes to FilePathAnchor when workspace metadata is present', () => {
++        renderA(
++            { href: '~/coding/hapi/docs/a.md', children: 'tilde' },
++            chatContext()
++        )
++        const link = document.querySelector('a')
++        expect(link).not.toBeNull()
++        expect(link!.getAttribute('href')).toContain('/sessions/session-1/file?')
++    })
++
++    it('keeps allowlisted relative file href as FilePathAnchor with chat', () => {
++        renderA({ href: 'docs/foo.md', children: 'rel' }, chatContext())
++        expect(document.querySelector('a')!.getAttribute('href')).toContain('/sessions/session-1/file?')
++    })
++
++    it('still renders /settings as a real navigable link with chat present', () => {
++        renderA({ href: '/settings', children: 'settings' }, chatContext())
++        expect(document.querySelector('a')!.getAttribute('href')).toBe('/settings')
++        expect(document.querySelector('.aui-md-a-inert')).toBeNull()
++    })
++})
++
+ // ── intra-tab cross-provider sync (schemeListeners emitter) ──────────────────
+ //
+ // P7e.1 added a module-level `schemeListeners: Set<SchemeListener>` so that
+diff --git a/web/src/components/assistant-ui/markdown-text.tsx b/web/src/components/assistant-ui/markdown-text.tsx
+index 78129c3c2..2a201511c 100644
+--- a/web/src/components/assistant-ui/markdown-text.tsx
++++ b/web/src/components/assistant-ui/markdown-text.tsx
+@@ -25,7 +25,8 @@ import { useCodeWrap } from '@/hooks/useCodeWrap'
+ import { CopyIcon, CheckIcon, WrapIcon } from '@/components/icons'
+ import { useTranslation } from '@/lib/use-translation'
+ import { useOptionalHappyChatContext } from '@/components/AssistantChat/context'
+-import { decodeFilePathHref, remarkFilePathLinks } from '@/lib/remark-file-path-links'
++import { decodeFilePathCandidateHref, decodeFilePathHref, remarkFilePathLinks } from '@/lib/remark-file-path-links'
++import { classifyNoSchemeHref } from '@/lib/markdown-href-policy'
+ import { remarkSessionPathLinks } from '@/lib/remark-session-path-links'
+ import { buildSessionReferencePath, parseSessionPathHref } from '@/lib/sessionReference'
+ import { UriConfirmDialog } from '@/components/UriConfirmDialog'
+@@ -494,25 +495,23 @@ function Code(props: ComponentPropsWithoutRef<'code'>) {
+ }
+ 
+ function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: string; sessionId: string }) {
++    const { filePath, sessionId, ...anchorProps } = props
+     const navigate = useNavigate()
+-    const rel = props.target === '_blank' ? (props.rel ?? 'noreferrer') : props.rel
+-    const search = new URLSearchParams({
+-        path: encodeBase64(props.filePath),
+-        origin: 'chat',
+-    }).toString()
+-    const href = `/sessions/${encodeURIComponent(props.sessionId)}/file?${search}`
++    const rel = anchorProps.target === '_blank' ? (anchorProps.rel ?? 'noreferrer') : anchorProps.rel
++    const search = new URLSearchParams({ path: encodeBase64(filePath), origin: 'chat' }).toString()
++    const href = `/sessions/${encodeURIComponent(sessionId)}/file?${search}`
+ 
+     const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+-        props.onClick?.(event)
++        anchorProps.onClick?.(event)
+         if (event.defaultPrevented) return
+         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+ 
+         event.preventDefault()
+         void navigate({
+             to: '/sessions/$sessionId/file',
+-            params: { sessionId: props.sessionId },
++            params: { sessionId },
+             search: {
+-                path: encodeBase64(props.filePath),
++                path: encodeBase64(filePath),
+                 origin: 'chat',
+             }
+         })
+@@ -520,11 +519,11 @@ function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: strin
+ 
+     return (
+         <a
+-            {...props}
++            {...anchorProps}
+             href={href}
+             rel={rel}
+             onClick={handleClick}
+-            className={cn('aui-md-a font-medium text-[var(--app-link)] underline decoration-[color:var(--app-link-muted)] underline-offset-3', props.className)}
++            className={cn('aui-md-a font-medium text-[var(--app-link)] underline decoration-[color:var(--app-link-muted)] underline-offset-3', anchorProps.className)}
+         />
+     )
+ }
+@@ -561,8 +560,10 @@ function SessionPathAnchor(props: ComponentPropsWithoutRef<'a'> & { targetSessio
+ /**
+  * Anchor component with URI scheme policy enforcement.
+  *
+- * - Relative / no-scheme hrefs (/settings, ./foo, #section, ?q=1): passed through
+- *   without interception so the browser or SPA router can navigate normally.
++ * - Scheme-less hrefs (#1452 fail-closed): known app routes (`/settings`, `#`,
++ *   `?`, `/sessions/…`) stay SPA-navigable; workspace file targets open via
++ *   FilePathAnchor; any other path-like href renders as inert (non-clickable)
++ *   text so we never paint a blue link that SPA-404s.
+  * - IANA safe schemes (https/http/mailto/irc/ircs/xmpp): navigate directly.
+  * - Deny schemes (javascript/data/vbscript/file): silently block. denyOnlyTransform
+  *   already strips the href to "", so href="" in DOM (belt-and-suspenders onClick
+@@ -575,6 +576,19 @@ function SessionPathAnchor(props: ComponentPropsWithoutRef<'a'> & { targetSessio
+  *   which uses useNavigate for SPA routing.
+  * - Session citation paths (`/sessions/<id>`): SessionPathAnchor SPA navigation.
+  */
++function InertMarkdownHref(props: { href: string; children?: ReactNode; className?: string }) {
++    // Plain/muted — intentionally not an <a>, so middle-click / copy-link can't
++    // invent a dead SPA route either.
++    return (
++        <span
++            title={props.href}
++            className={cn('aui-md-a-inert text-[var(--app-hint)]', props.className)}
++        >
++            {props.children}
++        </span>
++    )
++}
++
+ function A(props: ComponentPropsWithoutRef<'a'>) {
+     const chat = useOptionalHappyChatContext()
+     // useContext must be called unconditionally before any early return so that
+@@ -589,6 +603,8 @@ function A(props: ComponentPropsWithoutRef<'a'>) {
+     // <UriConfirmProvider> (or supply a mock UriConfirmContext.Provider).
+     const ctx = useContext(UriConfirmContext)
+     const filePath = typeof props.href === 'string' ? decodeFilePathHref(props.href) : null
++    const candidatePath =
++        typeof props.href === 'string' ? decodeFilePathCandidateHref(props.href) : null
+     const targetSessionId = typeof props.href === 'string' ? parseSessionPathHref(props.href) : null
+     const rel = props.target === '_blank' ? (props.rel ?? 'noreferrer') : props.rel
+ 
+@@ -603,15 +619,60 @@ function A(props: ComponentPropsWithoutRef<'a'>) {
+         return <SessionPathAnchor {...props} targetSessionId={targetSessionId} />
+     }
+ 
++    const { onClick, href, ...rest } = props
++
++    // Windows candidate (or raw / %5C-normalized drive path): classify with workspace
++    // before painting FilePathAnchor or treating `C:` as a custom URI scheme.
++    // Candidates are Windows-only; reject empty / non-drive payloads fail-closed
++    // (do not fall through to custom-scheme confirmation for this scheme).
++    const isCandidateHref = href ? normalizedScheme(href) === 'hapi-file-candidate' : false
++    if (isCandidateHref && (!candidatePath || !/^[A-Za-z]:[\\/]/.test(candidatePath))) {
++        return (
++            <InertMarkdownHref href={href ?? ''} className={props.className}>
++                {props.children}
++            </InertMarkdownHref>
++        )
++    }
++
++    const windowsPathFromHref = (() => {
++        if (candidatePath) return candidatePath
++        if (!href) return null
++        if (/^[A-Za-z]:[\\/]/.test(href)) return href
++        // mdast→hast may percent-encode backslashes before props.href arrives.
++        if (/^[A-Za-z]:(?:%5[Cc]|\/)/.test(href)) {
++            try {
++                return decodeURIComponent(href)
++            } catch {
++                return null
++            }
++        }
++        return null
++    })()
++
++    if (windowsPathFromHref || (href && !hasScheme(href))) {
++        const decision = classifyNoSchemeHref(windowsPathFromHref ?? href!, {
++            workspacePath: chat?.metadata?.path ?? null,
++        })
++        if (decision.action === 'file') {
++            if (!chat) {
++                return <InertMarkdownHref href={href ?? windowsPathFromHref ?? ''} className={props.className}>{props.children}</InertMarkdownHref>
++            }
++            return <FilePathAnchor {...props} filePath={decision.path} sessionId={chat.sessionId} />
++        }
++        if (decision.action === 'inert') {
++            return <InertMarkdownHref href={href ?? windowsPathFromHref ?? ''} className={props.className}>{props.children}</InertMarkdownHref>
++        }
++        // action === 'navigate' → fall through (only for non-Windows scheme-less SPA)
++    }
++
+     const isAllowed = ctx?.isAllowed ?? (() => false)
+ 
+-    const { onClick, href, ...rest } = props
+-    // Relative / no-scheme hrefs (/settings, ./foo, #section, ?q=1) must not be
++    // Relative / no-scheme hrefs that passed fail-closed as SPA-safe must not be
+     // classified via classifyScheme — it returns 'deny' for inputs with no valid
+     // scheme, which previously caused the onClick handler to preventDefault and
+     // silently break all relative markdown links. Treat them as 'iana' so the
+     // browser or SPA router can navigate normally.
+-    const isRelative = href ? !hasScheme(href) : false
++    const isRelative = href ? (!hasScheme(href) || Boolean(windowsPathFromHref)) : false
+     const classification = href && !isRelative ? classifyScheme(href) : 'iana'
+     const colonIdx = href ? href.indexOf(':') : -1
+     const scheme = colonIdx > 0 && !isRelative ? href!.slice(0, colonIdx).toLowerCase() : ''
+diff --git a/web/src/lib/markdown-href-policy.test.ts b/web/src/lib/markdown-href-policy.test.ts
+new file mode 100644
+index 000000000..5aff5b11c
+--- /dev/null
++++ b/web/src/lib/markdown-href-policy.test.ts
+@@ -0,0 +1,233 @@
++import { describe, expect, it } from 'vitest'
++import {
++    classifyNoSchemeHref,
++    expandTildePath,
++    isKnownSpaHref,
++    splitHrefMeta,
++} from '@/lib/markdown-href-policy'
++
++describe('splitHrefMeta', () => {
++    it('strips #fragment for file targets', () => {
++        expect(splitHrefMeta('docs/foo.md#section')).toEqual({
++            path: 'docs/foo.md',
++            suffix: '#section',
++        })
++    })
++
++    it('strips query before fragment when both present', () => {
++        expect(splitHrefMeta('docs/foo.md?x=1#y')).toEqual({
++            path: 'docs/foo.md',
++            suffix: '?x=1#y',
++        })
++    })
++})
++
++describe('isKnownSpaHref', () => {
++    it.each([
++        '/settings',
++        '/settings/general',
++        '/sessions',
++        '/sessions/abc-def',
++        '/sessions/abc/file',
++        '/sessions/abc/files',
++        '/sessions/abc/terminal',
++        '/browse',
++        '/share',
++        '#section',
++        '?q=1',
++        '/',
++    ])('treats %s as SPA', (href) => {
++        expect(isKnownSpaHref(href)).toBe(true)
++    })
++
++    it.each([
++        '/home/user/proj/docs/a.md',
++        '~/proj/docs/a.md',
++        'docs/foo.md',
++        './foo',
++        '../escape.md',
++        '//example.com/path',
++        '/settings/typo',
++        '/browse/extra',
++        '/sessions/id/unknown',
++        '/share/extra',
++    ])('does not treat %s as SPA', (href) => {
++        expect(isKnownSpaHref(href)).toBe(false)
++    })
++
++    it('strips Vite BASE_URL prefix before SPA allowlist checks', () => {
++        expect(isKnownSpaHref('/hapi/settings', { baseUrl: '/hapi/' })).toBe(true)
++        expect(isKnownSpaHref('/hapi/sessions/abc/file', { baseUrl: '/hapi/' })).toBe(true)
++        expect(isKnownSpaHref('/hapi/settings/typo', { baseUrl: '/hapi/' })).toBe(false)
++    })
++})
++
++describe('expandTildePath', () => {
++    it('expands ~/ against /home/<user> workspace', () => {
++        expect(expandTildePath('~/coding/hapi/docs/a.md', '/home/ada/coding/hapi')).toBe(
++            '/home/ada/coding/hapi/docs/a.md'
++        )
++    })
++
++    it('expands ~/ against /root workspaces', () => {
++        expect(expandTildePath('~/hapi/docs/a.md', '/root/hapi')).toBe('/root/hapi/docs/a.md')
++    })
++
++    it('returns null without workspace metadata', () => {
++        expect(expandTildePath('~/docs/a.md', null)).toBeNull()
++    })
++})
++
++describe('classifyNoSchemeHref — fail-closed (#1452)', () => {
++    const workspace = '/home/ada/coding/hapi'
++
++    it('keeps allowlisted relative file targets as file preview', () => {
++        expect(classifyNoSchemeHref('docs/foo.md')).toEqual({
++            action: 'file',
++            path: 'docs/foo.md',
++        })
++    })
++
++    it('opens ./prefixed allowlisted files in preview', () => {
++        expect(classifyNoSchemeHref('./diagram.mmd')).toEqual({
++            action: 'file',
++            path: './diagram.mmd',
++        })
++    })
++
++    it('strips #fragment and still opens allowlisted relative files', () => {
++        expect(classifyNoSchemeHref('docs/foo.md#section')).toEqual({
++            action: 'file',
++            path: 'docs/foo.md',
++        })
++    })
++
++    it('routes in-workspace absolute paths to file preview', () => {
++        expect(classifyNoSchemeHref('/home/ada/coding/hapi/docs/a.md', { workspacePath: workspace })).toEqual({
++            action: 'file',
++            path: '/home/ada/coding/hapi/docs/a.md',
++        })
++    })
++
++    it('expands in-workspace ~/ paths to absolute file preview targets', () => {
++        expect(classifyNoSchemeHref('~/coding/hapi/docs/a.md', { workspacePath: workspace })).toEqual({
++            action: 'file',
++            path: '/home/ada/coding/hapi/docs/a.md',
++        })
++    })
++
++    it('expands ~/ for root-owned workspaces', () => {
++        expect(
++            classifyNoSchemeHref('~/hapi/docs/a.md', { workspacePath: '/root/hapi' })
++        ).toEqual({
++            action: 'file',
++            path: '/root/hapi/docs/a.md',
++        })
++    })
++
++    it('decodes percent-encoded spaces before workspace containment', () => {
++        const workspace = '/home/ada/My Project'
++        expect(
++            classifyNoSchemeHref('/home/ada/My%20Project/docs/a.md', {
++                workspacePath: workspace,
++            })
++        ).toEqual({
++            action: 'file',
++            path: '/home/ada/My Project/docs/a.md',
++        })
++        expect(
++            classifyNoSchemeHref('~/My%20Project/docs/a.md', {
++                workspacePath: workspace,
++            })
++        ).toEqual({
++            action: 'file',
++            path: '/home/ada/My Project/docs/a.md',
++        })
++    })
++
++    it('renders absolute paths outside the workspace as inert', () => {
++        expect(classifyNoSchemeHref('/etc/passwd.sh', { workspacePath: workspace })).toEqual({
++            action: 'inert',
++        })
++    })
++
++    it('does not treat Windows absolute paths as repo-relative (containment required)', () => {
++        expect(classifyNoSchemeHref('D:\\outside\\secret.ts')).toEqual({ action: 'inert' })
++        expect(classifyNoSchemeHref('D:/outside/secret.ts#L1')).toEqual({ action: 'inert' })
++    })
++
++    it('routes in-workspace Windows absolute paths to file preview', () => {
++        const winWorkspace = 'C:\\Users\\ada\\coding\\hapi'
++        expect(
++            classifyNoSchemeHref('C:\\Users\\ada\\coding\\hapi\\docs\\a.md', {
++                workspacePath: winWorkspace,
++            })
++        ).toEqual({
++            action: 'file',
++            path: 'C:\\Users\\ada\\coding\\hapi\\docs\\a.md',
++        })
++    })
++
++    it('compares Windows workspace containment case-insensitively', () => {
++        expect(
++            classifyNoSchemeHref('c:\\users\\ada\\coding\\hapi\\docs\\a.md', {
++                workspacePath: 'C:\\Users\\Ada\\coding\\hapi',
++            })
++        ).toEqual({
++            action: 'file',
++            path: 'c:\\users\\ada\\coding\\hapi\\docs\\a.md',
++        })
++    })
++
++    it('renders absolute paths without workspace metadata as inert (fail closed)', () => {
++        expect(classifyNoSchemeHref('/home/ada/coding/hapi/docs/a.md')).toEqual({ action: 'inert' })
++    })
++
++    it('rejects tilde paths that lexically escape the workspace via ..', () => {
++        expect(classifyNoSchemeHref('~/coding/hapi/../secret.ts', { workspacePath: workspace })).toEqual({
++            action: 'inert',
++        })
++    })
++
++    it('treats nonexistent SPA children as inert, not navigate', () => {
++        expect(classifyNoSchemeHref('/settings/typo')).toEqual({ action: 'inert' })
++        expect(classifyNoSchemeHref('/browse/extra')).toEqual({ action: 'inert' })
++        expect(classifyNoSchemeHref('/sessions/id/unknown')).toEqual({ action: 'inert' })
++    })
++
++    it('renders unresolvable ~/ without workspace as inert (never SPA)', () => {
++        expect(classifyNoSchemeHref('~/coding/hapi/docs/a.md')).toEqual({ action: 'inert' })
++    })
++
++    it('renders no-extension path-like hrefs as inert', () => {
++        expect(classifyNoSchemeHref('docs/foo')).toEqual({ action: 'inert' })
++        expect(classifyNoSchemeHref('README')).toEqual({ action: 'inert' })
++        expect(classifyNoSchemeHref('./relative-route')).toEqual({ action: 'inert' })
++    })
++
++    it('renders parent-relative escape attempts as inert', () => {
++        expect(classifyNoSchemeHref('../escape.md')).toEqual({ action: 'inert' })
++    })
++
++    it('keeps real app routes navigable', () => {
++        expect(classifyNoSchemeHref('/settings')).toEqual({ action: 'navigate' })
++        expect(classifyNoSchemeHref('/settings/general')).toEqual({ action: 'navigate' })
++        expect(classifyNoSchemeHref('#section')).toEqual({ action: 'navigate' })
++        expect(classifyNoSchemeHref('?q=1')).toEqual({ action: 'navigate' })
++    })
++
++    it('keeps protocol-relative URLs navigable', () => {
++        expect(classifyNoSchemeHref('//example.com/path')).toEqual({ action: 'navigate' })
++    })
++
++    it('never classifies /home/... absolute file hrefs as SPA navigate', () => {
++        const decision = classifyNoSchemeHref('/home/ada/coding/hapi/docs/a.md', {
++            workspacePath: workspace,
++        })
++        expect(decision.action).not.toBe('navigate')
++        expect(decision).toEqual({
++            action: 'file',
++            path: '/home/ada/coding/hapi/docs/a.md',
++        })
++    })
++})
+diff --git a/web/src/lib/markdown-href-policy.ts b/web/src/lib/markdown-href-policy.ts
+new file mode 100644
+index 000000000..4eeb78e52
+--- /dev/null
++++ b/web/src/lib/markdown-href-policy.ts
+@@ -0,0 +1,227 @@
++/**
++ * Fail-closed policy for scheme-less markdown hrefs in chat.
++ *
++ * Product rule (#1452): never paint a clickable control that SPA-404s.
++ * Prefer session file preview when the target looks like a workspace file;
++ * known in-app routes stay navigable; everything else path-like is inert text.
++ */
++
++import { COMMON_FILE_EXTENSIONS } from '@/lib/remark-file-path-links'
++
++export type MarkdownHrefDecision =
++    | { action: 'navigate' }
++    | { action: 'file'; path: string }
++    | { action: 'inert' }
++
++const STATIC_SPA_PATHS = new Set([
++    '/',
++    '/browse',
++    '/share',
++    '/sessions',
++    '/settings',
++    '/settings/general',
++    '/settings/display',
++    '/settings/chat',
++    '/settings/voice',
++    '/settings/voice/voices',
++    '/settings/voice/advanced',
++    '/settings/machines',
++    '/settings/about',
++    '/settings/storage',
++    '/settings/usage',
++])
++
++// /sessions/<id> plus known children only (files | file | terminal).
++const SESSION_SPA_PATH =
++    /^\/sessions\/[^/]+(?:\/(?:files|file|terminal))?\/?$/
++
++export function splitHrefMeta(href: string): { path: string; suffix: string } {
++    const hashIdx = href.indexOf('#')
++    const queryIdx = href.indexOf('?')
++    let cut = -1
++    if (hashIdx >= 0 && queryIdx >= 0) cut = Math.min(hashIdx, queryIdx)
++    else if (hashIdx >= 0) cut = hashIdx
++    else if (queryIdx >= 0) cut = queryIdx
++    if (cut < 0) return { path: href, suffix: '' }
++    return { path: href.slice(0, cut), suffix: href.slice(cut) }
++}
++
++function stripLineSuffix(value: string): string {
++    return value.replace(/:\d+(?::\d+)?$/, '')
++}
++
++function isWindowsAbsolutePath(value: string): boolean {
++    return /^[A-Za-z]:[\\/]/.test(value)
++}
++
++export function hasKnownFileExtension(value: string): boolean {
++    const path = stripLineSuffix(value).toLowerCase()
++    const dot = path.lastIndexOf('.')
++    if (dot < 0 || dot === path.length - 1) return false
++    const ext = path.slice(dot + 1)
++    return COMMON_FILE_EXTENSIONS.has(ext)
++}
++
++export function isKnownSpaHref(
++    href: string,
++    options: { baseUrl?: string } = {}
++): boolean {
++    if (href.startsWith('#') || href.startsWith('?')) return true
++    if (href.startsWith('//')) return false
++    const { path: raw } = splitHrefMeta(href)
++    const path = raw.replace(/\/+$/, '') || '/'
++    const rawBase = options.baseUrl ?? (import.meta.env.BASE_URL as string | undefined) ?? '/'
++    const base = rawBase === '/' ? '' : rawBase.replace(/\/+$/, '')
++    const routePath =
++        base && (path === base || path.startsWith(`${base}/`))
++            ? path.slice(base.length) || '/'
++            : path
++    if (STATIC_SPA_PATHS.has(routePath)) return true
++    return SESSION_SPA_PATH.test(routePath)
++}
++
++export function inferHomeDir(workspacePath: string): string | null {
++    if (workspacePath === '/root' || workspacePath.startsWith('/root/')) return '/root'
++    const posix = workspacePath.match(/^(\/(?:home|Users)\/[^/]+)/)
++    if (posix) return posix[1]
++    const win = workspacePath.match(/^([A-Za-z]:[\\/]Users[\\/][^\\/]+)/i)
++    if (win) return win[1]
++    return null
++}
++
++export function expandTildePath(path: string, workspacePath: string | null | undefined): string | null {
++    if (path !== '~' && !path.startsWith('~/')) return null
++    if (!workspacePath) return null
++    const home = inferHomeDir(workspacePath)
++    if (!home) return null
++    if (path === '~') return home
++    const sep = home.includes('\\') && !home.includes('/') ? '\\' : '/'
++    const rest = path.slice(2).replace(/\\/g, '/')
++    if (sep === '\\') return `${home}\\${rest.replace(/\//g, '\\')}`
++    return `${home}/${rest}`
++}
++
++/** Lexically resolve `.` / `..`; return null if `..` escapes above the root. */
++export function resolveLexicalPath(absPath: string): string | null {
++    const norm = absPath.replace(/\\/g, '/')
++    const absolute = norm.startsWith('/')
++    const drive = /^[A-Za-z]:/.exec(norm)
++    const parts = norm.split('/')
++    const out: string[] = []
++    for (const part of parts) {
++        if (part === '' || part === '.') continue
++        if (drive && part === drive[0]) {
++            out.push(part)
++            continue
++        }
++        if (part === '..') {
++            if (out.length === 0) return null
++            // Do not pop a Windows drive root segment.
++            if (out.length === 1 && /^[A-Za-z]:$/.test(out[0]!)) return null
++            out.pop()
++            continue
++        }
++        out.push(part)
++    }
++    if (absolute) return `/${out.join('/')}`
++    if (drive) {
++        const [root, ...rest] = out
++        return rest.length === 0 ? `${root}\\` : `${root}\\${rest.join('\\')}`
++    }
++    return out.join('/')
++}
++
++export function isWithinWorkspace(absPath: string, workspacePath: string): boolean {
++    const target = resolveLexicalPath(absPath)
++    const root = resolveLexicalPath(workspacePath)
++    if (!target || !root) return false
++    const normTarget = target.replace(/\\/g, '/').replace(/\/+$/, '')
++    const normRoot = root.replace(/\\/g, '/').replace(/\/+$/, '')
++    // Windows filesystems are case-insensitive; compare folded when both sides
++    // are drive-qualified so `c:\Users\…` matches `C:\Users\…`.
++    const windows = isWindowsAbsolutePath(normTarget) && isWindowsAbsolutePath(normRoot)
++    const comparableTarget = windows ? normTarget.toLowerCase() : normTarget
++    const comparableRoot = windows ? normRoot.toLowerCase() : normRoot
++    return comparableTarget === comparableRoot || comparableTarget.startsWith(`${comparableRoot}/`)
++}
++
++function isRepoRelativeCandidate(path: string): boolean {
++    if (path.includes('://')) return false
++    if (path.startsWith('/') || path.startsWith('~/') || path === '~') return false
++    if (path.startsWith('../') || path.includes('/../')) return false
++    // Drive-qualified paths need workspace containment — never treat as relative.
++    if (isWindowsAbsolutePath(path)) return false
++    return hasKnownFileExtension(path)
++}
++
++function looksPathLike(path: string): boolean {
++    if (!path) return false
++    if (path === '~' || path.startsWith('~/') || path.startsWith('./') || path.startsWith('../')) return true
++    if (path.startsWith('/') || isWindowsAbsolutePath(path)) return true
++    if (path.includes('/') || path.includes('\\')) return true
++    return hasKnownFileExtension(path)
++}
++
++/**
++ * Classify a scheme-less markdown href for the chat <A> renderer.
++ *
++ * @param workspacePath session metadata.path when available (enables ~/ expansion + containment)
++ */
++export function classifyNoSchemeHref(
++    href: string,
++    options: { workspacePath?: string | null } = {}
++): MarkdownHrefDecision {
++    const trimmed = href.trim()
++    if (!trimmed) return { action: 'inert' }
++
++    // Protocol-relative URLs keep browser navigation (existing policy).
++    if (trimmed.startsWith('//')) return { action: 'navigate' }
++
++    if (isKnownSpaHref(trimmed)) return { action: 'navigate' }
++
++    const { path: rawPath } = splitHrefMeta(trimmed)
++    // mdast→hast percent-encodes spaces etc.; compare against literal workspace.
++    let decodedPath: string
++    try {
++        decodedPath = decodeURIComponent(rawPath)
++    } catch {
++        return { action: 'inert' }
++    }
++    const path = stripLineSuffix(decodedPath)
++    const workspacePath = options.workspacePath ?? null
++
++    if (isRepoRelativeCandidate(path)) {
++        return { action: 'file', path }
++    }
++
++    // Absolute / tilde targets need workspace metadata so we can fail closed on
++    // out-of-tree paths (remark deliberately does not rewrite POSIX abs).
++    if (isWindowsAbsolutePath(path) && hasKnownFileExtension(path)) {
++        if (!workspacePath || !isWithinWorkspace(path, workspacePath)) {
++            return { action: 'inert' }
++        }
++        return { action: 'file', path }
++    }
++
++    if (path.startsWith('/') && hasKnownFileExtension(path)) {
++        if (!workspacePath || !isWithinWorkspace(path, workspacePath)) {
++            return { action: 'inert' }
++        }
++        return { action: 'file', path }
++    }
++
++    if (path.startsWith('~/') || path === '~') {
++        if (!hasKnownFileExtension(path)) return { action: 'inert' }
++        const expanded = expandTildePath(path, workspacePath)
++        if (!expanded) return { action: 'inert' }
++        if (!workspacePath || !isWithinWorkspace(expanded, workspacePath)) {
++            return { action: 'inert' }
++        }
++        return { action: 'file', path: expanded }
++    }
++
++    if (looksPathLike(path)) return { action: 'inert' }
++
++    // Non-path leftovers (rare bare tokens) — do not invent SPA routes.
++    return { action: 'inert' }
++}
+diff --git a/web/src/lib/remark-file-path-links.test.ts b/web/src/lib/remark-file-path-links.test.ts
+index b4203d180..8b74879fa 100644
+--- a/web/src/lib/remark-file-path-links.test.ts
++++ b/web/src/lib/remark-file-path-links.test.ts
+@@ -48,14 +48,17 @@ describe('remarkFilePathLinks', () => {
+         expect(links.map(linkedPath)).toEqual(['screenshot.png', 'README.md'])
+     })
+ 
+-    it('links Windows absolute paths so the session host can validate and read them', () => {
++    it('autolinks Windows absolute paths as hapi-file-candidate (backslash-safe through hast)', () => {
+         const nodes = transform('Open C:\\Users\\dev\\project\\handoff.md and D:/work/app/src/main.ts:12')
+         const links = nodes.filter((node) => node.type === 'link')
+ 
+-        expect(links.map(linkedPath)).toEqual([
+-            'C:\\Users\\dev\\project\\handoff.md',
+-            'D:/work/app/src/main.ts'
++        expect(links.map((n) => n.url)).toEqual([
++            'hapi-file-candidate:' + encodeURIComponent('C:\\Users\\dev\\project\\handoff.md'),
++            'hapi-file-candidate:' + encodeURIComponent('D:/work/app/src/main.ts'),
+         ])
++        for (const link of links) {
++            expect(decodeFilePathHref(link.url as string)).toBeNull()
++        }
+     })
+ 
+     it('does not link other absolute or parent paths', () => {
+@@ -119,11 +122,12 @@ describe('remarkFilePathLinks — inlineCode', () => {
+     it.each([
+         'C:\\Users\\dev\\project\\handoff.md',
+         'D:/work/app/src/main.ts:12'
+-    ])('links Windows absolute inlineCode path %s', (value) => {
++    ])('autolinks Windows absolute inlineCode path %s as hapi-file-candidate', (value) => {
+         const nodes = transformNodes([{ type: 'inlineCode', value }])
+         const link = nodes.find((node) => node.type === 'link')!
+-
+-        expect(linkedPath(link)).toBe(value.replace(/:\d+(?::\d+)?$/, ''))
++        const expected = value.replace(/:\d+(?::\d+)?$/, '')
++        expect(link.url).toBe('hapi-file-candidate:' + encodeURIComponent(expected))
++        expect(decodeFilePathHref(link.url as string)).toBeNull()
+         expect(link.children?.[0]?.type).toBe('inlineCode')
+         expect(link.children?.[0]?.value).toBe(value)
+     })
+@@ -175,14 +179,29 @@ describe('remarkFilePathLinks — explicit markdown links', () => {
+         expect(linkedPath(nodes.find((n) => n.type === 'link')!)).toBe('./diagram.mmd')
+     })
+ 
++    it('rewrites a relative link with a #fragment, stripping it from the target', () => {
++        const nodes = transformNodes([linkNode('docs/foo.md#section')])
++        expect(linkedPath(nodes.find((n) => n.type === 'link')!)).toBe('docs/foo.md')
++    })
++
++    it('does not rewrite POSIX absolute file links (containment needs session cwd in <A>)', () => {
++        const nodes = transformNodes([linkNode('/home/ada/coding/hapi/docs/a.md')])
++        const link = nodes.find((n) => n.type === 'link')!
++        expect(decodeFilePathHref(link.url as string)).toBeNull()
++        expect(link.url).toBe('/home/ada/coding/hapi/docs/a.md')
++    })
++
+     it.each([
+         'C:\\Users\\dev\\project\\handoff.md',
+-        'D:/work/app/src/main.ts:12'
+-    ])('rewrites a Windows absolute file link %s', (url) => {
++        'D:/work/app/src/main.ts:12',
++        'D:/outside/secret.ts#L1',
++    ])('rewrites Windows absolute file link %s to hapi-file-candidate (not premature hapi-file)', (url) => {
+         const nodes = transformNodes([linkNode(url)])
+         const link = nodes.find((node) => node.type === 'link')!
+-
+-        expect(linkedPath(link)).toBe(url.replace(/:\d+(?::\d+)?$/, ''))
++        const withoutMeta = url.replace(/#.*$/, '').replace(/\?.*$/, '')
++        const expectedPath = withoutMeta.replace(/:\d+(?::\d+)?$/, '')
++        expect(decodeFilePathHref(link.url as string)).toBeNull()
++        expect(link.url).toBe('hapi-file-candidate:' + encodeURIComponent(expectedPath))
+     })
+ 
+     it.each([
+@@ -190,6 +209,7 @@ describe('remarkFilePathLinks — explicit markdown links', () => {
+         'mailto:dev@example.com',
+         'obsidian://open?file=a.md',
+         '/abs/path.md',
++        '/etc/passwd.sh',
+         '~/home.md',
+         '../escape.md',
+         'foo:bar.md',
+diff --git a/web/src/lib/remark-file-path-links.ts b/web/src/lib/remark-file-path-links.ts
+index 66121cba6..21e3e2aa3 100644
+--- a/web/src/lib/remark-file-path-links.ts
++++ b/web/src/lib/remark-file-path-links.ts
+@@ -1,4 +1,7 @@
+ const FILE_PATH_HREF_PREFIX = 'hapi-file:'
++// Encoded Windows abs handoff: raw `C:\…` is URI-normalized to `%5C` before <A>,
++// which breaks drive detection. Candidate scheme preserves the path through hast.
++const FILE_PATH_CANDIDATE_HREF_PREFIX = 'hapi-file-candidate:'
+ 
+ const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\.\/|[A-Za-z0-9_.-]+\/)[^\s`"\'<>]*?\.(?:[A-Za-z0-9]{1,12}|lock)(?::\d+(?::\d+)?)?|(?:[A-Za-z0-9_.-]+\.(?:[A-Za-z0-9]{1,12}|lock))(?::\d+(?::\d+)?)?/g
+ 
+@@ -10,7 +13,7 @@ const TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?'])
+ // tabular data (csv/tsv), config/schema (ini/conf/env/proto/graphql/prisma),
+ // and common languages not already covered. TLD-lookalikes (org/com/io/dev/co)
+ // are deliberately excluded so URLs like "example.org" don't autolink.
+-const COMMON_FILE_EXTENSIONS = new Set([
++export const COMMON_FILE_EXTENSIONS = new Set([
+     'adoc', 'astro', 'avif', 'bat', 'bmp', 'c', 'cfg', 'cjs', 'conf', 'cpp', 'css', 'csv',
+     'env', 'gif', 'go', 'gql', 'gradle', 'graphql', 'h', 'hpp', 'html', 'ico', 'ini', 'java',
+     'jpeg', 'jpg', 'js', 'json', 'jsx', 'kt', 'lock', 'md', 'mdx', 'mjs', 'mmd', 'php', 'png',
+@@ -40,6 +43,35 @@ export function decodeFilePathHref(href: string): string | null {
+     }
+ }
+ 
++export function decodeFilePathCandidateHref(href: string): string | null {
++    // Decode scheme bypass spellings (`HAPI-FILE-CANDIDATE:`, percent-encoded)
++    // before extracting the payload. Empty payload → null (caller fails closed).
++    let value = href.trimStart()
++    for (let i = 0; i < 2; i++) {
++        try {
++            const next = decodeURIComponent(value)
++            if (next === value) break
++            value = next
++        } catch {
++            break
++        }
++    }
++    const match = /^hapi-file-candidate:(.*)$/i.exec(value)
++    if (!match) return null
++    const payload = match[1]
++    if (!payload) return null
++    try {
++        // Payload may already be decoded by the loop above; retry is a no-op.
++        return decodeURIComponent(payload)
++    } catch {
++        return payload
++    }
++}
++
++function createFileCandidateHref(path: string): string {
++    return `${FILE_PATH_CANDIDATE_HREF_PREFIX}${encodeURIComponent(path)}`
++}
++
+ function splitTrailingPunctuation(value: string): { path: string; trailing: string } {
+     let path = value
+     let trailing = ''
+@@ -87,11 +119,19 @@ function shouldLinkPath(value: string): boolean {
+     if (path.length < 3) return false
+     if (path.startsWith('/') || path.startsWith('~/')) return false
+     if (path.startsWith('../') || path.includes('/../')) return false
++    // Windows abs: autolink with the raw path (not hapi-file:) so <A> can
++    // apply workspace containment before painting FilePathAnchor.
+     if (isWindowsAbsolutePath(path)) return hasKnownFileExtension(path)
+     if (path.includes('/')) return hasKnownFileExtension(path)
+     return hasKnownFileExtension(path)
+ }
+ 
++/** Autolink href: Windows abs uses candidate encoding so backslashes survive hast. */
++function createAutolinkHref(filePath: string): string {
++    if (isWindowsAbsolutePath(filePath)) return createFileCandidateHref(filePath)
++    return createFileHref(filePath)
++}
++
+ function linkTextNode(node: MarkdownNode): MarkdownNode[] {
+     const value = node.value ?? ''
+     const parts: MarkdownNode[] = []
+@@ -117,7 +157,7 @@ function linkTextNode(node: MarkdownNode): MarkdownNode[] {
+         }
+         parts.push({
+             type: 'link',
+-            url: createFileHref(filePath),
++            url: createAutolinkHref(filePath),
+             title: null,
+             children: [{ type: 'text', value: displayPath }]
+         })
+@@ -157,29 +197,48 @@ function linkInlineCodeNode(node: MarkdownNode): MarkdownNode | null {
+ 
+     return {
+         type: 'link',
+-        url: createFileHref(filePath),
++        url: createAutolinkHref(filePath),
+         title: null,
+         children: [{ type: 'inlineCode', value: trimmed }]
+     }
+ }
+ 
+-// Rewrite an explicit markdown link `[label](relative/file.ext)` whose target is
+-// a repo-relative allowlisted file path into a `hapi-file:` href so it opens the
+-// session file viewer instead of dead-ending in the SPA router.
++// Rewrite an explicit markdown link `[label](…file.ext)` into a `hapi-file:` href
++// so it opens the session file viewer instead of dead-ending in the SPA router.
++//
++// Accepts:
++// - repo-relative allowlisted paths (including `./` and `#fragment` / `:line` stripped)
+ //
+-// Security: reuses shouldLinkPath (rejects POSIX abs / `~/` / `../` / `scheme://`)
+-// and rejects residual colons for non-Windows targets after the line-suffix strip,
+-// so scheme-bearing urls (mailto:, obsidian://, foo:bar.md) are left for the
+-// deny-scheme layer. Windows absolute paths are routed through the session file
+-// viewer; the CLI still enforces that they stay inside the session workspace.
++// Still rejects: POSIX/Windows abs / `~/` (need session cwd — handled fail-closed in <A>),
++// `../`, scheme-bearing URLs, and non-file targets (`/settings`, `#section`).
+ function rewriteFileLinkNode(node: MarkdownNode): void {
+     if (node.type !== 'link') return
+     const url = node.url
+     if (!url) return
+     if (url.startsWith(FILE_PATH_HREF_PREFIX)) return
+ 
+-    const target = stripLineSuffix(url)
+-    if (!isWindowsAbsolutePath(target) && target.includes(':')) return
++    // Strip #fragment / ?query so `file.md#section` can still rewrite.
++    const hashIdx = url.indexOf('#')
++    const queryIdx = url.indexOf('?')
++    let cut = -1
++    if (hashIdx >= 0 && queryIdx >= 0) cut = Math.min(hashIdx, queryIdx)
++    else if (hashIdx >= 0) cut = hashIdx
++    else if (queryIdx >= 0) cut = queryIdx
++    const withoutMeta = cut >= 0 ? url.slice(0, cut) : url
++
++    const target = stripLineSuffix(withoutMeta)
++
++    // Absolute paths (POSIX or Windows) need chat workspace metadata for
++    // containment — leave POSIX for <A>; encode Windows as candidate so
++    // backslashes survive mdast→hast URI normalization.
++    if (isWindowsAbsolutePath(target)) {
++        if (!hasKnownFileExtension(target)) return
++        node.url = createFileCandidateHref(target)
++        return
++    }
++    if (target.startsWith('/') && !target.startsWith('//')) return
++    if (target.includes(':')) return
++
+     if (!shouldLinkPath(target)) return
+ 
+     node.url = createFileHref(target)

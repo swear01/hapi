@@ -1,0 +1,39 @@
+diff --git a/web/src/components/assistant-ui/reasoning.test.tsx b/web/src/components/assistant-ui/reasoning.test.tsx
+index 569e0ddae..e85ff45fc 100644
+--- a/web/src/components/assistant-ui/reasoning.test.tsx
++++ b/web/src/components/assistant-ui/reasoning.test.tsx
+@@ -240,4 +240,15 @@ describe('ReasoningGroup', () => {
+ 
+         expect(onNestedScrollFollowChange.mock.calls).toEqual([[false], [true]])
+     })
++
++    it('does not contain overscroll so the outer chat keeps scrolling past the panel boundary', () => {
++        // Scroll chaining is native browser behavior: once the panel reaches
++        // its bottom, the next wheel gesture must keep scrolling the outer
++        // chat viewport. overscroll-behavior-y: contain (Tailwind
++        // `overscroll-y-contain`) blocks exactly that — it was removed in
++        // #1264 and must not come back (regression from #1398).
++        const { container } = renderGroup()
++        const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
++        expect(scroll.className).not.toContain('overscroll-y-contain')
++    })
+ })
+diff --git a/web/src/components/assistant-ui/reasoning.tsx b/web/src/components/assistant-ui/reasoning.tsx
+index 8fc277299..f4d31a895 100644
+--- a/web/src/components/assistant-ui/reasoning.tsx
++++ b/web/src/components/assistant-ui/reasoning.tsx
+@@ -202,7 +202,13 @@ export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
+                     onPointerDown={claimNestedPointerScroll}
+                     onWheel={claimNestedWheelScroll}
+                     onKeyDown={claimNestedKeyboardScroll}
+-                    className="aui-reasoning-scroll max-h-[60vh] overflow-y-auto overscroll-y-contain border-t border-[var(--app-divider)] px-3.5 py-3"
++                    // No overscroll containment: native scroll chaining must pass
++                    // to the outer chat viewport once the panel reaches its
++                    // bottom (see #1264). The follow-tail coordination above
++                    // (onNestedScrollFollowChange) already pauses the outer
++                    // auto-follow while the user scrolls inside this panel, so
++                    // contain is not needed to stop the two from fighting.
++                    className="aui-reasoning-scroll max-h-[60vh] overflow-y-auto border-t border-[var(--app-divider)] px-3.5 py-3"
+                 >
+                     {children}
+                 </div>

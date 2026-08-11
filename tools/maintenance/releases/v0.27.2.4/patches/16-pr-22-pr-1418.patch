@@ -1,0 +1,327 @@
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index f2515a375..d0191f8f0 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -941,6 +941,13 @@ export function HappyComposer(props: {
+         haptic('light')
+     }, [api, suggestions, inputState, autocompletePrefixes, haptic, richMentionsEnabled, handleUserEdit])
+ 
++    const handleSessionMentionDrop = useCallback((mention: { id: string; title: string }) => {
++        if (mention.id === sessionId) return
++        handleUserEdit()
++        richInputRef.current?.focus()
++        richInputRef.current?.insertSessionMention(mention, [])
++    }, [handleUserEdit, sessionId])
++
+     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
+     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
+     const showSwitchButton = Boolean(controlledByUser && onSwitchToRemote)
+@@ -2223,6 +2230,7 @@ export function HappyComposer(props: {
+                                         onMirrorChange={handleRichMirrorChange}
+                                         onKeyDown={handleKeyDown}
+                                         onPaste={handlePaste}
++                                        onSessionMentionDrop={handleSessionMentionDrop}
+                                         onFocus={() => engageRichComposerFue()}
+                                         resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                                         onEdit={handleRichEdit}
+diff --git a/web/src/components/AssistantChat/RichComposerInput.test.tsx b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+index e877e89db..057ddce33 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.test.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.test.tsx
+@@ -309,3 +309,36 @@ describe('RichComposerInput controlled synchronization', () => {
+         expect(serializeComposerSegments(segmentsFromEditor(editor))).toBe('hello')
+     })
+ })
++
++describe('RichComposerInput session drops', () => {
++    it('forwards a HAPI session drag payload', () => {
++        const onSessionMentionDrop = vi.fn()
++        render(
++            <RichComposerInput
++                value=""
++                onValueChange={() => {}}
++                onMirrorChange={() => {}}
++                onSessionMentionDrop={onSessionMentionDrop}
++            />
++        )
++
++        const editor = screen.getByRole('textbox')
++        expect(fireEvent.dragOver(editor, {
++            dataTransfer: { types: ['application/x-hapi-session-mention'] },
++        })).toBe(false)
++
++        fireEvent.drop(editor, {
++            dataTransfer: {
++                types: ['application/x-hapi-session-mention'],
++                getData: (type: string) => type === 'application/x-hapi-session-mention'
++                    ? '{"id":"peer-1","title":"Peer session"}'
++                    : '',
++            },
++        })
++
++        expect(onSessionMentionDrop).toHaveBeenCalledWith({
++            id: 'peer-1',
++            title: 'Peer session',
++        })
++    })
++})
+diff --git a/web/src/components/AssistantChat/RichComposerInput.tsx b/web/src/components/AssistantChat/RichComposerInput.tsx
+index cc15aa83d..1382b67dd 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.tsx
+@@ -33,6 +33,7 @@ import {
+ } from '@/lib/sessionReference'
+ import { SessionRowSummary } from '@/components/SessionRowSummary'
+ import type { SessionSummary } from '@/types/api'
++import { parseSessionMentionDrag, SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ 
+ export type RichComposerInputHandle = {
+     focus: () => void
+@@ -75,6 +76,7 @@ type Props = {
+     onPaste?: (e: ReactClipboardEvent<HTMLDivElement>) => void
+     onFocus?: (e: ReactFocusEvent<HTMLDivElement>) => void
+     onEdit?: () => void
++    onSessionMentionDrop?: (mention: { id: string; title: string }) => void
+     /** Live session meta for chip hover / aria-label (from useSessions). */
+     resolveSessionMentionTooltip?: ResolveSessionMentionTooltip
+ }
+@@ -681,6 +683,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         onPaste,
+         onFocus,
+         onEdit,
++        onSessionMentionDrop,
+         resolveSessionMentionTooltip,
+     },
+     ref
+@@ -977,6 +980,19 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         insertPlainClipboardText(e.clipboardData?.getData('text/plain') ?? '')
+     }, [insertPlainClipboardText, onPaste])
+ 
++    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
++        if (disabled || !e.dataTransfer.types.includes(SESSION_MENTION_DRAG_MIME)) return
++        e.preventDefault()
++        e.dataTransfer.dropEffect = 'copy'
++    }, [disabled])
++
++    const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
++        const mention = parseSessionMentionDrag(e.dataTransfer)
++        if (!mention || disabled) return
++        e.preventDefault()
++        onSessionMentionDrop?.(mention)
++    }, [disabled, onSessionMentionDrop])
++
+     const applyBackwardDelete = useCallback((
+         root: HTMLElement,
+         segments: readonly ComposerSegment[],
+@@ -1019,8 +1035,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+         return () => root.removeEventListener('beforeinput', handleBeforeInput)
+     }, [applyBackwardDelete])
+ 
+-    // No onDrop: intercepting without caretRangeFromPoint appends at EOF / no-ops
+-    // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
++    // Session drops use the current editor selection; without one, insertion falls back to EOF.
+ 
+     const placeholderRef = useRef<HTMLDivElement>(null)
+ 
+@@ -1140,6 +1155,8 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+                 onCopy={(e) => handleCopyOrCut(e, false)}
+                 onCut={(e) => handleCopyOrCut(e, true)}
+                 onPaste={handlePaste}
++                onDragOver={handleDragOver}
++                onDrop={handleDrop}
+                 onCompositionStart={() => {
+                     composingRef.current = true
+                 }}
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index dd159d93e..e27d74601 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -41,6 +41,7 @@ import { SessionRowSummary } from '@/components/SessionRowSummary'
+ import { Spinner } from '@/components/Spinner'
+ import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+ import { useToast } from '@/lib/toast-context'
++import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ 
+ export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+ 
+@@ -879,7 +880,7 @@ function SessionItem(props: {
+     const { t } = useTranslation()
+     const { addToast } = useToast()
+     const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel } = props
+-    const { haptic } = usePlatform()
++    const { haptic, isTouch } = usePlatform()
+     const [menuOpen, setMenuOpen] = useState(false)
+     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+     const [renameOpen, setRenameOpen] = useState(false)
+@@ -975,6 +976,18 @@ function SessionItem(props: {
+             <button
+                 type="button"
+                 {...longPressHandlers}
++                draggable={!isTouch}
++                onDragStart={(event) => {
++                    // A drag supersedes the press gesture: cancel any pending
++                    // long-press and close a menu already opened by a slow grab.
++                    longPressHandlers.onDragStart(event)
++                    setMenuOpen(false)
++                    event.dataTransfer.effectAllowed = 'copy'
++                    event.dataTransfer.setData(SESSION_MENTION_DRAG_MIME, JSON.stringify({
++                        id: s.id,
++                        title: sessionName || s.id.slice(0, 8),
++                    }))
++                }}
+                 className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                 style={{ WebkitTouchCallout: 'none' }}
+                 aria-current={selected ? 'page' : undefined}
+diff --git a/web/src/hooks/useLongPress.test.tsx b/web/src/hooks/useLongPress.test.tsx
+index a1ddc80cc..b1cdf37cb 100644
+--- a/web/src/hooks/useLongPress.test.tsx
++++ b/web/src/hooks/useLongPress.test.tsx
+@@ -98,6 +98,34 @@ describe('useLongPress', () => {
+         expect(onClick).not.toHaveBeenCalled()
+     })
+ 
++    it('cancels the long-press timer once an HTML5 drag starts (hold-then-drag must not open the menu)', () => {
++        const onClick = vi.fn()
++        const onLongPress = vi.fn()
++        const { getByTestId } = render(<Probe onClick={onClick} onLongPress={onLongPress} />)
++        const row = getByTestId('row')
++
++        // Desktop: press the row, then the pointer turns into a drag before
++        // the 500ms long-press threshold elapses.
++        fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.dragStart(row)
++        act(() => {
++            now += 500
++            vi.advanceTimersByTime(500)
++        })
++        fireEvent.dragEnd(row)
++
++        expect(onLongPress).not.toHaveBeenCalled()
++
++        // The drag consumed the gesture: the drop must not navigate, and the
++        // next plain tap still works (no poisoned long-press state).
++        fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        expect(onClick).not.toHaveBeenCalled()
++
++        fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        expect(onClick).toHaveBeenCalledTimes(1)
++    })
++
+     it('still fires onLongPress (and not onClick) for a touch long-press', () => {
+         const onClick = vi.fn()
+         const onLongPress = vi.fn()
+diff --git a/web/src/hooks/useLongPress.ts b/web/src/hooks/useLongPress.ts
+index 3f8aa3c2d..5df187ece 100644
+--- a/web/src/hooks/useLongPress.ts
++++ b/web/src/hooks/useLongPress.ts
+@@ -32,6 +32,8 @@ type UseLongPressHandlers = {
+     onMouseDown: React.MouseEventHandler
+     onMouseUp: React.MouseEventHandler
+     onMouseLeave: React.MouseEventHandler
++    onDragStart: React.DragEventHandler
++    onDragEnd: React.DragEventHandler
+     onTouchStart: React.TouchEventHandler
+     onTouchEnd: React.TouchEventHandler
+     onTouchMove: React.TouchEventHandler
+@@ -145,6 +147,24 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         handleEnd(false)
+     }, [handleEnd, isGhostMouseEvent])
+ 
++    // HTML5 drag supersedes the press gesture: once the pointer turns into a
++    // drag, the long-press timer must not fire mid-drag (that would pop the
++    // action menu while the user is dragging a row). Mark the gesture as moved
++    // so a stray end event cannot also turn the drop into a click.
++    const onDragStart = useCallback<React.DragEventHandler>(() => {
++        clearTimer()
++        isLongPressRef.current = false
++        touchMoved.current = true
++    }, [clearTimer])
++
++    const onDragEnd = useCallback<React.DragEventHandler>(() => {
++        clearTimer()
++        isLongPressRef.current = false
++        // Leave touchMoved set: the gesture was a drag, so a trailing mouseup
++        // on the source row must not be interpreted as a click. A later genuine
++        // click starts a fresh gesture via startTimer.
++    }, [clearTimer])
++
+     const onTouchStart = useCallback<React.TouchEventHandler>((e) => {
+         lastTouchAtRef.current = Date.now()
+         const touch = e.touches[0]
+@@ -242,6 +262,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+             onMouseDown: () => {},
+             onMouseUp: () => {},
+             onMouseLeave: () => {},
++            onDragStart,
++            onDragEnd,
+             onTouchStart: onNativeTouchStart,
+             onTouchEnd: onNativeTouchEnd,
+             onTouchMove: onNativeTouchMove,
+@@ -256,6 +278,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         onMouseDown,
+         onMouseUp,
+         onMouseLeave,
++        onDragStart,
++        onDragEnd,
+         onTouchStart,
+         onTouchEnd,
+         onTouchMove,
+diff --git a/web/src/lib/sessionMentionDrag.test.ts b/web/src/lib/sessionMentionDrag.test.ts
+new file mode 100644
+index 000000000..81f480c38
+--- /dev/null
++++ b/web/src/lib/sessionMentionDrag.test.ts
+@@ -0,0 +1,24 @@
++import { describe, expect, it } from 'vitest'
++import {
++    SESSION_MENTION_DRAG_MIME,
++    parseSessionMentionDrag,
++} from './sessionMentionDrag'
++
++describe('parseSessionMentionDrag', () => {
++    it('reads a session mention drag payload', () => {
++        const transfer = {
++            getData: (type: string) => type === SESSION_MENTION_DRAG_MIME
++                ? '{"id":"peer-1","title":"Peer session"}'
++                : '',
++        }
++
++        expect(parseSessionMentionDrag(transfer)).toEqual({
++            id: 'peer-1',
++            title: 'Peer session',
++        })
++    })
++
++    it('rejects malformed drag payloads', () => {
++        expect(parseSessionMentionDrag({ getData: () => '{"id":1}' })).toBeNull()
++    })
++})
+diff --git a/web/src/lib/sessionMentionDrag.ts b/web/src/lib/sessionMentionDrag.ts
+new file mode 100644
+index 000000000..de8cd233c
+--- /dev/null
++++ b/web/src/lib/sessionMentionDrag.ts
+@@ -0,0 +1,22 @@
++export const SESSION_MENTION_DRAG_MIME = 'application/x-hapi-session-mention'
++
++export type SessionMentionDrag = {
++    id: string
++    title: string
++}
++
++export function parseSessionMentionDrag(dataTransfer: Pick<DataTransfer, 'getData'>): SessionMentionDrag | null {
++    try {
++        const payload: unknown = JSON.parse(dataTransfer.getData(SESSION_MENTION_DRAG_MIME))
++        if (
++            !payload
++            || typeof payload !== 'object'
++            || typeof (payload as SessionMentionDrag).id !== 'string'
++            || typeof (payload as SessionMentionDrag).title !== 'string'
++        ) return null
++        const { id, title } = payload as SessionMentionDrag
++        return id.trim() ? { id, title } : null
++    } catch {
++        return null
++    }
++}
