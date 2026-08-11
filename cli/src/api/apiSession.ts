@@ -892,7 +892,7 @@ export class ApiSessionClient extends EventEmitter {
         void this.materialize()
     }
 
-    sendAgentMessage(body: unknown): void {
+    sendAgentMessage(body: unknown, createdAt?: number, positionAt?: number): void {
         const content = {
             role: 'agent',
             content: {
@@ -906,7 +906,9 @@ export class ApiSessionClient extends EventEmitter {
         this.emitOrQueue(() => {
             this.socket.emit('message', {
                 sid: this.sessionId,
-                message: content
+                message: content,
+                ...(createdAt !== undefined ? { createdAt } : {}),
+                ...(positionAt !== undefined ? { positionAt } : {})
             })
         })
     }

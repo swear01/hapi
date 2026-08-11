@@ -582,16 +582,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
             this.promptInFlight = true;
             try {
-                await backend.prompt(acpSessionId, promptContent, (message) => {
-                    this.handleAgentMessage(message);
-                });
-                // Prompt resolved: flush deferred structural stderr, then text.
-                const settled = this.pendingStderrFailure ?? this.pendingTextFailure;
-                if (settled && !this.turnHasModelError) {
-                    this.recordModelError(settled);
-                }
-                this.pendingStderrFailure = null;
-                this.pendingTextFailure = null;
+                let turnPositionAt: number | undefined;
+                const onUpdate = (message: AgentMessage) => {
+                    const emittedAt = Date.now();
+                    turnPositionAt ??= emittedAt;
+                    this.handleAgentMessage(message, emittedAt, turnPositionAt);
+                };
+                await backend.prompt(acpSessionId, promptContent, onUpdate);
                 void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
@@ -774,9 +771,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private handleAgentMessage(message: AgentMessage): void {
+    private handleAgentMessage(message: AgentMessage, createdAt?: number, positionAt?: number): void {
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
-            this.session.sendAgentMessage(converted);
+            this.session.sendAgentMessage(converted, createdAt, positionAt);
         }
 
         switch (message.type) {
