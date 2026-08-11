@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import { MachineStore } from './machineStore'
@@ -87,6 +87,126 @@ export class Store {
      */
     get dbPath(): string {
         return this._dbPath
+    }
+
+    /**
+     * Snapshot of the SQLite file layout for the settings storage page:
+     * page geometry, reclaimable free pages, and per-table / per-index usage.
+     * Prefers the dbstat virtual table; when the runtime lacks it (Linux Bun
+     * 1.3.x builds do not enable ENABLE_DBSTAT_VTAB) falls back to row counts
+     * plus a content-length byte estimate and flags the result.
+     */
+    storageInsights(): {
+        pageSize: number
+        pageCount: number
+        freelistCount: number
+        tables: Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }>
+        breakdownApproximate: boolean
+    } {
+        const pageSize = (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size
+        const pageCount = (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count
+        const freelistCount = (
+            this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }
+        ).freelist_count
+        let tables: Array<{ name: string; kind: string; bytes: number; rows: number }>
+        let breakdownApproximate = false
+        try {
+            tables = (
+                this.db.query(
+                    `SELECT d.name AS name,
+                            COALESCE(m.type, 'table') AS kind,
+                            d.pgsize AS bytes,
+                            d.ncell AS rows
+                     FROM dbstat d
+                     LEFT JOIN sqlite_master m ON m.name = d.name
+                     WHERE d.aggregate = TRUE
+                       AND d.name NOT IN ('sqlite_schema', 'sqlite_master')
+                     ORDER BY d.pgsize DESC`
+                ).all() as Array<{ name: string; kind: string; bytes: number; rows: number }>
+            )
+        } catch (error) {
+            if (!(error instanceof Error) || !error.message.includes('dbstat')) {
+                throw error
+            }
+            breakdownApproximate = true
+            tables = this.estimateTableUsage()
+        }
+        return {
+            pageSize,
+            pageCount,
+            freelistCount,
+            tables: tables.map((table) => ({
+                ...table,
+                kind: table.kind === 'index' ? 'index' : 'table',
+            })),
+            breakdownApproximate,
+        }
+    }
+
+    /**
+     * Fallback per-table usage for runtimes without the dbstat virtual table:
+     * exact row counts plus an approximate byte size from the sum of column
+     * content lengths. Indexes are omitted (their pages are not cheaply
+     * countable without dbstat); the estimate covers the dominant user tables.
+     */
+    estimateTableUsage(): Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }> {
+        const tables = this.db
+            .query(
+                `SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name`
+            )
+            .all() as Array<{ name: string }>
+        const result: Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }> = []
+        for (const { name } of tables) {
+            const quoted = `"${name.replaceAll('"', '""')}"`
+            const columns = this.db.query(`PRAGMA table_info(${quoted})`).all() as Array<{ name: string }>
+            if (columns.length === 0) continue
+            const contentExpr = columns
+                .map(
+                    (column) =>
+                        `COALESCE(LENGTH(CAST(${`"${column.name.replaceAll('"', '""')}"`} AS BLOB)), 0)`,
+                )
+                .join(' + ')
+            const row = this.db
+                .query(`SELECT COUNT(*) AS rows, COALESCE(${contentExpr}, 0) AS bytes FROM ${quoted}`)
+                .get() as { rows: number; bytes: number }
+            if (row.rows > 0 || row.bytes > 0) {
+                result.push({ name, kind: 'table', bytes: row.bytes, rows: row.rows })
+            }
+        }
+        return result
+    }
+
+    /**
+     * Rebuilds the database with VACUUM and then checkpoint-truncates the
+     * WAL so the main file actually shrinks (in WAL mode VACUUM alone only
+     * repacks through the write-ahead log). Returns the file size before and
+     * after so the caller can report how much space was reclaimed.
+     */
+    vacuum(): { beforeBytes: number; afterBytes: number; reclaimedBytes: number; durationMs: number } {
+        if (this._dbPath === ':memory:' || this._dbPath.startsWith('file::memory:')) {
+            throw new Error('VACUUM is not supported for in-memory databases')
+        }
+        const beforeBytes = statSync(this._dbPath).size
+        const started = performance.now()
+        this.db.exec('VACUUM')
+        const checkpoint = (
+            this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
+        )
+        if (checkpoint.busy > 0) {
+            throw new Error(
+                `WAL checkpoint was blocked by ${checkpoint.busy} other connection(s); the file did not shrink`
+            )
+        }
+        const durationMs = Math.round(performance.now() - started)
+        const afterBytes = statSync(this._dbPath).size
+        return {
+            beforeBytes,
+            afterBytes,
+            reclaimedBytes: Math.max(0, beforeBytes - afterBytes),
+            durationMs,
+        }
     }
 
     constructor(dbPath: string) {
