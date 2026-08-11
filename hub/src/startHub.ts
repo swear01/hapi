@@ -12,6 +12,7 @@ import { SSEManager } from './sse/sseManager'
 import { getOrCreateVapidKeys } from './config/vapidKeys'
 import { PushService } from './push/pushService'
 import { PushNotificationChannel } from './push/pushNotificationChannel'
+import { loadNotificationCopy } from './push/notificationCopy'
 import { FcmService } from './fcm/fcmService'
 import { FcmNotificationChannel } from './fcm/fcmNotificationChannel'
 import { resolveFcmConfig } from './fcm/fcmConfig'
@@ -227,7 +228,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             pushService,
             sseManager,
             visibilityTracker,
-            config.publicUrl
+            config.publicUrl,
+            () => loadNotificationCopy(config.dataDir)
         )
     )
 
@@ -249,7 +251,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         }
     }
 
-    notificationHub = new NotificationHub(syncEngine, notificationChannels)
+    notificationHub = new NotificationHub(syncEngine, notificationChannels, undefined, store)
 
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
     webServer = await startWebServer({
@@ -259,6 +261,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         jwtSecret,
         store,
         vapidPublicKey: vapidKeys.publicKey,
+        pushService,
         socketEngine: socketServer.engine,
         corsOrigins,
         relayMode: relayFlag.enabled,
