@@ -2,7 +2,9 @@ import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, PermissionM
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import {
     ArchiveCodexSessionRpcResponseSchema,
+    CLAUDE_IMPORT_PAGE_BYTES,
     CursorChatStoreStatusSchema,
+    ListClaudeSessionsRpcResponseSchema,
     ListCodexSessionsRpcResponseSchema,
     ListPiSessionsRpcResponseSchema
 } from '@hapi/protocol/apiTypes'
@@ -21,6 +23,7 @@ import type {
     CopilotModelsResponse,
     GrokModelsResponse,
     GrokReasoningEffortResponse,
+    ListClaudeSessionsRpcResponse,
     ListDirectoryResponse,
     ListCodexSessionsRpcResponse,
     ListPiSessionsRpcResponse,
@@ -35,6 +38,14 @@ import type {
 } from '@hapi/protocol/apiTypes'
 import type { Server } from 'socket.io'
 import type { RpcRegistry } from '../socket/rpcRegistry'
+import type {
+    AgentProvider,
+    ProviderListResponse,
+    ProviderHealthCheckResponse,
+    ProviderMutationResponse,
+    ProviderProfileInput,
+    ProviderProfileUpdate
+} from '@hapi/protocol'
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
 const MODEL_LIST_RPC_TIMEOUT_MS = 120_000
@@ -72,6 +83,7 @@ export type RpcPathExistsResponse = PathExistsResponse
 export type RpcCodexModel = CodexModelSummary
 export type RpcListCodexModelsResponse = CodexModelsResponse
 export type RpcListCodexSessionsResponse = ListCodexSessionsRpcResponse
+export type RpcListClaudeSessionsResponse = ListClaudeSessionsRpcResponse
 export type RpcListPiSessionsResponse = ListPiSessionsRpcResponse
 export type RpcArchiveCodexSessionResponse = ArchiveCodexSessionRpcResponse
 export type RpcCursorModel = CursorModelSummary
@@ -139,6 +151,7 @@ export class RpcGateway {
             effort?: string | null
             collaborationMode?: CodexCollaborationMode
             copilotAgentMode?: CopilotAgentMode
+            autoBridgeTransientModelErrors?: boolean
         }
     ): Promise<unknown> {
         return await this.sessionRpc(sessionId, RPC_METHODS.SetSessionConfig, config)
@@ -159,6 +172,28 @@ export class RpcGateway {
         await this.sessionRpc(sessionId, RPC_METHODS.HandoffLocal, {})
     }
 
+    async bridgeModelError(
+        sessionId: string,
+        payload: {
+            eventId: string
+            atTs: number
+            kind: string
+            rawSnippet: string
+            lastUserMessage?: string
+            priorAssistantClaimsDone: boolean
+            transient: boolean
+            bridgedForEventId?: string
+            retriedAndFailed?: boolean
+            supersededByUserTurn?: boolean
+            bridgeable?: boolean
+        }
+    ): Promise<{ ok: boolean; reason?: string }> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.BridgeModelError, payload) as {
+            ok: boolean
+            reason?: string
+        }
+    }
+
     async spawnSession(
         machineId: string,
         directory: string,
@@ -176,6 +211,7 @@ export class RpcGateway {
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
         startingMode?: 'remote' | 'pty',
+        providerProfileId?: string | null,
         // Hub session id to reuse for this spawn. When set, the runner boots the
         // CLI with `--hapi-session-id`, so the child reuses the existing hub
         // session row (same id) instead of minting a new one.
@@ -189,6 +225,7 @@ export class RpcGateway {
                     type: 'spawn-in-directory',
                     directory,
                     agent,
+                    providerProfileId,
                     model,
                     modelReasoningEffort,
                     yolo,
@@ -265,6 +302,26 @@ export class RpcGateway {
         return exists
     }
 
+    async listProviderProfiles(machineId: string, agent?: AgentProvider): Promise<ProviderListResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderList, { agent }) as ProviderListResponse
+    }
+
+    async createProviderProfile(machineId: string, input: ProviderProfileInput): Promise<ProviderMutationResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderCreate, input) as ProviderMutationResponse
+    }
+
+    async updateProviderProfile(machineId: string, id: string, patch: ProviderProfileUpdate): Promise<ProviderMutationResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderUpdate, { id, patch }) as ProviderMutationResponse
+    }
+
+    async setDefaultProvider(machineId: string, agent: AgentProvider, id: string | null): Promise<ProviderMutationResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderSetDefault, { agent, id }) as ProviderMutationResponse
+    }
+
+    async checkProviderHealth(machineId: string, id: string, refreshModels: boolean): Promise<ProviderHealthCheckResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ProviderHealthCheck, { id, refreshModels }) as ProviderHealthCheckResponse
+    }
+
     async getCursorChatStoreStatus(
         machineId: string,
         workspacePath: string,
@@ -277,6 +334,15 @@ export class RpcGateway {
             { workspacePath, cursorSessionId, homeDir }
         )
         return CursorChatStoreStatusSchema.parse(result)
+    }
+
+    async stopRunner(machineId: string): Promise<void> {
+        await this.machineRpc(machineId, RPC_METHODS.StopRunner, {})
+    }
+
+    async runnerSelfUpgrade(machineId: string, offer: unknown): Promise<unknown> {
+        // Upgrades can take minutes (npm install / artifact download).
+        return await this.machineRpc(machineId, RPC_METHODS.RunnerSelfUpgrade, { offer }, 10 * 60_000)
     }
 
     async getGitStatus(sessionId: string, cwd?: string): Promise<RpcCommandResponse> {
@@ -353,6 +419,30 @@ export class RpcGateway {
         return ListCodexSessionsRpcResponseSchema.parse(result)
     }
 
+    async listClaudeSessionSummariesForMachine(machineId: string, cwd?: string | null): Promise<RpcListClaudeSessionsResponse> {
+        const result = await this.machineRpc(
+            machineId,
+            RPC_METHODS.ListClaudeSessions,
+            { mode: 'summaries', cwd: cwd ?? null },
+            MODEL_LIST_RPC_TIMEOUT_MS
+        )
+        return ListClaudeSessionsRpcResponseSchema.parse(result)
+    }
+
+    async listClaudeSessionPageForMachine(
+        machineId: string,
+        options: { cwd?: string | null; sessionId: string; cursor: number; maxBytes?: number }
+    ): Promise<RpcListClaudeSessionsResponse> {
+        const result = await this.machineRpc(machineId, RPC_METHODS.ListClaudeSessions, {
+            mode: 'messages',
+            cwd: options.cwd ?? null,
+            sessionId: options.sessionId,
+            cursor: options.cursor,
+            maxBytes: options.maxBytes ?? CLAUDE_IMPORT_PAGE_BYTES
+        }, MODEL_LIST_RPC_TIMEOUT_MS)
+        return ListClaudeSessionsRpcResponseSchema.parse(result)
+    }
+
     async listPiSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListPiSessionsResponse> {
         const result = await this.machineRpc(machineId, RPC_METHODS.ListPiSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
         return ListPiSessionsRpcResponseSchema.parse(result)
@@ -407,6 +497,16 @@ export class RpcGateway {
             {},
             MODEL_LIST_RPC_TIMEOUT_MS
         ) as RpcListCopilotModelsResponse
+    }
+
+    async steerQueuedMessage(
+        sessionId: string,
+        localId: string
+    ): Promise<{ steered: boolean; error?: string }> {
+        return await this.sessionRpc(sessionId, RPC_METHODS.SteerQueuedMessage, { localId }) as {
+            steered: boolean
+            error?: string
+        }
     }
 
     /** Generic Pi RPC call — routes all Pi-specific session RPCs through

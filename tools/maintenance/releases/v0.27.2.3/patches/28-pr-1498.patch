@@ -1,0 +1,59 @@
+diff --git a/web/src/components/assistant-ui/reasoning.test.tsx b/web/src/components/assistant-ui/reasoning.test.tsx
+index 569e0ddae..ccc8f8b22 100644
+--- a/web/src/components/assistant-ui/reasoning.test.tsx
++++ b/web/src/components/assistant-ui/reasoning.test.tsx
+@@ -63,6 +63,13 @@ describe('ReasoningGroup', () => {
+         expect(isCollapsed(container)).toBe(true)
+     })
+ 
++    it('does not mount reasoning content while collapsed', () => {
++        const { container, queryByTestId } = renderGroup()
++
++        expect(isCollapsed(container)).toBe(true)
++        expect(queryByTestId('reasoning-content')).toBeNull()
++    })
++
+     it('expands on click', () => {
+         const { container } = renderGroup()
+         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
+@@ -70,6 +77,19 @@ describe('ReasoningGroup', () => {
+         fireEvent.click(container.querySelector('button')!)
+         expect(isCollapsed(container)).toBe(false)
+         expect(scroll.tabIndex).toBe(0)
++        expect(container.querySelector('[data-testid="reasoning-content"]')).not.toBeNull()
++    })
++
++    it('unmounts reasoning content after collapsing again', () => {
++        const { container, queryByTestId } = renderGroup()
++
++        fireEvent.click(container.querySelector('button')!)
++        expect(queryByTestId('reasoning-content')).not.toBeNull()
++
++        fireEvent.click(container.querySelector('button')!)
++
++        expect(isCollapsed(container)).toBe(true)
++        expect(queryByTestId('reasoning-content')).toBeNull()
+     })
+ 
+     it('auto-expands while streaming', () => {
+diff --git a/web/src/components/assistant-ui/reasoning.tsx b/web/src/components/assistant-ui/reasoning.tsx
+index 8fc277299..d3c343161 100644
+--- a/web/src/components/assistant-ui/reasoning.tsx
++++ b/web/src/components/assistant-ui/reasoning.tsx
+@@ -72,6 +72,7 @@ export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
+         && message.content[message.content.length - 1]?.type === 'reasoning'
+     const { reasoningCollapsed } = useReasoningCollapse()
+     const chatContext = useOptionalHappyChatContext()
++    const shouldRenderContent = isOpen
+ 
+     useEffect(() => {
+         if (!isStreaming) return
+@@ -204,7 +205,7 @@ export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
+                     onKeyDown={claimNestedKeyboardScroll}
+                     className="aui-reasoning-scroll max-h-[60vh] overflow-y-auto overscroll-y-contain border-t border-[var(--app-divider)] px-3.5 py-3"
+                 >
+-                    {children}
++                    {shouldRenderContent ? children : null}
+                 </div>
+             </div>
+         </div>

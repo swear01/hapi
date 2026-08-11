@@ -1,0 +1,87 @@
+diff --git a/hub/src/web/routes/git.test.ts b/hub/src/web/routes/git.test.ts
+index 5a45c607a..fc278a0e2 100644
+--- a/hub/src/web/routes/git.test.ts
++++ b/hub/src/web/routes/git.test.ts
+@@ -84,6 +84,60 @@ describe('generated images route', () => {
+ })
+ 
+ describe('file search route', () => {
++    it('normalizes Windows path separators in search queries before invoking ripgrep', async () => {
++        const session = {
++            id: 'session-1',
++            namespace: 'default',
++            active: true,
++            metadata: { path: 'C:\\project' }
++        } as unknown as Session
++        let ripgrepArgs: string[] = []
++        const engine = {
++            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
++            runRipgrep: async (_sessionId: string, args: string[]) => {
++                ripgrepArgs = args
++                return { success: true, stdout: 'src/nested/file.ts\n' }
++            },
++            statFiles: async (_sessionId: string, paths: string[]) => ({
++                success: true,
++                entries: paths.map((path) => ({ path, size: 10, modified: 100 }))
++            })
++        } as unknown as Partial<SyncEngine>
++
++        const query = new URLSearchParams({ query: 'src\\nested\\file.ts' }).toString()
++        const response = await buildApp(engine).request(`/api/sessions/session-1/files?${query}`)
++
++        expect(response.status).toBe(200)
++        expect(ripgrepArgs).toEqual(['--files', '--iglob', '*src/nested/file.ts*'])
++    })
++
++    it('preserves backslashes in POSIX search queries', async () => {
++        const session = {
++            id: 'session-1',
++            namespace: 'default',
++            active: true,
++            metadata: { path: '/project' }
++        } as unknown as Session
++        let ripgrepArgs: string[] = []
++        const engine = {
++            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
++            runRipgrep: async (_sessionId: string, args: string[]) => {
++                ripgrepArgs = args
++                return { success: true, stdout: 'src/file\\name.ts\n' }
++            },
++            statFiles: async (_sessionId: string, paths: string[]) => ({
++                success: true,
++                entries: paths.map((path) => ({ path, size: 10, modified: 100 }))
++            })
++        } as unknown as Partial<SyncEngine>
++
++        const query = new URLSearchParams({ query: 'src\\file\\name.ts' }).toString()
++        const response = await buildApp(engine).request(`/api/sessions/session-1/files?${query}`)
++
++        expect(response.status).toBe(200)
++        expect(ripgrepArgs).toEqual(['--files', '--iglob', '*src\\file\\name.ts*'])
++    })
++
+     it('adds size and modification metadata to search results', async () => {
+         const session = {
+             id: 'session-1',
+diff --git a/hub/src/web/routes/git.ts b/hub/src/web/routes/git.ts
+index 771f93854..31c905e7b 100644
+--- a/hub/src/web/routes/git.ts
++++ b/hub/src/web/routes/git.ts
+@@ -228,10 +228,15 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
+         }
+ 
+         const query = parsed.data.query?.trim() ?? ''
++        // ripgrep's gitignore-style globs use '/' as the path separator even on Windows.
++        // Accept the native separator users see in Windows paths before building the glob.
++        const normalizedQuery = isWindowsSessionPath(sessionPath)
++            ? normalizeFileSearchPath(query)
++            : query
+         const limit = parsed.data.limit ?? 200
+         const args = ['--files']
+-        if (query) {
+-            args.push('--iglob', `*${query}*`)
++        if (normalizedQuery) {
++            args.push('--iglob', `*${normalizedQuery}*`)
+         }
+ 
+         const result = await runRpc(() => engine.runRipgrep(sessionResult.sessionId, args, sessionPath))

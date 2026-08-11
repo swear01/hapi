@@ -33,6 +33,7 @@ export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
         general: locale === 'zh-CN' ? '简体中文' : 'English',
         display: `${t(`settings.display.appearance.${appearance}`)} · ${Math.round(fontScale * 100)}%`,
         chat: t(`settings.chat.enterBehavior.${composerEnterBehavior}`),
+        providers: t('settings.providers.summary'),
         voice: t('settings.hub.voice.summary'),
         machines: t('settings.hub.machines.summary'),
         storage: t('settings.storage.summary'),

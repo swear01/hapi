@@ -7,9 +7,22 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
-import { isKnownFlavor, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+import {
+    cliBinaryUpdatedOnDisk,
+    isMachineCapabilitySkewed,
+    MACHINE_CAPABILITIES,
+} from '@hapi/protocol/runnerCapabilities'
+import {
+    DEFAULT_FLEET_UPGRADE_POLICY,
+    machineTrailsUpgradeOffer,
+    type FleetUpgradePolicy,
+    type HubUpgradeOffer,
+    type RunnerSelfUpgradeResponse,
+} from '@hapi/protocol/upgradeChannel'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
+import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
 import { randomUUID } from 'node:crypto'
@@ -19,8 +32,10 @@ import type { RpcRegistry } from '../socket/rpcRegistry'
 import { clearAgentTerminalBuffer } from '../socket/agentTerminalBuffer'
 import type { SSEManager } from '../sse/sseManager'
 import { CursorLegacyMigrator, type CursorLegacyMigratorOptions } from '../cursor/cursorLegacyMigrator'
+import { isTransientArtifactBuildFailure } from '../upgrade/cliArtifact'
 
 import { EventPublisher, type SyncEventListener } from './eventPublisher'
+import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
 import { MachineCache, type Machine } from './machineCache'
 import { MessageService } from './messageService'
 import { selectForkTranscriptPrefix } from './forkTranscript'
@@ -35,6 +50,7 @@ import {
     type RpcStatFilesResponse,
     type RpcListAgyModelsResponse,
     type RpcListCodexModelsResponse,
+    type RpcListClaudeSessionsResponse,
     type RpcListPiSessionsResponse,
     type RpcArchiveCodexSessionResponse,
     type RpcListCursorModelsResponse,
@@ -51,7 +67,8 @@ import {
     type RpcUploadFileResponse
 } from './rpcGateway'
 import { SessionCache } from './sessionCache'
-import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
+import { readAutoBridgeTransientModelErrorsEnabled } from '../config/autoBridgeTransientModelErrors'
+import { getConfiguration } from '../configuration'
 
 type PiResumeAttempt = NonNullable<NonNullable<Session['metadata']>['piResumeAttempt']>
 type PtyResumeAttempt = NonNullable<NonNullable<Session['metadata']>['ptyResumeAttempt']>
@@ -68,6 +85,7 @@ export type {
     RpcStatFilesResponse,
     RpcListAgyModelsResponse,
     RpcListCodexModelsResponse,
+    RpcListClaudeSessionsResponse,
     RpcListPiSessionsResponse,
     RpcListCursorModelsResponse,
     RpcListOpencodeModelsResponse,
@@ -161,6 +179,16 @@ function extractClaudeUserMessageTextFromAgentOutput(content: unknown): string |
     return extractUserMessageText(message.content)
 }
 
+export type SyncEngineOptions = {
+    /** Resolve the current hub upgrade offer (channel + version + optional artifact). */
+    getUpgradeOffer?: () => HubUpgradeOffer
+    /** Ensure hub-artifact bytes exist; returns offer with sha256 filled. */
+    prepareArtifactOffer?: (offer: HubUpgradeOffer, platform: string, arch: string) => Promise<HubUpgradeOffer>
+    /** Operator policy: only `auto` lets the hub auto-fire fleet upgrades. */
+    getFleetUpgradePolicy?: () => FleetUpgradePolicy
+    /** Data dir for cooldowns only — optional. */
+}
+
 export class SyncEngine {
     private readonly eventPublisher: EventPublisher
     private readonly sessionCache: SessionCache
@@ -191,16 +219,29 @@ export class SyncEngine {
      * Defaults to "1" for unit tests; startHub overwrites with getOrCreateOwnerId().
      */
     private hubOwnerUserId: string = '1'
+    private readonly fleetUpgradeAttemptAt = new Map<string, number>()
+    private static readonly FLEET_UPGRADE_COOLDOWN_MS = 15 * 60_000
+    private readonly getUpgradeOffer: (() => HubUpgradeOffer) | null
+    private readonly prepareArtifactOffer: SyncEngineOptions['prepareArtifactOffer']
+    private readonly getFleetUpgradePolicy: () => FleetUpgradePolicy
+    /** Test-only settings root so session-ready reconcile can run without full hub boot. */
+    private settingsDataDirForTests: string | null = null
+    /** Serialize settings write/fanout with first-activation / session-ready reconcile. */
+    private autoBridgeConfigTail: Promise<unknown> = Promise.resolve()
 
     constructor(
         private readonly store: Store,
         private readonly io: Server,
         rpcRegistry: RpcRegistry,
-        sseManager: SSEManager
+        sseManager: SSEManager,
+        options?: SyncEngineOptions,
     ) {
+        this.getUpgradeOffer = options?.getUpgradeOffer ?? null
+        this.prepareArtifactOffer = options?.prepareArtifactOffer
+        this.getFleetUpgradePolicy = options?.getFleetUpgradePolicy ?? (() => DEFAULT_FLEET_UPGRADE_POLICY)
         this.eventPublisher = new EventPublisher(sseManager, (event) => this.resolveNamespace(event))
         this.sessionCache = new SessionCache(store, this.eventPublisher)
-        this.machineCache = new MachineCache(store, this.eventPublisher)
+        this.machineCache = new MachineCache(store, this.eventPublisher, rpcRegistry)
         this.messageService = new MessageService(
             store,
             io,
@@ -323,8 +364,16 @@ export class SyncEngine {
         return this.store.messages.countFutureScheduledBySessionIds(sessionIds, now)
     }
 
+    getUninvokedScheduledMessageCounts(sessionIds: string[]): Map<string, number> {
+        return this.store.messages.countUninvokedScheduledBySessionIds(sessionIds)
+    }
+
     getNextScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
         return this.store.messages.minFutureScheduledAtBySessionIds(sessionIds, now)
+    }
+
+    getScratchlistUpdatedAtBySessionIds(sessionIds: string[]): Map<string, number> {
+        return this.store.scratchlist.maxUpdatedAtBySessionIds(sessionIds)
     }
 
     getSession(sessionId: string): Session | undefined {
@@ -345,6 +394,26 @@ export class SyncEngine {
         namespace: string
     ): { ok: true; sessionId: string; session: Session } | { ok: false; reason: 'not-found' | 'access-denied' } {
         return this.sessionCache.resolveSessionAccess(sessionId, namespace)
+    }
+
+    /** Follow job-owner redirects after merge/dedup (tiann/hapi#1404 cold review). */
+    resolveAttachedJobSessionId(sessionId: string, namespace: string): string {
+        return this.sessionCache.resolveAttachedJobSessionId(sessionId, namespace)
+    }
+
+    /** Follow dual-running same-key remaps after merge (tiann/hapi#1404). */
+    resolveAttachedJobKey(
+        requestedSessionId: string,
+        ownerSessionId: string,
+        jobKey: string,
+        namespace: string
+    ): string {
+        return this.sessionCache.resolveAttachedJobKey(
+            requestedSessionId,
+            ownerSessionId,
+            jobKey,
+            namespace
+        )
     }
 
     getActiveSessions(): Session[] {
@@ -463,6 +532,9 @@ export class SyncEngine {
 
         if (event.type === 'machine-updated' && event.machineId) {
             this.machineCache.refreshMachine(event.machineId)
+            void this.maybeFleetUpgradeMachine(event.machineId).catch((error) => {
+                console.warn('[fleet-upgrade] offer resolution failed', error)
+            })
             return
         }
 
@@ -474,7 +546,6 @@ export class SyncEngine {
 
         // Emit chat updates before ledger capture so SSE is not blocked on
         // synchronous SQLite ingest (cold review m5).
-        this.eventPublisher.emit(event)
 
         if (event.type === 'message-received' && event.sessionId && 'message' in event && event.message) {
             // A2A P3: well-formed AGENT_NOTIFY_SUMMARY → work-graph work_ad.
@@ -497,6 +568,8 @@ export class SyncEngine {
                 }
             }
         }
+
+        this.eventPublisher.emit(event)
     }
 
     handleSessionAlive(payload: {
@@ -511,9 +584,16 @@ export class SyncEngine {
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
     }): void {
+        const before = this.sessionCache.getSession(payload.sid)
+        const wasActive = before?.active === true
         this.sessionCache.handleSessionAlive(payload)
         this.messageService.replayImmediateQueuedMessages(payload.sid)
         this.triggerDedupIfNeeded(payload.sid)
+        // First inactive → active transition: catch toggles that happened while
+        // the row was still inactive (Settings fanout is active-only).
+        if (!wasActive) {
+            void this.reconcileCursorAutoBridgeSetting(payload.sid)
+        }
     }
 
     handleSessionReady(payload: { sid: string; time: number }): void {
@@ -527,7 +607,86 @@ export class SyncEngine {
                 })
                 .catch(() => {})
         }
+        // session-ready fires after set-session-config is registered (alive can
+        // race earlier). Re-read under the same lock as Settings fanout.
+        void this.reconcileCursorAutoBridgeSetting(payload.sid)
         this.triggerDedupIfNeeded(payload.sid)
+    }
+
+    /** @internal test hook — hub settings dataDir without createConfiguration(). */
+    setSettingsDataDirForTests(dataDir: string | null): void {
+        this.settingsDataDirForTests = dataDir
+    }
+
+    /**
+     * Owner hub setting changed: push to every active default-namespace Cursor CLI.
+     * Serialized with first-activation / session-ready reconcile.
+     */
+    async fanoutAutoBridgeTransientModelErrors(enabled: boolean): Promise<void> {
+        await this.withAutoBridgeConfigLock(async () => {
+            const targets = this.sessionCache.getSessions().filter(
+                (session) => session.active
+                    && session.namespace === 'default'
+                    && session.metadata?.flavor === 'cursor'
+            )
+            const results = await Promise.allSettled(
+                targets.map((session) => this.rpcGateway.requestSessionConfig(session.id, {
+                    autoBridgeTransientModelErrors: enabled
+                }))
+            )
+            if (results.some((result) => result.status === 'rejected')) {
+                throw new Error('Failed to update every active Cursor session')
+            }
+        })
+    }
+
+    /**
+     * Push the current owner hub auto-bridge pref to one Cursor CLI.
+     * Best-effort: never throws into the socket path.
+     */
+    async reconcileCursorAutoBridgeSetting(sessionId: string): Promise<void> {
+        try {
+            await this.withAutoBridgeConfigLock(async () => {
+                const session = this.sessionCache.getSession(sessionId)
+                    ?? this.sessionCache.refreshSession(sessionId)
+                if (!session) {
+                    return
+                }
+                if (session.namespace !== 'default' || session.metadata?.flavor !== 'cursor') {
+                    return
+                }
+                const dataDir = this.resolveSettingsDataDir()
+                if (!dataDir) {
+                    return
+                }
+                const enabled = await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+                await this.rpcGateway.requestSessionConfig(sessionId, {
+                    autoBridgeTransientModelErrors: enabled
+                })
+            })
+        } catch (error) {
+            console.warn(
+                `[sync] failed to reconcile auto-bridge setting for session ${sessionId}`,
+                error
+            )
+        }
+    }
+
+    private withAutoBridgeConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+        const run = this.autoBridgeConfigTail.then(fn, fn)
+        this.autoBridgeConfigTail = run.then(() => undefined, () => undefined)
+        return run
+    }
+
+    private resolveSettingsDataDir(): string | null {
+        if (this.settingsDataDirForTests) {
+            return this.settingsDataDirForTests
+        }
+        try {
+            return getConfiguration().dataDir
+        } catch {
+            return null
+        }
     }
 
     clearQueuedThinkingGrace(sessionId: string): void {
@@ -744,7 +903,119 @@ export class SyncEngine {
                     deleteScratchlistAttachmentFiles(getHapiHomeDir(), orphaned)
                 )
             }
-            this.sessionCache.emitScratchlistChanged(sessionId, Date.now())
+            const changedAt = Date.now()
+            this.sessionCache.recordSessionActivity(sessionId, changedAt)
+            this.sessionCache.emitScratchlistChanged(sessionId, changedAt)
+        }
+        return removed
+    }
+
+    listSessionJobs(sessionId: string) {
+        return this.store.sessionJobs.list(sessionId).map((job) => ({
+            key: job.key,
+            label: job.label,
+            status: job.status,
+            ...(job.done !== undefined ? { done: job.done } : {}),
+            ...(job.total !== undefined ? { total: job.total } : {}),
+            ...(job.remaining !== undefined ? { remaining: job.remaining } : {}),
+            ...(job.unit !== undefined ? { unit: job.unit } : {}),
+            ...(job.detail !== undefined ? { detail: job.detail } : {}),
+            heartbeatAt: job.heartbeatAt,
+            startedAt: job.startedAt,
+            updatedAt: job.updatedAt
+        }))
+    }
+
+    getPrimaryAttachedJob(sessionId: string) {
+        return this.store.sessionJobs.getPrimaryRunning(sessionId)
+    }
+
+    getPrimaryAttachedJobsBySessionIds(sessionIds: string[]) {
+        return this.store.sessionJobs.getPrimaryRunningBySessionIds(sessionIds)
+    }
+
+    /** Move outliving jobs + redirects onto another session (pre-delete). */
+    transferAttachedJobs(fromSessionId: string, toSessionId: string, namespace: string): void {
+        this.sessionCache.transferAttachedJobs(fromSessionId, toSessionId, namespace)
+    }
+
+    /** Shared REST/SSE watermark allocator for attachedJob patches. */
+    allocateAttachedJobVersion(sessionId: string): number {
+        return this.sessionCache.allocateAttachedJobVersion(sessionId)
+    }
+
+    upsertSessionJob(
+        sessionId: string,
+        jobKey: string,
+        body: import('@hapi/protocol').AttachedJobUpsert
+    ):
+        | { outcome: 'upserted'; job: import('@hapi/protocol').AttachedJob }
+        | { outcome: 'session-not-found' } {
+        const result = this.store.sessionJobs.upsert(sessionId, jobKey, body)
+        if (result.outcome === 'session-not-found') {
+            return result
+        }
+        const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
+        this.sessionCache.emitAttachedJobChanged(sessionId, primary)
+        const job = result.job
+        return {
+            outcome: 'upserted',
+            job: {
+                key: job.key,
+                label: job.label,
+                status: job.status,
+                ...(job.done !== undefined ? { done: job.done } : {}),
+                ...(job.total !== undefined ? { total: job.total } : {}),
+                ...(job.remaining !== undefined ? { remaining: job.remaining } : {}),
+                ...(job.unit !== undefined ? { unit: job.unit } : {}),
+                ...(job.detail !== undefined ? { detail: job.detail } : {}),
+                ...(job.runId !== undefined ? { runId: job.runId } : {}),
+                heartbeatAt: job.heartbeatAt,
+                startedAt: job.startedAt,
+                updatedAt: job.updatedAt
+            }
+        }
+    }
+
+    patchSessionJob(
+        sessionId: string,
+        jobKey: string,
+        patch: import('@hapi/protocol').AttachedJobPatch
+    ):
+        | { outcome: 'patched'; job: import('@hapi/protocol').AttachedJob }
+        | { outcome: 'not-found' }
+        | { outcome: 'run-mismatch' } {
+        const result = this.store.sessionJobs.patch(sessionId, jobKey, patch)
+        if (result.outcome !== 'patched') {
+            return result
+        }
+        const updated = result.job
+        const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
+        this.sessionCache.emitAttachedJobChanged(sessionId, primary)
+        return {
+            outcome: 'patched',
+            job: {
+                key: updated.key,
+                label: updated.label,
+                status: updated.status,
+                ...(updated.done !== undefined ? { done: updated.done } : {}),
+                ...(updated.total !== undefined ? { total: updated.total } : {}),
+                ...(updated.remaining !== undefined ? { remaining: updated.remaining } : {}),
+                ...(updated.unit !== undefined ? { unit: updated.unit } : {}),
+                ...(updated.detail !== undefined ? { detail: updated.detail } : {}),
+                ...(updated.runId !== undefined ? { runId: updated.runId } : {}),
+                heartbeatAt: updated.heartbeatAt,
+                startedAt: updated.startedAt,
+                updatedAt: updated.updatedAt
+            }
+        }
+    }
+
+    deleteSessionJob(sessionId: string, jobKey: string): boolean {
+        const removed = this.store.sessionJobs.delete(sessionId, jobKey)
+        if (removed) {
+            const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
+            this.sessionCache.emitAttachedJobChanged(sessionId, primary)
         }
         return removed
     }
@@ -773,7 +1044,7 @@ export class SyncEngine {
         }
     }
 
-async uploadScratchlistAttachment(
+    async uploadScratchlistAttachment(
         sessionId: string,
         namespace: string,
         filename: string,
@@ -872,6 +1143,266 @@ async uploadScratchlistAttachment(
 
     handleMachineAlive(payload: { machineId: string; time: number; health?: unknown }): void {
         this.machineCache.handleMachineAlive(payload)
+        void this.maybeFleetUpgradeMachine(payload.machineId).catch((error) => {
+            console.warn('[fleet-upgrade] offer resolution failed', error)
+        })
+    }
+
+    /**
+     * When a connected runner is missing required capabilities, ask it to
+     * self-upgrade to the hub's generation (npm or hub-artifact).
+     */
+    private async maybeFleetUpgradeMachine(machineId: string): Promise<void> {
+        // Policy-first: default `alert` must not resolve (and fingerprint) the
+        // upgrade offer on every machine-alive heartbeat.
+        if (!this.getUpgradeOffer) {
+            return
+        }
+        if (this.getFleetUpgradePolicy() !== 'auto') {
+            return
+        }
+        const offer = this.getUpgradeOffer()
+        if (offer.channel === 'off') {
+            return
+        }
+        const machine = this.machineCache.getMachine(machineId)
+        if (!machine?.active || !machine.metadata) {
+            return
+        }
+        // Honor runner opt-out: operators with HAPI_DISABLE_VERSION_HANDOFF=1
+        // must not get hub-initiated upgrade/stop churn (mtime handoff sibling).
+        if (machine.metadata.versionHandoffDisabled === true) {
+            return
+        }
+        // Auto-fire on capability skew OR pure semver drift ("set and forget"):
+        // a runner behind the hub's target version is nudged even when it's
+        // missing no required capability. The 0.0.0/off guards live in the helper.
+        if (!machineTrailsUpgradeOffer(
+            offer,
+            machine.metadata.happyCliVersion,
+            machine.metadata.capabilities,
+            machine.metadata.cliArtifactGeneration,
+        )) {
+            return
+        }
+        const last = this.fleetUpgradeAttemptAt.get(machineId) ?? 0
+        if (Date.now() - last < SyncEngine.FLEET_UPGRADE_COOLDOWN_MS) {
+            return
+        }
+        this.fleetUpgradeAttemptAt.set(machineId, Date.now())
+        const host = machine.metadata.host ?? machine.metadata.displayName ?? machineId
+        try {
+            const result = await this.upgradeMachineRunner(machineId, machine.namespace)
+            console.warn('[fleet-upgrade] auto attempt', {
+                machineId,
+                host,
+                channel: offer.channel,
+                result,
+            })
+            // Only toast hard upgrade failures. `upgrade_deferred` is mid-soup
+            // bun compile (Teemo 2026-08-04); `upgrade_unavailable` is expected
+            // opt-out / channel-off / missing capability. Permanent artifact
+            // prep failures are classified as `upgrade_failed` so they stay visible
+            // under auto (banner hides self-upgrade-capable hosts).
+            if (result.type === 'error' && result.code === 'upgrade_failed') {
+                this.eventPublisher.sendToast(
+                    machine.namespace,
+                    'Runner upgrade failed',
+                    `${host}: ${result.message}`,
+                )
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            console.warn('[fleet-upgrade] auto attempt failed', {
+                machineId,
+                message,
+            })
+            // Unexpected throw — still toast; prepare/compile paths return
+            // typed errors instead of throwing into this catch.
+            this.eventPublisher.sendToast(
+                machine.namespace,
+                'Runner upgrade failed',
+                `${host}: ${message}`,
+            )
+        }
+    }
+
+    /**
+     * Manual stop-runner (banner Restart). Only safe when the runner advertised
+     * `supervisedRestart` (HAPI_RUNNER_SUPERVISED=1) — an external supervisor
+     * relaunches. `versionHandoffDisabled` alone is not proof of a supervisor
+     * (detached `hapi runner start` can set that flag with nothing to relaunch).
+     */
+    async restartMachineRunner(machineId: string, namespace: string): Promise<
+        | { type: 'success'; message: string }
+        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'restart_unavailable' | 'restart_failed' }
+    > {
+        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
+            ?? this.machineCache.refreshMachine(machineId)
+        if (!machine || machine.namespace !== namespace) {
+            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
+        }
+        if (!machine.active) {
+            return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
+        }
+        // Banner Restart is stop-only. Gate on explicit supervisedRestart so a
+        // direct/stale client cannot stop-runner an unsupervised host. Also
+        // require a newer on-disk CLI — otherwise Restart just relaunches the
+        // same bytes and cannot clear skew.
+        if (machine.metadata?.supervisedRestart !== true) {
+            return {
+                type: 'error',
+                message: 'Restart requires an external runner supervisor (HAPI_RUNNER_SUPERVISED=1); use Upgrade instead',
+                code: 'restart_unavailable',
+            }
+        }
+        if (!cliBinaryUpdatedOnDisk(machine.metadata)) {
+            return {
+                type: 'error',
+                message: 'No newer CLI is installed; use Upgrade first',
+                code: 'restart_unavailable',
+            }
+        }
+        try {
+            await this.rpcGateway.stopRunner(machineId)
+            return { type: 'success', message: 'Runner restart requested' }
+        } catch (error) {
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Failed to restart runner',
+                code: 'restart_failed',
+            }
+        }
+    }
+
+    /**
+     * Ask a remote runner to upgrade to the hub's offered generation.
+     */
+    async upgradeMachineRunner(machineId: string, namespace: string): Promise<
+        | { type: 'success'; message: string; response: RunnerSelfUpgradeResponse }
+        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'upgrade_unavailable' | 'upgrade_deferred' | 'upgrade_failed' }
+    > {
+        if (!this.getUpgradeOffer) {
+            return { type: 'error', message: 'Upgrade offer not configured', code: 'upgrade_unavailable' }
+        }
+        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
+            ?? this.machineCache.refreshMachine(machineId)
+        if (!machine || machine.namespace !== namespace) {
+            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
+        }
+        if (!machine.active) {
+            return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
+        }
+
+        let offer = this.getUpgradeOffer()
+        if (offer.channel === 'off') {
+            return { type: 'error', message: 'Fleet upgrade disabled (HAPI_UPGRADE_CHANNEL=off)', code: 'upgrade_unavailable' }
+        }
+
+        // Soup / rebuild-only hosts (and any runner with HAPI_DISABLE_VERSION_HANDOFF=1)
+        // opt out of hub-initiated Upgrade. Fail closed on the manual path too so the
+        // UI cannot "succeed" while systemd keeps the soup entrypoint.
+        if (machine.metadata?.versionHandoffDisabled === true) {
+            return {
+                type: 'error',
+                message: 'Runner opted out of version handoff (soup/rebuild-only or HAPI_DISABLE_VERSION_HANDOFF=1); rematerialize soup or clear the opt-out',
+                code: 'upgrade_unavailable',
+            }
+        }
+
+        // Live-RPC overlay is already applied by MachineCache.getMachineByNamespace.
+        // Skewed runners that predate this RPC cannot self-upgrade remotely — fail
+        // closed with a clear code so the UI can steer operators to a manual path.
+        const capabilities = machine.metadata?.capabilities ?? []
+        if (!capabilities.includes(MACHINE_CAPABILITIES.RunnerSelfUpgrade)) {
+            return {
+                type: 'error',
+                message: 'Runner does not support self-upgrade; upgrade the CLI manually and restart the runner',
+                code: 'upgrade_unavailable',
+            }
+        }
+
+        if (offer.channel === 'hub-artifact') {
+            if (!this.prepareArtifactOffer) {
+                return { type: 'error', message: 'Artifact builder not configured', code: 'upgrade_unavailable' }
+            }
+            const platform = machine.metadata?.platform
+            const arch = machine.metadata?.arch
+            if (!platform || !arch) {
+                return {
+                    type: 'error',
+                    message: 'Machine platform/arch unavailable for hub-artifact upgrade',
+                    code: 'upgrade_unavailable',
+                }
+            }
+            try {
+                offer = await this.prepareArtifactOffer(
+                    offer,
+                    platform,
+                    arch,
+                )
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Failed to prepare CLI artifact'
+                // Mid-soup unresolved imports → deferred (no auto toast). Permanent
+                // prep failures → upgrade_failed so auto policy still surfaces them.
+                if (isTransientArtifactBuildFailure(error)) {
+                    return { type: 'error', message, code: 'upgrade_deferred' }
+                }
+                return { type: 'error', message, code: 'upgrade_failed' }
+            }
+            if (!offer.artifact?.sha256) {
+                return { type: 'error', message: 'Artifact missing sha256', code: 'upgrade_unavailable' }
+            }
+        }
+
+        try {
+            const raw = await this.rpcGateway.runnerSelfUpgrade(machineId, offer)
+            const response = raw as RunnerSelfUpgradeResponse
+            if (response?.status === 'failed' || response?.status === 'unsupported') {
+                return {
+                    type: 'error',
+                    message: response.message || `Upgrade ${response.status}`,
+                    code: 'upgrade_failed',
+                }
+            }
+            // Pre-generation runners (and any future gap) can reply already-current
+            // at the same semver while the hub still trails on targetGeneration /
+            // capabilities. That is not success — treating it as one stuck the
+            // banner in a forever "Already at X" loop.
+            if (
+                response?.status === 'already-current'
+                && machineTrailsUpgradeOffer(
+                    offer,
+                    machine.metadata?.happyCliVersion,
+                    machine.metadata?.capabilities,
+                    machine.metadata?.cliArtifactGeneration,
+                )
+            ) {
+                return {
+                    type: 'error',
+                    message:
+                        'Runner reported already-current but still trails the hub offer '
+                        + '(generation or capabilities). Install the hub CLI artifact once '
+                        + 'on that machine, or upgrade to a generation-aware runner.',
+                    code: 'upgrade_failed',
+                }
+            }
+            return {
+                type: 'success',
+                message: response?.message || 'Upgrade started',
+                response,
+            }
+        } catch (error) {
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : 'Fleet upgrade RPC failed',
+                code: 'upgrade_failed',
+            }
+        }
+    }
+
+    getHubUpgradeOffer(): HubUpgradeOffer | null {
+        return this.getUpgradeOffer?.() ?? null
     }
 
     private expireInactive(): void {
@@ -978,6 +1509,68 @@ async uploadScratchlistAttachment(
         messageId: string
     ): Promise<CancelQueuedMessageResult> {
         return this.messageService.cancelQueuedMessage(sessionId, messageId)
+    }
+
+    /**
+     * Ask the CLI to deliver one waiting-queue message into the active turn
+     * (Codex turn/steer, or Cursor ACP interrupt+prompt).
+     */
+    async steerQueuedMessage(
+        sessionId: string,
+        messageId: string
+    ): Promise<SteerQueuedMessageResponse> {
+        const session = this.getSession(sessionId)
+        if (!session) {
+            return { status: 'failed', error: 'Session not found', localId: null }
+        }
+        if (!isSteeringSupportedForSession(session.metadata)) {
+            return { status: 'failed', error: 'Steering is not supported for this agent', localId: null }
+        }
+        if (session.agentState?.controlledByUser === true) {
+            return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
+        }
+
+        const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
+        if (lookup.status === 'absent') {
+            return { status: 'failed', error: 'Message not found', localId: null }
+        }
+        if (lookup.status === 'invoked') {
+            const message = lookup.message
+            return {
+                status: 'invoked',
+                message: {
+                    id: message.id,
+                    seq: message.seq,
+                    localId: message.localId,
+                    content: message.content,
+                    createdAt: message.createdAt,
+                    invokedAt: message.invokedAt,
+                    scheduledAt: message.scheduledAt
+                }
+            }
+        }
+        const { localId, scheduledAt } = lookup
+        if (!localId) {
+            return { status: 'failed', error: 'Message has no localId', localId: null }
+        }
+        if (scheduledAt != null && scheduledAt > Date.now()) {
+            return { status: 'failed', error: 'Scheduled messages cannot be steered', localId }
+        }
+
+        try {
+            const result = await this.rpcGateway.steerQueuedMessage(sessionId, localId)
+            if (result.steered) {
+                return { status: 'steered', localId }
+            }
+            return {
+                status: 'failed',
+                error: result.error ?? 'Steer failed',
+                localId
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Steer failed'
+            return { status: 'failed', error: message, localId }
+        }
     }
 
     sweepImmediateQueuedOnSessionEnd(sessionId: string, invokedAt: number): void {
@@ -1385,6 +1978,7 @@ async uploadScratchlistAttachment(
                 source.collaborationMode,
                 undefined,
                 undefined,
+                undefined,
                 rpcResult.forkSession === true
             )
             if (spawn.type !== 'success') {
@@ -1739,6 +2333,61 @@ async uploadScratchlistAttachment(
         await this.sessionCache.renameSession(sessionId, name)
     }
 
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        await this.sessionCache.acknowledgeModelError(sessionId, eventId)
+    }
+
+    async markModelErrorNotified(sessionId: string, eventId: string): Promise<void> {
+        await this.sessionCache.markModelErrorNotified(sessionId, eventId)
+    }
+
+    async bridgeModelError(sessionId: string, eventId: string): Promise<{ ok: boolean; reason?: string }> {
+        const session = this.sessionCache.refreshSession(sessionId)
+            ?? this.sessionCache.getSession(sessionId)
+        if (!session) {
+            throw new Error('Session not found')
+        }
+
+        const err = session.metadata?.lastModelError
+        if (!err) {
+            throw new Error('No model error to bridge')
+        }
+        if (err.eventId !== eventId) {
+            throw new Error('Model error changed; refresh before bridging.')
+        }
+        if (!err.transient) {
+            throw new Error('Model error is not transient')
+        }
+        if (err.bridgedForEventId === err.eventId) {
+            throw new Error('Model error was already bridged')
+        }
+        if (err.retriedAndFailed) {
+            throw new Error('Bridge already failed for this error')
+        }
+        if (err.supersededByUserTurn) {
+            throw new Error('Model error was superseded by a newer turn')
+        }
+        if (err.bridgeable === false) {
+            throw new Error('Model error is not bridgeable')
+        }
+
+        // Do not mark bridgedForEventId here — CLI persists recovery only after
+        // the bridge prompt actually succeeds.
+        return await this.rpcGateway.bridgeModelError(sessionId, {
+            eventId: err.eventId,
+            atTs: err.atTs,
+            kind: err.kind,
+            rawSnippet: err.rawSnippet,
+            lastUserMessage: err.lastUserMessage,
+            priorAssistantClaimsDone: err.priorAssistantClaimsDone,
+            transient: err.transient,
+            bridgedForEventId: err.bridgedForEventId,
+            retriedAndFailed: err.retriedAndFailed,
+            supersededByUserTurn: err.supersededByUserTurn,
+            bridgeable: err.bridgeable
+        })
+    }
+
     async deleteSession(sessionId: string): Promise<void> {
         await this.sessionCache.deleteSession(sessionId)
     }
@@ -1753,6 +2402,7 @@ async uploadScratchlistAttachment(
             serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
             copilotAgentMode?: CopilotAgentMode
+            autoBridgeTransientModelErrors?: boolean
         }
     ): Promise<void> {
         const session = this.sessionCache.getSession(sessionId)
@@ -1814,7 +2464,8 @@ async uploadScratchlistAttachment(
         existingSessionId?: string,
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty'
+        startingMode?: 'remote' | 'pty',
+        providerProfileId?: string | null
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
         return await this.rpcGateway.spawnSession(
             machineId,
@@ -1832,7 +2483,8 @@ async uploadScratchlistAttachment(
             existingSessionId,
             collaborationMode,
             copilotAgentMode,
-            startingMode
+            startingMode,
+            providerProfileId
         )
     }
 
@@ -2082,7 +2734,9 @@ async uploadScratchlistAttachment(
             source.permissionMode ?? metadata.preferredPermissionMode,
             source.serviceTier ?? undefined,
             operation.replacementSessionId,
-            source.collaborationMode
+            source.collaborationMode,
+            undefined,
+            undefined
         )
         if (spawned.type === 'error') {
             this.persistClearOperationState(sessionId, namespace, operation, spawned.message)
@@ -2251,6 +2905,26 @@ async uploadScratchlistAttachment(
         return false
     }
 
+    async listProviderProfiles(machineId: string, agent?: import('@hapi/protocol').AgentProvider) {
+        return await this.rpcGateway.listProviderProfiles(machineId, agent)
+    }
+
+    async createProviderProfile(machineId: string, input: import('@hapi/protocol').ProviderProfileInput) {
+        return await this.rpcGateway.createProviderProfile(machineId, input)
+    }
+
+    async updateProviderProfile(machineId: string, id: string, patch: import('@hapi/protocol').ProviderProfileUpdate) {
+        return await this.rpcGateway.updateProviderProfile(machineId, id, patch)
+    }
+
+    async setDefaultProvider(machineId: string, agent: import('@hapi/protocol').AgentProvider, id: string | null) {
+        return await this.rpcGateway.setDefaultProvider(machineId, agent, id)
+    }
+
+    async checkProviderHealth(machineId: string, id: string, refreshModels: boolean) {
+        return await this.rpcGateway.checkProviderHealth(machineId, id, refreshModels)
+    }
+
     private resolveFlavor(session: Session): AgentFlavor {
         const flavor = session.metadata?.flavor
         return isKnownFlavor(flavor) ? flavor : 'claude'
@@ -2315,6 +2989,7 @@ async uploadScratchlistAttachment(
                 thinking: session.thinking,
                 controlledByUser: session.agentState?.controlledByUser === true,
                 agentSessionId,
+                providerProfileId: metadata.providerProfileId,
                 model: session.model ?? null,
                 effort: session.effort ?? null,
                 modelReasoningEffort: session.modelReasoningEffort ?? null,
@@ -2785,11 +3460,15 @@ async uploadScratchlistAttachment(
                     }
                 }
             } catch (error) {
-                return {
-                    type: 'error',
-                    message: error instanceof Error ? error.message : 'Failed to inspect Cursor chat store',
-                    code: 'resume_failed'
-                }
+                // Soft-fail on probe skew / missing handler (#1084): definitive
+                // onDisk:false still blocks above; probe errors must not be
+                // reported as missing chat data.
+                const message = error instanceof Error ? error.message : 'Failed to inspect Cursor chat store'
+                console.warn('[resume] Cursor chat-store probe failed; proceeding with reopen attempt', {
+                    sessionId: access.sessionId,
+                    machineId: targetMachine.id,
+                    message
+                })
             }
         }
 
@@ -2843,7 +3522,8 @@ async uploadScratchlistAttachment(
                 access.sessionId,
                 session.collaborationMode ?? undefined,
                 session.copilotAgentMode ?? undefined,
-                resumedStartingMode
+                resumedStartingMode,
+                metadata.providerProfileId
             )
 
             if (spawnResult.type !== 'success') {
@@ -3776,6 +4456,17 @@ async uploadScratchlistAttachment(
 
     async listCodexSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]) {
         return await this.rpcGateway.listCodexSessionsForMachine(machineId, cwd, sessionIds)
+    }
+
+    async listClaudeSessionSummariesForMachine(machineId: string, cwd?: string | null): Promise<RpcListClaudeSessionsResponse> {
+        return await this.rpcGateway.listClaudeSessionSummariesForMachine(machineId, cwd)
+    }
+
+    async listClaudeSessionPageForMachine(
+        machineId: string,
+        options: { cwd?: string | null; sessionId: string; cursor: number; maxBytes?: number }
+    ): Promise<RpcListClaudeSessionsResponse> {
+        return await this.rpcGateway.listClaudeSessionPageForMachine(machineId, options)
     }
 
     async listPiSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListPiSessionsResponse> {
