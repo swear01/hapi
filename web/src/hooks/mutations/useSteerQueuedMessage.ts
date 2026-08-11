@@ -45,7 +45,9 @@ export function useSteerQueuedMessage(api: ApiClient | null) {
                 // Race: CLI already consumed the row. Merge the authoritative
                 // invoked message so the queued bar clears even if SSE was missed
                 // (same pattern as useCancelQueuedMessage).
-                markMessagesConsumed(input.sessionId, [result.message.localId], result.message.invokedAt)
+                if (result.message.localId && result.message.invokedAt != null) {
+                    markMessagesConsumed(input.sessionId, [result.message.localId], result.message.invokedAt)
+                }
             }
             haptic.notification('success')
         },
