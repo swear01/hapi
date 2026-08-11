@@ -9,7 +9,7 @@ export type OpencodeModelSelectorProps = {
     error: string | null
     availableModels: OpencodeModelSummary[]
     currentModelId: string | null
-    selectedModel: string | null
+    selectedModel: string | null | undefined
     onModelChange: (modelId: string | null) => void
     onRetry?: () => void
 }
