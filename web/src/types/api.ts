@@ -78,6 +78,18 @@ export type {
 
 export type { HapiSessionExport } from '@hapi/protocol/sessionExport'
 
+export type {
+    AgentProvider,
+    ProviderListResponse,
+    ProviderHealthCheckResponse,
+    ProviderProtocol,
+    ProviderModel,
+    ProviderMutationResponse,
+    ProviderProfileInput,
+    ProviderProfileUpdate,
+    ProviderProfileView,
+} from '@hapi/protocol'
+
 export type SessionMetadataSummary = {
     path: string
     host: string
@@ -252,6 +264,54 @@ export type CodexLocalSessionsResponse = {
     error: string
     sessions: []
     machineId?: string
+}
+
+export type ClaudeLocalSessionSummary = {
+    id: string
+    title: string
+    lastUserMessage?: string | null
+    cwd?: string | null
+    file: string
+    modifiedAt: number
+    model?: string | null
+    messageCount: number
+    hapiSessionId?: string
+    importState?: 'importing' | 'complete' | 'failed' | 'diverged'
+}
+
+export type ClaudeLocalSessionsResponse = {
+    success: true
+    sessions: ClaudeLocalSessionSummary[]
+    machineId: string
+} | {
+    success: false
+    error: string
+    sessions: []
+    machineId?: string
+}
+
+export type ClaudeImportResult = {
+    claudeSessionId: string
+    hapiSessionId?: string
+    action?: 'created' | 'updated' | 'unchanged'
+    appended?: number
+    error?: { code: string; message: string }
+}
+
+export type ClaudeImportSessionsRequest = {
+    sessionIds: string[]
+    cwd?: string | null
+    machineId?: string | null
+    model?: string | null
+    effort?: string | null
+    permissionMode?: 'default' | 'bypassPermissions'
+}
+
+export type ClaudeImportSessionsResponse = {
+    success: boolean
+    results: ClaudeImportResult[]
+    machineId?: string
+    error?: string
 }
 
 export type PiLocalSessionSummary = {
