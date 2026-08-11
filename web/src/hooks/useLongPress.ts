@@ -135,7 +135,10 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         startTimer(e.clientX, e.clientY)
     }, [startTimer, isGhostMouseEvent])
 
-    const onMouseUp = useCallback<React.MouseEventHandler>(() => {
+    const onMouseUp = useCallback<React.MouseEventHandler>((e) => {
+        // Only the primary button acts as a click; right/middle mouse-up
+        // (e.g. opening a context menu) must not trigger onClick.
+        if (e.button !== 0) return
         if (isGhostMouseEvent()) return
         handleEnd(!isLongPressRef.current)
     }, [handleEnd, isGhostMouseEvent])

@@ -83,6 +83,7 @@ export type SessionSummary = {
     pendingRequests: PendingRequest[]
     backgroundTaskCount: number
     futureScheduledMessageCount: number
+    uninvokedScheduledMessageCount?: number
     /** Epoch ms of the soonest uninvoked future scheduled message, or null. */
     nextScheduledAt: number | null
     /**
@@ -92,6 +93,8 @@ export type SessionSummary = {
     attachedJob: AttachedJob | null
     /** Watermark for versioned `attachedJob` SSE patches (dual EventSource race). */
     attachedJobUpdatedAt: number
+    /** Epoch ms of the latest scratchlist entry mutation, when present. */
+    scratchlistUpdatedAt?: number
     model: string | null
     modelReasoningEffort?: string | null
     effort: string | null
