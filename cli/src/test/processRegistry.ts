@@ -90,35 +90,43 @@ function waitForAllDead(pids: number[], timeoutMs: number): Promise<void> {
  * (afterEach + afterAll) — already-dead entries are skipped and pruned.
  */
 export async function cleanupAllRegisteredProcesses(): Promise<void> {
-    // Stage 1: logical shutdown through the runner control API.
-    const sessionEntries = registered.filter((entry) => entry.kind === 'session' && entry.sessionId)
-    for (const entry of sessionEntries) {
-        try {
-            await stopRunnerSession(entry.sessionId!)
-        } catch {
-            // Runner may already be gone; the fallback below handles survivors.
-        }
-    }
+    // The runner control API carries a long HTTP timeout (setup.ts raises
+    // HAPI_RUNNER_HTTP_TIMEOUT for the stress test), so the whole logical
+    // phase is bounded: a hung-but-live runner must not exhaust the hook
+    // budget before the process-tree fallback and marker sweep run.
+    const LOGICAL_PHASE_BUDGET_MS = 15_000
 
-    // Resolve any surviving session PIDs from the runner's own tracking and
-    // force-terminate their trees as the bounded fallback.
-    const trackedSessionIds = new Set(sessionEntries.map((entry) => entry.sessionId))
+    // Stage 1: logical shutdown through the runner control API (all sessions
+    // in parallel) + resolve any surviving session PIDs from the runner's
+    // own tracking for the fallback below.
+    const sessionEntries = registered.filter((entry) => entry.kind === 'session' && entry.sessionId)
     const pidsToKill = new Set<number>()
-    try {
-        const sessions = await listRunnerSessions()
-        for (const session of sessions) {
-            if (
-                session?.happySessionId &&
-                trackedSessionIds.has(session.happySessionId) &&
-                typeof session.pid === 'number' &&
-                isProcessAlive(session.pid)
-            ) {
-                pidsToKill.add(session.pid)
+    await Promise.race([
+        (async () => {
+            await Promise.allSettled(
+                sessionEntries.map((entry) => stopRunnerSession(entry.sessionId!))
+            )
+
+            const trackedSessionIds = new Set(sessionEntries.map((entry) => entry.sessionId))
+            try {
+                const sessions = await listRunnerSessions()
+                for (const session of sessions) {
+                    if (
+                        session?.happySessionId &&
+                        trackedSessionIds.has(session.happySessionId) &&
+                        typeof session.pid === 'number' &&
+                        isProcessAlive(session.pid)
+                    ) {
+                        pidsToKill.add(session.pid)
+                    }
+                }
+            } catch {
+                // Runner unreachable — orphaned sessions are caught by the
+                // final audit.
             }
-        }
-    } catch {
-        // Runner unreachable — orphaned sessions are caught by the final audit.
-    }
+        })(),
+        new Promise((resolve) => setTimeout(resolve, LOGICAL_PHASE_BUDGET_MS)),
+    ])
 
     // Stage 2: bounded process-tree termination for anything still alive.
     // The runner itself is deliberately NOT killed here: it is always stopped
