@@ -6,7 +6,8 @@ import { saveNewSessionFormDraft } from './newSessionFormDraft'
 import {
     loadPreferredLaunchSettings,
     savePreferredAgent,
-    savePreferredLaunchSettings
+    savePreferredLaunchSettings,
+    savePreferredYoloMode
 } from './preferences'
 
 const mocks = vi.hoisted(() => ({
@@ -162,7 +163,20 @@ vi.mock('./MachineSelector', () => ({
     )
 }))
 vi.mock('./SessionTypeSelector', () => ({ SessionTypeSelector: () => null }))
-vi.mock('./PermissionField', () => ({ PermissionField: () => null }))
+vi.mock('./PermissionField', () => ({
+    PermissionField: (props: {
+        agent: string
+        nativeValue: string
+        yoloMode: boolean
+        isDisabled: boolean
+        onNativeChange: (mode: string) => void
+        onYoloToggle: (value: boolean) => void
+    }) => (
+        <button type="button" data-testid="permission-mode" onClick={() => props.onNativeChange('yolo')}>
+            {props.nativeValue}
+        </button>
+    )
+}))
 vi.mock('./CopilotAgentModeSelector', () => ({ CopilotAgentModeSelector: () => null }))
 vi.mock('./OpencodeModelSelector', () => ({
     OpencodeModelSelector: (props: { selectedModel: string | null | undefined; onModelChange: (model: string | null) => void }) => (
@@ -249,7 +263,8 @@ describe('NewSession launch preferences', () => {
             model: 'gpt-5.6-sol',
             cursorSelectedBase: 'auto',
             effort: 'auto',
-            modelReasoningEffort: 'xhigh'
+            modelReasoningEffort: 'xhigh',
+            permissionMode: 'safe-yolo'
         })
 
         render(
@@ -266,6 +281,49 @@ describe('NewSession launch preferences', () => {
         await waitFor(() => {
             expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-sol')
             expect(screen.getByTestId('reasoning')).toHaveTextContent('xhigh')
+            expect(screen.getByTestId('permission-mode')).toHaveTextContent('safe-yolo')
+        })
+    })
+
+    it('does not migrate a legacy YOLO value owned by a non-Codex agent', async () => {
+        savePreferredAgent('claude')
+        savePreferredYoloMode(true)
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByDisplayValue('codex'))
+
+        await waitFor(() => {
+            expect(screen.getByTestId('permission-mode')).toHaveTextContent('default')
+        })
+    })
+
+    it('migrates a legacy YOLO value when Codex was the preferred agent', async () => {
+        savePreferredAgent('codex')
+        savePreferredYoloMode(true)
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        await waitFor(() => {
+            expect(screen.getByTestId('permission-mode')).toHaveTextContent('yolo')
         })
     })
 
@@ -399,15 +457,18 @@ describe('NewSession launch preferences', () => {
         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toBeNull()
         fireEvent.click(screen.getByTestId('model'))
         fireEvent.click(screen.getByTestId('reasoning'))
+        fireEvent.click(screen.getByTestId('permission-mode'))
         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toBeNull()
         fireEvent.click(screen.getByTestId('create'))
 
         await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-1'))
+        expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'yolo' }))
         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toEqual({
             model: 'gpt-5.6-terra',
             cursorSelectedBase: 'auto',
             effort: 'auto',
-            modelReasoningEffort: 'max'
+            modelReasoningEffort: 'max',
+            permissionMode: 'yolo'
         })
     })
 
