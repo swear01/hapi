@@ -132,19 +132,6 @@ export function useDictation(config: {
                         return cur === '' || cur === baseline
                     }
 
-                    if (recordingFailed) {
-                        transcribingRef.current = false
-                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
-                        }
-                        if (mountedRef.current) {
-                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
-                            setError('Audio recording failed')
-                            setStatus('error')
-                        }
-                        return
-                    }
-
                     if (!blob.size) {
                         transcribingRef.current = false
                         if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
@@ -153,6 +140,18 @@ export function useDictation(config: {
                         if (mountedRef.current) {
                             if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
                             setError('No audio was recorded')
+                            setStatus('error')
+                        }
+                        return
+                    }
+                    if (recordingFailed) {
+                        transcribingRef.current = false
+                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        }
+                        if (mountedRef.current) {
+                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
+                            setError('Audio recording failed')
                             setStatus('error')
                         }
                         return
