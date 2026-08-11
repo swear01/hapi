@@ -62,7 +62,7 @@ import { PiThinkingLevelPanel } from './PiThinkingLevelPanel'
 import type { ApiClient } from '@/api/client'
 import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
 import { useDictation } from '@/hooks/useDictation'
-import type { ComposerSendIntent } from '@/lib/messageDelivery'
+import { resolveMessageDeliveryMode, type ComposerSendIntent } from '@/lib/messageDelivery'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 
 export interface TextInputState {
@@ -469,7 +469,12 @@ export function HappyComposer(props: {
         provider: voiceInput.provider,
         mode: voiceInput.transcriptionMode,
         getCurrentText: getCurrentComposerText,
-        onTextChange: setComposerText
+        onTextChange: setComposerText,
+        sendMessage: async (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => {
+            if (props.voiceTranscriptionApi) {
+                await props.voiceTranscriptionApi.sendMessage(sessionId, text, null, undefined, undefined, deliveryMode)
+            }
+        }
     }), [
         props.voiceTranscriptionApi,
         voiceInput.provider,
@@ -480,8 +485,13 @@ export function HappyComposer(props: {
     const dictation = useDictation(dictationConfig)
     const dictationActive = voiceInput.voiceMode === 'dictation'
     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
+    const handleDictationToggle = useCallback(async () => {
+        await dictation.toggle()
+    }, [dictation])
+
+
     const effectiveVoiceToggle = dictationActive
-        ? (dictation.supported ? dictation.toggle : undefined)
+        ? (dictation.supported ? handleDictationToggle : undefined)
         : onVoiceToggle
     const previousVoiceModeRef = useRef(voiceInput.voiceMode)
     useEffect(() => {
@@ -1103,6 +1113,33 @@ export function HappyComposer(props: {
     }, [pendingSendIntentRef])
 
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
+        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
+            const canDirectSend = dictation.status === 'connected'
+                && active
+                && attachments.length === 0
+                && pendingSchedule == null
+                && !props.scratchlistMode
+                && intent === 'default'
+            if (canDirectSend) {
+                richInputRef.current?.flushSerializedText()
+                const targetSessionId = props.sessionId ?? ''
+                const initialText = api.composer().getState().text
+                const deliveryMode = resolveMessageDeliveryMode({
+                    agentFlavor: props.agentFlavor,
+                    isSessionThinking: props.thinking ?? false,
+                    intent: 'default'
+                })
+                api.composer().setText('')
+                if (targetSessionId && dictation.stopAndSend) {
+                    await dictation.stopAndSend(targetSessionId, initialText, deliveryMode)
+                } else {
+                    await dictation.toggle()
+                }
+            } else {
+                await dictation.toggle()
+            }
+            return
+        }
         // SessionChat preloads the ref only when restoring a rejected send:
         // queue retries remain queue, while an ordinary fresh send always
         // starts from the explicit/default argument. Capture it before the
@@ -1213,6 +1250,14 @@ export function HappyComposer(props: {
         sendError,
         pendingSendIntentRef,
         resetPendingSendIntent,
+        dictationActive,
+        dictation.status,
+        dictation.toggle,
+        dictation.stopAndSend,
+        props.sessionId,
+        props.agentFlavor,
+        props.thinking,
+        active,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
