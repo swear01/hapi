@@ -50,7 +50,7 @@ import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import { initializeSessionLastSeen, markSessionSeen } from '@/lib/sessionLastSeen'
 import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
 import { clearCodexImportedSession } from '@/lib/codexImportedSessions'
-import { getSupersedingSessionId, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
+import { getSupersedingSessionId, prepareFollowSupersedingSession, shouldFollowSupersedingSession } from '@/routes/sessions/followSupersedingSession'
 import { migrateSuppressedSendError } from '@/lib/suppressed-send-error'
 import FilesPage from '@/routes/sessions/files'
 import FilePage from '@/routes/sessions/file'
@@ -69,7 +69,7 @@ import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import SettingsUsagePage from '@/routes/settings/usage'
 import SharePage from '@/routes/share'
-import { setSharePendingTransfer } from '@/lib/sharePendingState'
+import { retargetSharePendingTransfer, setSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer } from '@/lib/shareTransfer'
 
 
@@ -437,6 +437,7 @@ function SessionPage() {
                 await queryClient.invalidateQueries({ queryKey: queryKeys.session(result.sessionId) })
                 await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
                 if (result.sessionId && result.sessionId !== errorSessionId) {
+                    retargetSharePendingTransfer(errorSessionId, result.sessionId)
                     await transferComposerDraftThenNavigate(
                         errorSessionId,
                         result.sessionId,
@@ -538,6 +539,7 @@ function SessionPage() {
     const handleSessionResolved = useCallback((resolvedSessionId: string) => {
         if (session) {
             if (resolvedSessionId !== session.id) {
+                retargetSharePendingTransfer(session.id, resolvedSessionId)
                 seedMessageWindowFromSession(session.id, resolvedSessionId)
             }
             queryClient.setQueryData(queryKeys.session(resolvedSessionId), (previous: { session?: typeof session } | undefined) => ({
@@ -841,6 +843,7 @@ function SessionDetailRoute() {
         )
         observedSessionRef.current = { sessionId, supersedingSessionId }
         if (!shouldFollow || !supersedingSessionId) return
+        prepareFollowSupersedingSession(sessionId, supersedingSessionId)
         navigate({
             to: '/sessions/$sessionId',
             params: { sessionId: supersedingSessionId },
@@ -884,7 +887,7 @@ function NewSessionPage() {
 
     const handleSuccess = useCallback((sessionId: string) => {
         if (shareTransferId) {
-            setSharePendingTransfer(shareTransferId)
+            setSharePendingTransfer(shareTransferId, sessionId)
         }
         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
         // Replace current page with /sessions to clear spawn flow from history
