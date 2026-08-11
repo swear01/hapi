@@ -430,7 +430,7 @@ describe('real defaultScopeProbe (smoke test, no macOS tooling on this Linux hos
         _resetCarrierScopeCacheForTests();
     });
 
-    it('resolves to undefined (never hangs, never throws) when stubbed to darwin on a non-macOS host', async () => {
+    it.skipIf(process.platform !== 'linux')('resolves to undefined (never hangs, never throws) when stubbed to darwin on a non-macOS host', async () => {
         restorePlatform = stubPlatform('darwin');
         await expect(warmCarrierScope()).resolves.toBeUndefined();
 

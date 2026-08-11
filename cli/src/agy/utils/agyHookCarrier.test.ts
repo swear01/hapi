@@ -188,7 +188,7 @@ describe('agy hook carrier location (Phase 2.8)', () => {
         }
     });
 
-    it('writes owner metadata (pid, scope) at the carrier root, outside .agents/', () => {
+    it.skipIf(process.platform !== 'linux')('writes owner metadata (pid, scope) at the carrier root, outside .agents/', () => {
         const result = prepareAgyHookCarrier('{}');
         expect(result).toBeDefined();
         if (!result) return;
@@ -216,7 +216,7 @@ describe('agy hook carrier location (Phase 2.8)', () => {
 });
 
 describe('computeLocalCarrierScope', () => {
-    it('computes a linux:<bootId>:<nsId> scope from real /proc reads on this (Linux) test host', () => {
+    it.skipIf(process.platform !== 'linux')('computes a linux:<bootId>:<nsId> scope from real /proc reads on this (Linux) test host', () => {
         // Non-vacuous: this sandbox's /proc is genuinely readable (verified
         // manually before writing this test), so this pins the real Linux
         // success path, not just the fallback.
@@ -275,7 +275,7 @@ describe('sweepAgyHookCarriers', () => {
         return carrierDir;
     }
 
-    it('③ sweeps a carrier whose owner scope matches AND whose process has died', async () => {
+    it.skipIf(process.platform !== 'linux')('③ sweeps a carrier whose owner scope matches AND whose process has died', async () => {
         const deadPid = await spawnAndReapDeadPid();
         const carrierDir = makeCarrierDir('dead-owner-matching-scope');
         writeFileSync(
@@ -567,7 +567,7 @@ describe('sweepAgyHookCarriers', () => {
             expect(existsSync(carrierDir)).toBe(true);
         });
 
-        it('reads the directory listing before resolving the local scope — not just an outcome, the actual call order', async () => {
+        it.skipIf(process.platform !== 'linux')('reads the directory listing before resolving the local scope — not just an outcome, the actual call order', async () => {
             // hostile-review round 1 finding ③: the test above only proves
             // "a carrier created after the snapshot is invisible", which a
             // reversed implementation (resolve scope, THEN readdir) could

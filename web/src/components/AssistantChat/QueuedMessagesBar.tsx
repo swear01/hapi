@@ -380,10 +380,11 @@ export function QueuedMessagesBar({
                         const isPending = cancelMutation.isPending || steerMutation.isPending || queuedOperationPending
                         const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending })
                         const isFutureScheduled = msg.scheduledAt != null && msg.scheduledAt > Date.now()
-                        const canSteer = steeringSupported
-                            && Boolean(steeringActive)
-                            && !isFutureScheduled
+                        const canSteerRow = Boolean(
+                            canSteer
+                            && msg.scheduledAt == null
                             && canCancel
+                        )
 
                         const handleCancel = () => {
                             if (!canCancel) return
@@ -402,8 +403,8 @@ export function QueuedMessagesBar({
                         }
 
                         const handleSteer = () => {
-                            if (!canSteer) return
-                            steerMutation.mutate({
+                            if (!canSteerRow) return
+                            void steerMutation.mutateAsync({
                                 sessionId,
                                 messageId: msg.id,
                                 localId,
@@ -524,7 +525,7 @@ export function QueuedMessagesBar({
                                     )}
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
-                                    {canSteer ? (
+                                    {canSteerRow ? (
                                         <button
                                             type="button"
                                             aria-label="Steer queued message"

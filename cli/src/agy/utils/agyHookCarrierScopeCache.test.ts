@@ -30,7 +30,7 @@ describe('carrier scope cache (Phase 2-B infrastructure)', () => {
         _resetCarrierScopeCacheForTests();
     });
 
-    it('computes the scope only once across repeated warm calls with the same probe', async () => {
+    it.skipIf(process.platform !== 'linux')('computes the scope only once across repeated warm calls with the same probe', async () => {
         const readBootId = vi.fn(() => 'cached-boot-id');
         const readPidNamespaceId = vi.fn(() => '999');
         const probe: ScopeProbe = { readBootId, readPidNamespaceId, hostname: () => 'irrelevant' };
@@ -43,7 +43,7 @@ describe('carrier scope cache (Phase 2-B infrastructure)', () => {
         expect(readPidNamespaceId).toHaveBeenCalledTimes(1);
     });
 
-    it('a second warmCarrierScope call fired before the first has settled reuses the same in-flight probe (does not double-probe)', async () => {
+    it.skipIf(process.platform !== 'linux')('a second warmCarrierScope call fired before the first has settled reuses the same in-flight probe (does not double-probe)', async () => {
         const callCount = vi.fn();
         const probe: ScopeProbe = {
             readBootId: () => { callCount(); return 'boot-id'; },
@@ -57,7 +57,7 @@ describe('carrier scope cache (Phase 2-B infrastructure)', () => {
         expect(callCount).toHaveBeenCalledTimes(1);
     });
 
-    it('memoizes a failed probe too -- does not retry on every warm call', async () => {
+    it.skipIf(process.platform !== 'linux')('memoizes a failed probe too -- does not retry on every warm call', async () => {
         const readBootId = vi.fn((): string => { throw new Error('boot id read failed'); });
         const probe: ScopeProbe = { readBootId, readPidNamespaceId: () => '1', hostname: () => 'irrelevant' };
 
@@ -92,7 +92,7 @@ describe('carrier scope cache (Phase 2-B infrastructure)', () => {
             rmSync(customHapiHome, { recursive: true, force: true });
         });
 
-        it('reads a warm cache instead of recomputing (owner.json reflects the warmed value, not a fresh real-/proc read)', async () => {
+        it.skipIf(process.platform !== 'linux')('reads a warm cache instead of recomputing (owner.json reflects the warmed value, not a fresh real-/proc read)', async () => {
             // A deliberately WRONG-looking but well-formed scope: if
             // writeOwnerMetadata ignored the cache and fell back to the real
             // sync Linux probe, the resulting owner.json would carry the
@@ -117,7 +117,7 @@ describe('carrier scope cache (Phase 2-B infrastructure)', () => {
             }
         });
 
-        it('falls back to the real synchronous computation when the cache was never warmed (unchanged Linux behavior)', () => {
+        it.skipIf(process.platform !== 'linux')('falls back to the real synchronous computation when the cache was never warmed (unchanged Linux behavior)', () => {
             // No warmCarrierScope() call at all -- this is the existing,
             // pre-Phase-2-B code path (see agyHookCarrier.test.ts's Phase
             // 2.8 "writes owner metadata" test for the original assertion

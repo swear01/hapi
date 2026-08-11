@@ -4,6 +4,8 @@ export const COMPOSER_TOOLBAR_ITEM_IDS = [
     'attachment',
     'settings',
     'expand',
+    'model',
+    'effort',
     'piModel',
     'piThinking',
     'terminal',
@@ -12,8 +14,6 @@ export const COMPOSER_TOOLBAR_ITEM_IDS = [
     'voiceMic',
     'scratchlist',
     'schedule',
-    'model',
-    'effort'
 ] as const
 
 export type ComposerToolbarItemId = typeof COMPOSER_TOOLBAR_ITEM_IDS[number]

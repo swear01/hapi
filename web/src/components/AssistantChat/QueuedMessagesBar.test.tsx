@@ -57,14 +57,6 @@ vi.mock('@/hooks/mutations/useCancelQueuedMessage', () => ({
     }),
 }))
 
-vi.mock('@/hooks/mutations/useSteerQueuedMessage', () => ({
-    useSteerQueuedMessage: () => ({
-        isPending: false,
-        variables: undefined,
-        mutate: vi.fn(),
-    }),
-}))
-
 vi.mock('@/lib/composer-drafts', () => ({
     saveDraft: mocks.saveDraft,
 }))

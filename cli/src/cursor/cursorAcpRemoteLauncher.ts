@@ -590,6 +590,16 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 };
                 await backend.prompt(acpSessionId, promptContent, onUpdate);
                 void backend.refreshSessionInfo(acpSessionId, session.path);
+                // Prompt resolved: flush deferred structural stderr (a model
+                // rejection the agent surfaced mid-turn) before ready, so the
+                // user sees why the turn could not run. #1484 reworked message
+                // anchoring but kept this fork's #906 modelError UX.
+                const settled = this.pendingStderrFailure ?? this.pendingTextFailure;
+                if (settled && !this.turnHasModelError) {
+                    this.recordModelError(settled);
+                }
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
