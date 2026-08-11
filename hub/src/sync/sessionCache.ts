@@ -1234,7 +1234,15 @@ export class SessionCache {
      */
     transferAttachedJobs(fromSessionId: string, toSessionId: string, namespace: string): void {
         if (fromSessionId === toSessionId) return
+        // If the target previously redirected its jobs to the source (A→B then
+        // B→A reclaim), clear the stale outgoing pointer so the reclaimed
+        // owner resolves to itself.
+        const targetWasRedirectedToSource =
+            this.resolveAttachedJobSessionId(toSessionId, namespace) === fromSessionId
         const movedJobs = this.store.sessionJobs.transfer(fromSessionId, toSessionId)
+        if (targetWasRedirectedToSource) {
+            this.clearJobsTransferredToSession(toSessionId, namespace)
+        }
         this.recordJobsTransferredToSession(fromSessionId, toSessionId, namespace)
         this.recordJobKeyRedirects(toSessionId, fromSessionId, movedJobs.keyRedirects, namespace)
         this.recordJobsAcceptedFromSession(toSessionId, fromSessionId, namespace)
@@ -1300,6 +1308,14 @@ export class SessionCache {
         // promise that scratchlist survives reloads.
         const movedScratchlist = this.store.scratchlist.transfer(oldSessionId, newSessionId)
         const movedJobs = this.store.sessionJobs.transfer(oldSessionId, newSessionId)
+        // If newSessionId previously redirected its jobs to oldSessionId (A→B
+        // history, then B→A reclaim), clear that stale outgoing pointer so the
+        // reclaimed owner resolves to itself.
+        const targetWasRedirectedToSource =
+            this.resolveAttachedJobSessionId(newSessionId, namespace) === oldSessionId
+        if (targetWasRedirectedToSource) {
+            this.clearJobsTransferredToSession(newSessionId, namespace)
+        }
         // Install the source→target redirect BEFORE any await below. Merge can
         // spend time on scratchlist attachment I/O while the old session row
         // still exists; without this pointer, retained $HAPI_SESSION_ID hits
@@ -1682,9 +1698,29 @@ export class SessionCache {
      * Follow job-owner redirects after session merge/dedup so agents that still
      * hold the pre-merge `$HAPI_SESSION_ID` can heartbeat.
      */
+    private clearJobsTransferredToSession(sessionId: string, namespace: string): void {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            const latest = this.store.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!latest) return
+            const meta = (latest.metadata && typeof latest.metadata === 'object'
+                ? { ...(latest.metadata as Record<string, unknown>) }
+                : {}) as Record<string, unknown>
+            if (typeof meta.jobsTransferredToSessionId !== 'string') return
+            delete meta.jobsTransferredToSessionId
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                meta,
+                latest.metadataVersion,
+                namespace,
+                { touchUpdatedAt: false }
+            )
+            if (result.result === 'success' || result.result === 'error') return
+        }
+    }
+
     resolveAttachedJobSessionId(sessionId: string, namespace: string): string {
         let current = sessionId
-        for (let hop = 0; hop < 5; hop += 1) {
+        for (let hop = 0; hop < 7; hop += 1) {
             const access = this.resolveSessionAccess(current, namespace)
             if (access.ok) {
                 const meta = access.session.metadata as Record<string, unknown> | null | undefined

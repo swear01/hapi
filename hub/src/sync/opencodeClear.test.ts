@@ -686,6 +686,8 @@ describe('SyncEngine.clearOpenCodeSession', () => {
                 undefined,
                 undefined,
                 // startingMode — not applicable to an OpenCode clear replacement
+                undefined,
+                // providerProfileId — not set on a clear replacement
                 undefined
             )
             expect(engine.getSessionByNamespace(replacementSessionId, 'default')?.metadata).toMatchObject({

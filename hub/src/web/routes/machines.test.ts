@@ -34,7 +34,7 @@ describe('machines routes', () => {
             getMachine: () => machine,
             getMachineByNamespace: () => machine,
             spawnSession: async (...args: unknown[]) => {
-                capturedProvider = args[12] as string | null | undefined
+                capturedProvider = args[16] as string | null | undefined
                 return { type: 'success' as const, sessionId: 'session-provider' }
             }
         } as Partial<SyncEngine>

@@ -45,7 +45,7 @@ describe('pinned tunwg digests', () => {
             // Re-import ensure and confirm it attempts replacement (exists after
             // successful pin download, or throws a download error — not digest).
             try {
-                await ensurePinnedTunwgBinary({ toolsDir: dir, platformKey: 'x64-linux' })
+                await ensurePinnedTunwgBinary({ toolsDir: dir, platformKey: 'x64-linux', timeoutMs: 3_000 })
                 assertTunwgDigest(path, TUNWG_PINS['x64-linux'].sha256)
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error)

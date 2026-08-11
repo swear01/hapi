@@ -220,6 +220,17 @@ export class SyncEngine {
      */
     private hubOwnerUserId: string = '1'
     private readonly fleetUpgradeAttemptAt = new Map<string, number>()
+    /**
+     * Coalesce concurrent auto + banner Upgrade calls for the same machine so
+     * the runner's "already in progress" reply is not toasted as upgrade_failed.
+     */
+    private readonly fleetUpgradeInFlight = new Map<
+        string,
+        Promise<
+            | { type: 'success'; message: string; response: RunnerSelfUpgradeResponse }
+            | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'upgrade_unavailable' | 'upgrade_deferred' | 'upgrade_failed' }
+        >
+    >()
     private static readonly FLEET_UPGRADE_COOLDOWN_MS = 15 * 60_000
     private readonly getUpgradeOffer: (() => HubUpgradeOffer) | null
     private readonly prepareArtifactOffer: SyncEngineOptions['prepareArtifactOffer']
@@ -228,6 +239,8 @@ export class SyncEngine {
     private settingsDataDirForTests: string | null = null
     /** Serialize settings write/fanout with first-activation / session-ready reconcile. */
     private autoBridgeConfigTail: Promise<unknown> = Promise.resolve()
+    /** Cursor sessions whose auto-bridge config push failed; retried on next alive. */
+    private readonly pendingAutoBridgeReconcile = new Set<string>()
 
     constructor(
         private readonly store: Store,
@@ -590,8 +603,9 @@ export class SyncEngine {
         this.messageService.replayImmediateQueuedMessages(payload.sid)
         this.triggerDedupIfNeeded(payload.sid)
         // First inactive → active transition: catch toggles that happened while
-        // the row was still inactive (Settings fanout is active-only).
-        if (!wasActive) {
+        // the row was still inactive (Settings fanout is active-only). Also retry
+        // sessions whose prior fanout/rollback RPC failed.
+        if (!wasActive || this.pendingAutoBridgeReconcile.has(payload.sid)) {
             void this.reconcileCursorAutoBridgeSetting(payload.sid)
         }
     }
@@ -663,8 +677,10 @@ export class SyncEngine {
                 await this.rpcGateway.requestSessionConfig(sessionId, {
                     autoBridgeTransientModelErrors: enabled
                 })
+                this.pendingAutoBridgeReconcile.delete(sessionId)
             })
         } catch (error) {
+            this.pendingAutoBridgeReconcile.add(sessionId)
             console.warn(
                 `[sync] failed to reconcile auto-bridge setting for session ${sessionId}`,
                 error
@@ -705,6 +721,14 @@ export class SyncEngine {
                 autoBridgeTransientModelErrors: enabled
             }))
         )
+        results.forEach((result, index) => {
+            const id = targets[index]!.id
+            if (result.status === 'rejected') {
+                this.pendingAutoBridgeReconcile.add(id)
+            } else {
+                this.pendingAutoBridgeReconcile.delete(id)
+            }
+        })
         if (results.some((result) => result.status === 'rejected')) {
             throw new Error('Failed to update every active Cursor session')
         }
@@ -1321,6 +1345,25 @@ export class SyncEngine {
         | { type: 'success'; message: string; response: RunnerSelfUpgradeResponse }
         | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'upgrade_unavailable' | 'upgrade_deferred' | 'upgrade_failed' }
     > {
+        const existing = this.fleetUpgradeInFlight.get(machineId)
+        if (existing) {
+            return await existing
+        }
+        const task = this.upgradeMachineRunnerUnlocked(machineId, namespace)
+        this.fleetUpgradeInFlight.set(machineId, task)
+        try {
+            return await task
+        } finally {
+            if (this.fleetUpgradeInFlight.get(machineId) === task) {
+                this.fleetUpgradeInFlight.delete(machineId)
+            }
+        }
+    }
+
+    private async upgradeMachineRunnerUnlocked(machineId: string, namespace: string): Promise<
+        | { type: 'success'; message: string; response: RunnerSelfUpgradeResponse }
+        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'upgrade_unavailable' | 'upgrade_deferred' | 'upgrade_failed' }
+    > {
         if (!this.getUpgradeOffer) {
             return { type: 'error', message: 'Upgrade offer not configured', code: 'upgrade_unavailable' }
         }
@@ -1352,8 +1395,25 @@ export class SyncEngine {
         // Live-RPC overlay is already applied by MachineCache.getMachineByNamespace.
         // Skewed runners that predate this RPC cannot self-upgrade remotely — fail
         // closed with a clear code so the UI can steer operators to a manual path.
+        //
+        // Also require the *live* RpcRegistry entry. Advertised metadata alone is
+        // a lie after hub restart when fire-and-forget `rpc-register` is dropped
+        // but `machine-alive` keeps the row active.
         const capabilities = machine.metadata?.capabilities ?? []
-        if (!capabilities.includes(MACHINE_CAPABILITIES.RunnerSelfUpgrade)) {
+        const liveSelfUpgrade = this.machineCache.hasLiveRpc(
+            machineId,
+            MACHINE_CAPABILITIES.RunnerSelfUpgrade,
+        )
+        if (!liveSelfUpgrade) {
+            if (capabilities.includes(MACHINE_CAPABILITIES.RunnerSelfUpgrade)) {
+                return {
+                    type: 'error',
+                    message:
+                        'Runner advertises self-upgrade but the RPC is not registered on the live socket; '
+                        + 'restart the runner (or wait for keepalive re-register) then retry',
+                    code: 'upgrade_unavailable',
+                }
+            }
             return {
                 type: 'error',
                 message: 'Runner does not support self-upgrade; upgrade the CLI manually and restart the runner',
@@ -1562,8 +1622,8 @@ export class SyncEngine {
         if (!session) {
             return { status: 'failed', error: 'Session not found', localId: null }
         }
-        if (!isSteeringSupportedForSession(session.metadata)) {
-            return { status: 'failed', error: 'Steering is not supported for this agent', localId: null }
+        if (session.metadata?.flavor !== 'pi') {
+            return { status: 'failed', error: 'Steering is only supported for Pi sessions', localId: null }
         }
         if (session.agentState?.controlledByUser === true) {
             return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
@@ -1592,7 +1652,7 @@ export class SyncEngine {
         if (!localId) {
             return { status: 'failed', error: 'Message has no localId', localId: null }
         }
-        if (scheduledAt != null && scheduledAt > Date.now()) {
+        if (scheduledAt != null) {
             return { status: 'failed', error: 'Scheduled messages cannot be steered', localId }
         }
 
@@ -2814,6 +2874,10 @@ export class SyncEngine {
             this.persistClearOperationState(sessionId, namespace, operation, message)
             return { type: 'error', message, code: 'replacement_link_failed' }
         }
+        // Move outliving jobs before writing supersededBySessionId. resolveAttachedJobSessionId
+        // follows that link; without a transfer, heartbeats on the retained source id hit the
+        // empty replacement while the meter row stays frozen on the archived source.
+        this.transferAttachedJobs(sessionId, replacementSessionId, namespace)
         if (!this.persistClearReplacement(sessionId, namespace, replacementSessionId, operation)) {
             const message = 'Fresh OpenCode session started but the archived source could not be linked'
             this.persistClearOperationState(sessionId, namespace, operation, message)
