@@ -1645,9 +1645,14 @@ export function HappyComposer(props: {
                                             <div className="px-3 pt-2 pb-0.5 text-xs font-medium text-[var(--app-hint)]">
                                                 {group.label}
                                             </div>
-                                            {group.models.map((piModel) => (
+                                            {group.models.map((piModel) => {
+                                                const piRowSelected = piSelectedModel
+                                                    ? piSelectedModel.provider === piModel.provider
+                                                        && piSelectedModel.modelId === piModel.modelId
+                                                    : model === piModel.modelId
+                                                return (
                                                 <button
-                                                    key={piModel.modelId}
+                                                    key={`${piModel.provider}:${piModel.modelId}`}
                                                     type="button"
                                                     disabled={modelEffortControlsDisabled}
                                                     className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
@@ -1660,20 +1665,21 @@ export function HappyComposer(props: {
                                                 >
                                                     <div
                                                         className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                            model === piModel.modelId
+                                                            piRowSelected
                                                                 ? 'border-[var(--app-link)]'
                                                                 : 'border-[var(--app-hint)]'
                                                     }`}
                                                     >
-                                                        {model === piModel.modelId && (
+                                                        {piRowSelected && (
                                                             <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
                                                         )}
                                                     </div>
-                                                    <span className={model === piModel.modelId ? 'text-[var(--app-link)]' : ''}>
+                                                    <span className={piRowSelected ? 'text-[var(--app-link)]' : ''}>
                                                         {piModel.name ?? piModel.modelId}
                                                     </span>
                                                 </button>
-                                            ))}
+                                                )
+                                            })}
                                         </div>
                                     ))
                                 ) : (
@@ -1804,7 +1810,9 @@ export function HappyComposer(props: {
                                                 ? 'cursor-not-allowed opacity-50'
                                                 : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
                                         }`}
-                                        onClick={() => handleEffortChange(option.value)}
+                                        onClick={() => handleEffortChange(
+                                            agentFlavor === 'pi' && effort === option.value ? null : option.value
+                                        )}
                                         onMouseDown={(e) => e.preventDefault()}
                                     >
                                         <div
@@ -2027,6 +2035,7 @@ export function HappyComposer(props: {
         selectedModelVariant,
         showModelReasoningEffortSettings,
         showEffortSettings,
+        modelEffortControlsDisabled,
         showFastModeSettings,
         agentFlavor,
         modelOptions,

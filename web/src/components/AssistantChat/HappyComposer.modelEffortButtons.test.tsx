@@ -239,6 +239,78 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.getByText('Gemini 2.5 Pro')).toBeTruthy()
     })
 
+    it('highlights only the matching provider row when model IDs collide across providers', () => {
+        renderComposer('pi', {
+            piModels: [
+                { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+                { provider: 'vertex', modelId: 'gemini-2.5-pro', name: 'Vertex Gemini 2.5 Pro', reasoning: true },
+            ],
+            piSelectedModel: { provider: 'vertex', modelId: 'gemini-2.5-pro' },
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'Vertex Gemini 2.5 Pro' }))
+        const sheetRow = (name: string) => screen.getAllByText(name)
+            .map((el) => el.closest('button'))
+            .find((btn) => btn?.className.includes('w-full'))!
+        const geminiRow = sheetRow('Gemini 2.5 Pro')
+        const vertexRow = sheetRow('Vertex Gemini 2.5 Pro')
+        const selectedClass = 'text-[var(--app-link)]'
+        expect(geminiRow.querySelector('span')!.className).not.toContain(selectedClass)
+        expect(vertexRow.querySelector('span')!.className).toContain(selectedClass)
+    })
+
+    it('clears the Pi thinking level when the selected effort row is clicked again', () => {
+        const effortChanges: Array<string | null> = []
+        renderComposer('pi', {
+            effort: 'high',
+            piModels: [
+                { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+            ],
+            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
+            onEffortChange: (level) => effortChanges.push(level),
+        })
+        // Open the sheet from the 'High' value button, then re-click the 'High' row.
+        fireEvent.click(screen.getByRole('button', { name: 'High' }))
+        const effortRows = screen.getAllByRole('button', { name: 'High' })
+        expect(effortRows.length).toBeGreaterThan(1)
+        // The sheet renders before the toolbar in the DOM, so the first match is the row.
+        fireEvent.click(effortRows[0])
+        expect(effortChanges).toEqual([null])
+    })
+
+    it('re-evaluates the Pi sheet row disabled state when configuration controls change', () => {
+        const common = {
+            sessionId: 'composer-test',
+            disabled: false,
+            agentFlavor: 'pi' as const,
+            model: 'gemini-2.5-pro',
+            effort: 'high' as const,
+            permissionMode: 'default' as const,
+            onModelChange: vi.fn(),
+            onEffortChange: vi.fn(),
+            onPermissionModeChange: vi.fn(),
+            piModels: [{ provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true }],
+            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
+            pendingSendIntentRef: runtime.pendingSendIntentRef as { current: ComposerSendIntent },
+        }
+        const { rerender } = render(
+            <I18nProvider>
+                <HappyComposer {...common} active={true} />
+            </I18nProvider>
+        )
+        // Open the sheet while controls are live.
+        fireEvent.click(screen.getByRole('button', { name: 'Gemini 2.5 Pro' }))
+        const sheetRow = () => screen.getAllByRole('button', { name: 'Gemini 2.5 Pro' })
+            .find((btn) => btn.className.includes('w-full'))!
+        expect(sheetRow()).not.toBeDisabled()
+        // Inactive session disables configuration controls; the sheet rows must follow.
+        rerender(
+            <I18nProvider>
+                <HappyComposer {...common} active={false} />
+            </I18nProvider>
+        )
+        expect(sheetRow()).toBeDisabled()
+    })
+
     it('maps the default selection (model=null) onto the localized default option label', () => {
         renderComposer('claude', { model: null })
         expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
