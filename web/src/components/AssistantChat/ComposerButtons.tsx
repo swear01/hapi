@@ -9,6 +9,7 @@ import type { PendingSchedule } from './ScheduleTimePicker'
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
 import { useComposerToolbarLayout, type ComposerToolbarItemId, type ComposerToolbarLayout } from '@/hooks/useComposerToolbarLayout'
+import { useLongPress } from '@/hooks/useLongPress'
 import type { ComposerSendIntent } from '@/lib/messageDelivery'
 import { AgentBudgetIndicator } from './AgentBudgetIndicator'
 import { toCodexBudgetState } from './codexBudgetAdapter'
@@ -497,6 +498,8 @@ export function UnifiedButton(props: {
      * would fall back to chat, the button must look like a normal chat send.
      */
     routesToScratchlist?: boolean
+    /** Touch-hold = explicit queue intent for an in-flight Pi turn (#1480). */
+    allowQueueGesture?: boolean
 }) {
     const { t } = useTranslation()
     const voiceSendPendingRef = useRef(false)
