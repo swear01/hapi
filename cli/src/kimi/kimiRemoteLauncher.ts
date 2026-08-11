@@ -180,9 +180,13 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
             session.onThinkingChange(true);
 
             try {
-                await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
-                    this.handleAgentMessage(message);
-                });
+                let turnPositionAt: number | undefined;
+                const onUpdate = (message: AgentMessage) => {
+                    const emittedAt = Date.now();
+                    turnPositionAt ??= emittedAt;
+                    this.handleAgentMessage(message, emittedAt, turnPositionAt);
+                };
+                await backend.prompt(acpSessionId, promptContent, onUpdate);
                 void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
@@ -221,10 +225,10 @@ class KimiRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
-    private handleAgentMessage(message: AgentMessage): void {
+    private handleAgentMessage(message: AgentMessage, createdAt?: number, positionAt?: number): void {
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
-            this.session.sendAgentMessage(converted);
+            this.session.sendAgentMessage(converted, createdAt, positionAt);
         }
 
         switch (message.type) {
