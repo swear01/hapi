@@ -164,7 +164,9 @@ function createApp(session: Session, opts?: {
             commands: []
         })),
         forkConversation: opts?.forkConversation ?? (async () => ({ type: 'success', sessionId: 'child-1' })),
-        rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' }))
+        rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
+        getPrimaryAttachedJobsBySessionIds: () => new Map(),
+        allocateAttachedJobVersion: () => Date.now()
     } as Partial<SyncEngine>
 
     const app = new Hono<WebAppEnv>()
@@ -1426,7 +1428,11 @@ describe('sessions routes', () => {
                 scheduledIds.push(ids)
                 return new Map(ids.map((id) => [id, 0]))
             },
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getPrimaryAttachedJobsBySessionIds: () => new Map(),
+            allocateAttachedJobVersion: () => Date.now(),
             resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
         } as unknown as Partial<SyncEngine>
 
@@ -1458,7 +1464,11 @@ describe('sessions routes', () => {
         const engine = {
             getSessionsByNamespace: () => sessions,
             getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getPrimaryAttachedJobsBySessionIds: () => new Map(),
+            allocateAttachedJobVersion: () => Date.now(),
             resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
         } as unknown as Partial<SyncEngine>
 

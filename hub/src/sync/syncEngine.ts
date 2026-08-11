@@ -1020,6 +1020,116 @@ export class SyncEngine {
         return removed
     }
 
+    listSessionJobs(sessionId: string) {
+        return this.store.sessionJobs.list(sessionId).map((job) => ({
+            key: job.key,
+            label: job.label,
+            status: job.status,
+            ...(job.done !== undefined ? { done: job.done } : {}),
+            ...(job.total !== undefined ? { total: job.total } : {}),
+            ...(job.remaining !== undefined ? { remaining: job.remaining } : {}),
+            ...(job.unit !== undefined ? { unit: job.unit } : {}),
+            ...(job.detail !== undefined ? { detail: job.detail } : {}),
+            heartbeatAt: job.heartbeatAt,
+            startedAt: job.startedAt,
+            updatedAt: job.updatedAt
+        }))
+    }
+
+    getPrimaryAttachedJob(sessionId: string) {
+        return this.store.sessionJobs.getPrimaryRunning(sessionId)
+    }
+
+    getPrimaryAttachedJobsBySessionIds(sessionIds: string[]) {
+        return this.store.sessionJobs.getPrimaryRunningBySessionIds(sessionIds)
+    }
+
+    /** Move outliving jobs + redirects onto another session (pre-delete). */
+    transferAttachedJobs(fromSessionId: string, toSessionId: string, namespace: string): void {
+        this.sessionCache.transferAttachedJobs(fromSessionId, toSessionId, namespace)
+    }
+
+    /** Shared REST/SSE watermark allocator for attachedJob patches. */
+    allocateAttachedJobVersion(sessionId: string): number {
+        return this.sessionCache.allocateAttachedJobVersion(sessionId)
+    }
+
+    upsertSessionJob(
+        sessionId: string,
+        jobKey: string,
+        body: import('@hapi/protocol').AttachedJobUpsert
+    ):
+        | { outcome: 'upserted'; job: import('@hapi/protocol').AttachedJob }
+        | { outcome: 'session-not-found' } {
+        const result = this.store.sessionJobs.upsert(sessionId, jobKey, body)
+        if (result.outcome === 'session-not-found') {
+            return result
+        }
+        const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
+        this.sessionCache.emitAttachedJobChanged(sessionId, primary)
+        const job = result.job
+        return {
+            outcome: 'upserted',
+            job: {
+                key: job.key,
+                label: job.label,
+                status: job.status,
+                ...(job.done !== undefined ? { done: job.done } : {}),
+                ...(job.total !== undefined ? { total: job.total } : {}),
+                ...(job.remaining !== undefined ? { remaining: job.remaining } : {}),
+                ...(job.unit !== undefined ? { unit: job.unit } : {}),
+                ...(job.detail !== undefined ? { detail: job.detail } : {}),
+                ...(job.runId !== undefined ? { runId: job.runId } : {}),
+                heartbeatAt: job.heartbeatAt,
+                startedAt: job.startedAt,
+                updatedAt: job.updatedAt
+            }
+        }
+    }
+
+    patchSessionJob(
+        sessionId: string,
+        jobKey: string,
+        patch: import('@hapi/protocol').AttachedJobPatch
+    ):
+        | { outcome: 'patched'; job: import('@hapi/protocol').AttachedJob }
+        | { outcome: 'not-found' }
+        | { outcome: 'run-mismatch' } {
+        const result = this.store.sessionJobs.patch(sessionId, jobKey, patch)
+        if (result.outcome !== 'patched') {
+            return result
+        }
+        const updated = result.job
+        const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
+        this.sessionCache.emitAttachedJobChanged(sessionId, primary)
+        return {
+            outcome: 'patched',
+            job: {
+                key: updated.key,
+                label: updated.label,
+                status: updated.status,
+                ...(updated.done !== undefined ? { done: updated.done } : {}),
+                ...(updated.total !== undefined ? { total: updated.total } : {}),
+                ...(updated.remaining !== undefined ? { remaining: updated.remaining } : {}),
+                ...(updated.unit !== undefined ? { unit: updated.unit } : {}),
+                ...(updated.detail !== undefined ? { detail: updated.detail } : {}),
+                ...(updated.runId !== undefined ? { runId: updated.runId } : {}),
+                heartbeatAt: updated.heartbeatAt,
+                startedAt: updated.startedAt,
+                updatedAt: updated.updatedAt
+            }
+        }
+    }
+
+    deleteSessionJob(sessionId: string, jobKey: string): boolean {
+        const removed = this.store.sessionJobs.delete(sessionId, jobKey)
+        if (removed) {
+            const primary = this.store.sessionJobs.getPrimaryRunning(sessionId)
+            this.sessionCache.emitAttachedJobChanged(sessionId, primary)
+        }
+        return removed
+    }
+
     private async withScratchlistUploadLock<T>(
         namespace: string,
         sessionId: string,
@@ -2775,6 +2885,10 @@ export class SyncEngine {
             this.persistClearOperationState(sessionId, namespace, operation, message)
             return { type: 'error', message, code: 'replacement_link_failed' }
         }
+        // Move outliving jobs before writing supersededBySessionId. resolveAttachedJobSessionId
+        // follows that link; without a transfer, heartbeats on the retained source id hit the
+        // empty replacement while the meter row stays frozen on the archived source.
+        this.transferAttachedJobs(sessionId, replacementSessionId, namespace)
         if (!this.persistClearReplacement(sessionId, namespace, replacementSessionId, operation)) {
             const message = 'Fresh OpenCode session started but the archived source could not be linked'
             this.persistClearOperationState(sessionId, namespace, operation, message)

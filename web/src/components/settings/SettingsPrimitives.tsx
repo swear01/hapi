@@ -19,6 +19,14 @@ export function ChevronRightIcon(props: { className?: string }) {
     )
 }
 
+export function ChevronDownIcon(props: { className?: string }) {
+    return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={props.className} aria-hidden="true">
+            <path d="m6 9 6 6 6-6" />
+        </svg>
+    )
+}
+
 export function CheckIcon(props: { className?: string }) {
     return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={props.className} aria-hidden="true">
@@ -27,10 +35,11 @@ export function CheckIcon(props: { className?: string }) {
     )
 }
 
-export function SettingsPageContent(props: { description?: string; children: ReactNode }) {
+export function SettingsPageContent(props: { title?: string; description?: string; children: ReactNode }) {
     return (
         <div className="mx-auto w-full max-w-[720px] space-y-5 px-3 py-4 lg:px-6 lg:py-6">
             <div>
+                {props.title ? <h1 className="text-xl font-semibold text-[var(--app-fg)]">{props.title}</h1> : null}
                 {props.description ? <p className="text-sm text-[var(--app-hint)]">{props.description}</p> : null}
             </div>
             {props.children}
