@@ -457,7 +457,73 @@ export class AcpSdkBackend implements AgentBackend {
         this.agentActivityListener = listener;
     }
 
+
+    /**
+     * Soft-deliver one queued message into the active ACP turn (Codex
+     * turn/steer, Cursor ACP interrupt+prompt). Resolves when stdin accepts
+     * the prompt; the turn continues streaming on the current handler.
+     */
+    async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+        await this.transport.sendRequest('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+    }
+
+    /**
+     * Kick off a soft steer without blocking the hub RPC on turn completion.
+     * Separates transport dispatch from prompt completion so callers can commit
+     * queue state only after stdin accepted the request without waiting for the turn.
+     */
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): {
+        dispatched: Promise<void>;
+        completed: Promise<void>;
+    } {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        const transport = this.transport;
+        const request = transport.sendRequestWithDispatch('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+        const completed = (async () => {
+            try {
+                await request.completed;
+            } finally {
+                try {
+                    await this.waitForSessionUpdateQuiet(
+                        AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
+                        AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
+                    );
+                    this.messageHandler?.drainBuffers();
+                    await this.drainLateBuffers();
+                    this.messageHandler?.drainBuffers();
+                } finally {
+                    this.notifyResponseComplete();
+                }
+            }
+        })();
+
+        void completed.catch((error) => {
+            logger.warn('[ACP] soft-steer session/prompt failed', error);
+        });
+
+        return { dispatched: request.dispatched, completed };
+    }
+
     /** Reads the agent's persisted native title through stable ACP session/list. */
+
     async refreshSessionInfo(sessionId: string, cwd: string): Promise<void> {
         const existingTimer = this.sessionInfoRefreshTimers.get(sessionId);
         if (existingTimer) {

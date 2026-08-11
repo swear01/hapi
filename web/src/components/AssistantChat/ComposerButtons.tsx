@@ -670,6 +670,9 @@ export function ComposerButtons(props: {
     scratchlistMode?: boolean
     scratchlistCount?: number
     onScratchlistToggle?: () => void
+    /** Enables touch hold as an explicit queue intent for an in-flight Pi turn. */
+    allowQueueGesture?: boolean
+    codexUsage?: CodexUsage | null
 }) {
     const { t } = useTranslation()
     const { layout } = useComposerToolbarLayout()
@@ -941,6 +944,7 @@ export function ComposerButtons(props: {
                 onVoiceToggle={props.onVoiceToggle}
             />
 
+            <CodexUsageIndicator usage={props.codexUsage} />
             <UnifiedButton
                 canSend={props.canSend}
                 voiceStatus={props.voiceStatus}

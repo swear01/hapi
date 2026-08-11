@@ -1,6 +1,7 @@
 import type { Machine, MachinePatch } from '@hapi/protocol/types'
 import { MachineHealthSchema, MachineMetadataSchema, RunnerStateSchema } from '@hapi/protocol/schemas'
 import type { Store } from '../store'
+import type { RpcRegistry } from '../socket/rpcRegistry'
 import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
 
@@ -45,9 +46,19 @@ export class MachineCache {
 
     constructor(
         private readonly store: Store,
-        private readonly publisher: EventPublisher
+        private readonly publisher: EventPublisher,
+        private readonly rpcRegistry?: RpcRegistry
     ) {
     }
+
+    /** True when a live runner socket has registered this RPC method. */
+    hasLiveRpc(machineId: string, method: string): boolean {
+        if (!this.rpcRegistry) {
+            return false
+        }
+        return this.rpcRegistry.hasMethod(`${machineId}:${method}`)
+    }
+
 
     getMachines(): Machine[] {
         return Array.from(this.machines.values())

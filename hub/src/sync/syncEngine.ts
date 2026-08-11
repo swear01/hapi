@@ -1504,42 +1504,6 @@ export class SyncEngine {
         return this.getUpgradeOffer?.() ?? null
     }
 
-    /**
-     * Manual stop-runner for supervised hosts only (banner Restart).
-     * Detached `hapi runner start` has no supervisor — stop would leave the
-     * host offline. Require `metadata.supervisedRestart` (HAPI_RUNNER_SUPERVISED=1).
-     */
-    async restartMachineRunner(machineId: string, namespace: string): Promise<
-        | { type: 'success'; message: string }
-        | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'restart_unsupported' | 'restart_failed' }
-    > {
-        const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
-            ?? this.machineCache.refreshMachine(machineId)
-        if (!machine || machine.namespace !== namespace) {
-            return { type: 'error', message: 'Machine not found', code: 'machine_not_found' }
-        }
-        if (!machine.active) {
-            return { type: 'error', message: 'Machine is offline', code: 'machine_offline' }
-        }
-        if (machine.metadata?.supervisedRestart !== true) {
-            return {
-                type: 'error',
-                message: 'Restart requires a supervised runner (HAPI_RUNNER_SUPERVISED=1); unsupervised stop would leave the host offline',
-                code: 'restart_unsupported',
-            }
-        }
-        try {
-            await this.rpcGateway.stopRunner(machineId)
-            return { type: 'success', message: 'Runner stop requested; supervisor will relaunch' }
-        } catch (error) {
-            return {
-                type: 'error',
-                message: error instanceof Error ? error.message : 'Failed to restart runner',
-                code: 'restart_failed',
-            }
-        }
-    }
-
     private expireInactive(): void {
         const expired = this.sessionCache.expireInactive()
         // Sort by most recent first so dedup keeps the newest session when multiple
