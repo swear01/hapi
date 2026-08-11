@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
     directoryExists: undefined as boolean | undefined,
     copilotModels: [] as Array<{ modelId: string; name?: string }>,
     copilotModelsLoading: false,
+    grokModelsLoading: false,
+    grokAutoPermissionSupported: null as boolean | null,
     piDialogSelection: ['pi-native-1'] as string[],
     refetchSessions: vi.fn(),
     addToast: vi.fn()
@@ -117,8 +119,8 @@ vi.mock('@/hooks/queries/useGrokModelsForCwd', () => ({
     useGrokModelsForCwd: () => ({
         availableModels: [],
         currentModelId: null,
-        autoPermissionModeSupported: null,
-        isLoading: false,
+        autoPermissionModeSupported: mocks.grokAutoPermissionSupported,
+        isLoading: mocks.grokModelsLoading,
         error: null
     })
 }))
@@ -238,6 +240,8 @@ describe('NewSession launch preferences', () => {
         mocks.directoryExists = true
         mocks.copilotModels = []
         mocks.copilotModelsLoading = false
+        mocks.grokModelsLoading = false
+        mocks.grokAutoPermissionSupported = null
         mocks.piDialogSelection = ['pi-native-1']
         mocks.refetchSessions.mockReset()
         mocks.refetchSessions.mockResolvedValue(undefined)
@@ -455,6 +459,10 @@ describe('NewSession launch preferences', () => {
             cursorSelectedBase: 'auto',
             effort: 'auto',
             modelReasoningEffort: 'max',
+            serviceTier: 'standard',
+            collaborationMode: 'default',
+            grokPermissionMode: 'default',
+            sessionType: 'simple',
             permissionMode: 'yolo'
         })
     })
@@ -496,6 +504,38 @@ describe('NewSession launch preferences', () => {
         mocks.agyModelsLoading = true
         render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
         await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
+    })
+
+    it('blocks Create while a remembered Grok Auto permission awaits capability validation', async () => {
+        savePreferredAgent('grok')
+        savePreferredLaunchSettings('machine-1', 'grok', { model: 'auto', cursorSelectedBase: 'auto', effort: 'auto', modelReasoningEffort: 'default', serviceTier: 'standard', collaborationMode: 'default', grokPermissionMode: 'auto', sessionType: 'simple' })
+        mocks.grokModelsLoading = true
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
+    })
+
+    it('falls back to default permission when Grok Auto is unsupported after validation', async () => {
+        savePreferredAgent('grok')
+        savePreferredLaunchSettings('machine-1', 'grok', { model: 'auto', cursorSelectedBase: 'auto', effort: 'auto', modelReasoningEffort: 'default', serviceTier: 'standard', collaborationMode: 'default', grokPermissionMode: 'auto', sessionType: 'simple' })
+        mocks.grokAutoPermissionSupported = false
+        mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'grok-session' })
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+        fireEvent.click(screen.getByTestId('create'))
+        await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('grok-session'))
+        expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ agent: 'grok', permissionMode: 'default' }))
+    })
+
+    it('launches with the remembered Grok Auto permission once capability validation confirms support', async () => {
+        savePreferredAgent('grok')
+        savePreferredLaunchSettings('machine-1', 'grok', { model: 'auto', cursorSelectedBase: 'auto', effort: 'auto', modelReasoningEffort: 'default', serviceTier: 'standard', collaborationMode: 'default', grokPermissionMode: 'auto', sessionType: 'simple' })
+        mocks.grokAutoPermissionSupported = true
+        mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'grok-session' })
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+        await waitFor(() => expect(screen.getByTestId('create')).toBeEnabled())
+        fireEvent.click(screen.getByTestId('create'))
+        await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('grok-session'))
+        expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({ agent: 'grok', permissionMode: 'auto' }))
     })
 
     it('persists the selected AGY model only after a successful launch', async () => {
