@@ -89,7 +89,34 @@ Rules:
   guards, SCHEMA_VERSION never decreasing). Full list + side-selection table:
   `~/Documents/hapi/.git/info/hapi-merge-doctrine.md` (local) — keep in sync.
 
+## Merge doctrine v2 (Upstream-First Rebuild, UFR) — READ THIS FIRST
+
+**Base is always `upstream/main`** — every release rebuilds from the latest upstream
+(never branch from the previous release; that accumulates drift). The previous release
+is only a REFERENCE for what upstream has NOT done: fork-only carries and fixes are
+copied from its resolved files, never re-derived.
+
+Mechanical procedure (measured: 594 direct copies + 28 auto-merges + 15 side-selections
+for v0.27.2.5 → upstream 0.27.3; ~1–1.5h total):
+
+```bash
+git worktree add ../hapi-release-v<tag> upstream/main && git checkout -b release/v<tag>
+git diff --name-only $PREV_BASE..$PREV > /tmp/fork-delta.txt          # PREV=prev tag, PREV_BASE=its upstream base
+git diff --name-only $PREV_BASE..upstream/main > /tmp/upstream-new.txt
+git checkout $PREV -- $(comm -23 <(sort fork-delta.txt) <(sort upstream-new.txt))   # A: copy (80-90%)
+# B: overlap → git merge-file (base=PREV_BASE, ours=upstream, theirs=PREV); conflicts → side-select
+```
+
+Side-selection: THEIRS by default (upstream fixes + upstream-merged carries); OURS only
+for fork-only code (migration ladder in hub/src/store/index.ts, desktop packaging,
+release.yml, session-roots guard, #906 steer superset, fork upgrade/artifact files).
+After resolving, check the landmine list (mapLive on machine lists, asRunner in
+apiMachine identity, runnerCapabilities 4-entry set, locale keys, agy skipIf guards,
+SCHEMA_VERSION never decreasing). Full doctrine + side table + landmine details:
+`~/Documents/hapi/.git/info/hapi-merge-doctrine.md` (local) — keep in sync.
+
 ## Standard release checklist (as executed for v0.27.2.1)
+
 
 
 The `sync-from-upstream.sh --push` path is the canonical rebuild; when the merge
