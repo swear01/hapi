@@ -173,6 +173,7 @@ describe('UnifiedButton — active dictation send action', () => {
                 voiceStatus="connected"
                 voiceEnabled
                 dictationEnabled
+                dictationCanDirectSend
                 controlsDisabled={false}
                 onSend={onSend}
                 onVoiceToggle={onVoiceToggle}
@@ -187,6 +188,28 @@ describe('UnifiedButton — active dictation send action', () => {
         expect(onVoiceToggle).not.toHaveBeenCalled()
     })
 
+    it('hides the dictation Send button when direct send is not eligible', () => {
+        const onSend = vi.fn()
+        const onVoiceToggle = vi.fn()
+        renderInProviders(
+            <UnifiedButton
+                canSend
+                voiceStatus="connected"
+                voiceEnabled
+                dictationEnabled
+                dictationCanDirectSend={false}
+                controlsDisabled={false}
+                onSend={onSend}
+                onVoiceToggle={onVoiceToggle}
+            />,
+        )
+
+        // Attachments / pending schedule / scratchlist mode make handleSend
+        // fall back to dictation.toggle(); a "Send" label would be misleading.
+        expect(screen.queryByRole('button', { name: 'Send' })).toBeNull()
+        expect(getButton('Stop')).toBeDefined()
+    })
+
     it('keeps Stop stop-only during connected dictation', () => {
         const onSend = vi.fn()
         const onVoiceToggle = vi.fn()
@@ -196,6 +219,7 @@ describe('UnifiedButton — active dictation send action', () => {
                 voiceStatus="connected"
                 voiceEnabled
                 dictationEnabled
+                dictationCanDirectSend
                 controlsDisabled={false}
                 onSend={onSend}
                 onVoiceToggle={onVoiceToggle}

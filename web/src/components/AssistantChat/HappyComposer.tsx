@@ -563,6 +563,16 @@ export function HappyComposer(props: {
     const isControlled = onScheduleProp !== undefined
     const pendingSchedule = isControlled ? (pendingScheduleProp ?? null) : pendingScheduleLocal
     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
+    // Mirrors handleSend's canDirectSend (minus status/intent): the dictation
+    // Send button must only appear when clicking it will actually run the
+    // session-bound stopAndSend path. With attachments / a pending schedule /
+    // scratchlist mode handleSend falls back to dictation.toggle() (stop +
+    // transcribe), so a visible "Send" control would be misleading.
+    const dictationCanDirectSend = dictationActive
+        && (active || props.resolveSessionIdForVoice !== undefined)
+        && attachments.length === 0
+        && pendingSchedule == null
+        && !props.scratchlistMode
 
     useEffect(() => {
         const acceptance = props.sendAcceptance
@@ -2357,6 +2367,7 @@ export function HappyComposer(props: {
                             onSwitch={handleSwitch}
                             voiceEnabled={voiceEnabled}
                             dictationEnabled={dictationActive}
+                            dictationCanDirectSend={dictationCanDirectSend}
                             voiceStatus={effectiveVoiceStatus}
                             voiceMicMuted={dictationActive ? false : voiceMicMuted}
                             onVoiceToggle={effectiveVoiceToggle ?? (() => {})}

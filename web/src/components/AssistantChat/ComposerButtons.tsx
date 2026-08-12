@@ -474,6 +474,8 @@ export function UnifiedButton(props: {
     voiceStatus: ConversationStatus
     voiceEnabled: boolean
     dictationEnabled?: boolean
+    /** When false, the dictation Send button is hidden (direct send not eligible). */
+    dictationCanDirectSend?: boolean
     controlsDisabled: boolean
     onSend: (intent?: ComposerSendIntent) => void
     onVoiceToggle: () => void
@@ -566,7 +568,7 @@ export function UnifiedButton(props: {
             >
                 {icon}
             </button>
-            {isDictation && isConnected ? (
+            {isDictation && isConnected && props.dictationCanDirectSend ? (
                 // Explicit send action while dictation is connected: mouse/touch
                 // users must be able to reach the session-bound stopAndSend path
                 // (handleSend's dictation branch) without first stopping the
@@ -639,6 +641,8 @@ export function ComposerButtons(props: {
     onSwitch: () => void
     voiceEnabled: boolean
     dictationEnabled?: boolean
+    /** When false, the dictation Send button is hidden (direct send not eligible). */
+    dictationCanDirectSend?: boolean
     voiceStatus: ConversationStatus
     voiceMicMuted?: boolean
     onVoiceToggle: () => void
@@ -904,6 +908,7 @@ export function ComposerButtons(props: {
                 voiceStatus={props.voiceStatus}
                 voiceEnabled={props.voiceEnabled}
                 dictationEnabled={props.dictationEnabled}
+                dictationCanDirectSend={props.dictationCanDirectSend}
                 controlsDisabled={props.controlsDisabled}
                 onSend={props.onSend}
                 onVoiceToggle={props.onVoiceToggle}
