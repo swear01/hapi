@@ -10,6 +10,7 @@ import {
     useMatchRoute,
     useNavigate,
     useParams,
+    useRouter,
     useSearch,
 } from '@tanstack/react-router'
 import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
@@ -575,12 +576,14 @@ function SessionPage() {
     // designed to survive unmount, #1435). Only navigate to the resumed
     // session when the operator is still on the source session's page;
     // otherwise the completed background send would yank them away from where
-    // they moved.
-    const pathname = useLocation({ select: location => location.pathname })
+    // they moved. The router instance is stable and its state is read live at
+    // callback time — a render-time pathname would be stale once the source
+    // SessionPage unmounts.
+    const router = useRouter()
     const handleVoiceSessionResolved = useCallback((resolvedSessionId: string) => {
-        if (!isOnSessionPage(pathname, sessionId)) return
+        if (!isOnSessionPage(router.state.location.pathname, sessionId)) return
         handleSessionResolved(resolvedSessionId)
-    }, [handleSessionResolved, pathname, sessionId])
+    }, [handleSessionResolved, router, sessionId])
 
     const {
         sendMessage,
