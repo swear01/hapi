@@ -454,7 +454,7 @@ export function HappyThread(props: {
     messagesWarning: string | null
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
-    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { installBoundary?: boolean }) => Promise<OlderLoadOutcome>
     onCancelLoadMore: () => void
     unseenCount: number
     rawMessagesCount: number
@@ -1234,6 +1234,11 @@ export function HappyThread(props: {
                     pending.targetHistoryVersion = historyVersion
                     historyLoaderRef.current = { ...current, phase: 'awaiting-render' }
                     return true
+                }, {
+                    // Only outline-driven consumer loads hold the loaded-history
+                    // boundary; automatic coverage loads must not leave the
+                    // window unbounded when no view-mode transition follows.
+                    installBoundary: state.source === 'consumer'
                 })
             } catch (error) {
                 outcome = {

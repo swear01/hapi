@@ -898,8 +898,16 @@ export async function fetchOlderMessages(
     sessionId: string,
     options: {
         onBeforeApply?: (historyVersion: number) => boolean
+        /**
+         * Install the loaded-history boundary (tail-mode no-trim protection)
+         * for this load. Only user-initiated outline browsing passes this —
+         * automatic coverage loads must not leave the window unbounded, and
+         * history-mode loads are already protected by the oldest-kept trim.
+         */
+        installBoundary?: boolean
     } = {}
 ): Promise<OlderLoadOutcome> {
+    const installBoundary = options.installBoundary === true
     const initial = getState(sessionId)
     const before = readPosition(initial.oldestPositionAt, initial.oldestPositionSeq)
     if (initial.isSyncingTail || initial.isLoadingMore) {
@@ -967,8 +975,8 @@ export async function fetchOlderMessages(
                 // the history boundary is held so the live tail keeps streaming.
                 mode: previous.viewMode === 'history' ? 'prepend' : 'append',
                 regularLimit: OLDER_LOAD_WINDOW_SIZE,
-                historyBoundaryAt: before.at,
-                historyBoundarySeq: before.seq
+                historyBoundaryAt: installBoundary ? before.at : undefined,
+                historyBoundarySeq: installBoundary ? before.seq : undefined
             })
             historyVersion = nextHistoryVersion
             return buildState(merged, {
@@ -976,8 +984,8 @@ export async function fetchOlderMessages(
                 epoch: response.page.epoch,
                 oldestPositionAt: response.page.nextBeforeAt,
                 oldestPositionSeq: response.page.nextBeforeSeq,
-                historyBoundaryAt: before.at,
-                historyBoundarySeq: before.seq,
+                historyBoundaryAt: installBoundary ? before.at : previous.historyBoundaryAt,
+                historyBoundarySeq: installBoundary ? before.seq : previous.historyBoundarySeq,
                 isLoadingMore: false,
                 historyVersion,
                 warning: null
