@@ -67,7 +67,30 @@ tools/maintenance/sync-from-upstream.sh \
 
 `--push` refuses carried PRs without `--pr-audit`. Immediately before applying patches, the script compares each audited head with GitHub's live `refs/pull/<number>/head`. Keep every PR in its own patch/commit. After rehearsal, run frozen install, full typecheck and tests, inspect the integrated diff, push with the guarded force-with-lease confirmation, tag from `main`, publish and verify all artifacts, then deploy through the Skillshare HAPI fleet workflow.
 
+## Merge doctrine (delta-merge) — READ THIS FIRST
+
+**Do not rebuild releases from `upstream/main`.** Every release branches from the
+PREVIOUS release branch and does a single `git merge upstream/main`. The previous
+release already contains upstream-through-a-point + all carry resolutions, so the
+conflict surface is only the NEW upstream commits (measured: 17 trivial conflict
+files for a 7-commit upstream delta vs 60+ files + 300 file copies for a rebuild).
+
+Rules:
+- Resolve conflicts by SIDE SELECTION, never by interleaving both sides' logic.
+  Take OURS for fork-owned code (migration ladder in `hub/src/store/index.ts`,
+  desktop packaging, release.yml, session-roots guard, #906 steer superset,
+  fork upgrade/artifact files); take THEIRS for upstream fixes and upstream-merged
+  carries. If both matter, take the dominant side then re-apply the other side's
+  lines as a small follow-up edit.
+- Carries already in the branch need no re-application. New open PRs are applied
+  individually (small patches against recent upstream).
+- After resolving, check the landmine list (mapLive on machine lists, asRunner in
+  apiMachine identity, runnerCapabilities 4-entry set, locale keys, agy skipIf
+  guards, SCHEMA_VERSION never decreasing). Full list + side-selection table:
+  `~/Documents/hapi/.git/info/hapi-merge-doctrine.md` (local) — keep in sync.
+
 ## Standard release checklist (as executed for v0.27.2.1)
+
 
 The `sync-from-upstream.sh --push` path is the canonical rebuild; when the merge
 is performed by hand in an isolated worktree (conflict resolution + test fixes
