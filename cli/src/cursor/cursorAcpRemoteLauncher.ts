@@ -1,4 +1,5 @@
 import React from 'react';
+import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import { convertAgentMessage } from '@/agent/messageConverter';
@@ -43,6 +44,11 @@ import {
     resolveCursorSpawnModel,
     tryRemapCursorSpawnModelFromConnectError
 } from './utils/cursorStaleModelRemap';
+import {
+    CURSOR_AUTO_RETRY_LIMIT,
+    isRetryableCursorError,
+    stripRetryableCursorError
+} from './cursorAutoRetry';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -62,6 +68,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
     private autoReviewSlashQueued = false;
     private cursorMcpOverlay: CursorMcpOverlayHandle | null = null;
+    private pendingRetryableError: string | null = null;
+    private promptInFlight = false;
+    private userAbortRequested = false;
 
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -453,20 +462,37 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             session.onThinkingChange(true);
 
             try {
-                await backend.prompt(acpSessionId, promptContent, (message) => {
-                    this.handleAgentMessage(message);
-                });
-                void backend.refreshSessionInfo(acpSessionId, session.path);
-            } catch (error) {
-                logger.warn('[cursor-acp] prompt failed', error);
-                const errMsg = error instanceof Error ? error.message : String(error);
-                const message = `Cursor Agent failed: ${errMsg}`;
-                const converted = convertAgentMessage({ type: 'error', message });
-                if (converted) {
-                    session.sendAgentMessage(converted);
+                this.promptInFlight = true;
+                this.userAbortRequested = false;
+                for (let retryAttempt = 0; retryAttempt <= CURSOR_AUTO_RETRY_LIMIT; retryAttempt += 1) {
+                    this.pendingRetryableError = null;
+                    try {
+                        await backend.prompt(acpSessionId, promptContent, (message) => {
+                            this.handleAgentMessage(message);
+                        });
+                        if (!this.pendingRetryableError) {
+                            void backend.refreshSessionInfo(acpSessionId, session.path);
+                            break;
+                        }
+                    } catch (error) {
+                        logger.warn('[cursor-acp] prompt failed', error);
+                        if (this.userAbortRequested) break;
+                        if (!isRetryableCursorError(error)) {
+                            this.surfacePromptFailure(error instanceof Error ? error.message : String(error));
+                            break;
+                        }
+                        this.pendingRetryableError = error instanceof Error ? error.message : String(error);
+                    }
+
+                    if (retryAttempt < CURSOR_AUTO_RETRY_LIMIT) {
+                        this.surfaceRetry(retryAttempt + 1);
+                        continue;
+                    }
+                    this.surfacePromptFailure(`Cursor Agent failed after ${CURSOR_AUTO_RETRY_LIMIT} retries.`);
                 }
-                messageBuffer.addMessage(message, 'status');
             } finally {
+                this.promptInFlight = false;
+                this.pendingRetryableError = null;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');
@@ -523,6 +549,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             logger.debug('[cursor-acp] stderr error', error);
             const hint = error.raw || error.message;
             onHint(hint);
+            if (this.promptInFlight && isRetryableCursorError(hint)) {
+                if (!this.userAbortRequested) this.pendingRetryableError = hint;
+                return;
+            }
             if (error.type === 'model_not_found' && extractCannotUseThisModelMessage(hint)) {
                 return;
             }
@@ -576,6 +606,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private handleAgentMessage(message: AgentMessage): void {
+        if (message.type === 'text') {
+            const visibleText = stripRetryableCursorError(message.text);
+            if (visibleText !== null) {
+                if (this.userAbortRequested) return;
+                this.pendingRetryableError = message.text;
+                if (!visibleText) return;
+                message = { ...message, text: visibleText };
+            }
+        }
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
             this.session.sendAgentMessage(converted);
@@ -609,6 +648,23 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             default:
                 break;
         }
+    }
+
+    private surfaceRetry(retryAttempt: number): void {
+        this.session.client.sendClaudeSessionMessage({
+            type: 'system',
+            uuid: randomUUID(),
+            subtype: 'api_error',
+            retryAttempt,
+            maxRetries: CURSOR_AUTO_RETRY_LIMIT,
+            error: { message: 'Cursor connection interrupted.' }
+        });
+    }
+
+    private surfacePromptFailure(message: string): void {
+        const converted = convertAgentMessage({ type: 'error', message });
+        if (converted) this.session.sendAgentMessage(converted);
+        this.messageBuffer.addMessage(message, 'status');
     }
 
     private installLiveSessionConfigSync(
@@ -791,6 +847,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async handleAbort(): Promise<void> {
+        this.userAbortRequested = true;
         const backend = this.backend;
         const sessionId = this.session.sessionId;
         if (backend && sessionId) {
