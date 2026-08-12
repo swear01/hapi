@@ -8,6 +8,7 @@ import {
     PROTOCOL_VERSION
 } from '@hapi/protocol'
 import { getConfiguration } from '../../configuration'
+import { readAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
 import { readSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
 import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
@@ -56,6 +57,31 @@ function resolveMachineForNamespace(
         return { ok: false, status: 403, error: 'Machine access denied' }
     }
     return { ok: false, status: 404, error: 'Machine not found' }
+}
+
+/**
+ * Fork-only guard (kept out of upstream): sessions created via /cli/sessions
+ * must live inside one of their machine's declared workspace roots. Integration
+ * tests run from upstream-main checkouts (e.g. /tmp/hapi-1461-pristine) connect
+ * their own runner+CLI to this hub with the fleet token but report session
+ * directories like /tmp that no fleet runner declares as a workspace root;
+ * rejecting them here keeps fake sessions out of the hub regardless of which
+ * checkout the agent branched from. Set HAPI_FORK_ENFORCE_SESSION_ROOTS=0 to
+ * disable.
+ */
+function isWithinWorkspaceRoots(sessionPath: string, roots: string[]): boolean {
+    const normalize = (p: string): string => {
+        const normalized = p.replace(/\\/g, '/').replace(/\/+$/, '')
+        return normalized.length > 0 ? normalized : '/'
+    }
+    const path = normalize(sessionPath)
+    for (const root of roots) {
+        const base = normalize(root)
+        if (path === base || path.startsWith(base + '/')) {
+            return true
+        }
+    }
+    return false
 }
 
 function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
@@ -118,6 +144,25 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
             )
         }
 
+        const sessionMetadata = (
+            typeof parsed.data.metadata === 'object' && parsed.data.metadata !== null
+        ) ? parsed.data.metadata as Record<string, unknown> : {}
+        if (process.env.HAPI_FORK_ENFORCE_SESSION_ROOTS !== '0') {
+            const machineId = typeof sessionMetadata.machineId === 'string'
+                ? sessionMetadata.machineId
+                : machineInput?.id
+            const sessionPath = typeof sessionMetadata.path === 'string' ? sessionMetadata.path : undefined
+            if (machineId && sessionPath) {
+                const machine = engine.getMachineByNamespace?.(machineId, namespace) ?? engine.getMachine(machineId)
+                const roots = machine?.metadata?.workspaceRoots
+                if (roots && roots.length > 0 && !isWithinWorkspaceRoots(sessionPath, roots)) {
+                    return c.json({
+                        error: `Session directory \"${sessionPath}\" is outside machine \"${machineId}\" workspace roots: ${roots.join(', ')}`
+                    }, 403)
+                }
+            }
+        }
+
         try {
             const session = engine.getOrCreateSession(
                 parsed.data.tag,
@@ -129,10 +174,13 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
                 parsed.data.modelReasoningEffort,
                 parsed.data.id
             )
-            const sessionSummaryContract = await readSessionSummaryContractEnabled(
-                getConfiguration().dataDir
-            )
-            return c.json({ session, sessionSummaryContract })
+            const dataDir = getConfiguration().dataDir
+            const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
+            // Owner-only hub setting — never enable auto-bridge for tenant namespaces.
+            const autoBridgeTransientModelErrors = namespace === 'default'
+                ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+                : false
+            return c.json({ session, sessionSummaryContract, autoBridgeTransientModelErrors })
         } catch (error) {
             if (error instanceof SessionIdentityConflictError) {
                 return c.json({ error: error.message }, 409)
@@ -249,10 +297,16 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
         if (!resolved.ok) {
             return c.json({ error: resolved.error }, resolved.status)
         }
-        const sessionSummaryContract = await readSessionSummaryContractEnabled(
-            getConfiguration().dataDir
-        )
-        return c.json({ session: resolved.session, sessionSummaryContract })
+        const dataDir = getConfiguration().dataDir
+        const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
+        const autoBridgeTransientModelErrors = namespace === 'default'
+            ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+            : false
+        return c.json({
+            session: resolved.session,
+            sessionSummaryContract,
+            autoBridgeTransientModelErrors
+        })
     })
 
     app.get('/sessions/:id/messages', (c) => {

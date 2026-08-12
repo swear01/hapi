@@ -1,4 +1,5 @@
 import React from 'react';
+import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import { convertAgentMessage } from '@/agent/messageConverter';
@@ -34,6 +35,7 @@ import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsShared
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import {
     cursorHapiMcpServerId,
     installCursorMcpOverlay,
@@ -43,6 +45,14 @@ import {
     resolveCursorSpawnModel,
     tryRemapCursorSpawnModelFromConnectError
 } from './utils/cursorStaleModelRemap';
+import {
+    classifyAcpRpcRejection,
+    classifyCursorAgentMessage,
+    isCompletionClaim,
+    mapAcpStderrToFailure,
+    rawSnippetForFailure,
+    type CursorAgentStreamFailure
+} from './cursorAgentMessageClassifier';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -57,11 +67,39 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendModel: string | null = null;
     private unregisterModelApplyHandler: (() => void) | null = null;
     private modelApplySeq = 0;
+    private activePromptModeHash: string | null = null;
     /** True when ACP process was spawned with `--auto-review`. */
     private spawnedWithAutoReview = false;
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
     private autoReviewSlashQueued = false;
     private cursorMcpOverlay: CursorMcpOverlayHandle | null = null;
+    /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
+    private softSteerWaiters: Promise<void>[] = [];
+    private lastAssistantText: string | null = null;
+    private turnHasModelError = false;
+    /**
+     * Text-classifier hit retained until `backend.prompt` settles. Callbacks
+     * run before the promise rejects, so recording text immediately would
+     * beat the structural RPC classification (e.g. unknown_t_prefix vs
+     * transport_closed for WritableIterable). Flush on success; prefer RPC
+     * in catch.
+     */
+    private pendingTextFailure: CursorAgentStreamFailure | null = null;
+    /**
+     * Typed stderr failure deferred while prompt is in flight so RPC rejection
+     * keeps precedence (RPC → stderr → text). Flushed on settle like text.
+     */
+    private pendingStderrFailure: CursorAgentStreamFailure | null = null;
+    /** True while backend.prompt() is in flight — lets stderr model_not_found
+     *  surface as modelError during a turn without breaking setup/load remap. */
+    private promptInFlight = false;
+    /**
+     * Set in handleAbort before session/cancel. Cursor often rejects the
+     * in-flight prompt as `Error: T: [canceled] Operation aborted`, which the
+     * classifier maps to kind=canceled (real model cancel). Intent tracking
+     * keeps deliberate Abort/Exit/Switch out of the emergency model-error path.
+     */
+    private userAbortRequested = false;
 
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -82,6 +120,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     protected async runMainLoop(): Promise<void> {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
+        session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
             enableChangeTitle: false,
@@ -364,6 +403,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             }
         }
 
+        this.acpSessionId = acpSessionId;
         session.client.emitSessionReady();
 
         syncCursorModelsFromAcp(backend, acpSessionId);
@@ -402,13 +442,93 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             onSwitch: () => this.handleSwitchRequest()
         });
 
+        // Soft steer = Cursor GUI "Send" (next-opportune / soft inject): fire a
+        // concurrent session/prompt without canceling the in-flight turn. Abort
+        // remains the hard stop path (GUI "Stop & send").
+        session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.SteerQueuedMessage,
+            async (payload: unknown) => {
+                const localId = typeof (payload as { localId?: unknown } | null)?.localId === 'string'
+                    ? (payload as { localId: string }).localId
+                    : '';
+                if (!localId) {
+                    return { steered: false, error: 'Missing localId' };
+                }
+                if (!this.promptInFlight || !this.acpSessionId || !this.backend) {
+                    return { steered: false, error: 'No active steerable turn' };
+                }
+                const taken = session.queue.takeByLocalId(localId);
+                if (!taken) {
+                    return { steered: false, error: 'Message not in queue' };
+                }
+                const isControlCommand = Boolean(taken.item.isolate)
+                    || parseCursorSpecialCommand(taken.item.message).type !== null;
+                if (isControlCommand) {
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Control commands cannot be steered' };
+                }
+                if (this.activePromptModeHash !== taken.item.modeHash) {
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Queued message mode differs from the active turn' };
+                }
+
+                // Ack the hub once the soft-steer request is kicked off — not when
+                // the concurrent session/prompt finishes. ACP treats that response as
+                // turn completion, which can exceed the hub's 30s Socket.IO RPC timeout
+                // and report a false failure after the inject already started.
+                // Keep the launcher busy until that background prompt settles so we
+                // do not emit ready / start the next backend.prompt() while it runs.
+                if (!session.queue.beginReservationDispatch(taken)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
+                let steer: { dispatched: Promise<void>; completed: Promise<void> };
+                try {
+                    steer = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
+                        type: 'text',
+                        text: taken.item.message
+                    }]);
+                } catch (error) {
+                    logger.debug('[cursor-acp] soft-steer failed to start', error);
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Failed to soft-steer into active turn' };
+                }
+                const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
+                    session.queue.commitReservation(taken);
+                    messageBuffer.addMessage(taken.item.message, 'user');
+                    session.client.emitMessagesConsumed([localId], { steered: true });
+                }, (error) => {
+                    session.queue.restoreReservation(taken);
+                    logger.debug('[cursor-acp] soft-steer failed', error);
+                });
+                this.softSteerWaiters.push(steerDone);
+                const removeWaiter = () => {
+                    this.softSteerWaiters = this.softSteerWaiters.filter((p) => p !== steerDone);
+                };
+                void steerDone.then(removeWaiter);
+                try {
+                    await steer.dispatched;
+                } catch (error) {
+                    logger.debug('[cursor-acp] soft-steer failed to start', error);
+                    await steerDone;
+                    return { steered: false, error: 'Failed to soft-steer into active turn' };
+                }
+                return { steered: true };
+            }
+        );
+
         const sendReady = () => {
+            if (this.turnHasModelError) {
+                // Don't clear the error state with a 'ready' — banner stays visible.
+                return;
+            }
             session.sendSessionEvent({ type: 'ready' });
         };
 
+        try {
         while (!this.shouldExit) {
             const waitSignal = this.abortController.signal;
             const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
+
             if (!batch) {
                 if (waitSignal.aborted && !this.shouldExit) {
                     continue;
@@ -451,12 +571,35 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             }];
 
             session.onThinkingChange(true);
+            this.promptInFlight = true;
+            session.client.updateAgentState?.((state) => ({ ...state, steeringActive: true }));
+            this.activePromptModeHash = batch.hash;
+            this.turnHasModelError = false;
+            this.userAbortRequested = false;
+            this.lastAssistantText = null;
+            this.pendingTextFailure = null;
+            this.pendingStderrFailure = null;
 
+            this.promptInFlight = true;
             try {
-                await backend.prompt(acpSessionId, promptContent, (message) => {
-                    this.handleAgentMessage(message);
-                });
+                let turnPositionAt: number | undefined;
+                const onUpdate = (message: AgentMessage) => {
+                    const emittedAt = Date.now();
+                    turnPositionAt ??= emittedAt;
+                    this.handleAgentMessage(message, emittedAt, turnPositionAt);
+                };
+                await backend.prompt(acpSessionId, promptContent, onUpdate);
                 void backend.refreshSessionInfo(acpSessionId, session.path);
+                // Prompt resolved: flush deferred structural stderr (a model
+                // rejection the agent surfaced mid-turn) before ready, so the
+                // user sees why the turn could not run. #1484 reworked message
+                // anchoring but kept this fork's #906 modelError UX.
+                const settled = this.pendingStderrFailure ?? this.pendingTextFailure;
+                if (settled && !this.turnHasModelError) {
+                    this.recordModelError(settled);
+                }
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
@@ -466,13 +609,47 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.sendAgentMessage(converted);
                 }
                 messageBuffer.addMessage(message, 'status');
+                // Specific RPC (canceled / rate_limited / …) still wins. Generic
+                // transport/crash/prompt_failed must not overwrite a stronger
+                // deferred stderr cause (quota/auth/model) with “safe to retry”.
+                const rpcFailure = classifyAcpRpcRejection(error);
+                const genericRpcFailure = rpcFailure !== null && (
+                    rpcFailure.kind === 'transport_closed'
+                    || rpcFailure.kind === 'agent_crashed'
+                    || rpcFailure.kind === 'prompt_failed'
+                );
+                const failure = genericRpcFailure
+                    ? this.pendingStderrFailure ?? rpcFailure ?? this.pendingTextFailure
+                    : rpcFailure ?? this.pendingStderrFailure ?? this.pendingTextFailure;
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
+                if (failure) {
+                    this.recordModelError(failure);
+                }
             } finally {
+                this.promptInFlight = false;
+                session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+                // Soft-steers share the ACP session; wait for them before ready /
+                // the next prompt so message handlers are not swapped mid-inject.
+                if (this.softSteerWaiters.length > 0) {
+                    await Promise.allSettled(this.softSteerWaiters);
+                    this.softSteerWaiters = [];
+                }
+                this.activePromptModeHash = null;
+                this.pendingStderrFailure = null;
+                this.pendingTextFailure = null;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');
                 if (session.queue.size() === 0 && !this.shouldExit) {
                     sendReady();
                 }
+            }
+        }
+        } finally {
+            if (this.softSteerWaiters.length > 0) {
+                await Promise.allSettled(this.softSteerWaiters);
+                this.softSteerWaiters = [];
             }
         }
     }
@@ -485,6 +662,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
         try {
             this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+            this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
+                steered: false,
+                error: 'Session ending'
+            }));
+            this.promptInFlight = false;
+            this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+            this.softSteerWaiters = [];
             this.unregisterModelApplyHandler?.();
             this.unregisterModelApplyHandler = null;
 
@@ -523,7 +707,18 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             logger.debug('[cursor-acp] stderr error', error);
             const hint = error.raw || error.message;
             onHint(hint);
+            // Setup/load remap consumes "Cannot use this model" stderr without
+            // promoting to modelError. During an active prompt, the same
+            // signature must become model_not_found (mapper would otherwise
+            // be unreachable behind this early return).
+            const failure = mapAcpStderrToFailure(error);
             if (error.type === 'model_not_found' && extractCannotUseThisModelMessage(hint)) {
+                // Setup/load remap may reject a stale spawn model then succeed
+                // after remap — never promote that to a turn alert. Only defer
+                // during an active prompt so RPC precedence still wins.
+                if (this.promptInFlight && failure) {
+                    this.pendingStderrFailure ??= failure;
+                }
                 return;
             }
             const converted = convertAgentMessage({ type: 'error', message: error.message });
@@ -531,6 +726,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 session.sendAgentMessage(converted);
             }
             messageBuffer.addMessage(error.message, 'status');
+            // STRUCTURAL signal: route typed stderr into the modelError pipeline
+            // (rate_limited / quota_exhausted / auth_failed / model_not_found)
+            // without text matching. Generic `unknown` stderr stays status-only —
+            // ACP treats stderr as logging, and the transport labels any
+            // "error"/"failed"/"exception" line as unknown.
+            // While prompt is in flight, defer so RPC rejection keeps precedence.
+            if (failure) {
+                if (this.promptInFlight) {
+                    this.pendingStderrFailure ??= failure;
+                } else {
+                    this.recordModelError(failure);
+                }
+            }
         });
     }
 
@@ -575,15 +783,16 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         });
     }
 
-    private handleAgentMessage(message: AgentMessage): void {
+    private handleAgentMessage(message: AgentMessage, createdAt?: number, positionAt?: number): void {
         const converted = convertAgentMessage(message, this.currentBackendModel);
         if (converted) {
-            this.session.sendAgentMessage(converted);
+            this.session.sendAgentMessage(converted, createdAt, positionAt);
         }
 
         switch (message.type) {
             case 'text':
                 this.messageBuffer.addMessage(message.text, 'assistant');
+                this.handleTextMessageClassification(message.text);
                 break;
             case 'reasoning':
                 break;
@@ -609,6 +818,81 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             default:
                 break;
         }
+    }
+
+    private handleTextMessageClassification(text: string): void {
+        // FALLBACK PATH ONLY — deferred until prompt settles so structural
+        // RPC / stderr can win. If a structural signal already classified
+        // this turn, keep lastAssistantText for priorAssistantClaimsDone.
+        if (this.turnHasModelError) {
+            this.lastAssistantText = text;
+            return;
+        }
+        const failure = classifyCursorAgentMessage(text);
+        if (failure) {
+            this.pendingTextFailure ??= failure;
+        } else {
+            this.lastAssistantText = text;
+        }
+    }
+
+    /**
+     * Single source of truth for emitting modelError. Structural paths
+     * (RPC catch / stderr) record immediately; text fallback is deferred
+     * via pendingTextFailure until prompt settles, then flushed here.
+     * First recorded signal wins for the turn.
+     */
+    private recordModelError(failure: CursorAgentStreamFailure): void {
+        if (this.turnHasModelError) {
+            logger.debug(
+                `[cursor-acp] modelError already recorded for this turn, dropping ${failure.source}/${failure.kind}`
+            );
+            return;
+        }
+        if (this.userAbortRequested && failure.kind === 'canceled') {
+            logger.debug(
+                '[cursor-acp] dropping canceled modelError after user abort'
+            );
+            this.pendingTextFailure = null;
+            return;
+        }
+        this.turnHasModelError = true;
+        this.pendingTextFailure = null;
+        this.pendingStderrFailure = null;
+
+        // Same-message case: Cursor often appends `Error: T: ...` onto the
+        // assistant block that already claimed "Done." — lastAssistantText is
+        // still null because we classify before storing. Check failure.raw too.
+        const priorAssistantClaimsDone = (this.lastAssistantText !== null
+            && isCompletionClaim(this.lastAssistantText))
+            || (failure.source === 'text' && isCompletionClaim(failure.raw));
+        const rawSnippet = rawSnippetForFailure(failure);
+        const eventId = randomUUID();
+        const atTs = Date.now();
+
+        logger.debug(
+            `[cursor-acp] modelError recorded source=${failure.source} kind=${failure.kind} transient=${failure.transient}`
+        );
+
+        this.session.client.updateMetadata((metadata) => ({
+            ...metadata,
+            lastModelError: {
+                eventId,
+                kind: failure.kind,
+                transient: failure.transient,
+                rawSnippet,
+                atTs,
+                priorAssistantClaimsDone
+            }
+        }));
+
+        this.session.sendSessionEvent({
+            type: 'modelError',
+            kind: failure.kind,
+            transient: failure.transient,
+            rawSnippet,
+            priorAssistantClaimsDone
+        });
     }
 
     private installLiveSessionConfigSync(
@@ -792,13 +1076,18 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     private async handleAbort(): Promise<void> {
         const backend = this.backend;
-        const sessionId = this.session.sessionId;
+        const sessionId = this.acpSessionId ?? this.session.sessionId;
+        // Mark before cancel so the in-flight prompt rejection cannot promote
+        // Cursor's canceled/aborted wire shape into lastModelError + notify.
+        this.userAbortRequested = true;
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
         }
         await this.permissionAdapter?.cancelAll('User aborted');
         await this.extensionAdapter?.cancelAll('User aborted');
         this.session.queue.reset();
+        this.promptInFlight = false;
+        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         this.session.onThinkingChange(false);
         this.abortController.abort();
         this.abortController = new AbortController();

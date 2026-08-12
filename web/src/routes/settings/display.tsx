@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from '@/lib/use-translation'
+import { CREATABLE_AGENT_FLAVORS, getFlavorLabel } from '@hapi/protocol'
+import { loadCreateAgentVisibility, saveCreateAgentVisibility } from '@/lib/createAgentVisibility'
 import { getAppearanceOptions, useAppearance } from '@/hooks/useTheme'
 import { getColorThemeOptions, getColorThemePreview, useColorTheme, type ColorThemePreset } from '@/hooks/useColorTheme'
 import { getFontScaleOptions, useFontScale } from '@/hooks/useFontScale'
@@ -7,6 +9,7 @@ import { getTerminalFontSizeOptions, useTerminalFontSize } from '@/hooks/useTerm
 import { getSessionListStatusModeOptions, useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
 import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
+import { usePinActiveSessions } from '@/hooks/usePinActiveSessions'
 import { MAX_SESSION_PREVIEW_LIMIT, MIN_SESSION_PREVIEW_LIMIT, normalizeSessionPreviewLimit, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { useThemeColors, type ThemeColorKeyId } from '@/hooks/useThemeColors'
 import { useSessionHeaderMetadata, type SessionHeaderMetadataKey } from '@/hooks/useSessionHeaderMetadata'
@@ -137,8 +140,16 @@ export default function SettingsDisplayPage() {
     const { terminalFontSize, setTerminalFontSize } = useTerminalFontSize()
     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
     const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
+    const { pinInProgressMode, setPinInProgressMode } = usePinInProgressSessions()
     const { pinInProgressSessions, setPinInProgressSessions } = usePinInProgressSessions()
+    const { pinActiveSessions, setPinActiveSessions } = usePinActiveSessions()
     const { preferences: sessionHeaderMetadata, setPreference: setSessionHeaderMetadata } = useSessionHeaderMetadata()
+    const [agentVisibility, setAgentVisibility] = useState(loadCreateAgentVisibility)
+    const setAgentVisible = (agent: typeof CREATABLE_AGENT_FLAVORS[number], visible: boolean) => {
+        const next = { ...agentVisibility, [agent]: visible }
+        setAgentVisibility(next)
+        saveCreateAgentVisibility(next)
+    }
     const sessionHeaderOptions: ReadonlyArray<{ key: SessionHeaderMetadataKey; labelKey: string }> = [
         { key: 'showLabels', labelKey: 'settings.display.sessionHeader.showLabels' },
         { key: 'agent', labelKey: 'settings.display.sessionHeader.agent' },
@@ -174,7 +185,20 @@ export default function SettingsDisplayPage() {
             <SettingsSection title={t('settings.display.sessions')}>
                 <SessionPreviewLimitControl />
                 <SettingsSwitch label={t('settings.display.activeSessionsOnly')} description={t('settings.display.activeSessionsOnly.desc')} checked={showActiveSessionsOnly} onChange={setShowActiveSessionsOnly} />
-                <SettingsSwitch label={t('settings.display.pinInProgressSessions')} description={t('settings.display.pinInProgressSessions.desc')} checked={pinInProgressSessions} onChange={setPinInProgressSessions} />
+                <SettingsChoiceGroup
+                    label={t('settings.display.pinInProgressSessions')}
+                    description={t('settings.display.pinInProgressSessions.desc')}
+                    value={pinInProgressMode}
+                    columns={3}
+                    options={[
+                        { value: 'off', label: t('settings.display.pinInProgressMode.off') },
+                        { value: 'jobs', label: t('settings.display.pinInProgressMode.jobs') },
+                        { value: 'all', label: t('settings.display.pinInProgressMode.all') },
+                    ]}
+                    onChange={setPinInProgressMode}
+                />
+                                <SettingsSwitch label={t('settings.display.pinInProgressSessions')} description={t('settings.display.pinInProgressSessions.desc')} checked={pinInProgressSessions} onChange={setPinInProgressSessions} />
+                <SettingsSwitch label={t('settings.display.pinActiveSessions')} description={t('settings.display.pinActiveSessions.desc')} checked={pinActiveSessions} onChange={setPinActiveSessions} />
                 <SettingsChoiceGroup
                     label={t('settings.display.sessionListStatus')}
                     description={t('settings.display.sessionListStatus.detailedDescription')}
@@ -182,6 +206,12 @@ export default function SettingsDisplayPage() {
                     options={getSessionListStatusModeOptions().map((option) => ({ value: option.value, label: t(option.labelKey) }))}
                     onChange={setSessionListStatusMode}
                 />
+            </SettingsSection>
+
+            <SettingsSection title={t('settings.display.createAgents')} description={t('settings.display.createAgents.description')}>
+                {CREATABLE_AGENT_FLAVORS.map((agent) => (
+                    <SettingsSwitch key={agent} label={getFlavorLabel(agent)} checked={agentVisibility[agent]} onChange={(visible) => setAgentVisible(agent, visible)} />
+                ))}
             </SettingsSection>
 
             <SettingsSection title={t('settings.display.sessionHeader')} description={t('settings.display.sessionHeader.description')}>

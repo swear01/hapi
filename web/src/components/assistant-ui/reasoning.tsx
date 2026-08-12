@@ -72,6 +72,7 @@ export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
         && message.content[message.content.length - 1]?.type === 'reasoning'
     const { reasoningCollapsed } = useReasoningCollapse()
     const chatContext = useOptionalHappyChatContext()
+    const shouldRenderContent = isOpen
 
     useEffect(() => {
         if (!isStreaming) return
@@ -210,7 +211,7 @@ export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
                     // contain is not needed to stop the two from fighting.
                     className="aui-reasoning-scroll max-h-[60vh] overflow-y-auto border-t border-[var(--app-divider)] px-3.5 py-3"
                 >
-                    {children}
+                    {shouldRenderContent ? children : null}
                 </div>
             </div>
         </div>

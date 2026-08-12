@@ -1,0 +1,1686 @@
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+index ceabcc16d..ae112efef 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+@@ -687,6 +687,21 @@ describe('AcpSdkBackend', () => {
+         });
+     });
+ 
++    it('uses v2 state_update usage when the prompt response omits usage', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const internal = backend as unknown as { transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null; handleSessionUpdate: (params: unknown) => void };
++        const messages: AgentMessage[] = [];
++        internal.transport = {
++            sendRequest: async () => {
++                internal.handleSessionUpdate({ sessionId: 'session-1', update: { sessionUpdate: 'state_update', state: 'idle', usage: { input_tokens: 100, output_tokens: 20, cached_read_tokens: 40 } } });
++                return { stopReason: 'end_turn' };
++            },
++            close: async () => {}
++        };
++        await backend.prompt('session-1', [{ type: 'text', text: 'hello' }], (message) => messages.push(message));
++        expect(messages).toContainEqual(expect.objectContaining({ type: 'usage', inputTokens: 100, outputTokens: 20, cacheReadTokens: 40 }));
++    });
++
+     it('emits straggler chunks before turn_complete', async () => {
+         backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+         backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+@@ -916,6 +931,156 @@ describe('AcpSdkBackend', () => {
+         expect(realtimeUsage.map((m) => m.contextTokens)).toEqual([1_000, 2_500]);
+     });
+ 
++    it('forwards cumulative cost from usage_update with context', async () => {
++        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
++        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
++        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
++        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
++        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
++        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
++        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
++
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequest: (...args: unknown[]) => Promise<unknown>;
++                close: () => Promise<void>;
++            } | null;
++            handleSessionUpdate: (params: unknown) => void;
++        };
++
++        const messages: AgentMessage[] = [];
++        backendInternal.transport = {
++            sendRequest: async () => {
++                backendInternal.handleSessionUpdate({
++                    sessionId: 'session-1',
++                    update: {
++                        sessionUpdate: 'usage_update',
++                        used: 1_000,
++                        size: 200_000,
++                        cost: { amount: 1.25, currency: 'USD' }
++                    }
++                });
++                await sleep(5);
++                backendInternal.handleSessionUpdate({
++                    sessionId: 'session-1',
++                    update: {
++                        sessionUpdate: 'usage_update',
++                        used: 1_000,
++                        size: 200_000,
++                        cost: { amount: 2.5, currency: 'USD' }
++                    }
++                });
++                await sleep(5);
++                return { stopReason: 'end_turn' };
++            },
++            close: async () => {}
++        };
++
++        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
++
++        const usageMessages = messages.filter(
++            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
++        );
++        const withCost = usageMessages.filter((m) => m.cost !== undefined);
++        expect(withCost.length).toBeGreaterThanOrEqual(1);
++        const latest = withCost.at(-1);
++        expect(latest?.cost).toBe(2.5);
++        expect(latest?.costCurrency).toBe('USD');
++    });
++
++    it('forwards a cost-only usage_update without context fields', async () => {
++        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
++        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
++        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
++        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
++        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
++        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
++        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
++
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequest: (...args: unknown[]) => Promise<unknown>;
++                close: () => Promise<void>;
++            } | null;
++            handleSessionUpdate: (params: unknown) => void;
++        };
++
++        const messages: AgentMessage[] = [];
++        backendInternal.transport = {
++            sendRequest: async () => {
++                backendInternal.handleSessionUpdate({
++                    sessionId: 'session-1',
++                    update: { sessionUpdate: 'usage_update', cost: { amount: 0.4, currency: 'USD' } }
++                });
++                await sleep(5);
++                return { stopReason: 'end_turn' };
++            },
++            close: async () => {}
++        };
++
++        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
++
++        const usageMessages = messages.filter(
++            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
++        );
++        expect(usageMessages.at(-1)).toEqual(expect.objectContaining({ cost: 0.4, costCurrency: 'USD' }));
++    });
++
++    it('preserves context fields when a state_update carries only tokens', async () => {
++        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
++        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
++        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
++        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
++        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
++        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
++        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
++
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const backendInternal = backend as unknown as {
++            transport: {
++                sendRequest: (...args: unknown[]) => Promise<unknown>;
++                close: () => Promise<void>;
++            } | null;
++            handleSessionUpdate: (params: unknown) => void;
++        };
++
++        const messages: AgentMessage[] = [];
++        backendInternal.transport = {
++            sendRequest: async () => {
++                // usage_update first reports context, then a state_update
++                // reports tokens without touching context. The final usage
++                // event must keep the previously reported context values.
++                backendInternal.handleSessionUpdate({
++                    sessionId: 'session-1',
++                    update: { sessionUpdate: 'usage_update', used: 2_000, size: 200_000 }
++                });
++                await sleep(5);
++                backendInternal.handleSessionUpdate({
++                    sessionId: 'session-1',
++                    update: { sessionUpdate: 'state_update', state: 'idle', usage: { input_tokens: 100, output_tokens: 20 } }
++                });
++                await sleep(5);
++                return { stopReason: 'end_turn' };
++            },
++            close: async () => {}
++        };
++
++        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
++
++        const usageMessages = messages.filter(
++            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
++        );
++        const final = usageMessages.at(-1);
++        expect(final).toEqual(expect.objectContaining({
++            inputTokens: 100,
++            outputTokens: 20,
++            contextTokens: 2_000,
++            contextWindow: 200_000
++        }));
++    });
++
+     it('forwards title changes from session_info_update', () => {
+         const backend = new AcpSdkBackend({ command: 'agent' });
+         const updates: Array<{ sessionId: string | null; title: string | null }> = [];
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index a204463f0..e8086b8bf 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -21,9 +21,22 @@ type AcpPromptUsage = {
+     cacheCreationTokens?: number;
+ };
+ 
++type AcpUsageCost = {
++    amount: number;
++    currency: string;
++};
++
++function sameCost(a: AcpUsageCost | null | undefined, b: AcpUsageCost | null | undefined): boolean {
++    return a === b || (a !== null && a !== undefined && b !== null && b !== undefined
++        && a.amount === b.amount && a.currency === b.currency)
++}
++
+ type AcpUsageUpdate = {
+     contextTokens: number | undefined;
+     contextWindow: number | undefined;
++    tokenUsage: AcpPromptUsage | null;
++    /** Cumulative session cost reported by ACP `usage_update.cost`. */
++    cost: AcpUsageCost | null;
+ };
+ 
+ export type AcpModelDescriptor = {
+@@ -559,35 +572,44 @@ export class AcpSdkBackend implements AgentBackend {
+             this.messageHandler?.drainBuffers();
+             try {
+                 const latestUsageUpdate = this.readLatestUsageUpdate();
+-                if (promptUsage) {
++                const finalPromptUsage = promptUsage ?? latestUsageUpdate?.tokenUsage ?? null;
++                if (finalPromptUsage) {
+                     onUpdate({
+                         type: 'usage',
+-                        inputTokens: promptUsage.inputTokens,
+-                        outputTokens: promptUsage.outputTokens,
+-                        totalTokens: promptUsage.totalTokens,
+-                        thoughtTokens: promptUsage.thoughtTokens,
+-                        cacheReadTokens: promptUsage.cacheReadTokens,
+-                        ...(promptUsage.cacheCreationTokens !== undefined
+-                            ? { cacheCreationTokens: promptUsage.cacheCreationTokens }
++                        inputTokens: finalPromptUsage.inputTokens,
++                        outputTokens: finalPromptUsage.outputTokens,
++                        totalTokens: finalPromptUsage.totalTokens,
++                        thoughtTokens: finalPromptUsage.thoughtTokens,
++                        cacheReadTokens: finalPromptUsage.cacheReadTokens,
++                        ...(finalPromptUsage.cacheCreationTokens !== undefined
++                            ? { cacheCreationTokens: finalPromptUsage.cacheCreationTokens }
+                             : {}),
+                         contextTokens: latestUsageUpdate ? latestUsageUpdate.contextTokens : undefined,
+-                        contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined
++                        contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined,
++                        ...(latestUsageUpdate?.cost
++                            ? { cost: latestUsageUpdate.cost.amount, costCurrency: latestUsageUpdate.cost.currency }
++                            : {})
+                     });
+                 } else if (
+                     latestUsageUpdate
+-                    && (latestUsageUpdate.contextTokens !== undefined || latestUsageUpdate.contextWindow !== undefined)
++                    && (latestUsageUpdate.contextTokens !== undefined
++                        || latestUsageUpdate.contextWindow !== undefined
++                        || latestUsageUpdate.cost !== null)
+                     && !this.hasForwardedUsage(latestUsageUpdate)
+                 ) {
+                     // Agent did not return prompt usage (slash-handled turns,
+                     // errored turns), but we did see ACP usage updates during
+                     // the turn. Emit a context-only usage so the status bar
+-                    // reflects the current context size.
++                    // reflects the current context size and cumulative cost.
+                     onUpdate({
+                         type: 'usage',
+                         inputTokens: 0,
+                         outputTokens: 0,
+                         contextTokens: latestUsageUpdate.contextTokens,
+-                        contextWindow: latestUsageUpdate.contextWindow
++                        contextWindow: latestUsageUpdate.contextWindow,
++                        ...(latestUsageUpdate.cost
++                            ? { cost: latestUsageUpdate.cost.amount, costCurrency: latestUsageUpdate.cost.currency }
++                            : {})
+                     });
+                 }
+                 if (stopReason) {
+@@ -804,10 +826,15 @@ export class AcpSdkBackend implements AgentBackend {
+         const sessionUpdate = asString(update.sessionUpdate);
+         let contextTokens: number | null = null;
+         let contextWindow: number | null = null;
++        let cost: AcpUsageCost | null = null;
++        const tokenUsage = sessionUpdate === ACP_SESSION_UPDATE_TYPES.stateUpdate
++            ? this.extractUsage(update.usage)
++            : null;
+ 
+         if (sessionUpdate === ACP_SESSION_UPDATE_TYPES.usageUpdate) {
+             contextTokens = this.asFiniteNumber(update.used);
+             contextWindow = this.asFiniteNumber(update.size);
++            cost = this.extractCost(update.cost);
+         } else if (sessionUpdate === ACP_SESSION_UPDATE_TYPES.sessionInfoUpdate) {
+             contextTokens = this.asFiniteNumber(
+                 update.used
+@@ -821,13 +848,16 @@ export class AcpSdkBackend implements AgentBackend {
+                 ?? update.context_window
+                 ?? update.contextLimit
+             );
+-        } else {
++        } else if (sessionUpdate !== ACP_SESSION_UPDATE_TYPES.stateUpdate) {
+             return;
+         }
+ 
++        const previous = this.latestUsageUpdate
+         this.latestUsageUpdate = {
+-            contextTokens: contextTokens ?? undefined,
+-            contextWindow: contextWindow ?? undefined
++            contextTokens: contextTokens ?? previous?.contextTokens,
++            contextWindow: contextWindow ?? previous?.contextWindow,
++            tokenUsage: tokenUsage ?? previous?.tokenUsage ?? null,
++            cost: cost ?? previous?.cost ?? null
+         };
+         this.forwardUsageUpdate();
+     }
+@@ -835,14 +865,15 @@ export class AcpSdkBackend implements AgentBackend {
+     private hasForwardedUsage(update: AcpUsageUpdate): boolean {
+         return this.lastForwardedUsageUpdate !== null
+             && this.lastForwardedUsageUpdate.contextTokens === update.contextTokens
+-            && this.lastForwardedUsageUpdate.contextWindow === update.contextWindow;
++            && this.lastForwardedUsageUpdate.contextWindow === update.contextWindow
++            && sameCost(this.lastForwardedUsageUpdate.cost, update.cost);
+     }
+ 
+     private forwardUsageUpdate(): void {
+         const update = this.latestUsageUpdate;
+         if (
+             !update
+-            || (update.contextTokens === undefined && update.contextWindow === undefined)
++            || (update.contextTokens === undefined && update.contextWindow === undefined && update.cost === null)
+         ) {
+             return;
+         }
+@@ -851,6 +882,7 @@ export class AcpSdkBackend implements AgentBackend {
+             this.lastForwardedUsageUpdate
+             && this.lastForwardedUsageUpdate.contextTokens === update.contextTokens
+             && this.lastForwardedUsageUpdate.contextWindow === update.contextWindow
++            && sameCost(this.lastForwardedUsageUpdate.cost, update.cost)
+         ) {
+             return;
+         }
+@@ -861,7 +893,8 @@ export class AcpSdkBackend implements AgentBackend {
+             inputTokens: 0,
+             outputTokens: 0,
+             contextTokens: update.contextTokens,
+-            contextWindow: update.contextWindow
++            contextWindow: update.contextWindow,
++            ...(update.cost ? { cost: update.cost.amount, costCurrency: update.cost.currency } : {})
+         };
+ 
+         if (this.promptUsageCallback) {
+@@ -1015,8 +1048,22 @@ export class AcpSdkBackend implements AgentBackend {
+     }
+ 
+     private extractPromptUsage(response: unknown): AcpPromptUsage | null {
+-        if (!isObject(response) || !isObject(response.usage)) return null;
+-        const usage = response.usage;
++        return isObject(response) ? this.extractUsage(response.usage) : null;
++    }
++
++    private extractCost(value: unknown): AcpUsageCost | null {
++        if (!isObject(value)) return null;
++        const amount = this.asFiniteNumber(value.amount);
++        const currency = typeof value.currency === 'string' && value.currency.trim()
++            ? value.currency.trim()
++            : null;
++        if (amount === null || currency === null) return null;
++        return { amount, currency };
++    }
++
++    private extractUsage(value: unknown): AcpPromptUsage | null {
++        if (!isObject(value)) return null;
++        const usage = value;
+         const inputTokens = this.asFiniteNumber(usage.inputTokens ?? usage.input_tokens);
+         const outputTokens = this.asFiniteNumber(usage.outputTokens ?? usage.output_tokens);
+         if (inputTokens === null || outputTokens === null) return null;
+diff --git a/cli/src/agent/backends/acp/constants.ts b/cli/src/agent/backends/acp/constants.ts
+index a3bddbe7b..45292cac0 100644
+--- a/cli/src/agent/backends/acp/constants.ts
++++ b/cli/src/agent/backends/acp/constants.ts
+@@ -5,5 +5,6 @@ export const ACP_SESSION_UPDATE_TYPES = {
+     toolCallUpdate: 'tool_call_update',
+     plan: 'plan',
+     usageUpdate: 'usage_update',
++    stateUpdate: 'state_update',
+     sessionInfoUpdate: 'session_info_update'
+ } as const;
+diff --git a/cli/src/agent/messageConverter.test.ts b/cli/src/agent/messageConverter.test.ts
+index ac11db6d8..2a610c4d2 100644
+--- a/cli/src/agent/messageConverter.test.ts
++++ b/cli/src/agent/messageConverter.test.ts
+@@ -207,6 +207,34 @@ describe('convertAgentMessage', () => {
+             inputTokenSemantics: 'includes-cache'
+         });
+     });
++
++    it('carries ACP cumulative cost onto the token_count payload', () => {
++        const converted = convertAgentMessage({
++            type: 'usage',
++            inputTokens: 0,
++            outputTokens: 0,
++            contextTokens: 4_200,
++            contextWindow: 200_000,
++            cost: 1.25,
++            costCurrency: 'USD'
++        });
++
++        expect(converted).toMatchObject({
++            type: 'token_count',
++            cost: 1.25,
++            costCurrency: 'USD',
++            info: {
++                total: { inputTokens: 0, outputTokens: 0 },
++                contextTokens: 4_200,
++                modelContextWindow: 200_000
++            }
++        });
++        // Narrowed access proves the wire type declares the emitted fields.
++        if (converted?.type === 'token_count') {
++            expect(converted.cost).toBe(1.25);
++            expect(converted.costCurrency).toBe('USD');
++        }
++    });
+     it('returns null instead of echoing an unrecognized message shape', () => {
+         // Unreachable through the type system, but callers forward any non-null
+         // result straight into the chat stream — so the runtime contract has to
+diff --git a/cli/src/agent/messageConverter.ts b/cli/src/agent/messageConverter.ts
+index 1c7699b5c..4322f146c 100644
+--- a/cli/src/agent/messageConverter.ts
++++ b/cli/src/agent/messageConverter.ts
+@@ -11,6 +11,9 @@ export type CodexMessage =
+         model: string | null;
+         usageSchema: InclusiveInputTokenUsageMarker['usageSchema'];
+         inputTokenSemantics: InclusiveInputTokenUsageMarker['inputTokenSemantics'];
++        /** Cumulative session cost from ACP `usage_update.cost`. */
++        cost?: number;
++        costCurrency?: string;
+         info: {
+             total: {
+                 inputTokens: number;
+@@ -70,6 +73,9 @@ export function convertAgentMessage(message: AgentMessage, model?: string | null
+                 type: 'token_count',
+                 model: typeof model === 'string' && model.trim() ? model.trim() : null,
+                 ...INCLUSIVE_INPUT_TOKEN_USAGE_MARKER,
++                ...(message.cost !== undefined
++                    ? { cost: message.cost, costCurrency: message.costCurrency ?? 'USD' }
++                    : {}),
+                 info: {
+                     total: {
+                         inputTokens: message.inputTokens
+diff --git a/cli/src/agent/types.ts b/cli/src/agent/types.ts
+index 6a3949466..1bca1790e 100644
+--- a/cli/src/agent/types.ts
++++ b/cli/src/agent/types.ts
+@@ -53,6 +53,9 @@ export type AgentMessage =
+         cacheCreationTokens?: number;
+         contextTokens?: number;
+         contextWindow?: number;
++        /** Cumulative session cost from ACP `usage_update.cost` (amount + ISO 4217 currency). */
++        cost?: number;
++        costCurrency?: string;
+     }
+     | { type: 'plan'; items: PlanItem[] }
+     | { type: 'generated_image'; imageId: string; fileName: string; mimeType: string; source?: InlineMediaSource }
+diff --git a/hub/src/store/index.ts b/hub/src/store/index.ts
+index 865a40549..6e7272de4 100644
+--- a/hub/src/store/index.ts
++++ b/hub/src/store/index.ts
+@@ -33,7 +33,7 @@ export { SessionStore } from './sessionStore'
+ export { UserStore } from './userStore'
+ export { UsageStore } from './usageStore'
+ 
+-const SCHEMA_VERSION: number = 22
++const SCHEMA_VERSION: number = 23
+ const REQUIRED_TABLES = [
+     'sessions',
+     'machines',
+@@ -290,6 +290,7 @@ export class Store {
+             19: () => this.migrateFromV19ToV20(),
+             20: () => this.migrateFromV20ToV21(),
+             21: () => this.migrateFromV21ToV22(),
++            22: () => this.migrateFromV22ToV23(),
+         })
+ 
+         if (currentVersion === 0) {
+@@ -469,6 +470,9 @@ export class Store {
+                 last_output_tokens INTEGER,
+                 last_cache_read_tokens INTEGER,
+                 last_cache_creation_tokens INTEGER,
++                context_only INTEGER NOT NULL DEFAULT 0,
++                cost REAL,
++                cost_currency TEXT,
+                 PRIMARY KEY (session_id, source_key),
+                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+             );
+@@ -769,6 +773,13 @@ export class Store {
+                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
++                last_input_tokens INTEGER,
++                last_output_tokens INTEGER,
++                last_cache_read_tokens INTEGER,
++                last_cache_creation_tokens INTEGER,
++                context_only INTEGER NOT NULL DEFAULT 0,
++                cost REAL,
++                cost_currency TEXT,
+                 PRIMARY KEY (session_id, source_key),
+                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+             );
+@@ -853,6 +864,29 @@ export class Store {
+         }
+     }
+ 
++    private migrateFromV22ToV23(): void {
++        // Usage events are a rebuildable index. v23 adds cumulative-cost and
++        // context-only presence markers; the derived rows must be re-derived
++        // under the new semantics instead of mixing old and new rows.
++        const columns = new Set(
++            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
++                .map((column) => column.name)
++        )
++        if (!columns.has('context_only')) {
++            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
++        }
++        if (!columns.has('cost')) {
++            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
++        }
++        if (!columns.has('cost_currency')) {
++            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
++        }
++        this.db.exec(`
++            DELETE FROM usage_events;
++            DELETE FROM usage_scan_state;
++        `)
++    }
++
+     private getSessionColumnNames(): Set<string> {
+         const rows = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
+         return new Set(rows.map((row) => row.name))
+diff --git a/hub/src/store/migration-v13.test.ts b/hub/src/store/migration-v13.test.ts
+index a099009b5..1780813ed 100644
+--- a/hub/src/store/migration-v13.test.ts
++++ b/hub/src/store/migration-v13.test.ts
+@@ -10,7 +10,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+         const store = new Store(':memory:')
+         expect(tableExists(store, 'message_epochs')).toBe(true)
+         expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-        expect(getUserVersion(store)).toBe(22)
++        expect(getUserVersion(store)).toBe(23)
+         store.close()
+     })
+ 
+@@ -34,7 +34,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(22)
++            expect(getUserVersion(store)).toBe(23)
+             expect(store.messages.getMessageEpoch('session-1')).toBe(0)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+@@ -72,7 +72,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(22)
++            expect(getUserVersion(store)).toBe(23)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v15.test.ts b/hub/src/store/migration-v15.test.ts
+index ce8ade58e..a323fdeb4 100644
+--- a/hub/src/store/migration-v15.test.ts
++++ b/hub/src/store/migration-v15.test.ts
+@@ -19,7 +19,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+         expect(cols).toContain('attachments')
+         expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+         expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-        expect(getUserVersion(store)).toBe(22)
++        expect(getUserVersion(store)).toBe(23)
+         store.close()
+     })
+ 
+@@ -40,7 +40,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             expect(cols).toContain('attachments')
+             expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+             expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-            expect(getUserVersion(store)).toBe(22)
++            expect(getUserVersion(store)).toBe(23)
+         } finally {
+             store?.close()
+             rmSync(dir, { recursive: true, force: true })
+@@ -60,7 +60,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             store2 = new Store(dbPath)
+             const cols2 = getColumns(store2, 'session_scratchlist')
+             expect(cols2).toEqual(cols1)
+-            expect(getUserVersion(store2)).toBe(22)
++            expect(getUserVersion(store2)).toBe(23)
+         } finally {
+             store2?.close()
+             store1?.close()
+diff --git a/hub/src/store/migration-v18.test.ts b/hub/src/store/migration-v18.test.ts
+index af662bf1e..75861a17a 100644
+--- a/hub/src/store/migration-v18.test.ts
++++ b/hub/src/store/migration-v18.test.ts
+@@ -38,7 +38,7 @@ describe('Store V18->V19 migration: usage scan state', () => {
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+             expect(table?.name).toBe('usage_scan_state')
+-            expect(version.user_version).toBe(22)
++            expect(version.user_version).toBe(23)
+             expect(usageRows.count).toBe(0)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v19.test.ts b/hub/src/store/migration-v19.test.ts
+index 8e6659346..5688e6153 100644
+--- a/hub/src/store/migration-v19.test.ts
++++ b/hub/src/store/migration-v19.test.ts
+@@ -37,7 +37,7 @@ describe('Store V19->current migration: usage re-index', () => {
+             const scanRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+-            expect(version.user_version).toBe(22)
++            expect(version.user_version).toBe(23)
+             expect(scanRows.count).toBe(0)
+             expect(usageRows.count).toBe(0)
+         } finally {
+diff --git a/hub/src/store/migration-v20.test.ts b/hub/src/store/migration-v20.test.ts
+index 7cfec238f..529dff11d 100644
+--- a/hub/src/store/migration-v20.test.ts
++++ b/hub/src/store/migration-v20.test.ts
+@@ -43,7 +43,7 @@ describe('Store V20->V21 migration: usage semantics re-index', () => {
+             store = new Store(dbPath)
+             const internalDb = (store as unknown as { db: Database }).db
+             const count = (table: string): number => (internalDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
+-            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(22)
++            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(23)
+             expect(count('usage_events')).toBe(0)
+             expect(count('usage_scan_state')).toBe(0)
+             expect(store.messages.getMessages(session.id)).toHaveLength(1)
+diff --git a/hub/src/store/migration-v23.test.ts b/hub/src/store/migration-v23.test.ts
+new file mode 100644
+index 000000000..29af54158
+--- /dev/null
++++ b/hub/src/store/migration-v23.test.ts
+@@ -0,0 +1,57 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { Database } from 'bun:sqlite'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { Store } from './index'
++
++const tempDirs: string[] = []
++
++afterEach(() => {
++    for (const dir of tempDirs.splice(0)) {
++        rmSync(dir, { recursive: true, force: true })
++    }
++})
++
++describe('schema migration v22 to v23', () => {
++    it('adds cost and context-only presence columns and rebuilds the usage index', () => {
++        const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v23-'))
++        tempDirs.push(dir)
++        const dbPath = join(dir, 'hapi.db')
++
++        new Store(dbPath).close()
++        const legacy = new Database(dbPath)
++        legacy.exec('ALTER TABLE usage_events DROP COLUMN context_only')
++        legacy.exec('ALTER TABLE usage_events DROP COLUMN cost')
++        legacy.exec('ALTER TABLE usage_events DROP COLUMN cost_currency')
++        // Seed a v22-shaped derived row: the upgrade must wipe it so the lazy
++        // re-index rebuilds every row under the new semantics.
++        legacy.prepare(`
++            INSERT INTO usage_events (
++                session_id, source_key, source_seq, created_at, agent, model, kind,
++                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
++            ) VALUES (
++                'migration-v23-seed', 'delta|seed', 1, 0, 'opencode', NULL, 'delta',
++                100, 20, 0, 0
++            )
++        `).run()
++        legacy.exec('PRAGMA user_version = 22')
++        legacy.close()
++
++        const migrated = new Store(dbPath)
++        const internalDb = (migrated as unknown as { db: Database }).db
++        const columns = new Set(
++            (internalDb.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
++                .map((column) => column.name)
++        )
++        expect(columns.has('context_only')).toBe(true)
++        expect(columns.has('cost')).toBe(true)
++        expect(columns.has('cost_currency')).toBe(true)
++
++        // The derived index is cleared on upgrade so rows are re-derived
++        // under the new semantics instead of mixing old and new rows.
++        const seedCount = internalDb.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE session_id = 'migration-v23-seed'").get() as { n: number }
++        expect(seedCount.n).toBe(0)
++        migrated.close()
++    })
++})
+diff --git a/hub/src/store/usage.ts b/hub/src/store/usage.ts
+index 3c3644feb..cab84caf1 100644
+--- a/hub/src/store/usage.ts
++++ b/hub/src/store/usage.ts
+@@ -18,6 +18,12 @@ export type UsageEvent = {
+     lastOutputTokens: number | null
+     lastCacheReadTokens: number | null
+     lastCacheCreationTokens: number | null
++    /** True when the source message carried context-window values but zero
++     *  processed tokens (ACP agents that only report usage_update). */
++    contextOnly: boolean
++    /** Cumulative session cost from the source message, when supplied. */
++    cost: number | null
++    costCurrency: string | null
+ }
+ 
+ export type UsageScanState = {
+@@ -41,6 +47,9 @@ type UsageEventRow = {
+     last_output_tokens: number | null
+     last_cache_read_tokens: number | null
+     last_cache_creation_tokens: number | null
++    context_only: number | null
++    cost: number | null
++    cost_currency: string | null
+ }
+ 
+ function toUsageEvent(row: UsageEventRow): UsageEvent {
+@@ -59,7 +68,10 @@ function toUsageEvent(row: UsageEventRow): UsageEvent {
+         lastInputTokens: row.last_input_tokens,
+         lastOutputTokens: row.last_output_tokens,
+         lastCacheReadTokens: row.last_cache_read_tokens,
+-        lastCacheCreationTokens: row.last_cache_creation_tokens
++        lastCacheCreationTokens: row.last_cache_creation_tokens,
++        contextOnly: row.context_only === 1,
++        cost: row.cost,
++        costCurrency: row.cost_currency
+     }
+ }
+ 
+@@ -93,7 +105,10 @@ export function recordUsageScan(
+                     last_input_tokens,
+                     last_output_tokens,
+                     last_cache_read_tokens,
+-                    last_cache_creation_tokens
++                    last_cache_creation_tokens,
++                    context_only,
++                    cost,
++                    cost_currency
+                 ) VALUES (
+                     @session_id,
+                     @source_key,
+@@ -109,7 +124,10 @@ export function recordUsageScan(
+                     @last_input_tokens,
+                     @last_output_tokens,
+                     @last_cache_read_tokens,
+-                    @last_cache_creation_tokens
++                    @last_cache_creation_tokens,
++                    @context_only,
++                    @cost,
++                    @cost_currency
+                 )
+                 ON CONFLICT(session_id, source_key)
+                 DO UPDATE SET
+@@ -125,7 +143,10 @@ export function recordUsageScan(
+                     last_input_tokens = excluded.last_input_tokens,
+                     last_output_tokens = excluded.last_output_tokens,
+                     last_cache_read_tokens = excluded.last_cache_read_tokens,
+-                    last_cache_creation_tokens = excluded.last_cache_creation_tokens
++                    last_cache_creation_tokens = excluded.last_cache_creation_tokens,
++                    context_only = excluded.context_only,
++                    cost = excluded.cost,
++                    cost_currency = excluded.cost_currency
+                 WHERE usage_events.kind = 'delta'
+             `)
+             const updateCumulativeModel = db.prepare(`
+@@ -152,7 +173,10 @@ export function recordUsageScan(
+                     last_input_tokens: event.lastInputTokens,
+                     last_output_tokens: event.lastOutputTokens,
+                     last_cache_read_tokens: event.lastCacheReadTokens,
+-                    last_cache_creation_tokens: event.lastCacheCreationTokens
++                    last_cache_creation_tokens: event.lastCacheCreationTokens,
++                    context_only: event.contextOnly ? 1 : 0,
++                    cost: event.cost,
++                    cost_currency: event.costCurrency
+                 })
+                 if (event.kind === 'cumulative' && event.model !== null) {
+                     updateCumulativeModel.run(event.model, event.sessionId, event.sourceKey)
+@@ -195,7 +219,10 @@ export function getUsageEvents(db: Database, sessionIds: string[]): UsageEvent[]
+             last_input_tokens,
+             last_output_tokens,
+             last_cache_read_tokens,
+-            last_cache_creation_tokens
++            last_cache_creation_tokens,
++            context_only,
++            cost,
++            cost_currency
+         FROM usage_events
+         WHERE session_id IN (${placeholders})
+         ORDER BY created_at ASC, source_seq ASC
+@@ -240,7 +267,10 @@ export function transferUsageSession(db: Database, fromSessionId: string, toSess
+                 last_input_tokens,
+                 last_output_tokens,
+                 last_cache_read_tokens,
+-                last_cache_creation_tokens
++                last_cache_creation_tokens,
++                context_only,
++                cost,
++                cost_currency
+             )
+             SELECT
+                 ?,
+@@ -257,7 +287,10 @@ export function transferUsageSession(db: Database, fromSessionId: string, toSess
+                 last_input_tokens,
+                 last_output_tokens,
+                 last_cache_read_tokens,
+-                last_cache_creation_tokens
++                last_cache_creation_tokens,
++                context_only,
++                cost,
++                cost_currency
+             FROM usage_events
+             WHERE session_id = ?
+         `).run(toSessionId, fromSessionId)
+diff --git a/hub/src/sync/usageService.test.ts b/hub/src/sync/usageService.test.ts
+index 70efa476d..08c4f6800 100644
+--- a/hub/src/sync/usageService.test.ts
++++ b/hub/src/sync/usageService.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, expect, it } from 'bun:test'
++import { Database } from 'bun:sqlite'
+ import { Store } from '../store'
+ import { getUsageSummary } from './usageService'
+ 
+@@ -866,4 +867,370 @@ describe('usage service', () => {
+         expect(store.usage.getEvents([target.id])).toHaveLength(1)
+         store.close()
+     })
++
++    it('marks an ACP agent as context-only when it reports context without tokens', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-context-only-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default',
++            'some-model'
++        )
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                model: 'some-model',
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 4_200,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.totals.requests).toBe(0)
++        expect(result.totals.totalTokens).toBe(0)
++        expect(result.totals.costs).toEqual([])
++        expect(result.agents).toEqual([
++            expect.objectContaining({ agent: 'opencode', status: 'context-only', sessions: 1, costs: [] })
++        ])
++        store.close()
++    })
++
++    it('treats an explicit zero context or a context window alone as context presence', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-zero-context-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default',
++            'some-model'
++        )
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                model: 'some-model',
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 0,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.agents).toEqual([
++            expect.objectContaining({ agent: 'opencode', status: 'context-only', sessions: 1 })
++        ])
++        store.close()
++    })
++
++    it('keeps costs per currency instead of collapsing them into one scalar', () => {        const store = new Store(':memory:')
++        const usdSession = store.sessions.getOrCreateSession(
++            'acp-cost-usd-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const eurSession = store.sessions.getOrCreateSession(
++            'acp-cost-eur-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const costMessage = (cost: number, currency: string) => ({
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost,
++                costCurrency: currency,
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++        addAgentMessage(store, usdSession.id, costMessage(1, 'USD'))
++        addAgentMessage(store, eurSession.id, costMessage(1, 'EUR'))
++
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.totals.costs).toEqual([
++            { amount: 1, currency: 'EUR' },
++            { amount: 1, currency: 'USD' }
++        ])
++        expect(result.agents).toEqual([
++            expect.objectContaining({ agent: 'opencode', status: 'cost-only', costs: [
++                { amount: 1, currency: 'EUR' },
++                { amount: 1, currency: 'USD' }
++            ] })
++        ])
++        store.close()
++    })
++
++    it('derives bounded-range cost from the cumulative baseline', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-cost-range-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const costMessage = (cost: number, currency: string) => ({
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost,
++                costCurrency: currency,
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++        const day = 24 * 60 * 60 * 1000
++        // USD 10 was already spent before the 7-day window; USD 11 is the
++        // cumulative total now. The 7-day view must show the USD 1 growth,
++        // while the all-time view shows the full USD 11.
++        addAgentMessage(store, session.id, costMessage(10, 'USD'), Date.now() - 10 * day)
++        addAgentMessage(store, session.id, costMessage(11, 'USD'))
++
++        const sevenDay = getUsageSummary(store, 'default', '7d')
++        expect(sevenDay.totals.costs).toEqual([{ amount: 1, currency: 'USD' }])
++        const allTime = getUsageSummary(store, 'default', 'all')
++        expect(allTime.totals.costs).toEqual([{ amount: 11, currency: 'USD' }])
++        store.close()
++    })
++
++    it('omits pre-range spend when an old session first reports cost inside the range', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-cost-old-session-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const day = 24 * 60 * 60 * 1000
++        // The session predates the 7-day window but its first (and only) cost
++        // sample lands inside it. The bounded view cannot attribute how much
++        // was already spent, so it omits the session; all-time keeps the full
++        // cumulative amount.
++        const internalDb = (store as unknown as { db: Database }).db
++        internalDb.prepare('UPDATE sessions SET created_at = ? WHERE id = ?')
++            .run(Date.now() - 30 * day, session.id)
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost: 5,
++                costCurrency: 'USD',
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++
++        const sevenDay = getUsageSummary(store, 'default', '7d')
++        expect(sevenDay.totals.costs).toEqual([])
++        const allTime = getUsageSummary(store, 'default', 'all')
++        expect(allTime.totals.costs).toEqual([{ amount: 5, currency: 'USD' }])
++        store.close()
++    })
++
++    it('preserves spend across cumulative-cost resets', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-cost-reset-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const costMessage = (cost: number) => ({
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost,
++                costCurrency: 'USD',
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++        const day = 24 * 60 * 60 * 1000
++        // 10 -> 11 accumulates 1; the drop to 2 is a provider reset that
++        // restarts the counter, so 2 more counts. All-time total: 13.
++        addAgentMessage(store, session.id, costMessage(10), Date.now() - 10 * day)
++        addAgentMessage(store, session.id, costMessage(11), Date.now() - 2 * day)
++        addAgentMessage(store, session.id, costMessage(2))
++
++        const allTime = getUsageSummary(store, 'default', 'all')
++        expect(allTime.totals.costs).toEqual([{ amount: 13, currency: 'USD' }])
++        // 7-day view: baseline 10, in-range 11 -> 2 is 1 + 2 = 3.
++        const sevenDay = getUsageSummary(store, 'default', '7d')
++        expect(sevenDay.totals.costs).toEqual([{ amount: 3, currency: 'USD' }])
++        store.close()
++    })
++
++    it('omits a session cost whose baseline currency changed inside the range', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-cost-currency-switch-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const costMessage = (cost: number, currency: string) => ({
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost,
++                costCurrency: currency,
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++        const day = 24 * 60 * 60 * 1000
++        addAgentMessage(store, session.id, costMessage(10, 'USD'), Date.now() - 10 * day)
++        addAgentMessage(store, session.id, costMessage(2, 'EUR'))
++
++        const sevenDay = getUsageSummary(store, 'default', '7d')
++        expect(sevenDay.totals.costs).toEqual([])
++        store.close()
++    })
++
++    it('records cumulative ACP cost once per session and marks cost-only agents', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-cost-only-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost: 1.25,
++                costCurrency: 'USD',
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        }, Date.now() - 60_000)
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost: 2.5,
++                costCurrency: 'USD',
++                info: {
++                    total: { inputTokens: 0, outputTokens: 0 },
++                    contextTokens: 1_200,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.totals.costs).toEqual([{ amount: 2.5, currency: 'USD' }])
++        expect(result.totals.requests).toBe(0)
++        expect(result.agents).toEqual([
++            expect.objectContaining({ agent: 'opencode', status: 'cost-only', costs: [{ amount: 2.5, currency: 'USD' }] })
++        ])
++        store.close()
++    })
++
++    it('keeps cost separate from token events and counts the latest cost once per session', () => {
++        const store = new Store(':memory:')
++        const session = store.sessions.getOrCreateSession(
++            'acp-tokens-plus-cost-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default',
++            'some-model'
++        )
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost: 0.5,
++                costCurrency: 'USD',
++                info: {
++                    total: { inputTokens: 100, outputTokens: 20 },
++                    contextTokens: 4_200,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++        addAgentMessage(store, session.id, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                cost: 1.1,
++                costCurrency: 'USD',
++                info: {
++                    total: { inputTokens: 60, outputTokens: 15 },
++                    contextTokens: 5_000,
++                    modelContextWindow: 200_000
++                }
++            }
++        })
++
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.totals.requests).toBe(2)
++        expect(result.totals.inputTokens).toBe(160)
++        expect(result.totals.outputTokens).toBe(35)
++        // Cumulative cost is not a per-turn delta: the latest value wins.
++        expect(result.totals.costs).toEqual([{ amount: 1.1, currency: 'USD' }])
++        expect(result.agents).toEqual([
++            expect.objectContaining({ agent: 'opencode', status: 'complete', costs: [{ amount: 1.1, currency: 'USD' }] })
++        ])
++        store.close()
++    })
++
++    it('reports agents without any usage events as not-reported', () => {
++        const store = new Store(':memory:')
++        const silent = store.sessions.getOrCreateSession(
++            'acp-silent-test',
++            { path: '/tmp', host: 'test', flavor: 'opencode' },
++            null,
++            'default'
++        )
++        const reporting = store.sessions.getOrCreateSession(
++            'acp-reporting-test',
++            { path: '/tmp', host: 'test', flavor: 'claude' },
++            null,
++            'default',
++            'test-model'
++        )
++        addAgentMessage(store, reporting.id, {
++            type: 'output',
++            data: {
++                type: 'assistant',
++                message: { id: 'claude-usage', usage: { input_tokens: 10, output_tokens: 2 } }
++            }
++        })
++
++        const result = getUsageSummary(store, 'default', 'all')
++        expect(result.agents).toEqual([
++            expect.objectContaining({ agent: 'claude', status: 'complete', sessions: 1 }),
++            expect.objectContaining({ agent: 'opencode', status: 'not-reported', sessions: 1, costs: [] })
++        ])
++        expect(result.totals.costs).toEqual([])
++        store.close()
++    })
+ })
+diff --git a/hub/src/sync/usageService.ts b/hub/src/sync/usageService.ts
+index 1dac14b4b..08771a841 100644
+--- a/hub/src/sync/usageService.ts
++++ b/hub/src/sync/usageService.ts
+@@ -1,4 +1,4 @@
+-import type { UsageSummaryBucket, UsageSummaryResponse } from '@hapi/protocol/apiTypes'
++import type { UsageAgentStatus, UsageCost, UsageSummaryBucket, UsageSummaryResponse } from '@hapi/protocol/apiTypes'
+ import type { StoredMessage, StoredSession } from '../store'
+ import type { UsageEvent } from '../store/usage'
+ import type { Store } from '../store'
+@@ -17,6 +17,13 @@ function asCount(value: unknown): number | null {
+         : null
+ }
+ 
++/** Cost amounts keep their fractional precision (unlike token counts). */
++function asAmount(value: unknown): number | null {
++    return typeof value === 'number' && Number.isFinite(value) && value >= 0
++        ? value
++        : null
++}
++
+ function firstCount(record: RecordValue, ...keys: string[]): number {
+     for (const key of keys) {
+         const value = asCount(record[key])
+@@ -25,6 +32,29 @@ function firstCount(record: RecordValue, ...keys: string[]): number {
+     return 0
+ }
+ 
++/**
++ * ACP `usage_update.cost` is a cumulative session cost. HAPI's generic wire
++ * carries it flat (`cost` + `costCurrency`), but the ACP object shape
++ * (`{ amount, currency }`) is also accepted for robustness.
++ */
++function parseUsageCost(data: RecordValue): { amount: number; currency: string } | null {
++    const costRecord = asRecord(data.cost)
++    const amount = costRecord !== null ? asAmount(costRecord.amount) : asAmount(data.cost)
++    if (amount === null) return null
++    const currencyValue = costRecord !== null ? costRecord.currency : data.costCurrency
++    const currency = typeof currencyValue === 'string' && currencyValue.trim()
++        ? currencyValue.trim()
++        : 'USD'
++    return { amount, currency }
++}
++
++const AGENT_STATUS_RANK: Record<UsageAgentStatus, number> = {
++    'complete': 3,
++    'cost-only': 2,
++    'context-only': 1,
++    'not-reported': 0
++}
++
+ function normalizeInputTokens(
+     data: RecordValue,
+     inputTokens: number,
+@@ -94,7 +124,10 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
+             lastInputTokens: null,
+             lastOutputTokens: null,
+             lastCacheReadTokens: null,
+-            lastCacheCreationTokens: null
++            lastCacheCreationTokens: null,
++            contextOnly: false,
++            cost: null,
++            costCurrency: null
+         }
+     }
+ 
+@@ -131,7 +164,19 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
+         const outputTokens = firstCount(total, 'outputTokens', 'output_tokens')
+         const cacheReadTokens = firstCount(total, 'cachedInputTokens', 'cached_input_tokens', 'cacheReadTokens', 'cache_read_input_tokens')
+         const cacheCreationTokens = firstCount(total, 'cacheWriteInputTokens', 'cache_write_input_tokens', 'cacheCreationTokens', 'cache_creation_input_tokens')
+-        if (rawInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) return null
++        const hasProcessedTokens = rawInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens > 0
++        const cost = parseUsageCost(data)
++        // Zero-token messages still carry presence information: an ACP agent
++        // may report only context (`usage_update.used/size`) or only a
++        // cumulative session cost. Both are indexed so the UI can distinguish
++        // "context-only"/"cost-only" from an agent that reports nothing. An
++        // explicit zero context is still a report (asCount returns null only
++        // for missing values), and a context window alone is a presence too.
++        const contextTokens = asCount(info.contextTokens ?? info.context_tokens)
++        const contextWindow = asCount(info.modelContextWindow ?? info.model_context_window)
++        const contextOnly = !hasProcessedTokens
++            && (contextTokens !== null || contextWindow !== null)
++        if (!hasProcessedTokens && !contextOnly && cost === null) return null
+         const threadId = explicitThreadId ?? session.id
+         const scope = typeof data.scopeRole === 'string'
+             ? data.scopeRole
+@@ -207,7 +252,10 @@ function parseUsageEvent(session: StoredSession, message: StoredMessage): UsageE
+             lastInputTokens,
+             lastOutputTokens,
+             lastCacheReadTokens,
+-            lastCacheCreationTokens
++            lastCacheCreationTokens,
++            contextOnly,
++            cost: cost?.amount ?? null,
++            costCurrency: cost?.currency ?? null
+         }
+     }
+ 
+@@ -357,6 +405,32 @@ export function getUsageSummary(
+     const cumulativeFingerprints = new Set<string>()
+     const dayFormatter = createDayFormatter(timeZone)
+ 
++    // All-time agent availability is independent of the selected range: a
++    // session that ever reported tokens/context/cost keeps that status even
++    // when the current range has no events.
++    const sessionStatus = new Map<string, UsageAgentStatus>()
++    for (const event of events) {
++        const status: UsageAgentStatus | null = event.inputTokens + event.outputTokens
++                + event.cacheReadTokens + event.cacheCreationTokens > 0
++            ? 'complete'
++            : event.cost !== null
++                ? 'cost-only'
++                : event.contextOnly
++                    ? 'context-only'
++                    : null
++        if (!status) continue
++        const previous = sessionStatus.get(event.sessionId)
++        if (!previous || AGENT_STATUS_RANK[status] > AGENT_STATUS_RANK[previous]) {
++            sessionStatus.set(event.sessionId, status)
++        }
++    }
++
++    // Cumulative session cost is a point-in-time value, not a delta: every
++    // reported point is kept in chronological order so resets can be detected.
++    // For bounded ranges the amount shown is the cumulative growth inside the
++    // range (points walked against the latest point before the range).
++    type CostPoint = { amount: number; currency: string; createdAt: number; sourceSeq: number }
++    const sessionCostPoints = new Map<string, CostPoint[]>()
+     for (const event of events) {
+         let inputTokens = event.inputTokens
+         let outputTokens = event.outputTokens
+@@ -408,6 +482,16 @@ export function getUsageSummary(
+                 cumulativeFingerprints.add(fingerprint)
+             }
+         }
++        if (event.cost !== null) {
++            const points = sessionCostPoints.get(event.sessionId) ?? []
++            points.push({
++                amount: event.cost,
++                currency: event.costCurrency ?? 'USD',
++                createdAt: event.createdAt,
++                sourceSeq: event.sourceSeq
++            })
++            sessionCostPoints.set(event.sessionId, points)
++        }
+         if (duplicateCumulativeEvent || !isInRange(event) || inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens <= 0) continue
+         // Cache reads and writes partition processed input. Preserve the
+         // request and its primary token counts when a provider emits an
+@@ -432,18 +516,108 @@ export function getUsageSummary(
+         sessionsWithUsage.add(event.sessionId)
+     }
+ 
++    // Costs are never summed across currencies into one labeled scalar: each
++    // currency keeps its own total (e.g. USD 1 + EUR 1 stays two entries).
++    // For a bounded range the session cost is the cumulative growth inside
++    // the range, walking every in-range point against the previous one: a
++    // counter reset (a lower value) contributes its full amount, so spend
++    // accumulated before the reset is not discarded. A currency change in the
++    // chain cannot be diffed, so that session's cost is omitted.
++    const rangedCost = new Map<string, { amount: number; currency: string }>()
++    const sessionById = new Map(sessions.map((session) => [session.id, session]))
++    for (const [sessionId, points] of sessionCostPoints) {
++        const session = sessionById.get(sessionId)
++        const baseline = from !== null
++            ? [...points].reverse().find((point) => point.createdAt < from) ?? null
++            : null
++        const inRange = from !== null
++            ? points.filter((point) => point.createdAt >= from && point.createdAt <= now)
++            : points
++        if (inRange.length === 0) continue
++        // A missing baseline is only a true zero when the session itself
++        // started inside the range; an older session with its first cost
++        // sample inside the window cannot be attributed, so it is omitted.
++        if (from !== null && !baseline && session && session.createdAt < from) {
++            continue
++        }
++        let previous = baseline
++        let total = 0
++        let currency: string | null = null
++        let mismatch = false
++        for (const point of inRange) {
++            if (previous !== null && previous.currency !== point.currency) {
++                mismatch = true
++                break
++            }
++            if (previous === null) {
++                total += point.amount
++            } else {
++                total += point.amount >= previous.amount
++                    ? point.amount - previous.amount
++                    : point.amount
++            }
++            previous = point
++            currency = point.currency
++        }
++        if (mismatch) continue
++        if (total > 0 && currency !== null) {
++            rangedCost.set(sessionId, { amount: total, currency })
++        }
++    }
++    const totalCosts = new Map<string, number>()
++    for (const cost of rangedCost.values()) {
++        totalCosts.set(cost.currency, (totalCosts.get(cost.currency) ?? 0) + cost.amount)
++    }
++
++    // Per-agent availability: every session's agent starts as "not-reported";
++    // the strongest status observed across its events upgrades it.
++    const agentEntries = new Map<string, { status: UsageAgentStatus; sessions: number; costs: Map<string, number> }>()
++    for (const session of sessions) {
++        const agent = sessionAgent(session)
++        if (agent === 'unknown') continue
++        const entry = agentEntries.get(agent)
++            ?? { status: 'not-reported' as UsageAgentStatus, sessions: 0, costs: new Map<string, number>() }
++        entry.sessions += 1
++        const status = sessionStatus.get(session.id)
++        if (status && AGENT_STATUS_RANK[status] > AGENT_STATUS_RANK[entry.status]) {
++            entry.status = status
++        }
++        agentEntries.set(agent, entry)
++    }
++    for (const [sessionId, cost] of rangedCost) {
++        const session = sessionById.get(sessionId)
++        if (!session) continue
++        const agent = sessionAgent(session)
++        if (agent === 'unknown') continue
++        const entry = agentEntries.get(agent)
++        if (!entry) continue
++        entry.costs.set(cost.currency, (entry.costs.get(cost.currency) ?? 0) + cost.amount)
++    }
++
++    const toCosts = (values: Map<string, number>): UsageCost[] => Array.from(values.entries())
++        .map(([currency, amount]) => ({ amount, currency }))
++        .sort((a, b) => b.amount - a.amount || a.currency.localeCompare(b.currency))
++
+     const sortBuckets = (values: Map<string, Totals>): UsageSummaryBucket[] => Array.from(values.entries())
+         .map(([key, value]) => toBucket(key, value))
+         .sort((a, b) => b.totalTokens - a.totalTokens)
+ 
+     return {
+         range: { from, to: now },
+-        totals: { ...totals, sessions: sessionsWithUsage.size },
++        totals: { ...totals, sessions: sessionsWithUsage.size, costs: toCosts(totalCosts) },
+         daily: Array.from(daily.entries())
+             .map(([key, value]) => toBucket(key, value))
+             .sort((a, b) => a.key.localeCompare(b.key)),
+         byAgent: sortBuckets(byAgent),
+         byModel: sortBuckets(byModel),
++        agents: Array.from(agentEntries.entries())
++            .map(([agent, entry]) => ({
++                agent,
++                status: entry.status,
++                sessions: entry.sessions,
++                costs: toCosts(entry.costs)
++            }))
++            .sort((a, b) => a.agent.localeCompare(b.agent)),
+         updatedAt: now
+     }
+ }
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 5db9ee851..08879977c 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -869,6 +869,24 @@ export type UsageSummaryBucket = {
+     requests: number
+ }
+ 
++export type UsageAgentStatus = 'complete' | 'context-only' | 'cost-only' | 'not-reported'
++
++/** One cumulative cost amount in its own currency (never collapsed). */
++export type UsageCost = {
++    amount: number
++    currency: string
++}
++
++export type UsageAgentAvailability = {
++    agent: string
++    /** Whether the underlying agent reports full token usage, only context,
++     *  only cumulative cost, or nothing at all. */
++    status: UsageAgentStatus
++    sessions: number
++    /** Latest cumulative cost per currency across this agent's sessions. */
++    costs: UsageCost[]
++}
++
+ export type UsageSummaryResponse = {
+     range: {
+         from: number | null
+@@ -883,9 +901,12 @@ export type UsageSummaryResponse = {
+         uncachedTokens: number
+         requests: number
+         sessions: number
++        /** Latest cumulative cost per currency across sessions. */
++        costs: UsageCost[]
+     }
+     daily: Array<UsageSummaryBucket & { key: string }>
+     byAgent: UsageSummaryBucket[]
+     byModel: UsageSummaryBucket[]
++    agents: UsageAgentAvailability[]
+     updatedAt: number
+ }
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index bd22c1df3..b786131b0 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -715,7 +715,7 @@ export default {
+   'settings.storage.chartEmpty': 'No on-disk size to chart yet.',
+   'settings.usage.title': 'Token usage',
+   'settings.usage.summary': 'Token-only usage dashboard',
+-  'settings.usage.description': 'Tokens processed while agents are managed by HAPI. Imported earlier transcript usage is excluded; costs are not included.',
++  'settings.usage.description': 'Tokens processed while agents are managed by HAPI. Imported earlier transcript usage is excluded; cost is shown only when the underlying agent reports it.',
+   'settings.usage.range.label': 'Usage range',
+   'settings.usage.range.7d': '7 days',
+   'settings.usage.range.30d': '30 days',
+@@ -731,9 +731,17 @@ export default {
+   'settings.usage.cacheCreation': 'Cache creation (included)',
+   'settings.usage.cacheHitRate': 'Cache hit rate',
+   'settings.usage.requests': 'Requests',
++  'settings.usage.cost': 'Agent-reported cost',
+   'settings.usage.daily.title': 'Daily trend',
+   'settings.usage.agent.title': 'By agent',
+   'settings.usage.model.title': 'By model',
++  'settings.usage.agents.title': 'Per-agent reporting',
++  'settings.usage.agents.description': 'What each agent actually reports to HAPI. Agents without complete token accounting cannot be reconstructed from context size alone.',
++  'settings.usage.agents.empty': 'No agents with sessions yet.',
++  'settings.usage.agents.status.complete': 'Full tokens',
++  'settings.usage.agents.status.contextOnly': 'Context only',
++  'settings.usage.agents.status.costOnly': 'Cost only',
++  'settings.usage.agents.status.notReported': 'Not reported',
+   'settings.usage.bucketDetails': '{requests} requests · {input} in · {output} out',
+   'settings.usage.sessions': '{count} sessions with usage',
+   'settings.general.description': 'Language, companion pairing, and general application preferences.',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 395e0ec72..1f087ee08 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -714,7 +714,7 @@ export default {
+   'settings.storage.chartEmpty': '暂无可绘制的磁盘占用。',
+   'settings.usage.title': 'Token 用量',
+   'settings.usage.summary': 'Token 用量看板',
+-  'settings.usage.description': '统计 Agent 由 HAPI 管理期间处理的 Token；不含导入前的历史会话用量和费用估算。',
++  'settings.usage.description': '统计 Agent 由 HAPI 管理期间处理的 Token；不含导入前的历史会话用量。费用仅在 Agent 主动上报时显示。',
+   'settings.usage.range.label': '用量范围',
+   'settings.usage.range.7d': '近 7 天',
+   'settings.usage.range.30d': '近 30 天',
+@@ -730,9 +730,17 @@ export default {
+   'settings.usage.cacheCreation': '缓存创建（已计入）',
+   'settings.usage.cacheHitRate': '缓存命中率',
+   'settings.usage.requests': '请求数',
++  'settings.usage.cost': 'Agent 上报费用',
+   'settings.usage.daily.title': '每日趋势',
+   'settings.usage.agent.title': '按 Agent',
+   'settings.usage.model.title': '按模型',
++  'settings.usage.agents.title': '各 Agent 上报情况',
++  'settings.usage.agents.description': '每个 Agent 实际向 HAPI 上报了什么。没有完整 Token 数据的 Agent，无法仅凭上下文大小还原用量。',
++  'settings.usage.agents.empty': '还没有任何 Agent 会话。',
++  'settings.usage.agents.status.complete': '完整 Token',
++  'settings.usage.agents.status.contextOnly': '仅上下文',
++  'settings.usage.agents.status.costOnly': '仅费用',
++  'settings.usage.agents.status.notReported': '未上报',
+   'settings.usage.bucketDetails': '{requests} 次请求 · 输入 {input} · 输出 {output}',
+   'settings.usage.sessions': '{count} 个会话有用量记录',
+   'settings.general.description': '语言、伴侣应用配对和通用应用偏好。',
+diff --git a/web/src/routes/settings/usage.test.ts b/web/src/routes/settings/usage.test.ts
+new file mode 100644
+index 000000000..6ae1188c7
+--- /dev/null
++++ b/web/src/routes/settings/usage.test.ts
+@@ -0,0 +1,24 @@
++import { describe, expect, it } from 'vitest'
++import { formatCost } from './usage'
++
++describe('formatCost', () => {
++    it('formats standard currency amounts', () => {
++        expect(formatCost(2.5, 'USD')).toBe('$2.50')
++    })
++
++    it('keeps sub-cent amounts nonzero', () => {
++        const rendered = formatCost(0.004, 'USD')
++        expect(rendered).not.toBe('$0.00')
++        expect(rendered).toContain('0.00')
++    })
++
++    it('keeps sub-unit amounts nonzero for zero-decimal currencies', () => {
++        const rendered = formatCost(0.4, 'JPY')
++        expect(rendered).not.toBe('¥0')
++        expect(rendered).toContain('0.4')
++    })
++
++    it('falls back to a plain amount for unknown currencies', () => {
++        expect(formatCost(0.5, 'NOPE')).toBe('0.5000 NOPE')
++    })
++})
+diff --git a/web/src/routes/settings/usage.tsx b/web/src/routes/settings/usage.tsx
+index c865a896c..dfc59201d 100644
+--- a/web/src/routes/settings/usage.tsx
++++ b/web/src/routes/settings/usage.tsx
+@@ -1,6 +1,6 @@
+ import { useMemo, useState } from 'react'
+ import { useQuery } from '@tanstack/react-query'
+-import type { UsageSummaryBucket } from '@hapi/protocol/apiTypes'
++import type { UsageAgentStatus, UsageCost, UsageSummaryBucket } from '@hapi/protocol/apiTypes'
+ import { SettingsPageContent, SettingsRow, SettingsSection } from '@/components/settings/SettingsPrimitives'
+ import { useAppContext } from '@/lib/app-context'
+ import { queryKeys } from '@/lib/query-keys'
+@@ -15,6 +15,62 @@ function formatTokens(value: number): string {
+     return `${(value / 1_000_000_000).toFixed(1)}B`
+ }
+ 
++export function formatCost(amount: number, currency: string): string {
++    try {
++        const base = new Intl.NumberFormat(undefined, { style: 'currency', currency })
++        // Costs below the currency's smallest unit (e.g. USD 0.004, or 0.4
++        // for a zero-decimal currency such as JPY) would render as zero;
++        // use significant digits so nonzero spend stays visible.
++        const smallestUnit = 10 ** -(base.resolvedOptions().maximumFractionDigits ?? 2)
++        const precision = amount > 0 && amount < smallestUnit
++            ? { minimumSignificantDigits: 2, maximumSignificantDigits: 4 }
++            : {}
++        return new Intl.NumberFormat(undefined, { style: 'currency', currency, ...precision }).format(amount)
++    } catch {
++        return `${amount.toFixed(4)} ${currency}`
++    }
++}
++
++function formatCosts(costs: UsageCost[]): string {
++    return costs.map((cost) => formatCost(cost.amount, cost.currency)).join(' + ')
++}
++
++const AGENT_STATUS_ORDER: UsageAgentStatus[] = ['complete', 'context-only', 'cost-only', 'not-reported']
++
++type AgentStatusStyle = Record<UsageAgentStatus, { className: string; label: string }>
++
++function AgentAvailabilityList(props: { rows: Array<{ agent: string; status: UsageAgentStatus; sessions: number; costs: UsageCost[] }> }) {
++    const { t } = useTranslation()
++    if (props.rows.length === 0) {
++        return <div className="px-3 py-4 text-sm text-[var(--app-hint)]">{t('settings.usage.agents.empty')}</div>
++    }
++    const statusStyle: AgentStatusStyle = {
++        'complete': { className: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400', label: t('settings.usage.agents.status.complete') },
++        'context-only': { className: 'bg-amber-500/15 text-amber-600 dark:text-amber-400', label: t('settings.usage.agents.status.contextOnly') },
++        'cost-only': { className: 'bg-sky-500/15 text-sky-600 dark:text-sky-400', label: t('settings.usage.agents.status.costOnly') },
++        'not-reported': { className: 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]', label: t('settings.usage.agents.status.notReported') }
++    }
++    const rows = [...props.rows].sort((a, b) => {
++        const rankDiff = AGENT_STATUS_ORDER.indexOf(a.status) - AGENT_STATUS_ORDER.indexOf(b.status)
++        return rankDiff !== 0 ? rankDiff : a.agent.localeCompare(b.agent)
++    })
++    return (
++        <div className="divide-y divide-[var(--app-divider)]">
++            {rows.map((row) => (
++                <div key={row.agent} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
++                    <span className="min-w-0 truncate font-medium text-[var(--app-fg)]">{row.agent}</span>
++                    <span className="flex shrink-0 items-center gap-2">
++                        {row.costs.length > 0 ? <span className="text-xs text-[var(--app-hint)]">{formatCosts(row.costs)}</span> : null}
++                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle[row.status].className}`}>
++                            {statusStyle[row.status].label}
++                        </span>
++                    </span>
++                </div>
++            ))}
++        </div>
++    )
++}
++
+ function UsageBarList(props: { rows: UsageSummaryBucket[]; empty: string }) {
+     const { t } = useTranslation()
+     const max = props.rows[0]?.totalTokens ?? 0
+@@ -101,6 +157,12 @@ export default function SettingsUsagePage() {
+                                 <div className="mt-1 text-xl font-semibold text-[var(--app-fg)]">{typeof value === 'number' ? formatTokens(value) : value}</div>
+                             </div>
+                         ))}
++                        {query.data.totals.costs.length > 0 ? (
++                            <div className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-3 shadow-sm">
++                                <div className="text-xs text-[var(--app-hint)]">{t('settings.usage.cost')}</div>
++                                <div className="mt-1 text-xl font-semibold text-[var(--app-fg)]">{formatCosts(query.data.totals.costs)}</div>
++                            </div>
++                        ) : null}
+                     </div>
+                     <SettingsSection title={t('settings.usage.daily.title')}>
+                         {query.data.daily.length === 0 ? <div className="px-3 py-4 text-sm text-[var(--app-hint)]">{t('settings.usage.empty')}</div> : (
+@@ -123,6 +185,9 @@ export default function SettingsUsagePage() {
+                             <UsageBarList rows={query.data.byModel} empty={t('settings.usage.empty')} />
+                         </SettingsSection>
+                     </div>
++                    <SettingsSection title={t('settings.usage.agents.title')} description={t('settings.usage.agents.description')}>
++                        <AgentAvailabilityList rows={query.data.agents} />
++                    </SettingsSection>
+                     <div className="text-xs text-[var(--app-hint)]">
+                         {t('settings.usage.sessions', { count: query.data.totals.sessions })}
+                     </div>

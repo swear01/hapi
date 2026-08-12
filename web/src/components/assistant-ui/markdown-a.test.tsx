@@ -60,6 +60,12 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
         isSyncingTail: false,
         isLoadingMoreMessages: false,
         loadOlderMessagesPreservingScroll: async () => 'loaded',
+        jumpToPrompt: async () => false,
+        loadingPromptMessageId: null,
+        scrollToConversationStart: async () => false,
+        isLoadingConversationStart: false,
+        isNavigationInFlight: false,
+        showSessionSummaryInChat: false,
         ...overrides,
     }
 }
@@ -197,7 +203,6 @@ describe('cross-tab sync via storage event', () => {
             window.dispatchEvent(new StorageEvent('storage', {
                 key: STORAGE_KEY,
                 newValue: JSON.stringify(['obsidian']),
-                storageArea: localStorage,
             }))
         })
 

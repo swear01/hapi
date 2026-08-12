@@ -12,6 +12,8 @@ describe('DEFAULT_COMPOSER_TOOLBAR_LAYOUT', () => {
             'attachment',
             'settings',
             'expand',
+            'model',
+            'effort',
             'piModel',
             'piThinking',
             'terminal',
@@ -82,8 +84,8 @@ describe('normalizeComposerToolbarLayout', () => {
             'piThinking',
             'terminal',
             'expand',
-            'abort',
-            'switch',
+            'model',
+            'effort',
             'attachment',
         ])
         expect(result.left).toHaveLength(layout.left.length)

@@ -9,6 +9,9 @@ import type {
     CodexDesktopStatusResponse,
     CodexArchiveSessionResponse,
     CodexCollaborationMode,
+    ClaudeImportSessionsRequest,
+    ClaudeImportSessionsResponse,
+    ClaudeLocalSessionsResponse,
     CopilotAgentMode,
     FileSearchResponse,
     MachinesResponse,
@@ -16,9 +19,14 @@ import type {
     PermissionMode,
     PiImportSessionsResponse,
     PiLocalSessionsResponse,
+    NotificationCopyConfig,
+    NotificationCopyResponse,
+    NotificationPreferences,
+    NotificationPreferencesUpdate,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
     PushVapidPublicKeyResponse,
+    TestPushResponse,
     SlashCommandsResponse,
     SkillsResponse,
     SpawnResponse,
@@ -48,14 +56,29 @@ import type {
     QueuedStateResponse,
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
+    VacuumStorageResponse,
     HubSettingsResponse,
     UpdateHubSettingsRequest,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
+import type {
+    AgentProvider,
+    ProviderListResponse,
+    ProviderHealthCheckResponse,
+    ProviderMutationResponse,
+    ProviderProfileInput,
+    ProviderProfileUpdate
+} from '@hapi/protocol'
 import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+import type { FleetUpgradePolicy, HubUpgradeOffer } from '@hapi/protocol/upgradeChannel'
+
+export type UpgradeInfoResponse = {
+    offer: HubUpgradeOffer
+    policy: FleetUpgradePolicy
+}
 
 export type ProviderCredentialSource = 'env' | 'settings' | 'none'
 
@@ -258,6 +281,37 @@ export class ApiClient {
         })
     }
 
+    async getNotificationPreferences(): Promise<NotificationPreferences> {
+        return await this.request<NotificationPreferences>('/api/notification-preferences')
+    }
+
+    async updateNotificationPreferences(
+        update: NotificationPreferencesUpdate
+    ): Promise<NotificationPreferences> {
+        return await this.request<NotificationPreferences>('/api/notification-preferences', {
+            method: 'PUT',
+            body: JSON.stringify(update)
+        })
+    }
+
+    async sendTestPush(): Promise<TestPushResponse> {
+        return await this.request<TestPushResponse>('/api/push/test', {
+            method: 'POST',
+            body: JSON.stringify({})
+        })
+    }
+
+    async getNotificationCopy(): Promise<NotificationCopyResponse> {
+        return await this.request<NotificationCopyResponse>('/api/notification-copy')
+    }
+
+    async updateNotificationCopy(copy: NotificationCopyConfig): Promise<NotificationCopyResponse> {
+        return await this.request<NotificationCopyResponse>('/api/notification-copy', {
+            method: 'PUT',
+            body: JSON.stringify(copy)
+        })
+    }
+
     async syncCodexSession(payload?: CodexDesktopSyncRequest): Promise<CodexDesktopScriptResponse> {
         // 中文注释：当前按钮语义已改为“从 Codex 导入到 Hapi”；这里提交的是本地 transcript 对应的 Codex thread ID 列表。
         return await this.request<CodexDesktopScriptResponse>('/api/codex/sync-session', {
@@ -280,6 +334,21 @@ export class ApiClient {
         if (machineId?.trim()) params.set('machineId', machineId.trim())
         const query = params.size ? `?${params.toString()}` : ''
         return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
+    }
+
+    async getClaudeSessions(cwd?: string | null, machineId?: string | null): Promise<ClaudeLocalSessionsResponse> {
+        const params = new URLSearchParams()
+        if (cwd?.trim()) params.set('cwd', cwd.trim())
+        if (machineId?.trim()) params.set('machineId', machineId.trim())
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.request<ClaudeLocalSessionsResponse>(`/api/claude/sessions${query}`)
+    }
+
+    async importClaudeSessions(payload: ClaudeImportSessionsRequest): Promise<ClaudeImportSessionsResponse> {
+        return await this.request<ClaudeImportSessionsResponse>('/api/claude/import-sessions', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })
     }
 
     async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
@@ -540,6 +609,14 @@ export class ApiClient {
         return response as CancelMessageResponse
     }
 
+    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
+        const response = await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
+            { method: 'POST', body: JSON.stringify({}) }
+        )
+        return response as SteerQueuedMessageResponse
+    }
+
     async steerMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
         const response = await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
@@ -579,6 +656,66 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
             method: 'POST',
             body: JSON.stringify({})
+        })
+    }
+
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-error/acknowledge`, {
+            method: 'POST',
+            body: JSON.stringify({ eventId })
+        })
+    }
+
+    async bridgeModelError(sessionId: string, eventId: string): Promise<{ ok: boolean; reason?: string }> {
+        const path = `/api/sessions/${encodeURIComponent(sessionId)}/model-error/bridge`
+        const tryOnce = async (overrideToken: string | null): Promise<Response> => {
+            const headers = new Headers({ 'content-type': 'application/json' })
+            const liveToken = this.getToken ? this.getToken() : null
+            const authToken = overrideToken ?? liveToken ?? this.token
+            if (authToken) {
+                headers.set('authorization', `Bearer ${authToken}`)
+            }
+            return fetch(this.buildUrl(path), {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ eventId })
+            })
+        }
+
+        let res = await tryOnce(null)
+        if (res.status === 401 && this.onUnauthorized) {
+            const refreshed = await this.onUnauthorized()
+            if (refreshed) {
+                this.token = refreshed
+                res = await tryOnce(refreshed)
+            }
+        }
+        if (res.status === 401) {
+            throw new Error('Session expired. Please sign in again.')
+        }
+
+        const body = await res.json().catch(() => null) as { ok?: boolean; reason?: string; error?: string } | null
+        if (res.status === 409 && body && typeof body.ok === 'boolean') {
+            return { ok: body.ok, reason: body.reason }
+        }
+
+        if (!res.ok) {
+            const detail = body?.error ?? (typeof body === 'object' ? JSON.stringify(body) : '')
+            throw new ApiError(
+                `HTTP ${res.status} ${res.statusText}: ${detail}`,
+                res.status,
+                undefined,
+                detail || undefined
+            )
+        }
+
+        return { ok: true }
+    }
+
+    async setModelErrorAutoBridge(sessionId: string, enabled: boolean): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-error/auto-bridge-setting`, {
+            method: 'POST',
+            body: JSON.stringify({ enabled })
         })
     }
 
@@ -734,6 +871,12 @@ export class ApiClient {
         return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
     }
 
+    async vacuumStorage(): Promise<VacuumStorageResponse> {
+        return await this.request<VacuumStorageResponse>('/api/storage/vacuum', {
+            method: 'POST',
+        })
+    }
+
     async getHubSettings(): Promise<HubSettingsResponse> {
         return await this.request<HubSettingsResponse>('/api/hub-settings')
     }
@@ -763,6 +906,24 @@ export class ApiClient {
         )
     }
 
+    async upgradeMachineRunner(machineId: string): Promise<{ message: string; response?: unknown }> {
+        return await this.request<{ message: string; response?: unknown }>(
+            `/api/machines/${encodeURIComponent(machineId)}/upgrade-runner`,
+            { method: 'POST', body: '{}' }
+        )
+    }
+
+    async getUpgradeInfo(): Promise<UpgradeInfoResponse> {
+        return await this.request<UpgradeInfoResponse>('/api/upgrade/offer')
+    }
+
+    async setFleetUpgradePolicy(policy: FleetUpgradePolicy): Promise<{ policy: FleetUpgradePolicy }> {
+        return await this.request<{ policy: FleetUpgradePolicy }>(
+            '/api/upgrade/policy',
+            { method: 'PUT', body: JSON.stringify({ policy }) }
+        )
+    }
+
     async listMachineDirectory(
         machineId: string,
         path: string,
@@ -775,6 +936,39 @@ export class ApiClient {
                 body: JSON.stringify({ path, includeHidden: options?.includeHidden === true })
             }
         )
+    }
+
+    async listProviderProfiles(machineId: string, agent?: AgentProvider): Promise<ProviderListResponse> {
+        const query = agent ? `?agent=${encodeURIComponent(agent)}` : ''
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers${query}`)
+    }
+
+    async createProviderProfile(machineId: string, input: ProviderProfileInput): Promise<ProviderMutationResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers`, {
+            method: 'POST',
+            body: JSON.stringify(input)
+        })
+    }
+
+    async updateProviderProfile(machineId: string, id: string, patch: ProviderProfileUpdate): Promise<ProviderMutationResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(patch)
+        })
+    }
+
+    async setDefaultProvider(machineId: string, agent: AgentProvider, id: string | null): Promise<ProviderMutationResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/default`, {
+            method: 'POST',
+            body: JSON.stringify({ agent, id })
+        })
+    }
+
+    async checkProviderHealth(machineId: string, id: string, refreshModels = true): Promise<ProviderHealthCheckResponse> {
+        return await this.request(`/api/machines/${encodeURIComponent(machineId)}/providers/${encodeURIComponent(id)}/health`, {
+            method: 'POST',
+            body: JSON.stringify({ refreshModels })
+        })
     }
 
     async checkMachinePathsExists(
@@ -800,11 +994,13 @@ export class ApiClient {
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
         effort?: string,
+        resumeSessionId?: string,
         permissionMode?: PermissionMode,
         serviceTier?: 'fast' | 'standard',
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty'
+        startingMode?: 'remote' | 'pty',
+        providerProfileId?: string | null
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
@@ -817,11 +1013,13 @@ export class ApiClient {
                 sessionType,
                 worktreeName,
                 effort,
+                resumeSessionId,
                 permissionMode,
                 serviceTier,
                 collaborationMode,
                 copilotAgentMode,
-                startingMode
+                startingMode,
+                providerProfileId
             })
         })
     }
@@ -945,8 +1143,12 @@ export class ApiClient {
         })
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    async deleteSession(sessionId: string, options?: { cleanOld?: boolean; requireArchived?: boolean }): Promise<void> {
+        const params = new URLSearchParams()
+        if (options?.cleanOld) params.set('cleanOld', '1')
+        if (options?.requireArchived) params.set('requireArchived', '1')
+        const suffix = params.size > 0 ? `?${params}` : ''
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
             method: 'DELETE'
         })
     }

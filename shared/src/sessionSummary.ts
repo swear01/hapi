@@ -1,4 +1,4 @@
-import type { AgentState, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
+import type { AgentState, AttachedJob, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
 import { isKnownFlavor } from './flavors'
 import type { AgentFlavor } from './modes'
 
@@ -43,6 +43,20 @@ export type SessionSummaryMetadata = {
     lifecycleState?: string
     /** Loopback MCP URL when session CLI happy server is running (#956). */
     hapiMcpUrl?: string
+    lastModelError?: {
+        eventId: string
+        kind: string
+        transient: boolean
+        rawSnippet: string
+        atTs: number
+        priorAssistantClaimsDone: boolean
+        bridgedForEventId?: string
+        retriedAndFailed?: boolean
+        supersededByUserTurn?: boolean
+        bridgeable?: boolean
+        acknowledgedAt?: number
+        notifiedAt?: number
+    }
 }
 
 export type SessionSummary = {
@@ -69,8 +83,18 @@ export type SessionSummary = {
     pendingRequests: PendingRequest[]
     backgroundTaskCount: number
     futureScheduledMessageCount: number
+    uninvokedScheduledMessageCount?: number
     /** Epoch ms of the soonest uninvoked future scheduled message, or null. */
     nextScheduledAt: number | null
+    /**
+     * Primary running session-attached job (tiann/hapi#1404), or null.
+     * Independent of agent `active` / thinking — work that outlives the agent.
+     */
+    attachedJob: AttachedJob | null
+    /** Watermark for versioned `attachedJob` SSE patches (dual EventSource race). */
+    attachedJobUpdatedAt: number
+    /** Epoch ms of the latest scratchlist entry mutation, when present. */
+    scratchlistUpdatedAt?: number
     model: string | null
     modelReasoningEffort?: string | null
     effort: string | null
@@ -161,7 +185,7 @@ const AGENT_SESSION_ID_FIELD_BY_FLAVOR = {
     pi: 'piSessionId'
 } as const satisfies Record<AgentFlavor, keyof Metadata>
 
-function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
+export function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
     const flavor = metadata.flavor
     if (isKnownFlavor(flavor)) {
         const flavorField = AGENT_SESSION_ID_FIELD_BY_FLAVOR[flavor]
@@ -197,11 +221,31 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
         worktree: metadata.worktree,
         agentSessionId: getSummaryAgentSessionId(metadata),
         lifecycleState: metadata.lifecycleState,
-        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined
+        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined,
+        // Omit lastUserMessage — bridge recovery text stays in full session
+        // metadata only; list/SSE summaries must not ship up to 32 KB of prompt.
+        lastModelError: metadata.lastModelError
+            ? (() => {
+                const {
+                    lastUserMessage: _omitLastUserMessage,
+                    ...summaryError
+                } = metadata.lastModelError
+                return summaryError
+            })()
+            : undefined
     }
 }
 
-export function toSessionSummary(session: Session): SessionSummary {
+export function toSessionSummary(
+    session: Session,
+    extras?: {
+        attachedJob?: AttachedJob | null
+        /** Explicit SSE/list watermark; required when attachedJob is null so
+         *  a REST refetch does not reset the client gate to 0. */
+        attachedJobUpdatedAt?: number
+    }
+): SessionSummary {
+    const attachedJob = extras?.attachedJob ?? null
     return {
         id: session.id,
         active: session.active,
@@ -221,6 +265,10 @@ export function toSessionSummary(session: Session): SessionSummary {
         backgroundTaskCount: session.backgroundTaskCount ?? 0,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,
+        attachedJob,
+        attachedJobUpdatedAt: extras?.attachedJobUpdatedAt
+            ?? attachedJob?.updatedAt
+            ?? 0,
         model: session.model,
         modelReasoningEffort: session.modelReasoningEffort,
         effort: session.effort

@@ -32,6 +32,8 @@ type UseLongPressHandlers = {
     onMouseDown: React.MouseEventHandler
     onMouseUp: React.MouseEventHandler
     onMouseLeave: React.MouseEventHandler
+    onDragStart: React.DragEventHandler
+    onDragEnd: React.DragEventHandler
     onTouchStart: React.TouchEventHandler
     onTouchEnd: React.TouchEventHandler
     onTouchMove: React.TouchEventHandler
@@ -135,7 +137,10 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         startTimer(e.clientX, e.clientY)
     }, [startTimer, isGhostMouseEvent])
 
-    const onMouseUp = useCallback<React.MouseEventHandler>(() => {
+    const onMouseUp = useCallback<React.MouseEventHandler>((e) => {
+        // Only the primary button acts as a click; right/middle mouse-up
+        // (e.g. opening a context menu) must not trigger onClick.
+        if (e.button !== 0) return
         if (isGhostMouseEvent()) return
         handleEnd(!isLongPressRef.current)
     }, [handleEnd, isGhostMouseEvent])
@@ -144,6 +149,24 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         if (isGhostMouseEvent()) return
         handleEnd(false)
     }, [handleEnd, isGhostMouseEvent])
+
+    // HTML5 drag supersedes the press gesture: once the pointer turns into a
+    // drag, the long-press timer must not fire mid-drag (that would pop the
+    // action menu while the user is dragging a row). Mark the gesture as moved
+    // so a stray end event cannot also turn the drop into a click.
+    const onDragStart = useCallback<React.DragEventHandler>(() => {
+        clearTimer()
+        isLongPressRef.current = false
+        touchMoved.current = true
+    }, [clearTimer])
+
+    const onDragEnd = useCallback<React.DragEventHandler>(() => {
+        clearTimer()
+        isLongPressRef.current = false
+        // Leave touchMoved set: the gesture was a drag, so a trailing mouseup
+        // on the source row must not be interpreted as a click. A later genuine
+        // click starts a fresh gesture via startTimer.
+    }, [clearTimer])
 
     const onTouchStart = useCallback<React.TouchEventHandler>((e) => {
         lastTouchAtRef.current = Date.now()
@@ -242,6 +265,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
             onMouseDown: () => {},
             onMouseUp: () => {},
             onMouseLeave: () => {},
+            onDragStart,
+            onDragEnd,
             onTouchStart: onNativeTouchStart,
             onTouchEnd: onNativeTouchEnd,
             onTouchMove: onNativeTouchMove,
@@ -256,6 +281,8 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
         onMouseDown,
         onMouseUp,
         onMouseLeave,
+        onDragStart,
+        onDragEnd,
         onTouchStart,
         onTouchEnd,
         onTouchMove,

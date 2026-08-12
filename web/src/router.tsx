@@ -58,12 +58,15 @@ import TerminalPage from '@/routes/sessions/terminal'
 import SettingsLayout from '@/routes/settings/layout'
 import SettingsHubPage from '@/routes/settings'
 import SettingsGeneralPage from '@/routes/settings/general'
+import SettingsRunnerManagementPage from '@/routes/settings/runner-management'
 import SettingsDisplayPage from '@/routes/settings/display'
 import SettingsChatPage from '@/routes/settings/chat'
+import SettingsProvidersPage from '@/routes/settings/providers'
 import SettingsVoicePage from '@/routes/settings/voice'
 import SettingsVoiceVoicesPage from '@/routes/settings/voice-voices'
 import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
 import SettingsMachinesPage from '@/routes/settings/machines'
+import SettingsNotificationsPage from '@/routes/settings/notifications'
 import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import SettingsUsagePage from '@/routes/settings/usage'
@@ -1173,6 +1176,12 @@ const settingsGeneralRoute = createRoute({
     component: SettingsGeneralPage,
 })
 
+const settingsRunnerManagementRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'general/runners',
+    component: SettingsRunnerManagementPage,
+})
+
 const settingsDisplayRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'display',
@@ -1183,6 +1192,12 @@ const settingsChatRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'chat',
     component: SettingsChatPage,
+})
+
+const settingsProvidersRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'providers',
+    component: SettingsProvidersPage,
 })
 
 const settingsVoiceRoute = createRoute({
@@ -1207,6 +1222,12 @@ const settingsMachinesRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'machines',
     component: SettingsMachinesPage,
+})
+
+const settingsNotificationsRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'notifications',
+    component: SettingsNotificationsPage,
 })
 
 const settingsAboutRoute = createRoute({
@@ -1254,12 +1275,15 @@ export const routeTree = rootRoute.addChildren([
     settingsRoute.addChildren([
         settingsIndexRoute,
         settingsGeneralRoute,
+        settingsRunnerManagementRoute,
         settingsDisplayRoute,
         settingsChatRoute,
+        settingsProvidersRoute,
         settingsVoiceRoute,
         settingsVoiceVoicesRoute,
         settingsVoiceAdvancedRoute,
         settingsMachinesRoute,
+        settingsNotificationsRoute,
         settingsStorageRoute,
         settingsUsageRoute,
         settingsAboutRoute,
