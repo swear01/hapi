@@ -17,6 +17,7 @@ const harness = vi.hoisted(() => ({
     prompts: [] as unknown[][],
     promptErrors: [] as Error[],
     promptMessages: [] as AgentMessage[],
+    promptMessageBatches: [] as AgentMessage[][],
     promptStderrErrors: [] as Array<{ type: string; message: string; raw: string }>,
     deferPrompt: null as Promise<void> | null,
     releasePrompt: null as (() => void) | null,
@@ -135,8 +136,8 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             prompt: vi.fn(async (_sessionId: string, content: unknown[], onMessage?: (message: AgentMessage) => void) => {
                 harness.promptCalls++;
                 harness.prompts.push(content);
-                const message = harness.promptMessages.shift();
-                if (message) onMessage?.(message);
+                const messages = harness.promptMessageBatches.shift() ?? harness.promptMessages.splice(0, 1);
+                for (const message of messages) onMessage?.(message);
                 const stderrError = harness.promptStderrErrors.shift();
                 if (stderrError) harness.stderrErrorHandler?.(stderrError);
                 if (harness.deferPrompt) await harness.deferPrompt;
@@ -268,6 +269,7 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.prompts = [];
         harness.promptErrors = [];
         harness.promptMessages = [];
+        harness.promptMessageBatches = [];
         harness.promptStderrErrors = [];
         harness.deferPrompt = null;
         harness.releasePrompt = null;
@@ -493,6 +495,39 @@ describe('cursorAcpRemoteLauncher', () => {
 
         expect(harness.promptCalls).toBe(1);
         expect(client.sendClaudeSessionMessage).not.toHaveBeenCalled();
+    });
+
+    it('retries when inline failure accompanies recovered stderr and turn_complete', async () => {
+        harness.promptStderrErrors = [{
+            type: 'unknown',
+            message: 'http/2 stream closed with error code CANCEL',
+            raw: 'http/2 stream closed with error code CANCEL'
+        }];
+        harness.promptMessageBatches = [[
+            { type: 'text', text: 'Error: RetriableError: [canceled] http/2 stream closed' },
+            { type: 'turn_complete', stopReason: 'end_turn' }
+        ]];
+        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
+        const session = new CursorSession({
+            api: {} as never,
+            client: makeClient(),
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('finish the task', { permissionMode: 'default' });
+        queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(harness.promptCalls).toBe(2);
     });
 
     it('does not retry when Stop resolves a prompt after a retryable stderr signal', async () => {

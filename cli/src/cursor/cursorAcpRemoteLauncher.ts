@@ -70,6 +70,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private cursorMcpOverlay: CursorMcpOverlayHandle | null = null;
     private pendingRetryableError: string | null = null;
     private pendingRetryableFromStderr = false;
+    private pendingInlineRetryableError = false;
+    private attemptProducedToolActivity = false;
     private promptInFlight = false;
     private userAbortRequested = false;
 
@@ -468,18 +470,16 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 for (let retryAttempt = 0; retryAttempt <= CURSOR_AUTO_RETRY_LIMIT; retryAttempt += 1) {
                     this.pendingRetryableError = null;
                     this.pendingRetryableFromStderr = false;
-                    let attemptProducedToolActivity = false;
+                    this.pendingInlineRetryableError = false;
+                    this.attemptProducedToolActivity = false;
                     let turnCompleted = false;
                     try {
                         await backend.prompt(acpSessionId, promptContent, (message) => {
                             if (message.type === 'turn_complete') turnCompleted = true;
-                            if (message.type === 'tool_call' || message.type === 'tool_result') {
-                                attemptProducedToolActivity = true;
-                            }
                             this.handleAgentMessage(message);
                         });
                         if (this.userAbortRequested) break;
-                        if (turnCompleted && this.pendingRetryableFromStderr) {
+                        if (turnCompleted && this.pendingRetryableFromStderr && !this.pendingInlineRetryableError) {
                             this.pendingRetryableError = null;
                         }
                         if (!this.pendingRetryableError) {
@@ -496,7 +496,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         this.pendingRetryableError = error instanceof Error ? error.message : String(error);
                     }
 
-                    if (attemptProducedToolActivity) {
+                    if (this.attemptProducedToolActivity) {
                         this.surfacePromptFailure('Cursor connection interrupted after tool activity; the prompt was not retried.');
                         break;
                     }
@@ -510,6 +510,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 this.promptInFlight = false;
                 this.pendingRetryableError = null;
                 this.pendingRetryableFromStderr = false;
+                this.pendingInlineRetryableError = false;
+                this.attemptProducedToolActivity = false;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');
@@ -626,11 +628,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     private handleAgentMessage(message: AgentMessage): void {
+        if (this.promptInFlight && (
+            message.type === 'tool_call'
+            || message.type === 'tool_result'
+            || message.type === 'generated_image'
+        )) {
+            this.attemptProducedToolActivity = true;
+        }
         if (message.type === 'text') {
             const visibleText = stripRetryableCursorError(message.text);
             if (visibleText !== null) {
                 if (this.userAbortRequested) return;
                 this.pendingRetryableError = message.text;
+                this.pendingInlineRetryableError = true;
                 if (!visibleText) return;
                 message = { ...message, text: visibleText };
             }
