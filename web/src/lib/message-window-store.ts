@@ -899,15 +899,18 @@ export async function fetchOlderMessages(
     options: {
         onBeforeApply?: (historyVersion: number) => boolean
         /**
-         * Install the loaded-history boundary (tail-mode no-trim protection)
-         * for this load. Only user-initiated outline browsing passes this —
-         * automatic coverage loads must not leave the window unbounded, and
-         * history-mode loads are already protected by the oldest-kept trim.
+         * Live predicate evaluated when the older page APPLIES (not when the
+         * request starts): when it returns true, the loaded-history boundary
+         * (tail-mode no-trim protection) is installed for this load. Only
+         * user-initiated outline browsing passes it — automatic coverage
+         * loads and tool-group hydration must not leave the window unbounded,
+         * and history-mode loads are already protected by the oldest-kept
+         * trim. Evaluating at apply time also covers an outline closed while
+         * a slow request was in flight.
          */
-        installBoundary?: boolean
+        shouldInstallBoundary?: () => boolean
     } = {}
 ): Promise<OlderLoadOutcome> {
-    const installBoundary = options.installBoundary === true
     const initial = getState(sessionId)
     const before = readPosition(initial.oldestPositionAt, initial.oldestPositionSeq)
     if (initial.isSyncingTail || initial.isLoadingMore) {
@@ -969,6 +972,7 @@ export async function fetchOlderMessages(
                     warning: null
                 })
             }
+            const installBoundary = options.shouldInstallBoundary?.() === true
             const merged = mergeIntoWindow(previous, response.messages, {
                 // In history mode keep the oldest side (the loaded pages the
                 // user is browsing); in tail mode keep the whole window while

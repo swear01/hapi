@@ -412,7 +412,7 @@ type SessionChatProps = {
     historyVersion: number
     onBack: () => void
     onRefresh: () => void
-    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { installBoundary?: boolean }) => Promise<OlderLoadOutcome>
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
     onCancelLoadMore: () => void
     // Returns the accepted mutation's attempt id, or false when
     // pre-mutation guards (no-api / no-session / pending) rejected the call OR async

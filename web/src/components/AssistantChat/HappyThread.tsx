@@ -47,7 +47,7 @@ type PendingScrollRestore = {
     targetHistoryVersion: number | null
 }
 
-type HistoryLoadSource = 'coverage' | 'user' | 'consumer'
+type HistoryLoadSource = 'coverage' | 'user' | 'consumer' | 'outline'
 type PullToLoadState = 'idle' | 'pulling' | 'ready'
 
 type HistoryLoaderState = {
@@ -454,7 +454,7 @@ export function HappyThread(props: {
     messagesWarning: string | null
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
-    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { installBoundary?: boolean }) => Promise<OlderLoadOutcome>
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
     onCancelLoadMore: () => void
     unseenCount: number
     rawMessagesCount: number
@@ -583,6 +583,10 @@ export function HappyThread(props: {
     const atBottomRef = useRef(true)
     const onViewModeChangeRef = useRef(props.onViewModeChange)
     const forceScrollTokenRef = useRef(props.forceScrollToken)
+    // Render-time mirror so apply-time boundary decisions can read the live
+    // outline state without a stale closure or an effect-delayed ref.
+    const outlineOpenRef = useRef(props.outlineOpen)
+    outlineOpenRef.current = props.outlineOpen
     const lastScrollTopRef = useRef(0)
     const sessionIdRef = useRef(props.sessionId)
     const initialScrollSessionRef = useRef<string | null>(null)
@@ -650,6 +654,7 @@ export function HappyThread(props: {
         // old DOM after trimming. Only network/backoff work is cancellable.
         if (
             state.source === 'consumer'
+            || state.source === 'outline'
             || (state.phase !== 'loading' && state.phase !== 'backoff')
         ) {
             return
@@ -1184,7 +1189,11 @@ export function HappyThread(props: {
             }
         }
 
-        if (state.source !== 'consumer' && !needsViewportCoverage()) {
+        if (
+            state.source !== 'consumer'
+            && state.source !== 'outline'
+            && !needsViewportCoverage()
+        ) {
             finishStoppedAttempt(state, 'transient-stop')
             return
         }
@@ -1228,18 +1237,27 @@ export function HappyThread(props: {
                     ) {
                         return false
                     }
-                    if (current.source !== 'consumer' && !needsViewportCoverage()) {
+                    if (
+                        current.source !== 'consumer'
+                        && current.source !== 'outline'
+                        && !needsViewportCoverage()
+                    ) {
                         return false
                     }
                     pending.targetHistoryVersion = historyVersion
                     historyLoaderRef.current = { ...current, phase: 'awaiting-render' }
                     return true
-                }, {
-                    // Only outline-driven consumer loads hold the loaded-history
-                    // boundary; automatic coverage loads must not leave the
-                    // window unbounded when no view-mode transition follows.
-                    installBoundary: state.source === 'consumer'
-                })
+                }, state.source === 'outline'
+                    ? {
+                        // Only outline-driven loads hold the loaded-history
+                        // boundary, and only while the outline is still open at
+                        // APPLY time — a slow request that lands after the
+                        // outline closed must not leave the window unbounded.
+                        // Automatic coverage loads and tool-group hydration
+                        // (consumer) never hold it.
+                        shouldInstallBoundary: () => outlineOpenRef.current
+                    }
+                    : undefined)
             } catch (error) {
                 outcome = {
                     kind: 'failed',
@@ -1372,6 +1390,10 @@ export function HappyThread(props: {
         return requestOlder('consumer')
     }, [requestOlder])
 
+    const loadOlderFromOutline = useCallback((): Promise<OlderHistoryLoadResult> => {
+        return requestOlder('outline')
+    }, [requestOlder])
+
     const loadOlderForOutline = useCallback(async (): Promise<boolean> => {
         return await loadOlderFromConsumer() === 'loaded'
     }, [loadOlderFromConsumer])
@@ -1392,6 +1414,7 @@ export function HappyThread(props: {
     }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
 
     const handleOutlineClose = useCallback(() => {
+        outlineOpenRef.current = false
         props.onOutlineOpenChange(false)
         // Closing the outline while still at the tail ends the loaded-history
         // browsing session: re-assert tail mode so the store releases the
@@ -1684,7 +1707,7 @@ export function HappyThread(props: {
                             hasMoreMessages={props.hasMoreMessages}
                             isLoadingMoreMessages={props.isLoadingMoreMessages}
                             onLoadMore={() => {
-                                void loadOlderFromConsumer()
+                                void loadOlderFromOutline()
                             }}
                             onSelect={handleOutlineSelect}
                             onClose={handleOutlineClose}

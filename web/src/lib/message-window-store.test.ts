@@ -1105,9 +1105,9 @@ describe('history view and older pagination', () => {
         await syncTailMessages(api, id)
 
         // Two "Load earlier" clicks from the tail: window 200 -> 600.
-        const first = await fetchOlderMessages(api, id, { installBoundary: true })
+        const first = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
         expect(first.kind).toBe('applied')
-        const second = await fetchOlderMessages(api, id, { installBoundary: true })
+        const second = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
         expect(second.kind).toBe('applied')
         expect(getMessageWindowState(id).messages[0]!.seq).toBe(1)
         expect(getMessageWindowState(id).messages).toHaveLength(600)
@@ -1155,8 +1155,8 @@ describe('history view and older pagination', () => {
         const api = createApi(getMessages)
         await syncTailMessages(api, id)
         setMessageViewMode(id, 'history')
-        await fetchOlderMessages(api, id, { installBoundary: true })
-        const second = await fetchOlderMessages(api, id, { installBoundary: true })
+        await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        const second = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
         expect(second.kind).toBe('applied')
 
         ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
@@ -1206,7 +1206,7 @@ describe('history view and older pagination', () => {
         // Tail mode: load four older pages (the last crosses the old 800-row
         // cap) while the boundary is held (outline path).
         for (let page = 0; page < 4; page += 1) {
-            const outcome = await fetchOlderMessages(api, id, { installBoundary: true })
+            const outcome = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
             expect(outcome.kind).toBe('applied')
         }
         let state = getMessageWindowState(id)
@@ -1277,7 +1277,7 @@ describe('history view and older pagination', () => {
         await syncTailMessages(api, id)
 
         // Outline "Load earlier" while already in tail mode: window 200 -> 400.
-        const outcome = await fetchOlderMessages(api, id, { installBoundary: true })
+        const outcome = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
         expect(outcome.kind).toBe('applied')
         expect(getMessageWindowState(id).messages).toHaveLength(400)
         expect(getMessageWindowState(id).messages[0]!.seq).toBe(201)
@@ -1383,8 +1383,8 @@ describe('history view and older pagination', () => {
         const api = createApi(getMessages)
         await syncTailMessages(api, id)
         setMessageViewMode(id, 'history')
-        await fetchOlderMessages(api, id, { installBoundary: true })
-        await fetchOlderMessages(api, id, { installBoundary: true })
+        await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
 
         // Back to the bottom: the window compacts to the newest tail and the
         // protection is released, so streaming trims resume normally.

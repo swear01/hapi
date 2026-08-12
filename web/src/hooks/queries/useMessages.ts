@@ -38,7 +38,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
     viewMode: MessageViewMode
     messagesVersion: number
     historyVersion: number
-    loadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { installBoundary?: boolean }) => Promise<OlderLoadOutcome>
+    loadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
     cancelLoadMore: () => void
     refetch: () => Promise<void>
     setViewMode: (mode: MessageViewMode) => void
@@ -64,7 +64,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         }
     }, [api, sessionId])
 
-    const loadMore = useCallback(async (onBeforeApply?: (historyVersion: number) => boolean, options?: { installBoundary?: boolean }) => {
+    const loadMore = useCallback(async (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => {
         if (!api || !sessionId) {
             return { kind: 'stopped', reason: 'unavailable' } as const
         }
