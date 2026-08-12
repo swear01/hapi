@@ -1,0 +1,341 @@
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 9000abfe8..5d0dee50a 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -11,6 +11,7 @@ afterEach(() => {
+     cleanup()
+     localStorage.removeItem('hapi-session-preview-limit')
+     localStorage.removeItem('hapi-pin-in-progress-sessions')
++    localStorage.removeItem('hapi-pin-active-sessions')
+ })
+ 
+ function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
+@@ -600,6 +601,39 @@ describe('SessionList collapse behavior', () => {
+         expect(getProjectPanel().getAttribute('data-open')).toBe('true')
+     })
+ 
++    it('pins every active session when pin-active is on', () => {
++        localStorage.setItem('hapi-pin-active-sessions', 'true')
++        const sessions = [
++            makeSession({
++                id: 'session-running',
++                active: true,
++                thinking: true,
++                updatedAt: 100,
++                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
++            }),
++            makeSession({
++                id: 'session-quiet',
++                active: true,
++                updatedAt: 90,
++                metadata: { path: '/work/hapi', name: 'Quiet task', flavor: 'codex' },
++            }),
++            makeSession({
++                id: 'session-inactive',
++                updatedAt: 80,
++                metadata: { path: '/work/hapi', name: 'Inactive task', flavor: 'codex' },
++            }),
++        ]
++        render(renderSessionList(sessions, null))
++
++        expect(screen.getByTitle('Active sessions')).toBeInTheDocument()
++        expect(screen.getByText(/Running \(1\)/)).toBeInTheDocument()
++        expect(screen.getByText(/Active \(1\)/)).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: /Running task/ })).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: /Quiet task/ })).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: /Inactive task/ })).toBeInTheDocument()
++        expect(getProjectPanel().getAttribute('data-open')).toBeNull()
++    })
++
+     it('auto-expands the path again when the selected session changes', async () => {
+         const sessions = [
+             makeSession({
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 6ab3bf9d7..bf0a93a7a 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -25,6 +25,7 @@ import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/u
+ import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
+ import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
+ import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
++import { usePinActiveSessions } from '@/hooks/usePinActiveSessions'
+ import { classifySessionAttention, sessionIsUnread } from '@/lib/sessionAttention'
+ import { getSessionLastSeenAt, getSessionLastSeenSnapshot } from '@/lib/sessionLastSeen'
+ import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
+@@ -60,6 +61,7 @@ type SessionGroup = {
+ const RUNNING_BUCKETS = [
+     { key: 'working', labelKey: 'session.item.running', colorClass: 'text-[var(--app-badge-success-text)]', pulse: true },
+     { key: 'pending', labelKey: 'session.item.pending', colorClass: 'text-[var(--app-badge-warning-text)]', pulse: true },
++    { key: 'active', labelKey: 'session.item.active', colorClass: 'text-[var(--app-hint)]', pulse: false },
+ ] as const
+ 
+ /** Active sessions that warrant the optional pinned In progress section. Quiet actives stay in directory groups. */
+@@ -1138,6 +1140,7 @@ export function SessionList(props: {
+     // Transient unread lens — not a Settings preference. Cleared on reload; rows drop as they're seen.
+     const [showUnreadOnly, setShowUnreadOnly] = useState(false)
+     const { pinInProgressSessions } = usePinInProgressSessions()
++    const { pinActiveSessions } = usePinActiveSessions()
+     const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
+     const showDetailedStatus = sessionListStatusMode === 'detailed'
+     const [searchQuery, setSearchQuery] = useState('')
+@@ -1248,11 +1251,12 @@ export function SessionList(props: {
+             .sort((a, b) => b.updatedAt - a.updatedAt)
+     }, [machineFilteredSessions])
+     const runningSessions = useMemo(() => {
+-        const buckets: Record<'working' | 'pending', SessionSummary[]> = {
++        const buckets: Record<'working' | 'pending' | 'active', SessionSummary[]> = {
+             working: [],
+             pending: [],
++            active: [],
+         }
+-        if (!pinInProgressSessions) {
++        if (!pinInProgressSessions && !pinActiveSessions) {
+             return buckets
+         }
+         for (const session of machineFilteredSessions) {
+@@ -1266,26 +1270,31 @@ export function SessionList(props: {
+                 buckets.working.push(session)
+             } else if ((session.pendingRequestsCount ?? 0) > 0) {
+                 buckets.pending.push(session)
++            } else if (pinActiveSessions) {
++                buckets.active.push(session)
+             }
+-            // Quiet active sessions stay in directory groups (no Idle pin bucket).
+         }
+         const byRecent = (a: SessionSummary, b: SessionSummary) => b.updatedAt - a.updatedAt
+         for (const key of Object.keys(buckets) as Array<keyof typeof buckets>) {
+             buckets[key].sort(byRecent)
+         }
+         return buckets
+-    }, [machineFilteredSessions, pinInProgressSessions])
++    }, [machineFilteredSessions, pinActiveSessions, pinInProgressSessions])
+     const runningSessionTotal = runningSessions.working.length
+         + runningSessions.pending.length
++        + runningSessions.active.length
+     const groups = useMemo(
+         () => groupSessionsByDirectory(
+             machineFilteredSessions.filter((session) => {
+                 if (session.globalPinned) return false
+-                if (pinInProgressSessions && !session.pinned && isPinnedInProgressSession(session)) return false
++                if (!session.pinned && (
++                    (pinActiveSessions && session.active)
++                    || (pinInProgressSessions && isPinnedInProgressSession(session))
++                )) return false
+                 return true
+             })
+         ),
+-        [machineFilteredSessions, pinInProgressSessions]
++        [machineFilteredSessions, pinActiveSessions, pinInProgressSessions]
+     )
+     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
+         () => new Map()
+@@ -1829,14 +1838,14 @@ export function SessionList(props: {
+                                     setRunningSectionCollapsed((value) => !value)
+                                 }
+                             }}
+-                            title={t('sessions.runningSection')}
++                            title={t(pinActiveSessions ? 'sessions.activeSection' : 'sessions.runningSection')}
+                         >
+                             <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={runningSectionCollapsed && !isFiltering} />
+                             <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
+                                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--app-badge-success-text)] animate-pulse" />
+                             </span>
+                             <span className="min-w-0 flex-1 truncate text-sm font-medium">
+-                                {t('sessions.runningSection')}
++                                {t(pinActiveSessions ? 'sessions.activeSection' : 'sessions.runningSection')}
+                             </span>
+                             <span className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
+                                 ({runningSessionTotal})
+diff --git a/web/src/hooks/usePinActiveSessions.test.ts b/web/src/hooks/usePinActiveSessions.test.ts
+new file mode 100644
+index 000000000..c2f75ceba
+--- /dev/null
++++ b/web/src/hooks/usePinActiveSessions.test.ts
+@@ -0,0 +1,25 @@
++import { act, cleanup, renderHook } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { usePinActiveSessions } from './usePinActiveSessions'
++
++describe('usePinActiveSessions', () => {
++    beforeEach(() => {
++        localStorage.clear()
++    })
++
++    afterEach(() => {
++        cleanup()
++        localStorage.clear()
++    })
++
++    it('updates other hook consumers in the same tab', () => {
++        const first = renderHook(() => usePinActiveSessions())
++        const second = renderHook(() => usePinActiveSessions())
++
++        act(() => first.result.current.setPinActiveSessions(true))
++
++        expect(first.result.current.pinActiveSessions).toBe(true)
++        expect(second.result.current.pinActiveSessions).toBe(true)
++        expect(localStorage.getItem('hapi-pin-active-sessions')).toBe('true')
++    })
++})
+diff --git a/web/src/hooks/usePinActiveSessions.ts b/web/src/hooks/usePinActiveSessions.ts
+new file mode 100644
+index 000000000..dd3c19754
+--- /dev/null
++++ b/web/src/hooks/usePinActiveSessions.ts
+@@ -0,0 +1,55 @@
++import { useCallback, useEffect, useState } from 'react'
++
++const STORAGE_KEY = 'hapi-pin-active-sessions'
++const CHANGE_EVENT = 'hapi-pin-active-sessions-change'
++
++function readPreference(): boolean {
++    if (typeof window === 'undefined') return false
++    try {
++        return localStorage.getItem(STORAGE_KEY) === 'true'
++    } catch {
++        return false
++    }
++}
++
++export function usePinActiveSessions(): {
++    pinActiveSessions: boolean
++    setPinActiveSessions: (value: boolean) => void
++} {
++    const [pinActiveSessions, setPinActiveSessionsState] = useState(readPreference)
++
++    useEffect(() => {
++        const onStorage = (event: StorageEvent) => {
++            if (event.key === STORAGE_KEY) {
++                setPinActiveSessionsState(event.newValue === 'true')
++            }
++        }
++        const onLocalChange = (event: Event) => {
++            if (event instanceof CustomEvent && typeof event.detail === 'boolean') {
++                setPinActiveSessionsState(event.detail)
++            }
++        }
++        window.addEventListener('storage', onStorage)
++        window.addEventListener(CHANGE_EVENT, onLocalChange)
++        return () => {
++            window.removeEventListener('storage', onStorage)
++            window.removeEventListener(CHANGE_EVENT, onLocalChange)
++        }
++    }, [])
++
++    const setPinActiveSessions = useCallback((value: boolean) => {
++        setPinActiveSessionsState(value)
++        try {
++            if (value) {
++                localStorage.setItem(STORAGE_KEY, 'true')
++            } else {
++                localStorage.removeItem(STORAGE_KEY)
++            }
++        } catch {
++            // Ignore storage errors.
++        }
++        window.dispatchEvent(new CustomEvent(CHANGE_EVENT, { detail: value }))
++    }, [])
++
++    return { pinActiveSessions, setPinActiveSessions }
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 2559844de..cfef98c99 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -84,6 +84,7 @@ export default {
+   'sessions.group.expand': 'Expand {n}',
+   'sessions.group.collapse': 'Collapse {n}',
+   'sessions.runningSection': 'In progress',
++  'sessions.activeSection': 'Active sessions',
+   'sessions.group.new': 'New session in this directory',
+   'sessions.machineFilter.label': 'Filter sessions by machine',
+   'sessions.machineFilter.all': 'All',
+@@ -174,6 +175,7 @@ export default {
+   'session.modelChange.pendingTooltip': 'The model will change when the current task finishes.',
+   'session.item.worktree': 'worktree',
+   'session.item.pending': 'pending',
++  'session.item.active': 'Active',
+   'session.item.thinking': 'thinking',
+   'session.item.running': 'Running',
+   'session.item.permission': 'Permission required',
+@@ -813,6 +815,8 @@ export default {
+   'settings.display.activeSessionsOnly.desc': 'Hide inactive sessions in the sidebar. The session you have open stays visible.',
+   'settings.display.pinInProgressSessions': 'Pin in-progress sessions',
+   'settings.display.pinInProgressSessions.desc': 'Move unpinned working and pending sessions into an In progress section above project folders. Global pins remain above it; quiet active sessions stay inside their project folders. Off keeps everything in directory groups.',
++  'settings.display.pinActiveSessions': 'Pin active sessions',
++  'settings.display.pinActiveSessions.desc': 'Move every connected session to the top, including active sessions that are currently idle.',
+   'settings.display.sessionListStatus': 'Session list status hints',
+   'settings.display.sessionListStatus.standard': 'Basic',
+   'settings.display.sessionListStatus.detailed': 'Extended',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index d1deb621f..8f843fe8b 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -84,6 +84,7 @@ export default {
+   'sessions.group.expand': '展开 {n} 个',
+   'sessions.group.collapse': '收起 {n} 个',
+   'sessions.runningSection': '进行中',
++  'sessions.activeSection': '活跃会话',
+   'sessions.group.new': '在此目录新建会话',
+   'sessions.machineFilter.label': '按机器筛选会话',
+   'sessions.machineFilter.all': '全部',
+@@ -174,6 +175,7 @@ export default {
+   'session.modelChange.pendingTooltip': '当前任务完成后将更改模型。',
+   'session.item.worktree': '工作树',
+   'session.item.pending': '待处理',
++  'session.item.active': '活跃',
+   'session.item.thinking': '思考中',
+   'session.item.running': '运行中',
+   'session.item.permission': '需要权限',
+@@ -812,6 +814,8 @@ export default {
+   'settings.display.activeSessionsOnly.desc': '在侧边栏隐藏非活跃会话；当前打开的会话仍会保留显示。',
+   'settings.display.pinInProgressSessions': '置顶进行中会话',
+   'settings.display.pinInProgressSessions.desc': '将未置顶的运行中和待处理会话移到「进行中」分区（位于项目目录分组之上）。全局置顶仍在该分区之上；安静的活跃会话留在各自项目目录分组中。关闭后全部保留在目录分组中。',
++  'settings.display.pinActiveSessions': '置顶活跃会话',
++  'settings.display.pinActiveSessions.desc': '将所有仍连接的会话移到侧边栏顶部，包括当前空闲的活跃会话。',
+   'settings.display.sessionListStatus': '会话列表状态提示',
+   'settings.display.sessionListStatus.standard': '基础',
+   'settings.display.sessionListStatus.detailed': '扩展',
+diff --git a/web/src/routes/settings/display.tsx b/web/src/routes/settings/display.tsx
+index 11682b9ba..21ef0eab2 100644
+--- a/web/src/routes/settings/display.tsx
++++ b/web/src/routes/settings/display.tsx
+@@ -7,6 +7,7 @@ import { getTerminalFontSizeOptions, useTerminalFontSize } from '@/hooks/useTerm
+ import { getSessionListStatusModeOptions, useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
+ import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
+ import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
++import { usePinActiveSessions } from '@/hooks/usePinActiveSessions'
+ import { MAX_SESSION_PREVIEW_LIMIT, MIN_SESSION_PREVIEW_LIMIT, normalizeSessionPreviewLimit, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
+ import { useThemeColors, type ThemeColorKeyId } from '@/hooks/useThemeColors'
+ import { useSessionHeaderMetadata, type SessionHeaderMetadataKey } from '@/hooks/useSessionHeaderMetadata'
+@@ -138,6 +139,7 @@ export default function SettingsDisplayPage() {
+     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
+     const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
+     const { pinInProgressSessions, setPinInProgressSessions } = usePinInProgressSessions()
++    const { pinActiveSessions, setPinActiveSessions } = usePinActiveSessions()
+     const { preferences: sessionHeaderMetadata, setPreference: setSessionHeaderMetadata } = useSessionHeaderMetadata()
+     const sessionHeaderOptions: ReadonlyArray<{ key: SessionHeaderMetadataKey; labelKey: string }> = [
+         { key: 'showLabels', labelKey: 'settings.display.sessionHeader.showLabels' },
+@@ -175,6 +177,7 @@ export default function SettingsDisplayPage() {
+                 <SessionPreviewLimitControl />
+                 <SettingsSwitch label={t('settings.display.activeSessionsOnly')} description={t('settings.display.activeSessionsOnly.desc')} checked={showActiveSessionsOnly} onChange={setShowActiveSessionsOnly} />
+                 <SettingsSwitch label={t('settings.display.pinInProgressSessions')} description={t('settings.display.pinInProgressSessions.desc')} checked={pinInProgressSessions} onChange={setPinInProgressSessions} />
++                <SettingsSwitch label={t('settings.display.pinActiveSessions')} description={t('settings.display.pinActiveSessions.desc')} checked={pinActiveSessions} onChange={setPinActiveSessions} />
+                 <SettingsChoiceGroup
+                     label={t('settings.display.sessionListStatus')}
+                     description={t('settings.display.sessionListStatus.detailedDescription')}
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index c50b2707d..b52b689cc 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -85,6 +85,10 @@ vi.mock('@/hooks/usePinInProgressSessions', () => ({
+     usePinInProgressSessions: () => ({ pinInProgressSessions: false, setPinInProgressSessions: vi.fn() }),
+ }))
+ 
++vi.mock('@/hooks/usePinActiveSessions', () => ({
++    usePinActiveSessions: () => ({ pinActiveSessions: false, setPinActiveSessions: vi.fn() }),
++}))
++
+ vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
+     useSessionHeaderMetadata: () => ({
+         preferences: {

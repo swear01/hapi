@@ -1,0 +1,168 @@
+diff --git a/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx b/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
+index 1e4e14c85..e0a313c19 100644
+--- a/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
++++ b/web/src/components/AssistantChat/HappyThread.mobile-scroll.test.tsx
+@@ -15,6 +15,7 @@ vi.mock('@assistant-ui/react', async (importOriginal) => {
+         useAuiState: (selector: (state: unknown) => unknown) => selector({
+             thread: { extras: undefined }
+         }),
++        unstable_useThreadMessageIds: () => [],
+         ThreadPrimitive: {
+             ...actual.ThreadPrimitive,
+             Root: ({ children, className }: PropsWithChildren<{ className?: string }>) => (
+diff --git a/web/src/components/AssistantChat/HappyThread.test.tsx b/web/src/components/AssistantChat/HappyThread.test.tsx
+index 0f5ca6d9d..4a6b6f1be 100644
+--- a/web/src/components/AssistantChat/HappyThread.test.tsx
++++ b/web/src/components/AssistantChat/HappyThread.test.tsx
+@@ -1,6 +1,6 @@
+ import { describe, expect, it, vi } from 'vitest'
+-import { fireEvent, render, screen } from '@testing-library/react'
+-import type { ComponentProps } from 'react'
++import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { useState, type ComponentProps } from 'react'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import {
+     ConversationOutlinePanel,
+@@ -15,7 +15,10 @@ import {
+     restoreScrollAnchor,
+     shouldLoadOlderForViewport,
+     shouldCancelInitialScrollSettling,
++    ThreadMessagesById,
+ } from '@/components/AssistantChat/HappyThread'
++import { AssistantRuntimeProvider, useExternalStoreRuntime } from '@assistant-ui/react'
++import type { ThreadMessageLike } from '@assistant-ui/react'
+ import type { ConversationOutlineItem } from '@/chat/outline'
+ 
+ const outlineItems: ConversationOutlineItem[] = [
+@@ -57,6 +60,65 @@ describe('nested scroll event ownership', () => {
+     })
+ })
+ 
++describe('ThreadMessagesById', () => {
++    it('does not crash when rewind shortens the transcript and then clears it', async () => {
++        type TestMessage = { id: string; role: 'user' | 'assistant'; text: string }
++        let setMessages!: (messages: TestMessage[]) => void
++        function Harness() {
++            const [messages, updateMessages] = useState<TestMessage[]>([
++                { id: 'user-1', role: 'user', text: 'first' },
++                { id: 'assistant-1', role: 'assistant', text: 'answer' },
++                { id: 'user-2', role: 'user', text: 'second' },
++                { id: 'assistant-2', role: 'assistant', text: 'second answer' }
++            ])
++            setMessages = updateMessages
++            const runtime = useExternalStoreRuntime({
++                messages,
++                convertMessage: (message): ThreadMessageLike => ({
++                    id: message.id,
++                    role: message.role,
++                    content: [{ type: 'text', text: message.text }]
++                }),
++                onNew: async () => {}
++            })
++            return (
++                <AssistantRuntimeProvider runtime={runtime}>
++                    <ThreadMessagesById components={{
++                        UserMessage: () => <div data-testid="user-message" />,
++                        AssistantMessage: () => <div data-testid="assistant-message" />,
++                        SystemMessage: () => <div data-testid="system-message" />
++                    }} />
++                </AssistantRuntimeProvider>
++            )
++        }
++
++        render(<Harness />)
++        expect(screen.getAllByTestId('user-message')).toHaveLength(2)
++        expect(screen.getAllByTestId('assistant-message')).toHaveLength(2)
++
++        await act(async () => {
++            setMessages([
++                { id: 'user-1', role: 'user', text: 'first' },
++                { id: 'assistant-1', role: 'assistant', text: 'answer' }
++            ])
++        })
++
++        await waitFor(() => {
++            expect(screen.getAllByTestId('user-message')).toHaveLength(1)
++            expect(screen.getAllByTestId('assistant-message')).toHaveLength(1)
++        })
++
++        await act(async () => {
++            setMessages([])
++        })
++
++        await waitFor(() => {
++            expect(screen.queryByTestId('user-message')).not.toBeInTheDocument()
++            expect(screen.queryByTestId('assistant-message')).not.toBeInTheDocument()
++        })
++    })
++})
++
+ function rect(values: Pick<DOMRect, 'top' | 'bottom'> & Partial<DOMRect>): DOMRect {
+     return {
+         left: 0,
+diff --git a/web/src/components/AssistantChat/HappyThread.tsx b/web/src/components/AssistantChat/HappyThread.tsx
+index 92d5036b4..35a0fc49d 100644
+--- a/web/src/components/AssistantChat/HappyThread.tsx
++++ b/web/src/components/AssistantChat/HappyThread.tsx
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+-import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
++import { ThreadPrimitive, unstable_useThreadMessageIds, useAuiState } from '@assistant-ui/react'
++import type { ComponentProps } from 'react'
+ import { useQuery } from '@tanstack/react-query'
+ import type { ApiClient } from '@/api/client'
+ import type { HappyRuntimeExtras } from '@/lib/assistant-runtime'
+@@ -301,6 +302,32 @@ const THREAD_MESSAGE_COMPONENTS = {
+     SystemMessage: HappySystemMessage
+ } as const
+ 
++type ThreadMessageComponents = ComponentProps<typeof ThreadPrimitive.Unstable_MessageById>['components']
++
++/**
++ * Render messages by stable id instead of their current array index.
++ *
++ * Rewind can replace a non-empty transcript with an empty one in a single
++ * external-runtime update. Index-based providers may then ask assistant-ui
++ * for message 0 while its lookup table is already empty. Stable id providers
++ * unmount removed rows without consulting a stale index.
++ */
++export function ThreadMessagesById({ components }: { components: ThreadMessageComponents }) {
++    const messageIds = unstable_useThreadMessageIds()
++
++    return (
++        <>
++            {messageIds.map((messageId) => (
++                <ThreadPrimitive.Unstable_MessageById
++                    key={messageId}
++                    messageId={messageId}
++                    components={components}
++                />
++            ))}
++        </>
++    )
++}
++
+ export function ConversationOutlinePanel(props: {
+     items: readonly ConversationOutlineItem[]
+     hasMoreMessages: boolean
+@@ -1648,7 +1675,7 @@ export function HappyThread(props: {
+                                 </>
+                             )}
+                             <div className="happy-thread-messages flex flex-col gap-3">
+-                                <ThreadPrimitive.Messages components={THREAD_MESSAGE_COMPONENTS} />
++                                <ThreadMessagesById components={THREAD_MESSAGE_COMPONENTS} />
+                             </div>
+                         </div>
+                     </div>
+diff --git a/web/src/components/assistant-ui/markdown-a.test.tsx b/web/src/components/assistant-ui/markdown-a.test.tsx
+index d2053f0c7..2217317a1 100644
+--- a/web/src/components/assistant-ui/markdown-a.test.tsx
++++ b/web/src/components/assistant-ui/markdown-a.test.tsx
+@@ -60,6 +60,7 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
+         isSyncingTail: false,
+         isLoadingMoreMessages: false,
+         loadOlderMessagesPreservingScroll: async () => 'loaded',
++        showSessionSummaryInChat: false,
+         ...overrides,
+     }
+ }
