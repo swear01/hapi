@@ -1402,8 +1402,17 @@ function SessionChatInner(props: SessionChatProps) {
     }, [navigate, props.session.id])
 
     const handleToggleOutline = useCallback(() => {
-        setOutlineOpen((open) => !open)
-    }, [])
+        // Closing the outline while still at the tail ends the loaded-history
+        // browsing session: re-assert tail mode so the store releases the
+        // history boundary and the window compacts back to the bounded tail
+        // (mirrors the in-panel close controls in HappyThread).
+        setOutlineOpen((open) => {
+            if (open && props.viewMode === 'tail') {
+                props.onViewModeChange('tail')
+            }
+            return !open
+        })
+    }, [props.viewMode, props.onViewModeChange])
 
     const handleViewTerminal = useCallback(() => {
         navigate({
