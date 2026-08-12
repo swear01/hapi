@@ -20,6 +20,7 @@ import {
     useState
 } from 'react'
 import { isRichComposerMentionsEnabled, resolveComposerPlaceholderKey } from '@/lib/composerSegments'
+import { dictationDirectSendEligible } from '@/lib/dictationSend'
 import type { SessionMentionResolveResult } from '@/components/AssistantChat/RichComposerInput'
 import {
     RichComposerInput,
@@ -563,17 +564,6 @@ export function HappyComposer(props: {
     const isControlled = onScheduleProp !== undefined
     const pendingSchedule = isControlled ? (pendingScheduleProp ?? null) : pendingScheduleLocal
     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
-    // Mirrors handleSend's canDirectSend (minus status/intent): the dictation
-    // Send button must only appear when clicking it will actually run the
-    // session-bound stopAndSend path. With attachments / a pending schedule /
-    // scratchlist mode handleSend falls back to dictation.toggle() (stop +
-    // transcribe), so a visible "Send" control would be misleading.
-    const dictationCanDirectSend = dictationActive
-        && (active || props.resolveSessionIdForVoice !== undefined)
-        && attachments.length === 0
-        && pendingSchedule == null
-        && !props.scratchlistMode
-
     useEffect(() => {
         const acceptance = props.sendAcceptance
         if (!acceptance || acceptance === lastSendAcceptanceRef.current) return
@@ -689,6 +679,20 @@ export function HappyComposer(props: {
     const hasAnyAttachments = hasAttachments || hasHiddenAttachments
     const blocksScheduling =
         hasAttachments || hasHiddenAttachments || hiddenAttachmentStatePending
+    // Mirrors handleSend's dictation branch (see dictationDirectSendEligible):
+    // the dictation Send button must only appear when clicking it will actually
+    // run the session-bound stopAndSend path. With attachments (visible or
+    // hidden persisted) / a pending schedule / scratchlist mode handleSend
+    // falls back to dictation.toggle() (stop + transcribe), so a visible
+    // "Send" control would be misleading.
+    const dictationCanDirectSend = dictationActive
+        && dictationDirectSendEligible({
+            active,
+            resolveSessionIdAvailable: props.resolveSessionIdForVoice !== undefined,
+            blocksScheduling,
+            pendingSchedule,
+            scratchlistMode: props.scratchlistMode ?? false,
+        })
     const canSend = (hasText || hasAnyAttachments) && attachmentsReady && !controlsDisabled
 
     useEffect(() => {
@@ -1142,10 +1146,13 @@ export function HappyComposer(props: {
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
         if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
             const canDirectSend = dictation.status === 'connected'
-                && (active || props.resolveSessionIdForVoice !== undefined)
-                && attachments.length === 0
-                && pendingSchedule == null
-                && !props.scratchlistMode
+                && dictationDirectSendEligible({
+                    active,
+                    resolveSessionIdAvailable: props.resolveSessionIdForVoice !== undefined,
+                    blocksScheduling,
+                    pendingSchedule,
+                    scratchlistMode: props.scratchlistMode ?? false,
+                })
                 && intent === 'default'
             if (canDirectSend) {
                 richInputRef.current?.flushSerializedText()

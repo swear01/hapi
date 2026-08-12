@@ -47,6 +47,7 @@ import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer
 import { getDraftAttachments } from '@/lib/composer-attachment-drafts'
 import { refreshSessionDetailPreservingActive } from '@/lib/session-detail-optimistic'
 import { inactiveSessionCanResume, resolveCursorReopenGate } from '@/lib/sessionResume'
+import { isOnSessionPage } from '@/lib/dictationSend'
 import { initializeSessionLastSeen, markSessionSeen } from '@/lib/sessionLastSeen'
 import { useSessionBrowserTitle } from '@/hooks/useSessionBrowserTitle'
 import { clearCodexImportedSession } from '@/lib/codexImportedSessions'
@@ -569,6 +570,18 @@ function SessionPage() {
         }
     }, [api, navigate, queryClient, session])
 
+    // Voice dictation direct-sends finish asynchronously after transcription
+    // and may complete long after the operator navigated away (stopAndSend is
+    // designed to survive unmount, #1435). Only navigate to the resumed
+    // session when the operator is still on the source session's page;
+    // otherwise the completed background send would yank them away from where
+    // they moved.
+    const pathname = useLocation({ select: location => location.pathname })
+    const handleVoiceSessionResolved = useCallback((resolvedSessionId: string) => {
+        if (!isOnSessionPage(pathname, sessionId)) return
+        handleSessionResolved(resolvedSessionId)
+    }, [handleSessionResolved, pathname, sessionId])
+
     const {
         sendMessage,
         retryMessage,
@@ -797,7 +810,7 @@ function SessionPage() {
             resolveSessionIdForUpload={async (id) => (await resolveSessionId(id)).sessionId}
             onUploadSessionResolved={handleSessionResolved}
             resolveSessionIdForVoice={resolveSessionId}
-            onVoiceSessionResolved={handleSessionResolved}
+            onVoiceSessionResolved={handleVoiceSessionResolved}
             onViewModeChange={setViewMode}
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}
