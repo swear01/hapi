@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type { EnhancedMode } from './loop';
+import type { AgentMessage } from '@/agent/types';
 
 const harness = vi.hoisted(() => ({
     initializeError: null as Error | null,
@@ -15,7 +16,7 @@ const harness = vi.hoisted(() => ({
     promptCalls: 0,
     prompts: [] as unknown[][],
     promptErrors: [] as Error[],
-    promptMessages: [] as Array<{ type: 'text'; text: string }>,
+    promptMessages: [] as AgentMessage[],
     promptStderrErrors: [] as Array<{ type: string; message: string; raw: string }>,
     deferPrompt: null as Promise<void> | null,
     releasePrompt: null as (() => void) | null,
@@ -131,7 +132,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 }
                 return undefined;
             }),
-            prompt: vi.fn(async (_sessionId: string, content: unknown[], onMessage?: (message: { type: 'text'; text: string }) => void) => {
+            prompt: vi.fn(async (_sessionId: string, content: unknown[], onMessage?: (message: AgentMessage) => void) => {
                 harness.promptCalls++;
                 harness.prompts.push(content);
                 const message = harness.promptMessages.shift();
@@ -374,9 +375,9 @@ describe('cursorAcpRemoteLauncher', () => {
             retryAttempt: message.retryAttempt,
             maxRetries: message.maxRetries
         }))).toEqual([
-            { subtype: 'api_error', retryAttempt: 1, maxRetries: 3 },
-            { subtype: 'api_error', retryAttempt: 2, maxRetries: 3 },
-            { subtype: 'api_error', retryAttempt: 3, maxRetries: 3 }
+            { subtype: 'api_error', retryAttempt: 1, maxRetries: 4 },
+            { subtype: 'api_error', retryAttempt: 2, maxRetries: 4 },
+            { subtype: 'api_error', retryAttempt: 3, maxRetries: 4 }
         ]);
         expect(client.sendAgentMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
     });
@@ -413,7 +414,7 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(client.sendClaudeSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
             subtype: 'api_error',
             retryAttempt: 1,
-            maxRetries: 3
+            maxRetries: 4
         }));
         expect(client.sendAgentMessage).not.toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('http/2 stream closed')
@@ -502,6 +503,47 @@ describe('cursorAcpRemoteLauncher', () => {
         await launchPromise;
 
         expect(harness.promptCalls).toBe(1);
+    });
+
+    it('does not replay a prompt when a transient failure follows tool activity', async () => {
+        harness.promptMessages = [{
+            type: 'tool_call',
+            id: 'tool-1',
+            name: 'shell',
+            input: { command: 'touch output.txt' },
+            status: 'completed'
+        }];
+        harness.promptErrors = [
+            new Error('Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL')
+        ];
+        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
+        const client = makeClient() as unknown as ApiSessionClient & {
+            sendAgentMessage: ReturnType<typeof vi.fn>;
+        };
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('finish the task', { permissionMode: 'default' });
+        queue.close();
+
+        await cursorAcpRemoteLauncher(session);
+
+        expect(harness.promptCalls).toBe(1);
+        expect(client.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'error',
+            message: expect.stringContaining('not retried')
+        }));
     });
 
     it('removes the Cursor MCP overlay even when backend.disconnect rejects', async () => {

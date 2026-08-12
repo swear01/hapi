@@ -466,8 +466,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 this.userAbortRequested = false;
                 for (let retryAttempt = 0; retryAttempt <= CURSOR_AUTO_RETRY_LIMIT; retryAttempt += 1) {
                     this.pendingRetryableError = null;
+                    let attemptProducedToolActivity = false;
                     try {
                         await backend.prompt(acpSessionId, promptContent, (message) => {
+                            if (message.type === 'tool_call' || message.type === 'tool_result') {
+                                attemptProducedToolActivity = true;
+                            }
                             this.handleAgentMessage(message);
                         });
                         if (this.userAbortRequested) break;
@@ -485,6 +489,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         this.pendingRetryableError = error instanceof Error ? error.message : String(error);
                     }
 
+                    if (attemptProducedToolActivity) {
+                        this.surfacePromptFailure('Cursor connection interrupted after tool activity; the prompt was not retried.');
+                        break;
+                    }
                     if (retryAttempt < CURSOR_AUTO_RETRY_LIMIT) {
                         this.surfaceRetry(retryAttempt + 1);
                         continue;
@@ -657,7 +665,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             uuid: randomUUID(),
             subtype: 'api_error',
             retryAttempt,
-            maxRetries: CURSOR_AUTO_RETRY_LIMIT,
+            maxRetries: CURSOR_AUTO_RETRY_LIMIT + 1,
             error: { message: 'Cursor connection interrupted.' }
         });
     }
