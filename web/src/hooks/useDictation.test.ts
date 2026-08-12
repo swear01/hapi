@@ -826,4 +826,67 @@ describe('useDictation', () => {
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
         expect(result.current.error).toBe('network down')
     })
+
+    it('does not overwrite a newer resumed-session draft when a post-resume send fails', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const onTextChange = vi.fn()
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
+        const onSessionResolved = vi.fn()
+        let rejectSend: ((error: Error) => void) | null = null
+        const sendMessage = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSend = reject }))
+        const api = { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) }
+        clearDraft('session-A')
+        clearDraft('session-A-resumed')
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => 'initial text',
+            onTextChange,
+            sendMessage
+        }))
+
+        await act(() => result.current.toggle())
+        await act(async () => {
+            await result.current.stopAndSend('session-A', 'initial text', undefined, {
+                resolveSessionId,
+                onSessionResolved
+            })
+        })
+        // The send is now in flight against the resumed session; the operator
+        // types a newer draft there before it rejects.
+        await act(async () => {
+            await waitFor(() => expect(sendMessage).toHaveBeenCalled())
+        })
+        act(() => { saveDraft('session-A-resumed', 'newer draft typed by user') })
+        await act(async () => { rejectSend?.(new Error('network down')) })
+        await act(async () => {
+            await waitFor(() => expect(result.current.error).toBe('network down'))
+        })
+
+        // The recovery must NOT clobber the newer draft.
+        expect(getDraft('session-A-resumed')).toBe('newer draft typed by user')
+        expect(getDraft('session-A')).toBe('')
+    })
 })
