@@ -249,7 +249,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             session.client,
             backend,
             () => session.getPermissionMode(),
-            (response) => extensionAdapter.handlePermissionResponse(response)
+            (response) => this.handlePermissionResponse(extensionAdapter, response)
         );
 
         const resumeSessionId = session.sessionId;
@@ -308,7 +308,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                             session.client,
                             backend,
                             () => session.getPermissionMode(),
-                            (response) => this.extensionAdapter!.handlePermissionResponse(response)
+                            (response) => this.handlePermissionResponse(this.extensionAdapter!, response)
                         );
                         continue;
                     }
@@ -369,7 +369,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                             session.client,
                             backend,
                             () => session.getPermissionMode(),
-                            (response) => this.extensionAdapter!.handlePermissionResponse(response)
+                            (response) => this.handlePermissionResponse(this.extensionAdapter!, response)
                         );
                         continue;
                     }
@@ -769,6 +769,14 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         logger.debug('[cursor-acp] CreatePlan accepted — queued continue prompt', {
             executeMode
         });
+    }
+
+    private handlePermissionResponse(
+        extensionAdapter: CursorExtensionAdapter,
+        response: { id: string; approved: boolean; decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort' }
+    ): Promise<boolean> {
+        if (response.decision === 'abort') this.userAbortRequested = true;
+        return extensionAdapter.handlePermissionResponse(response);
     }
 
     /**
