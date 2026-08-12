@@ -318,7 +318,12 @@ describe('useDictation', () => {
             expect(result.current.status).toBe('error')
             expect(result.current.error).toBe('No audio was recorded')
         })
-        expect(onTextChange).not.toHaveBeenCalledWith('initial')
+        // Recovery reseats the failed voice text into the composer and persists
+        // it as the draft; text typed afterwards is the live composer source
+        // and is never touched by recovery.
+        expect(onTextChange).toHaveBeenCalledWith('initial')
+        expect(getDraft('session-A')).toBe('initial')
+        expect(currentText).toBe('user typed replacement text')
     })
 
     it('does not transcribe or send when MediaRecorder fails after partial data', async () => {
@@ -888,5 +893,122 @@ describe('useDictation', () => {
         // Both the newer draft and the failed voice message survive.
         expect(getDraft('session-A-resumed')).toBe('newer draft typed by user initial text voice payload')
         expect(getDraft('session-A')).toBe('')
+    })
+
+    it('preserves live composer text typed while the send is pending', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
+        const onSessionResolved = vi.fn()
+        let rejectSend: ((error: Error) => void) | null = null
+        const sendMessage = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSend = reject }))
+        const api = { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) }
+        let composerText = ''
+        clearDraft('session-A')
+        clearDraft('session-A-resumed')
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => composerText,
+            onTextChange: (text) => { composerText = text },
+            sendMessage
+        }))
+
+        await act(() => result.current.toggle())
+        await act(async () => {
+            await result.current.stopAndSend('session-A', 'initial text', undefined, {
+                resolveSessionId,
+                onSessionResolved
+            })
+        })
+        // The send is in flight; the operator types replacement text into the
+        // mounted composer (in memory, not yet persisted).
+        await act(async () => {
+            await waitFor(() => expect(sendMessage).toHaveBeenCalled())
+        })
+        act(() => { composerText = 'replacement typed by user' })
+        await act(async () => { rejectSend?.(new Error('network down')) })
+        await act(async () => {
+            await waitFor(() => expect(result.current.error).toBe('network down'))
+        })
+
+        // Live replacement text AND the failed voice message both survive.
+        expect(composerText).toBe('replacement typed by user initial text voice payload')
+        expect(getDraft('session-A-resumed')).toBe('replacement typed by user initial text voice payload')
+    })
+
+    it('preserves live composer text typed while transcription is pending', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        let rejectTranscribe: ((error: Error) => void) | null = null
+        const api = { transcribeVoice: vi.fn(() => new Promise<void>((_resolve, reject) => { rejectTranscribe = reject })) }
+        let composerText = ''
+        clearDraft('session-A')
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => composerText,
+            onTextChange: (text) => { composerText = text },
+            sendMessage: vi.fn(async () => {})
+        }))
+
+        await act(() => result.current.toggle())
+        await act(async () => {
+            await result.current.stopAndSend('session-A', 'initial text')
+        })
+        await act(async () => {
+            await waitFor(() => expect(api.transcribeVoice).toHaveBeenCalled())
+        })
+        act(() => { composerText = 'replacement typed by user' })
+        await act(async () => { rejectTranscribe?.(new Error('transcription blew up')) })
+        await act(async () => {
+            await waitFor(() => expect(result.current.error).toBe('transcription blew up'))
+        })
+
+        // Live replacement text AND the failed voice text both survive.
+        expect(composerText).toBe('replacement typed by user initial text')
+        expect(getDraft('session-A')).toBe('replacement typed by user initial text')
     })
 })

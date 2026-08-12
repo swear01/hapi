@@ -27,6 +27,7 @@ type ScribeCallbacks = {
     onPartialTranscript: (event: { text: string }) => void
     onDisconnect: () => void
     onCommittedTranscript: (event: { text: string }) => void
+    onError: (error: unknown) => void
 }
 
 describe('useRealtimeDictation', () => {
@@ -185,5 +186,91 @@ describe('useRealtimeDictation', () => {
         // Both the newer draft and the failed voice message survive.
         expect(getDraft('session-A')).toBe('')
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
+    })
+
+    it('preserves live composer text typed while the send is pending', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() }
+        })
+        const api = {
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
+        } as unknown as ApiClient
+        let rejectSend: ((error: Error) => void) | null = null
+        const sendMessage = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSend = reject }))
+        let composerText = ''
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
+        const onSessionResolved = vi.fn()
+        clearDraft('session-A')
+        clearDraft('session-A-resumed')
+        const { result } = renderHook(() => useRealtimeDictation({
+            api,
+            provider: 'elevenlabs',
+            mode: 'realtime',
+            onFinalTranscript: (text) => { composerText = text },
+            getCurrentText: () => composerText,
+            sendMessage
+        }))
+
+        scribe.commit.mockImplementation(() => {
+            (scribe.options as ScribeCallbacks).onCommittedTranscript?.({ text: 'spoken words' })
+        })
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'explicit initial text', undefined, {
+            resolveSessionId,
+            onSessionResolved
+        }))
+        // The send is in flight; the operator types replacement text into the
+        // mounted composer (in memory, not yet persisted).
+        await act(async () => {
+            await waitFor(() => expect(sendMessage).toHaveBeenCalled())
+        })
+        act(() => { composerText = 'replacement typed by user' })
+        await act(async () => { rejectSend?.(new Error('network down')) })
+        await act(async () => {
+            await waitFor(() => expect(composerText).toBe('replacement typed by user explicit initial text spoken words'))
+        })
+
+        // Live replacement text AND the failed voice message both survive.
+        expect(getDraft('session-A-resumed')).toBe('replacement typed by user explicit initial text spoken words')
+        expect(getDraft('session-A')).toBe('')
+    })
+
+    it('preserves live composer text typed before a realtime failure', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() }
+        })
+        const api = {
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
+        } as unknown as ApiClient
+        let composerText = ''
+        clearDraft('session-A')
+        // Do not inherit the success-path commit implementation from the
+        // previous test: the provider must stay active until onError fires.
+        scribe.commit.mockImplementation(() => {})
+        const { result } = renderHook(() => useRealtimeDictation({
+            api,
+            provider: 'elevenlabs',
+            mode: 'realtime',
+            onFinalTranscript: (text) => { composerText = text },
+            getCurrentText: () => composerText,
+            sendMessage: vi.fn(async () => {})
+        }))
+
+        await act(() => result.current.toggle())
+        // Fire-and-forget: stop() waits on the scribe commit race; the failure
+        // must be driven while the provider session is still active.
+        act(() => { void result.current.stopAndSend('session-A', 'explicit initial text') })
+        const callbacks = scribe.options as ScribeCallbacks
+        act(() => callbacks.onPartialTranscript({ text: 'spoken words' }))
+        act(() => { composerText = 'replacement typed by user' })
+        act(() => callbacks.onError(new Error('realtime connection died')))
+        await act(async () => {
+            await waitFor(() => expect(composerText).toBe('replacement typed by user explicit initial text spoken words'))
+        })
+
+        // Live replacement text AND the failed voice text both survive.
+        expect(getDraft('session-A')).toBe('replacement typed by user explicit initial text spoken words')
     })
 })

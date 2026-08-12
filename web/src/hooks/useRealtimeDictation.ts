@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, recoverFailedVoiceSend, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -95,15 +95,17 @@ export function useRealtimeDictation(config: {
                     // retryable transcript under the LIVE resumed id so the operator
                     // can retry from the resumed session (and is navigated there via
                     // onSessionResolved) instead of leaving it under the archived
-                    // source id. When the operator already typed a newer draft into
-                    // that composer, preserve BOTH: merge the failed voice text
-                    // after the newer draft so nothing is lost.
+                    // source id.
                     const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
-                    const currentDraft = getDraft(recoverySessionId)
-                    const recoveredDraft = currentDraft === '' || currentDraft === recoveryDraftAtStart
-                        ? finalMessage
-                        : appendTranscript(currentDraft, finalMessage)
-                    saveDraft(recoverySessionId, recoveredDraft)
+                    recoverFailedVoiceSend({
+                        mounted: mountedRef.current,
+                        getCurrentText: config.getCurrentText ?? (() => ''),
+                        onTextChange: onFinalTranscriptRef.current,
+                        recoverySessionId,
+                        initialText: pendingSend.initialText,
+                        failedText: finalMessage,
+                        draftAtStart: recoveryDraftAtStart,
+                    })
                     if (resumed) {
                         pendingSend.options.onSessionResolved?.(recoverySessionId)
                     }
@@ -131,15 +133,15 @@ export function useRealtimeDictation(config: {
         sendOnFinishRef.current = null
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, partialRef.current)
-            const cur = getDraft(pendingSend.sessionId)
-            if (cur === '' || cur === pendingSend.draftAtStart) {
-                saveDraft(pendingSend.sessionId, finalMessage)
-            }
-            if (mountedRef.current) {
-                if (!config.getCurrentText?.().trim()) {
-                    onFinalTranscriptRef.current(finalMessage)
-                }
-            }
+            recoverFailedVoiceSend({
+                mounted: mountedRef.current,
+                getCurrentText: config.getCurrentText ?? (() => ''),
+                onTextChange: onFinalTranscriptRef.current,
+                recoverySessionId: pendingSend.sessionId,
+                initialText: pendingSend.initialText,
+                failedText: finalMessage,
+                draftAtStart: pendingSend.draftAtStart,
+            })
         }
         elevenLabsActiveRef.current = false
         resolveElevenLabsCommitRef.current?.()

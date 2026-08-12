@@ -30,6 +30,44 @@ function preferredMimeType(): string | undefined {
 }
 
 /**
+ * Recover a failed voice send into the draft store without losing text the
+ * operator typed while transcription/delivery was pending.
+ *
+ * While the composer is mounted its edits live in memory (session storage is
+ * only written on unmount), so the live composer text is the authoritative
+ * replacement source; a persisted draft written since `draftAtStart` covers
+ * the unmounted case. Either way the failed voice text is appended after the
+ * replacement so both remain recoverable, and the composer (when mounted) is
+ * reseated to the merged draft so the later unmount persists the same value.
+ */
+export function recoverFailedVoiceSend(args: {
+    mounted: boolean
+    getCurrentText: () => string
+    onTextChange: (text: string) => void
+    recoverySessionId: string
+    /** Composer text captured when the send was requested. */
+    initialText: string
+    /** Text that failed to deliver (the voice message to retry). */
+    failedText: string
+    /** Persisted draft baseline captured before the delivery attempt. */
+    draftAtStart: string
+}): void {
+    const liveReplacement = args.mounted ? args.getCurrentText() : ''
+    const persistedDraft = getDraft(args.recoverySessionId)
+    if (liveReplacement.trim() && liveReplacement !== args.initialText) {
+        const merged = appendTranscript(liveReplacement, args.failedText)
+        saveDraft(args.recoverySessionId, merged)
+        args.onTextChange(merged)
+    } else if (persistedDraft !== '' && persistedDraft !== args.draftAtStart) {
+        saveDraft(args.recoverySessionId, appendTranscript(persistedDraft, args.failedText))
+    } else {
+        saveDraft(args.recoverySessionId, args.failedText)
+        if (args.mounted) args.onTextChange(args.failedText)
+    }
+}
+
+
+/**
  * Optional session resolution for a `stopAndSend` voice send.
  *
  * Mirrors the text-send pipeline's `resolveSessionId` contract
@@ -160,11 +198,18 @@ export function useDictation(config: {
 
                     if (recordingFailed) {
                         transcribingRef.current = false
-                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        if (pendingSend) {
+                            recoverFailedVoiceSend({
+                                mounted: mountedRef.current,
+                                getCurrentText: config.getCurrentText,
+                                onTextChange: config.onTextChange,
+                                recoverySessionId: pendingSend.sessionId,
+                                initialText: pendingSend.initialText,
+                                failedText: pendingSend.initialText,
+                                draftAtStart: pendingSend.draftAtStart,
+                            })
                         }
                         if (mountedRef.current) {
-                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
                             setError('Audio recording failed')
                             setStatus('error')
                         }
@@ -173,11 +218,18 @@ export function useDictation(config: {
 
                     if (!blob.size) {
                         transcribingRef.current = false
-                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        if (pendingSend) {
+                            recoverFailedVoiceSend({
+                                mounted: mountedRef.current,
+                                getCurrentText: config.getCurrentText,
+                                onTextChange: config.onTextChange,
+                                recoverySessionId: pendingSend.sessionId,
+                                initialText: pendingSend.initialText,
+                                failedText: pendingSend.initialText,
+                                draftAtStart: pendingSend.draftAtStart,
+                            })
                         }
                         if (mountedRef.current) {
-                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
                             setError('No audio was recorded')
                             setStatus('error')
                         }
@@ -223,15 +275,17 @@ export function useDictation(config: {
                                     // retryable transcript under the LIVE resumed id so the operator
                                     // can retry from the resumed session (and is navigated there via
                                     // onSessionResolved) instead of leaving it under the archived
-                                    // source id. When the operator already typed a newer draft into
-                                    // that composer, preserve BOTH: merge the failed voice text
-                                    // after the newer draft so nothing is lost.
+                                    // source id.
                                     const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
-                                    const currentDraft = getDraft(recoverySessionId)
-                                    const recoveredDraft = currentDraft === '' || currentDraft === recoveryDraftAtStart
-                                        ? finalMessage
-                                        : appendTranscript(currentDraft, finalMessage)
-                                    saveDraft(recoverySessionId, recoveredDraft)
+                                    recoverFailedVoiceSend({
+                                        mounted: mountedRef.current,
+                                        getCurrentText: config.getCurrentText,
+                                        onTextChange: config.onTextChange,
+                                        recoverySessionId,
+                                        initialText: pendingSend.initialText,
+                                        failedText: finalMessage,
+                                        draftAtStart: recoveryDraftAtStart,
+                                    })
                                     if (resumed) {
                                         pendingSend.options.onSessionResolved?.(recoverySessionId)
                                     }
@@ -252,11 +306,18 @@ export function useDictation(config: {
                             setStatus('disconnected')
                         }
                     } catch (transcriptionError) {
-                        if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                            saveDraft(pendingSend.sessionId, pendingSend.initialText)
+                        if (pendingSend) {
+                            recoverFailedVoiceSend({
+                                mounted: mountedRef.current,
+                                getCurrentText: config.getCurrentText,
+                                onTextChange: config.onTextChange,
+                                recoverySessionId: pendingSend.sessionId,
+                                initialText: pendingSend.initialText,
+                                failedText: pendingSend.initialText,
+                                draftAtStart: pendingSend.draftAtStart,
+                            })
                         }
                         if (mountedRef.current) {
-                            if (pendingSend && !config.getCurrentText().trim()) config.onTextChange(pendingSend.initialText)
                             setError(transcriptionError instanceof Error ? transcriptionError.message : 'Transcription failed')
                             setStatus('error')
                         }
