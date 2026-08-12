@@ -1066,6 +1066,153 @@ describe('history view and older pagination', () => {
 
         expect(getMessageWindowState(id).messages.some((message) => message.id === 'root')).toBe(true)
     })
+
+    // Regression: clicking "Load earlier" on a RUNNING session used to be
+    // pointless and destructive. The tail-mode trim evicted the freshly
+    // loaded older pages on the very next streaming ingest (and one more row
+    // per message afterwards), so the viewport anchored in the loaded range
+    // jumped upward repeatedly. The loaded-history range must survive
+    // streaming ingests while the user browses it.
+    it('keeps loaded older pages in the window while a running session streams (tail mode)', async () => {
+        const id = sessionId('running-tail-loaded-history')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+
+        // Two "Load earlier" clicks from the tail: window 200 -> 600.
+        const first = await fetchOlderMessages(api, id)
+        expect(first.kind).toBe('applied')
+        const second = await fetchOlderMessages(api, id)
+        expect(second.kind).toBe('applied')
+        expect(getMessageWindowState(id).messages[0]!.seq).toBe(1)
+        expect(getMessageWindowState(id).messages).toHaveLength(600)
+
+        // Running session: streaming messages arrive one by one.
+        for (const seq of [601, 602, 603]) {
+            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
+        }
+        const state = getMessageWindowState(id)
+        // The loaded range (m-1…) survives; the streaming tail stays visible.
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages).toHaveLength(603)
+        expect(state.messages.at(-1)!.seq).toBe(603)
+
+    })
+
+    it('keeps loaded older pages and the streaming tail while reading history', async () => {
+        const id = sessionId('running-history-loaded-history')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+        await fetchOlderMessages(api, id)
+        const second = await fetchOlderMessages(api, id)
+        expect(second.kind).toBe('applied')
+
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
+        const state = getMessageWindowState(id)
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(601)
+
+    })
+
+    it('releases the loaded range when the user returns to the tail', async () => {
+        const id = sessionId('loaded-history-tail-release')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+        await fetchOlderMessages(api, id)
+        await fetchOlderMessages(api, id)
+
+        // Back to the bottom: the window compacts to the newest tail and the
+        // protection is released, so streaming trims resume normally.
+        setMessageViewMode(id, 'tail')
+        let state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(201)
+
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
+        state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(202)
+        expect(state.messages.at(-1)!.seq).toBe(601)
+    })
 })
 
 describe('optimistic and queued-message operations', () => {

@@ -52,6 +52,17 @@ type InternalState = MessageWindowState & {
     oldestPositionSeq: number | null
     newestPositionAt: number | null
     newestPositionSeq: number | null
+    /**
+     * Oldest position of the "tail region" after older-history pages were
+     * loaded (the cursor of the last successful older-page fetch). Messages
+     * strictly older than this boundary are part of the loaded history the
+     * user is browsing; tail-mode trims must not evict them while streaming
+     * ingests arrive, or the viewport anchored in the loaded range jumps up
+     * repeatedly on a running session. Cleared when the window re-enters the
+     * tail (enterTailMode) or is rebuilt by a tail resync.
+     */
+    historyBoundaryAt: number | null
+    historyBoundarySeq: number | null
     requiresLatestReset: boolean
     syncGeneration: number
     olderGeneration: number
@@ -64,6 +75,8 @@ type PersistedMessageWindowState = {
     oldestPositionSeq: number | null
     newestPositionAt: number | null
     newestPositionSeq: number | null
+    historyBoundaryAt: number | null
+    historyBoundarySeq: number | null
     epoch: number | null
 }
 
@@ -158,6 +171,7 @@ function shouldPersistState(state: InternalState): boolean {
         || state.epoch !== null
         || state.oldestPositionAt !== null
         || state.newestPositionAt !== null
+        || state.historyBoundaryAt !== null
 }
 
 function persistState(sessionId: string, state: InternalState): void {
@@ -176,6 +190,8 @@ function persistState(sessionId: string, state: InternalState): void {
             oldestPositionSeq: state.oldestPositionSeq,
             newestPositionAt: state.newestPositionAt,
             newestPositionSeq: state.newestPositionSeq,
+            historyBoundaryAt: state.historyBoundaryAt,
+            historyBoundarySeq: state.historyBoundarySeq,
             epoch: state.epoch
         }
         sessionStorage.setItem(getStorageKey(sessionId), JSON.stringify(persisted))
@@ -236,6 +252,8 @@ function createState(sessionId: string): InternalState {
         oldestPositionSeq: null,
         newestPositionAt: null,
         newestPositionSeq: null,
+        historyBoundaryAt: null,
+        historyBoundarySeq: null,
         requiresLatestReset: false,
         syncGeneration: 0,
         olderGeneration: 0
@@ -267,6 +285,7 @@ function hydrateState(sessionId: string): InternalState | null {
         }
         const oldest = readPosition(parsed.oldestPositionAt, parsed.oldestPositionSeq)
         const newest = readPosition(parsed.newestPositionAt, parsed.newestPositionSeq)
+        const historyBoundary = readPosition(parsed.historyBoundaryAt, parsed.historyBoundarySeq)
         const epoch = typeof parsed.epoch === 'number' && Number.isInteger(parsed.epoch) && parsed.epoch >= 0
             ? parsed.epoch
             : null
@@ -277,6 +296,8 @@ function hydrateState(sessionId: string): InternalState | null {
             oldestPositionSeq: oldest?.seq ?? null,
             newestPositionAt: newest?.at ?? null,
             newestPositionSeq: newest?.seq ?? null,
+            historyBoundaryAt: historyBoundary?.at ?? null,
+            historyBoundarySeq: historyBoundary?.seq ?? null,
             epoch,
             requiresLatestReset: parsed.messages.length > 0 && (newest === null || epoch === null)
         })
@@ -385,6 +406,8 @@ function buildState(
         | 'oldestPositionSeq'
         | 'newestPositionAt'
         | 'newestPositionSeq'
+        | 'historyBoundaryAt'
+        | 'historyBoundarySeq'
         | 'requiresLatestReset'
         | 'syncGeneration'
         | 'olderGeneration'
@@ -488,6 +511,8 @@ function mergeIntoWindow(
     options: {
         mode?: 'append' | 'prepend'
         regularLimit?: number
+        historyBoundaryAt?: number | null
+        historyBoundarySeq?: number | null
     } = {}
 ): InternalState {
     const retainedIncoming = incoming.filter(shouldRetainWindowMessage)
@@ -498,28 +523,83 @@ function mergeIntoWindow(
     const regularLimit = options.regularLimit
         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
     const merged = mergeMessages(previous.messages, retainedIncoming)
-    const { kept, dropped } = trimPreservingQueued(merged, regularLimit, mode)
+
+    const boundaryAt = options.historyBoundaryAt !== undefined
+        ? options.historyBoundaryAt
+        : previous.historyBoundaryAt
+    const boundarySeq = options.historyBoundarySeq !== undefined
+        ? options.historyBoundarySeq
+        : previous.historyBoundarySeq
+    const boundary = boundaryAt !== null && boundarySeq !== null
+        ? { at: boundaryAt, seq: boundarySeq }
+        : null
+
+    let kept: DecryptedMessage[]
+    let dropped: DecryptedMessage[]
+    let droppedNewest = false
+    if (boundary) {
+        // Loaded older history is present: keep that range whole and trim
+        // only the newest tail region (bounded by the same overall cap the
+        // older-page fetch itself applies). Streaming ingests must not
+        // evict the messages the user just loaded, or the viewport anchored
+        // there jumps upward on every new message of a running session.
+        const queued = merged.filter(isQueuedForInvocation)
+        const queuedIds = new Set(queued.map((message) => message.id))
+        const trimmable = merged.filter((message) => !queuedIds.has(message.id))
+        const loaded: DecryptedMessage[] = []
+        const tail: DecryptedMessage[] = []
+        for (const message of trimmable) {
+            const position = messagePosition(message)
+            if (!position) {
+                loaded.push(message)
+                continue
+            }
+            if (comparePosition(position, boundary) < 0) {
+                loaded.push(message)
+            } else {
+                tail.push(message)
+            }
+        }
+        const totalCap = Math.max(regularLimit, OLDER_LOAD_WINDOW_SIZE)
+        const loadedTrim = sliceForTrim(loaded, totalCap, 'prepend')
+        const tailTrim = sliceForTrim(tail, Math.max(0, totalCap - loadedTrim.kept.length), 'append')
+        kept = mergeMessages([...loadedTrim.kept, ...tailTrim.kept], queued)
+        const keptIds = new Set(kept.map((message) => message.id))
+        dropped = merged.filter((message) => !keptIds.has(message.id))
+        if (dropped.length > 0) {
+            const droppedNewestPosition = derivePosition(dropped, 'newest')
+            const mergedNewestPosition = derivePosition(merged, 'newest')
+            droppedNewest = droppedNewestPosition !== null
+                && mergedNewestPosition !== null
+                && comparePosition(droppedNewestPosition, mergedNewestPosition) === 0
+        }
+    } else {
+        const trimmed = trimPreservingQueued(merged, regularLimit, mode)
+        kept = trimmed.kept
+        dropped = trimmed.dropped
+        droppedNewest = mode === 'prepend' && dropped.length > 0
+    }
     let next = buildState(previous, {
         messages: kept
     })
     if (dropped.length === 0) {
         return next
     }
-    if (mode === 'append') {
-        const oldest = derivePosition(kept, 'oldest')
-        return buildState(next, {
-            hasMore: true,
-            oldestPositionAt: oldest?.at ?? next.oldestPositionAt,
-            oldestPositionSeq: oldest?.seq ?? next.oldestPositionSeq
+    if (droppedNewest) {
+        const newest = derivePosition(kept, 'newest')
+        next = buildState(next, {
+            requiresLatestReset: true,
+            newestPositionAt: newest?.at ?? null,
+            newestPositionSeq: newest?.seq ?? null
         })
+        return next
     }
-    const newest = derivePosition(kept, 'newest')
-    next = buildState(next, {
-        requiresLatestReset: true,
-        newestPositionAt: newest?.at ?? null,
-        newestPositionSeq: newest?.seq ?? null
+    const oldest = derivePosition(kept, 'oldest')
+    return buildState(next, {
+        hasMore: true,
+        oldestPositionAt: oldest?.at ?? next.oldestPositionAt,
+        oldestPositionSeq: oldest?.seq ?? next.oldestPositionSeq
     })
-    return next
 }
 
 function pagePosition(at: number | null, seq: number | null): MessagePosition | null {
@@ -574,6 +654,10 @@ function applyLatestResponse(
         olderGeneration: options.replaceServerRows
             ? previous.olderGeneration + 1
             : previous.olderGeneration,
+        // A tail resync rebuilds the window from the server's authoritative
+        // rows; the loaded-history protection no longer applies.
+        historyBoundaryAt: options.replaceServerRows ? null : previous.historyBoundaryAt,
+        historyBoundarySeq: options.replaceServerRows ? null : previous.historyBoundarySeq,
         warning: null
     })
 }
@@ -753,7 +837,12 @@ function enterTailMode(previous: InternalState): InternalState {
         oldestPositionAt: oldest?.at ?? null,
         oldestPositionSeq: oldest?.seq ?? null,
         newestPositionAt: forceLatest ? null : previous.newestPositionAt,
-        newestPositionSeq: forceLatest ? null : previous.newestPositionSeq
+        newestPositionSeq: forceLatest ? null : previous.newestPositionSeq,
+        // Returning to the tail releases the loaded-history protection: the
+        // window is allowed to shed the older range again (invisibly, the
+        // user is at the bottom).
+        historyBoundaryAt: null,
+        historyBoundarySeq: null
     })
 }
 
@@ -864,7 +953,9 @@ export async function fetchOlderMessages(
             }
             const merged = mergeIntoWindow(previous, response.messages, {
                 mode: 'prepend',
-                regularLimit: OLDER_LOAD_WINDOW_SIZE
+                regularLimit: OLDER_LOAD_WINDOW_SIZE,
+                historyBoundaryAt: before.at,
+                historyBoundarySeq: before.seq
             })
             historyVersion = nextHistoryVersion
             return buildState(merged, {
@@ -872,6 +963,8 @@ export async function fetchOlderMessages(
                 epoch: response.page.epoch,
                 oldestPositionAt: response.page.nextBeforeAt,
                 oldestPositionSeq: response.page.nextBeforeSeq,
+                historyBoundaryAt: before.at,
+                historyBoundarySeq: before.seq,
                 isLoadingMore: false,
                 historyVersion,
                 warning: null
@@ -988,6 +1081,8 @@ export function seedMessageWindowFromSession(fromSessionId: string, toSessionId:
         hasMore: source.hasMore,
         oldestPositionAt: source.oldestPositionAt,
         oldestPositionSeq: source.oldestPositionSeq,
+        historyBoundaryAt: source.historyBoundaryAt,
+        historyBoundarySeq: source.historyBoundarySeq,
         requiresLatestReset: true,
         syncGeneration: target.syncGeneration + 1,
         olderGeneration: target.olderGeneration + 1
