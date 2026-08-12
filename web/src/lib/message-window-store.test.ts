@@ -1352,6 +1352,37 @@ describe('history view and older pagination', () => {
         expect(state.oldestSeq).toBe(state.messages[0]!.seq)
     })
 
+    // Regression: the history boundary is persisted, but a boundary restored
+    // from a previous page session must not survive — the outline that held
+    // it is gone, so no release path exists and SSE ingests would grow the
+    // window without limit. Activation clears it.
+    it('drops a persisted history boundary on window activation', () => {
+        const id = sessionId('persisted-boundary-release')
+        const messages = Array.from({ length: VISIBLE_WINDOW_SIZE }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
+            messages,
+            hasMore: true,
+            oldestPositionAt: 1,
+            oldestPositionSeq: 1,
+            newestPositionAt: 400,
+            newestPositionSeq: 400,
+            historyBoundaryAt: 201,
+            historyBoundarySeq: 201,
+            epoch: 0
+        }))
+        activateMessageWindow(id)
+
+        // The boundary is released: the next streaming ingest trims back to
+        // the tail cap instead of taking the no-trim branch.
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-401', seq: 401, at: 401 })])
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(2)
+        expect(state.messages.at(-1)!.seq).toBe(401)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>

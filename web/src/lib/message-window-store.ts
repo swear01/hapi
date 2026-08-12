@@ -864,6 +864,10 @@ export function activateMessageWindow(sessionId: string): void {
             previous.viewMode === 'tail'
             && kept.length === previous.messages.length
             && !forceLatest
+            // A boundary persisted from a previous page session must not
+            // survive: the outline that held it is gone, so the window has
+            // no release path and would grow unboundedly on SSE ingests.
+            && previous.historyBoundaryAt === null
         ) {
             return previous
         }
