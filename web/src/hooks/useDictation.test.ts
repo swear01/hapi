@@ -2,7 +2,7 @@ import { StrictMode } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
-import { getDraft, saveDraft } from '@/lib/composer-drafts'
+import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import { appendTranscript, useDictation } from './useDictation'
 
 describe('appendTranscript', () => {
@@ -769,5 +769,61 @@ describe('useDictation', () => {
         expect(result.current.error).toBe('Session is archived. Reopen it to send your message.')
         // The failed send text is preserved in the draft store for the composer.
         expect(getDraft('session-A')).toBe('initial text voice payload')
+    })
+
+    it('recovers a post-resume send failure under the resumed session id', async () => {
+        const stopTrack = vi.fn()
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const onTextChange = vi.fn()
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
+        const onSessionResolved = vi.fn()
+        const sendMessage = vi.fn(async () => { throw new Error('network down') })
+        const api = { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) }
+        clearDraft('session-A')
+        clearDraft('session-A-resumed')
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => 'initial text',
+            onTextChange,
+            sendMessage
+        }))
+
+        await act(() => result.current.toggle())
+        await act(async () => {
+            await result.current.stopAndSend('session-A', 'initial text', undefined, {
+                resolveSessionId,
+                onSessionResolved
+            })
+        })
+
+        expect(sendMessage).toHaveBeenCalledWith('session-A-resumed', 'initial text voice payload', undefined)
+        // The source session is superseded: recovery lives under the resumed id,
+        // and the UI is pointed at the resumed session.
+        expect(getDraft('session-A-resumed')).toBe('initial text voice payload')
+        expect(getDraft('session-A')).toBe('')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
+        expect(result.current.error).toBe('network down')
     })
 })

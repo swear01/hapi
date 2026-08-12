@@ -197,9 +197,9 @@ export function useDictation(config: {
                             const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                             if (finalMessage.trim()) {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                                let targetSessionId = pendingSend.sessionId
+                                let resumed = false
                                 try {
-                                    let targetSessionId = pendingSend.sessionId
-                                    let resumed = false
                                     if (pendingSend.options.resolveSessionId) {
                                         const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
                                         targetSessionId = resolved.sessionId
@@ -213,8 +213,18 @@ export function useDictation(config: {
                                         clearDraft(pendingSend.sessionId)
                                     }
                                 } catch (sendError) {
-                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                                        saveDraft(pendingSend.sessionId, finalMessage)
+                                    // After a resume the source session is superseded: recover the
+                                    // retryable transcript under the LIVE resumed id so the operator
+                                    // can retry from the resumed session (and is navigated there via
+                                    // onSessionResolved) instead of leaving it under the archived
+                                    // source id.
+                                    const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
+                                    const recoveryDraftAtStart = resumed ? getDraft(targetSessionId) : pendingSend.draftAtStart
+                                    if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
+                                        saveDraft(recoverySessionId, finalMessage)
+                                    }
+                                    if (resumed) {
+                                        pendingSend.options.onSessionResolved?.(recoverySessionId)
                                     }
                                     if (mountedRef.current) {
                                         if (!config.getCurrentText().trim()) {
