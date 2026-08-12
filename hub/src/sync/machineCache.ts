@@ -62,11 +62,13 @@ export class MachineCache {
 
 
     getMachines(): Machine[] {
-        return Array.from(this.machines.values())
+        return this.mapLive(Array.from(this.machines.values()))
     }
 
     getMachinesByNamespace(namespace: string): Machine[] {
-        return this.getMachines().filter((machine) => machine.namespace === namespace)
+        return this.mapLive(
+            Array.from(this.machines.values()).filter((machine) => machine.namespace === namespace)
+        )
     }
 
     getMachine(machineId: string): Machine | undefined {
@@ -201,6 +203,13 @@ export class MachineCache {
         return this.withLiveCapabilities(machine)
     }
 
+
+    private mapLive(machines: Machine[]): Machine[] {
+        if (machines.length === 0 || !this.rpcRegistry) {
+            return machines
+        }
+        return machines.map((machine) => this.withLiveCapabilities(machine))
+    }
 
     /** Overlay live RPC registrations onto advertised metadata capabilities for API/SSE consumers. */
     private withLiveCapabilities(machine: Machine): Machine {
