@@ -470,6 +470,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         await backend.prompt(acpSessionId, promptContent, (message) => {
                             this.handleAgentMessage(message);
                         });
+                        if (this.userAbortRequested) break;
                         if (!this.pendingRetryableError) {
                             void backend.refreshSessionInfo(acpSessionId, session.path);
                             break;

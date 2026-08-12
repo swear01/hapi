@@ -1,6 +1,6 @@
 export const CURSOR_AUTO_RETRY_LIMIT = 3;
 
-const RETRYABLE_CURSOR_ERROR = /(?:Error: (?:T|RetriableError): \[(?:canceled|deadline_exceeded|unavailable)\]|http\/(?:1\.1|2)|connection (?:reset|stalled|closed)|timed? out after|\btimeout\b)/i;
+const RETRYABLE_CURSOR_ERROR = /(?:Error: (?:T|RetriableError): \[(?:canceled|deadline_exceeded|unavailable)\]|http\/(?:1\.1|2).*stream closed|connection (?:reset|stalled|closed)|ACP request 'session\/prompt' timed out after \d+ms)/i;
 const INLINE_CURSOR_ERROR = /^[ \t]*Error: (?:T|RetriableError):/im;
 
 export function isRetryableCursorError(error: unknown): boolean {

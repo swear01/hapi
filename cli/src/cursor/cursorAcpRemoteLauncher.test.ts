@@ -17,6 +17,8 @@ const harness = vi.hoisted(() => ({
     promptErrors: [] as Error[],
     promptMessages: [] as Array<{ type: 'text'; text: string }>,
     promptStderrErrors: [] as Array<{ type: string; message: string; raw: string }>,
+    deferPrompt: null as Promise<void> | null,
+    releasePrompt: null as (() => void) | null,
     backendArgs: null as { command: string; args?: string[] } | null,
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
@@ -136,6 +138,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 if (message) onMessage?.(message);
                 const stderrError = harness.promptStderrErrors.shift();
                 if (stderrError) harness.stderrErrorHandler?.(stderrError);
+                if (harness.deferPrompt) await harness.deferPrompt;
                 const error = harness.promptErrors.shift();
                 if (error) throw error;
             }),
@@ -265,6 +268,8 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.promptErrors = [];
         harness.promptMessages = [];
         harness.promptStderrErrors = [];
+        harness.deferPrompt = null;
+        harness.releasePrompt = null;
         harness.setConfigOptionCalls = [];
         harness.deferSetConfigOption = null;
         harness.releaseSetConfigOption = null;
@@ -453,6 +458,50 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(client.sendAgentMessage).not.toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('http/2 stream closed')
         }));
+    });
+
+    it('does not retry when Stop resolves a prompt after a retryable stderr signal', async () => {
+        harness.promptStderrErrors = [{
+            type: 'unknown',
+            message: 'http/2 stream closed with error code CANCEL',
+            raw: 'http/2 stream closed with error code CANCEL'
+        }];
+        harness.deferPrompt = new Promise<void>((resolve) => {
+            harness.releasePrompt = resolve;
+        });
+        const handlers = new Map<string, () => Promise<void>>();
+        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
+        const client = {
+            ...makeClient(),
+            rpcHandlerManager: {
+                registerHandler: vi.fn((method: string, handler: () => Promise<void>) => handlers.set(method, handler)),
+                unregisterHandler: vi.fn()
+            }
+        } as unknown as ApiSessionClient;
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('finish the task', { permissionMode: 'default' });
+
+        const launchPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        await handlers.get('abort')!();
+        harness.releasePrompt!();
+        queue.close();
+        await launchPromise;
+
+        expect(harness.promptCalls).toBe(1);
     });
 
     it('removes the Cursor MCP overlay even when backend.disconnect rejects', async () => {
