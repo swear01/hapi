@@ -1026,7 +1026,13 @@ export function cancelOlderMessageLoad(sessionId: string): void {
 export function setMessageViewMode(sessionId: string, mode: MessageViewMode): void {
     updateState(sessionId, (previous) => {
         if (previous.viewMode === mode) {
-            return previous
+            // Re-asserting tail mode while loaded history is held releases it:
+            // the user has returned to the live tail (e.g. the conversation
+            // outline closed after a "Load earlier" click), so the window can
+            // shed the older range again and stay bounded.
+            return mode === 'tail' && previous.historyBoundaryAt !== null
+                ? enterTailMode(previous)
+                : previous
         }
         if (mode === 'history') {
             return buildState(previous, { viewMode: 'history' })

@@ -1240,6 +1240,67 @@ describe('history view and older pagination', () => {
         expect(state.messages.at(-1)!.seq).toBe(1_300)
     })
 
+    // Regression: an older-page load made while the viewport is already at
+    // the tail (outline "Load earlier") installs a history boundary with no
+    // viewMode transition to release it. Re-asserting tail mode (the outline
+    // closing at the bottom) must release the boundary and compact the
+    // window back to the bounded tail.
+    it('releases the loaded range when tail mode is re-asserted at the bottom', async () => {
+        const id = sessionId('loaded-history-tail-reassert')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+
+        // Outline "Load earlier" while already in tail mode: window 200 -> 400.
+        const outcome = await fetchOlderMessages(api, id)
+        expect(outcome.kind).toBe('applied')
+        expect(getMessageWindowState(id).messages).toHaveLength(400)
+        expect(getMessageWindowState(id).messages[0]!.seq).toBe(201)
+
+        // Streaming keeps the window (boundary held, tail live).
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
+        expect(getMessageWindowState(id).messages).toHaveLength(401)
+
+        // Closing the outline re-asserts tail mode: the window compacts to
+        // the newest tail and streaming trims resume normally.
+        setMessageViewMode(id, 'tail')
+        let state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(202)
+        expect(state.messages.at(-1)!.seq).toBe(601)
+
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-602', seq: 602, at: 602 })])
+        state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(203)
+        expect(state.messages.at(-1)!.seq).toBe(602)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>

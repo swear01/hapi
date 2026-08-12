@@ -1386,6 +1386,18 @@ export function HappyThread(props: {
         props.onOutlineOpenChange(false)
     }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
 
+    const handleOutlineClose = useCallback(() => {
+        props.onOutlineOpenChange(false)
+        // Closing the outline while still at the tail ends the loaded-history
+        // browsing session: re-assert tail mode so the store releases the
+        // history boundary and the window compacts back to the bounded tail.
+        // Scrolling up afterwards re-fetches the older pages via the coverage
+        // loader, so the loaded range is never lost permanently.
+        if (atBottomRef.current) {
+            onViewModeChangeRef.current('tail')
+        }
+    }, [props.onOutlineOpenChange])
+
     useEffect(() => {
         if (
             !props.hasMoreMessages
@@ -1660,7 +1672,7 @@ export function HappyThread(props: {
                             type="button"
                             className="absolute inset-0 z-20 bg-black/20"
                             aria-label={t('session.outline.close')}
-                            onClick={() => props.onOutlineOpenChange(false)}
+                            onClick={handleOutlineClose}
                         />
                         <ConversationOutlinePanel
                             items={props.outlineItems}
@@ -1670,7 +1682,7 @@ export function HappyThread(props: {
                                 void loadOlderFromConsumer()
                             }}
                             onSelect={handleOutlineSelect}
-                            onClose={() => props.onOutlineOpenChange(false)}
+                            onClose={handleOutlineClose}
                         />
                     </>
                 ) : null}
