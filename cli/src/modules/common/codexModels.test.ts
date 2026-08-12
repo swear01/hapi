@@ -92,6 +92,22 @@ describe('listCodexModels cwd', () => {
         expect(first).toHaveLength(1);
     });
 
+    it('expires the cache after the TTL so a later call respawns the app-server', async () => {
+        vi.useFakeTimers();
+        try {
+            listModelsMock.mockResolvedValue({ data: [{ id: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol' }] });
+
+            await listCodexModels();
+            expect(constructorOptions).toHaveLength(1);
+
+            vi.advanceTimersByTime(5 * 60_000 + 1);
+            await listCodexModels();
+            expect(constructorOptions).toHaveLength(2);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('does not cache empty or failed results', async () => {
         listModelsMock.mockResolvedValue({ data: [] });
         await listCodexModels();
