@@ -1393,13 +1393,26 @@ function SessionChatInner(props: SessionChatProps) {
         props.onRefresh()
     }, [switchSession, props.onRefresh])
 
-    const handleToggleFiles = useCallback(() => {
+    const closeOutlineBeforeHidingThread = useCallback(() => {
+        // Before hiding the thread (Files/Terminal routes or the terminal
+        // panel), re-assert tail mode while the outline is open: the store
+        // releases the loaded-history boundary and the window compacts back
+        // to the bounded tail. Without this, selected-session SSE keeps
+        // ingesting on subroutes and the no-trim boundary branch grows the
+        // rendered and persisted window without limit.
+        if (outlineOpen && props.viewMode === 'tail') {
+            props.onViewModeChange('tail')
+        }
         setOutlineOpen(false)
+    }, [outlineOpen, props.viewMode, props.onViewModeChange])
+
+    const handleToggleFiles = useCallback(() => {
+        closeOutlineBeforeHidingThread()
         navigate({
             to: '/sessions/$sessionId/files',
             params: { sessionId: props.session.id }
         })
-    }, [navigate, props.session.id])
+    }, [closeOutlineBeforeHidingThread, navigate, props.session.id])
 
     const handleToggleOutline = useCallback(() => {
         // Closing the outline while still at the tail ends the loaded-history
@@ -1415,11 +1428,21 @@ function SessionChatInner(props: SessionChatProps) {
     }, [props.viewMode, props.onViewModeChange])
 
     const handleViewTerminal = useCallback(() => {
+        closeOutlineBeforeHidingThread()
         navigate({
             to: '/sessions/$sessionId/terminal',
             params: { sessionId: props.session.id }
         })
-    }, [navigate, props.session.id])
+    }, [closeOutlineBeforeHidingThread, navigate, props.session.id])
+
+    const handleToggleTerminalPanel = useCallback(() => {
+        setTerminalVisible((visible) => {
+            if (!visible) {
+                closeOutlineBeforeHidingThread()
+            }
+            return !visible
+        })
+    }, [closeOutlineBeforeHidingThread])
 
     // Scheduled message state — lifted here so useHappyRuntime can read the ref.
     //
@@ -1597,7 +1620,7 @@ function SessionChatInner(props: SessionChatProps) {
                 filesActive={false}
                 onToggleOutline={handleToggleOutline}
                 outlineActive={outlineOpen}
-                onToggleTerminal={canViewAgentTerminal ? () => setTerminalVisible(v => !v) : undefined}
+                onToggleTerminal={canViewAgentTerminal ? handleToggleTerminalPanel : undefined}
                 terminalActive={terminalVisible}
                 api={props.api}
                 canReopen={inactiveCanResume}
