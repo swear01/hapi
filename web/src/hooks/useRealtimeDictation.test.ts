@@ -25,6 +25,7 @@ vi.mock('@elevenlabs/react', () => ({
 type ScribeCallbacks = {
     onPartialTranscript: (event: { text: string }) => void
     onDisconnect: () => void
+    onCommittedTranscript: (event: { text: string }) => void
 }
 
 describe('useRealtimeDictation', () => {
@@ -57,5 +58,43 @@ describe('useRealtimeDictation', () => {
         expect(result.current.error).toBe('ElevenLabs realtime transcription disconnected')
         expect(result.current.partialTranscript).toBe('')
         expect(onFinalTranscript).toHaveBeenCalledWith('spoken words')
+    })
+
+    it('resumes an inactive session before a stopAndSend commit and notifies the resolved session', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() }
+        })
+        const api = {
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
+        } as unknown as ApiClient
+        const sendMessage = vi.fn(async () => {})
+        const onFinalTranscript = vi.fn()
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
+        const onSessionResolved = vi.fn()
+        const { result } = renderHook(() => useRealtimeDictation({
+            api,
+            provider: 'elevenlabs',
+            mode: 'realtime',
+            onFinalTranscript,
+            sendMessage
+        }))
+
+        // Real scribe.commit() emits the committed transcript; drive the same
+        // path in the mock so the send fires with the dictated text.
+        scribe.commit.mockImplementation(() => {
+            (scribe.options as ScribeCallbacks).onCommittedTranscript?.({ text: 'spoken words' })
+        })
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'explicit initial text', undefined, {
+            resolveSessionId,
+            onSessionResolved
+        }))
+
+        await waitFor(() => {
+            expect(sendMessage).toHaveBeenCalledWith('session-A-resumed', 'explicit initial text spoken words', undefined)
+        })
+        expect(resolveSessionId).toHaveBeenCalledWith('session-A')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
     })
 })

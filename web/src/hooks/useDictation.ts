@@ -29,6 +29,32 @@ function preferredMimeType(): string | undefined {
     ].find((type) => MediaRecorder.isTypeSupported(type))
 }
 
+/**
+ * Optional session resolution for a `stopAndSend` voice send.
+ *
+ * Mirrors the text-send pipeline's `resolveSessionId` contract
+ * (`useSendMessage`): an inactive session must be resumed via
+ * `api.resumeSession` before the message POST, because the hub rejects
+ * messages to inactive sessions with 409 `session_inactive`. The
+ * dictation hooks send after transcription completes (possibly after the
+ * composer unmounted), so the resolver is captured at call time and
+ * applied at send time.
+ */
+export type DictationPendingSendOptions = {
+    /**
+     * Maps the target session id to the id the message should actually be
+     * sent to (e.g. the resumed session id for an inactive session).
+     * Invoked right before the message send. May throw to abort the send.
+     */
+    resolveSessionId?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    /**
+     * Called when `resolveSessionId` resumed the session into a live one,
+     * so the caller can navigate/seed the resumed session. Fires only
+     * after the message was delivered successfully.
+     */
+    onSessionResolved?: (sessionId: string) => void
+}
+
 export function useDictation(config: {
     api: ApiClient | null
     provider: TranscriptionProvider | null
@@ -65,7 +91,7 @@ export function useDictation(config: {
     const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode; options: DictationPendingSendOptions } | null>(null)
 
     const stopTracks = useCallback(() => {
         if (mediaStreamRef.current) {
@@ -172,7 +198,17 @@ export function useDictation(config: {
                             if (finalMessage.trim()) {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                                 try {
-                                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
+                                    let targetSessionId = pendingSend.sessionId
+                                    let resumed = false
+                                    if (pendingSend.options.resolveSessionId) {
+                                        const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
+                                        targetSessionId = resolved.sessionId
+                                        resumed = resolved.resumed
+                                    }
+                                    await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
+                                    if (resumed) {
+                                        pendingSend.options.onSessionResolved?.(targetSessionId)
+                                    }
                                     if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                                         clearDraft(pendingSend.sessionId)
                                     }
@@ -234,12 +270,13 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode, options: DictationPendingSendOptions = {}) => {
         sendOnFinishRef.current = {
             sessionId: targetSessionId,
             initialText: initialText ?? config.getCurrentText(),
             draftAtStart: getDraft(targetSessionId),
-            deliveryMode
+            deliveryMode,
+            options
         }
         await stop()
     }, [config, stop])

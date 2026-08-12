@@ -426,6 +426,10 @@ type SessionChatProps = {
     ) => Promise<SendMessageAcceptance | false>
     resolveSessionIdForUpload?: (sessionId: string) => Promise<string>
     onUploadSessionResolved?: (sessionId: string) => void
+    /** Inactive-session resume for voice dictation direct-sends; see HappyComposer. */
+    resolveSessionIdForVoice?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    /** Navigate/seed after a voice direct-send resumed an inactive session. */
+    onVoiceSessionResolved?: (sessionId: string) => void
     onViewModeChange: (mode: 'tail' | 'history') => void
     onRetryMessage?: (localId: string) => void
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>
@@ -1817,6 +1821,8 @@ function SessionChatInner(props: SessionChatProps) {
                         }
                         active={props.session.active}
                         allowSendWhenInactive
+                        resolveSessionIdForVoice={props.resolveSessionIdForVoice}
+                        onVoiceSessionResolved={props.onVoiceSessionResolved}
                         onResumeStoredDraft={() => handleSend('', undefined, null)}
                         thinking={props.session.thinking}
                         agentState={props.session.agentState}

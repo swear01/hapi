@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript } from './useDictation'
+import { appendTranscript, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -58,7 +58,7 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode; options: DictationPendingSendOptions } | null>(null)
 
     const finish = useCallback(async (text: string) => {
         const pendingSend = sendOnFinishRef.current
@@ -69,7 +69,17 @@ export function useRealtimeDictation(config: {
             if (finalMessage.trim()) {
                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                 try {
-                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
+                    let targetSessionId = pendingSend.sessionId
+                    let resumed = false
+                    if (pendingSend.options.resolveSessionId) {
+                        const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
+                        targetSessionId = resolved.sessionId
+                        resumed = resolved.resumed
+                    }
+                    await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
+                    if (resumed) {
+                        pendingSend.options.onSessionResolved?.(targetSessionId)
+                    }
                     const cur = getDraft(pendingSend.sessionId)
                     if (cur === '' || cur === pendingSend.draftAtStart) {
                         clearDraft(pendingSend.sessionId)
@@ -276,8 +286,8 @@ export function useRealtimeDictation(config: {
         }
     }, [elevenLabs, fail])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
-        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), deliveryMode }
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode, options: DictationPendingSendOptions = {}) => {
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), deliveryMode, options }
         await stop()
     }, [stop])
 
