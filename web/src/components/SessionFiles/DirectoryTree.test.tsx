@@ -43,7 +43,11 @@ describe('DirectoryTree expanded folders', () => {
         sessionStorage.clear()
     })
 
-    afterEach(() => cleanup())
+    afterEach(() => {
+        cleanup()
+        vi.unstubAllGlobals()
+        vi.restoreAllMocks()
+    })
 
     it('restores expanded folders after the file manager remounts', () => {
         const view = renderTree()
@@ -69,14 +73,16 @@ describe('DirectoryTree expanded folders', () => {
     })
 
     it('prefers the session fallback after localStorage writes fail', () => {
-        localStorage.setItem('hapi-dir-expanded-v2-session-1', JSON.stringify(['']))
-        const originalSetItem = localStorage.setItem.bind(localStorage)
-        vi.spyOn(localStorage, 'setItem').mockImplementation(function setItem(this: Storage, key, value) {
-            if (key === 'hapi-dir-expanded-v2-session-1') throw new Error('quota')
-            return originalSetItem.call(this, key, value)
-        })
-        // jsdom's sessionStorage instance does not accept own-property spies in
-        // this environment, so swap in an explicit memory sessionStorage.
+        // jsdom Storage methods cannot be spied on consistently across platforms.
+        const localStore = new Map([['hapi-dir-expanded-v2-session-1', JSON.stringify([''])]])
+        const memoryLocalStorage: Storage = {
+            get length() { return localStore.size },
+            clear() { localStore.clear() },
+            getItem(key: string) { return localStore.get(key) ?? null },
+            key(index: number) { return Array.from(localStore.keys())[index] ?? null },
+            removeItem(key: string) { localStore.delete(key) },
+            setItem() { throw new Error('quota') },
+        }
         const sessionStore = new Map<string, string>()
         const memorySessionStorage: Storage = {
             get length() { return sessionStore.size },
@@ -86,6 +92,7 @@ describe('DirectoryTree expanded folders', () => {
             removeItem(key: string) { sessionStore.delete(key) },
             setItem(key: string, value: string) { sessionStore.set(key, String(value)) },
         }
+        vi.stubGlobal('localStorage', memoryLocalStorage)
         vi.stubGlobal('sessionStorage', memorySessionStorage)
         const sessionSetItem = vi.spyOn(memorySessionStorage, 'setItem')
 
