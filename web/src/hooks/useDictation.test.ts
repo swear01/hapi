@@ -885,8 +885,8 @@ describe('useDictation', () => {
             await waitFor(() => expect(result.current.error).toBe('network down'))
         })
 
-        // The recovery must NOT clobber the newer draft.
-        expect(getDraft('session-A-resumed')).toBe('newer draft typed by user')
+        // Both the newer draft and the failed voice message survive.
+        expect(getDraft('session-A-resumed')).toBe('newer draft typed by user initial text voice payload')
         expect(getDraft('session-A')).toBe('')
     })
 })

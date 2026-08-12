@@ -179,10 +179,10 @@ describe('useRealtimeDictation', () => {
         act(() => { saveDraft('session-A-resumed', 'newer draft typed by user') })
         await act(async () => { rejectSend?.(new Error('network down')) })
         await act(async () => {
-            await waitFor(() => expect(getDraft('session-A-resumed')).toBe('newer draft typed by user'))
+            await waitFor(() => expect(getDraft('session-A-resumed')).toBe('newer draft typed by user explicit initial text spoken words'))
         })
 
-        // The recovery must NOT clobber the newer draft.
+        // Both the newer draft and the failed voice message survive.
         expect(getDraft('session-A')).toBe('')
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
     })

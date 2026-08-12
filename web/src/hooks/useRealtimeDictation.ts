@@ -95,12 +95,15 @@ export function useRealtimeDictation(config: {
                     // retryable transcript under the LIVE resumed id so the operator
                     // can retry from the resumed session (and is navigated there via
                     // onSessionResolved) instead of leaving it under the archived
-                    // source id.
+                    // source id. When the operator already typed a newer draft into
+                    // that composer, preserve BOTH: merge the failed voice text
+                    // after the newer draft so nothing is lost.
                     const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
-                    const cur = getDraft(recoverySessionId)
-                    if (cur === '' || cur === recoveryDraftAtStart) {
-                        saveDraft(recoverySessionId, finalMessage)
-                    }
+                    const currentDraft = getDraft(recoverySessionId)
+                    const recoveredDraft = currentDraft === '' || currentDraft === recoveryDraftAtStart
+                        ? finalMessage
+                        : appendTranscript(currentDraft, finalMessage)
+                    saveDraft(recoverySessionId, recoveredDraft)
                     if (resumed) {
                         pendingSend.options.onSessionResolved?.(recoverySessionId)
                     }
