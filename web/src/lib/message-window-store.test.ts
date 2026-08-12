@@ -1221,13 +1221,19 @@ describe('history view and older pagination', () => {
         expect(state.messages[0]!.seq).toBe(1)
         expect(state.oldestSeq).toBe(1)
 
-        // Streaming past the cap afterwards still trims from one end: the
-        // newest tail stays visible and the oldest cursor keeps bookending.
+        // Streaming past the cap afterwards keeps the window contiguous: the
+        // loaded range stays intact, only the newest streamed rows are dropped
+        // (armed for the tail resync) — never the middle, never the loaded
+        // range.
         for (let seq = 1_001; seq <= 1_300; seq += 1) {
             ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
         }
         const streamed = getMessageWindowState(id)
-        expect(streamed.messages.at(-1)!.seq).toBe(1_300)
+        for (let index = 1; index < streamed.messages.length; index += 1) {
+            expect(streamed.messages[index]!.seq).toBe(streamed.messages[index - 1]!.seq! + 1)
+        }
+        expect(streamed.messages[0]!.seq).toBe(1)
+        expect(streamed.messages.at(-1)!.seq).toBe(800)
         expect(streamed.oldestSeq).toBe(streamed.messages[0]!.seq)
     })
 
