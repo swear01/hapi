@@ -1166,12 +1166,13 @@ describe('history view and older pagination', () => {
 
     })
 
-    // Regression: trimming with loaded history present must stay directional
-    // (drop from one end only). A two-sided split could drop a middle range
-    // that the single oldest-side pagination cursor could never re-fetch —
-    // e.g. the fourth older-page load crossing the 800-row cap would keep
-    // `oldest-loaded + newest-tail` and silently drop the rows between.
-    it('never leaves an unreachable middle gap when the raised budget overflows', async () => {
+    // Regression: while the history boundary is held, tail mode must not
+    // trim — the loaded range and the live streaming tail both stay visible,
+    // contiguous, and cursor-bookended. Trimming either side would make the
+    // viewport jump (evicting the loaded range) or freeze the stream (a
+    // dropped tail needs a tail resync that never fires on its own in tail
+    // mode). Releasing the boundary compacts the window again.
+    it('keeps the loaded range and the live tail contiguous while the boundary is held', async () => {
         const id = sessionId('loaded-history-no-gap')
         const all = Array.from({ length: 1_000 }, (_, index) =>
             makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
@@ -1202,39 +1203,41 @@ describe('history view and older pagination', () => {
         const api = createApi(getMessages)
         await syncTailMessages(api, id)
 
-        // Tail mode: three loads fill the 800-row cap, the fourth crosses it.
-        for (let page = 0; page < 3; page += 1) {
+        // Tail mode: load four older pages (the last crosses the old 800-row
+        // cap) while the boundary is held.
+        for (let page = 0; page < 4; page += 1) {
             const outcome = await fetchOlderMessages(api, id)
             expect(outcome.kind).toBe('applied')
         }
-        expect(getMessageWindowState(id).messages).toHaveLength(800)
-        const fourth = await fetchOlderMessages(api, id)
-        expect(fourth.kind).toBe('applied')
-
-        const state = getMessageWindowState(id)
-        // The window stays contiguous (no dropped middle range)…
+        let state = getMessageWindowState(id)
         for (let index = 1; index < state.messages.length; index += 1) {
             expect(state.messages[index]!.seq).toBe(state.messages[index - 1]!.seq! + 1)
         }
-        // …and the oldest-side pagination cursor still bookends the window, so
-        // the evicted rows remain reachable via the next older-page fetch.
         expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(1_000)
         expect(state.oldestSeq).toBe(1)
 
-        // Streaming past the cap afterwards keeps the window contiguous: the
-        // loaded range stays intact, only the newest streamed rows are dropped
-        // (armed for the tail resync) — never the middle, never the loaded
-        // range.
+        // Streaming past the cap: every new row stays visible (no frozen
+        // tail), the loaded range stays intact, the window stays contiguous.
         for (let seq = 1_001; seq <= 1_300; seq += 1) {
             ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
         }
-        const streamed = getMessageWindowState(id)
-        for (let index = 1; index < streamed.messages.length; index += 1) {
-            expect(streamed.messages[index]!.seq).toBe(streamed.messages[index - 1]!.seq! + 1)
+        state = getMessageWindowState(id)
+        for (let index = 1; index < state.messages.length; index += 1) {
+            expect(state.messages[index]!.seq).toBe(state.messages[index - 1]!.seq! + 1)
         }
-        expect(streamed.messages[0]!.seq).toBe(1)
-        expect(streamed.messages.at(-1)!.seq).toBe(800)
-        expect(streamed.oldestSeq).toBe(streamed.messages[0]!.seq)
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(1_300)
+        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
+
+        // Releasing the boundary (leaving history and returning to the tail)
+        // compacts the window to the newest tail again.
+        setMessageViewMode(id, 'history')
+        setMessageViewMode(id, 'tail')
+        state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(901)
+        expect(state.messages.at(-1)!.seq).toBe(1_300)
     })
 
     it('releases the loaded range when the user returns to the tail', async () => {

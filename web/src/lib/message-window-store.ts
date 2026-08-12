@@ -538,42 +538,50 @@ function mergeIntoWindow(
     let dropped: DecryptedMessage[]
     let droppedNewest = false
     if (boundary) {
-        // Loaded older history is present and protected: the loaded range is
-        // trimmed only from its own oldest end when it alone exceeds the
-        // budget (those rows stay reachable through the before-cursor). The
-        // tail region is capped by dropping its NEWEST rows instead — the
-        // kept window therefore stays contiguous (both regions keep their
-        // edge adjacent to the boundary) and the dropped streaming tail
-        // remains reachable through the requiresLatestReset tail resync.
+        // Loaded older history is present and the user is browsing it.
+        // Tail mode deliberately does NOT trim while the boundary is held:
+        // the loaded range must stay readable and the live tail must keep
+        // streaming — dropping either side would make the viewport jump or
+        // freeze new messages. Releasing the boundary (returning to the tail
+        // via enterTailMode, or a tail resync) restores the bounded window.
+        // History mode keeps the loaded range whole and caps the tail by
+        // dropping its NEWEST rows (reachable through the requiresLatestReset
+        // tail resync), so the kept window stays contiguous and the loaded
+        // range is never evicted.
         const totalCap = Math.max(regularLimit, OLDER_LOAD_WINDOW_SIZE)
-        const queued = merged.filter(isQueuedForInvocation)
-        const queuedIds = new Set(queued.map((message) => message.id))
-        const trimmable = merged.filter((message) => !queuedIds.has(message.id))
-        const loaded: DecryptedMessage[] = []
-        const tail: DecryptedMessage[] = []
-        for (const message of trimmable) {
-            const position = messagePosition(message)
-            if (!position) {
-                loaded.push(message)
-                continue
+        if (mode === 'append') {
+            kept = merged
+            dropped = []
+        } else {
+            const queued = merged.filter(isQueuedForInvocation)
+            const queuedIds = new Set(queued.map((message) => message.id))
+            const trimmable = merged.filter((message) => !queuedIds.has(message.id))
+            const loaded: DecryptedMessage[] = []
+            const tail: DecryptedMessage[] = []
+            for (const message of trimmable) {
+                const position = messagePosition(message)
+                if (!position) {
+                    loaded.push(message)
+                    continue
+                }
+                if (comparePosition(position, boundary) < 0) {
+                    loaded.push(message)
+                } else {
+                    tail.push(message)
+                }
             }
-            if (comparePosition(position, boundary) < 0) {
-                loaded.push(message)
-            } else {
-                tail.push(message)
+            const loadedTrim = sliceForTrim(loaded, totalCap, 'prepend')
+            const tailTrim = sliceForTrim(tail, Math.max(0, totalCap - loadedTrim.kept.length), 'prepend')
+            kept = mergeMessages([...loadedTrim.kept, ...tailTrim.kept], queued)
+            const keptIds = new Set(kept.map((message) => message.id))
+            dropped = merged.filter((message) => !keptIds.has(message.id))
+            if (dropped.length > 0) {
+                const droppedNewestPosition = derivePosition(dropped, 'newest')
+                const mergedNewestPosition = derivePosition(merged, 'newest')
+                droppedNewest = droppedNewestPosition !== null
+                    && mergedNewestPosition !== null
+                    && comparePosition(droppedNewestPosition, mergedNewestPosition) === 0
             }
-        }
-        const loadedTrim = sliceForTrim(loaded, totalCap, 'prepend')
-        const tailTrim = sliceForTrim(tail, Math.max(0, totalCap - loadedTrim.kept.length), 'prepend')
-        kept = mergeMessages([...loadedTrim.kept, ...tailTrim.kept], queued)
-        const keptIds = new Set(kept.map((message) => message.id))
-        dropped = merged.filter((message) => !keptIds.has(message.id))
-        if (dropped.length > 0) {
-            const droppedNewestPosition = derivePosition(dropped, 'newest')
-            const mergedNewestPosition = derivePosition(merged, 'newest')
-            droppedNewest = droppedNewestPosition !== null
-                && mergedNewestPosition !== null
-                && comparePosition(droppedNewestPosition, mergedNewestPosition) === 0
         }
     } else {
         const trimmed = trimPreservingQueued(merged, regularLimit, mode)
@@ -954,7 +962,10 @@ export async function fetchOlderMessages(
                 })
             }
             const merged = mergeIntoWindow(previous, response.messages, {
-                mode: 'prepend',
+                // In history mode keep the oldest side (the loaded pages the
+                // user is browsing); in tail mode keep the whole window while
+                // the history boundary is held so the live tail keeps streaming.
+                mode: previous.viewMode === 'history' ? 'prepend' : 'append',
                 regularLimit: OLDER_LOAD_WINDOW_SIZE,
                 historyBoundaryAt: before.at,
                 historyBoundarySeq: before.seq
