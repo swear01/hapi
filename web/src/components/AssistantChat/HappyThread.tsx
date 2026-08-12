@@ -1398,21 +1398,6 @@ export function HappyThread(props: {
         return await loadOlderFromConsumer() === 'loaded'
     }, [loadOlderFromConsumer])
 
-    const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
-        const target = await locateOutlineTargetMessage({
-            targetMessageId: item.targetMessageId,
-            findTarget: (anchorId) => document.getElementById(anchorId),
-            hasMoreMessages: () => hasMoreMessagesRef.current,
-            loadOlderPreservingScroll: loadOlderForOutline
-        })
-        if (target) {
-            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            autoScrollEnabledRef.current = false
-        }
-        props.onOutlineItemClick?.(item)
-        props.onOutlineOpenChange(false)
-    }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
-
     const handleOutlineClose = useCallback(() => {
         outlineOpenRef.current = false
         props.onOutlineOpenChange(false)
@@ -1544,6 +1529,34 @@ export function HappyThread(props: {
     useEffect(() => {
         isLoadingMoreRef.current = props.isLoadingMoreMessages
     }, [props.isLoadingMoreMessages])
+
+    const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        const target = await locateOutlineTargetMessage({
+            targetMessageId: item.targetMessageId,
+            findTarget: (anchorId) => document.getElementById(anchorId),
+            hasMoreMessages: () => hasMoreMessagesRef.current,
+            loadOlderPreservingScroll: loadOlderForOutline
+        })
+        if (!target) {
+            // The target could not be located; close through the release path
+            // so a held history boundary is released (the outline is gone).
+            handleOutlineClose()
+            return
+        }
+        // Navigating to an outline entry is an explicit history jump: enter
+        // history mode so the store's loaded-history protection (and its
+        // release on returning to the tail) follows the normal view-mode
+        // lifecycle. The browser clamps scrollIntoView to the live tail for
+        // newest entries, which would otherwise leave the store in tail mode
+        // with the boundary held and no release path.
+        atBottomRef.current = false
+        onViewModeChangeRef.current('history')
+        autoScrollEnabledRef.current = false
+        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        props.onOutlineItemClick?.(item)
+        props.onOutlineOpenChange(false)
+    }, [loadOlderForOutline, handleOutlineClose, props.onOutlineItemClick, props.onOutlineOpenChange])
+
 
     const showSkeleton = props.isSyncingTail && props.rawMessagesCount === 0
     const handleShareTurn = useCallback((
