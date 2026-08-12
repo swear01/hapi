@@ -10,5 +10,8 @@ describe('Cursor automatic retry classification', () => {
         expect(stripRetryableCursorError(
             'Partial answer\n\nError: RetriableError: [canceled] http/2 stream closed'
         )).toBe('Partial answer');
+        expect(stripRetryableCursorError(
+            'Example:\n```text\nError: RetriableError: [canceled] http/2 stream closed\n```'
+        )).toBeNull();
     });
 });

@@ -11,5 +11,7 @@ export function isRetryableCursorError(error: unknown): boolean {
 export function stripRetryableCursorError(text: string): string | null {
     const marker = INLINE_CURSOR_ERROR.exec(text);
     if (!marker || !isRetryableCursorError(text.slice(marker.index))) return null;
+    const before = text.slice(0, marker.index);
+    if ((before.match(/^[ \t]{0,3}(?:```|~~~)/gm)?.length ?? 0) % 2 === 1) return null;
     return text.slice(0, marker.index).trimEnd();
 }

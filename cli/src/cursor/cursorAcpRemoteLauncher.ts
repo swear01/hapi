@@ -69,6 +69,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private autoReviewSlashQueued = false;
     private cursorMcpOverlay: CursorMcpOverlayHandle | null = null;
     private pendingRetryableError: string | null = null;
+    private pendingRetryableFromStderr = false;
     private promptInFlight = false;
     private userAbortRequested = false;
 
@@ -466,15 +467,21 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 this.userAbortRequested = false;
                 for (let retryAttempt = 0; retryAttempt <= CURSOR_AUTO_RETRY_LIMIT; retryAttempt += 1) {
                     this.pendingRetryableError = null;
+                    this.pendingRetryableFromStderr = false;
                     let attemptProducedToolActivity = false;
+                    let turnCompleted = false;
                     try {
                         await backend.prompt(acpSessionId, promptContent, (message) => {
+                            if (message.type === 'turn_complete') turnCompleted = true;
                             if (message.type === 'tool_call' || message.type === 'tool_result') {
                                 attemptProducedToolActivity = true;
                             }
                             this.handleAgentMessage(message);
                         });
                         if (this.userAbortRequested) break;
+                        if (turnCompleted && this.pendingRetryableFromStderr) {
+                            this.pendingRetryableError = null;
+                        }
                         if (!this.pendingRetryableError) {
                             void backend.refreshSessionInfo(acpSessionId, session.path);
                             break;
@@ -502,6 +509,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             } finally {
                 this.promptInFlight = false;
                 this.pendingRetryableError = null;
+                this.pendingRetryableFromStderr = false;
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
                 await this.extensionAdapter?.cancelAll('Prompt finished');
@@ -559,7 +567,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             const hint = error.raw || error.message;
             onHint(hint);
             if (this.promptInFlight && isRetryableCursorError(hint)) {
-                if (!this.userAbortRequested) this.pendingRetryableError = hint;
+                if (!this.userAbortRequested) {
+                    this.pendingRetryableError = hint;
+                    this.pendingRetryableFromStderr = true;
+                }
                 return;
             }
             if (error.type === 'model_not_found' && extractCannotUseThisModelMessage(hint)) {
