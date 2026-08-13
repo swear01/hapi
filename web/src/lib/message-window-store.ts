@@ -63,6 +63,13 @@ type InternalState = MessageWindowState & {
      */
     historyBoundaryAt: number | null
     historyBoundarySeq: number | null
+    /**
+     * olderGeneration of the in-flight outline request that provisionally
+     * installed historyBoundaryAt/Seq at request start. A tail resync or
+     * cancel that invalidates that generation must release the boundary too,
+     * or the no-trim branch would outlive the load that armed it.
+     */
+    provisionalBoundaryGeneration: number | null
     requiresLatestReset: boolean
     syncGeneration: number
     olderGeneration: number
@@ -254,6 +261,7 @@ function createState(sessionId: string): InternalState {
         newestPositionSeq: null,
         historyBoundaryAt: null,
         historyBoundarySeq: null,
+        provisionalBoundaryGeneration: null,
         requiresLatestReset: false,
         syncGeneration: 0,
         olderGeneration: 0
@@ -408,6 +416,7 @@ function buildState(
         | 'newestPositionSeq'
         | 'historyBoundaryAt'
         | 'historyBoundarySeq'
+        | 'provisionalBoundaryGeneration'
         | 'requiresLatestReset'
         | 'syncGeneration'
         | 'olderGeneration'
@@ -668,6 +677,9 @@ function applyLatestResponse(
         // rows; the loaded-history protection no longer applies.
         historyBoundaryAt: options.replaceServerRows ? null : previous.historyBoundaryAt,
         historyBoundarySeq: options.replaceServerRows ? null : previous.historyBoundarySeq,
+        provisionalBoundaryGeneration: options.replaceServerRows
+            ? null
+            : previous.provisionalBoundaryGeneration,
         warning: null
     })
 }
@@ -676,6 +688,12 @@ function beginTailSync(sessionId: string): number {
     let generation = 0
     updateState(sessionId, (previous) => {
         generation = previous.syncGeneration + 1
+        // Bumping olderGeneration invalidates any in-flight older-page request.
+        // If that request provisionally installed the history boundary, the
+        // load is gone — release the boundary too, or the no-trim branch would
+        // outlive it and the window would grow without limit.
+        const releaseProvisional = previous.provisionalBoundaryGeneration !== null
+            && previous.provisionalBoundaryGeneration === previous.olderGeneration
         return buildState(previous, {
             syncGeneration: generation,
             // Tail reconciliation owns the authoritative epoch. An older-page
@@ -684,7 +702,10 @@ function beginTailSync(sessionId: string): number {
             olderGeneration: previous.olderGeneration + 1,
             isSyncingTail: true,
             isLoadingMore: false,
-            warning: null
+            warning: null,
+            historyBoundaryAt: releaseProvisional ? null : previous.historyBoundaryAt,
+            historyBoundarySeq: releaseProvisional ? null : previous.historyBoundarySeq,
+            provisionalBoundaryGeneration: releaseProvisional ? null : previous.provisionalBoundaryGeneration
         })
     })
     return generation
@@ -852,7 +873,8 @@ function enterTailMode(previous: InternalState): InternalState {
         // window is allowed to shed the older range again (invisibly, the
         // user is at the bottom).
         historyBoundaryAt: null,
-        historyBoundarySeq: null
+        historyBoundarySeq: null,
+        provisionalBoundaryGeneration: null
     })
 }
 
@@ -946,7 +968,8 @@ export async function fetchOlderMessages(
             if (previous.olderGeneration !== generation) return previous
             return buildState(previous, {
                 historyBoundaryAt: before.at,
-                historyBoundarySeq: before.seq
+                historyBoundarySeq: before.seq,
+                provisionalBoundaryGeneration: generation
             })
         })
     }
@@ -996,7 +1019,10 @@ export async function fetchOlderMessages(
                     // the bounded window if we provisionally installed the
                     // boundary for this request.
                     historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
-                    historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq
+                    historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq,
+                    provisionalBoundaryGeneration: installedProvisionalBoundary
+                        ? null
+                        : previous.provisionalBoundaryGeneration
                 })
             }
             const installBoundaryNow = options.shouldInstallBoundary?.() === true
@@ -1029,6 +1055,9 @@ export async function fetchOlderMessages(
                     : installBoundary
                         ? null
                         : previous.historyBoundarySeq,
+                // The boundary is now held by the outline lifecycle, not by
+                // this request; the provisional ownership ends here.
+                provisionalBoundaryGeneration: null,
                 isLoadingMore: false,
                 historyVersion,
                 warning: null
@@ -1058,7 +1087,10 @@ export async function fetchOlderMessages(
                 // A failed request never delivers the loaded page; restore the
                 // bounded window if we provisionally installed the boundary.
                 historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
-                historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq
+                historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq,
+                provisionalBoundaryGeneration: installedProvisionalBoundary
+                    ? null
+                    : previous.provisionalBoundaryGeneration
             })
         })
         return { kind: 'failed', error: loadError }
@@ -1070,10 +1102,15 @@ export function cancelOlderMessageLoad(sessionId: string): void {
         if (!previous.isLoadingMore) {
             return previous
         }
+        const releaseProvisional = previous.provisionalBoundaryGeneration !== null
+            && previous.provisionalBoundaryGeneration === previous.olderGeneration
         return buildState(previous, {
             olderGeneration: previous.olderGeneration + 1,
             isLoadingMore: false,
-            warning: null
+            warning: null,
+            historyBoundaryAt: releaseProvisional ? null : previous.historyBoundaryAt,
+            historyBoundarySeq: releaseProvisional ? null : previous.historyBoundarySeq,
+            provisionalBoundaryGeneration: releaseProvisional ? null : previous.provisionalBoundaryGeneration
         })
     }, true)
 }
@@ -1157,6 +1194,7 @@ export function seedMessageWindowFromSession(fromSessionId: string, toSessionId:
         oldestPositionSeq: source.oldestPositionSeq,
         historyBoundaryAt: source.historyBoundaryAt,
         historyBoundarySeq: source.historyBoundarySeq,
+        provisionalBoundaryGeneration: null,
         requiresLatestReset: true,
         syncGeneration: target.syncGeneration + 1,
         olderGeneration: target.olderGeneration + 1

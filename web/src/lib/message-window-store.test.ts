@@ -1500,6 +1500,76 @@ describe('history view and older pagination', () => {
         expect(state.oldestSeq).toBe(state.messages[0]!.seq)
     })
 
+    // Regression: a tail resync invalidates an in-flight outline request via
+    // the olderGeneration bump; the provisional boundary it installed must be
+    // released with it, or the no-trim branch outlives the load.
+    it('releases a provisional boundary when a tail resync invalidates the outline request', async () => {
+        const id = sessionId('outline-resync-releases-boundary')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const pending = deferred<MessagesResponse>()
+        let outlinePending = false
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                if (!outlinePending) {
+                    outlinePending = true
+                    return await pending.promise
+                }
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+
+        // Outline load starts; its GET stays pending with the boundary
+        // provisionally installed (ingest takes the no-trim branch).
+        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(outlinePending).toBe(true)
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
+        expect(getMessageWindowState(id).messages).toHaveLength(201)
+
+        // A tail resync invalidates the in-flight request and must release
+        // the provisional boundary.
+        await syncTailMessages(api, id)
+        pending.resolve(beforeResponse(all.slice(0, 200), {
+            epoch: 0,
+            hasMore: false,
+            nextBeforeAt: 1,
+            nextBeforeSeq: 1
+        }))
+        const outcome = await loading
+        expect(outcome.kind).toBe('stopped')
+
+        // The boundary is gone: ingests trim back to the tail cap.
+        for (let seq = 602; seq <= 850; seq += 1) {
+            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
+        }
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages.at(-1)!.seq).toBe(850)
+        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>
