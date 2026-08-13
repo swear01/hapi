@@ -881,6 +881,10 @@ function enterTailMode(previous: InternalState): InternalState {
     const oldest = dropped.length > 0
         ? derivePosition(kept, 'oldest')
         : readPosition(previous.oldestPositionAt, previous.oldestPositionSeq)
+    // Shedding rows while an older-page request is in flight can evict its
+    // `before` cursor row (the window's oldest at request start); invalidate
+    // that request so its apply cannot re-arm a stale cursor past the gap.
+    const invalidateInFlight = previous.isLoadingMore && dropped.length > 0
     return buildState(previous, {
         messages: kept,
         hasMore: previous.hasMore || dropped.length > 0,
@@ -895,7 +899,9 @@ function enterTailMode(previous: InternalState): InternalState {
         // user is at the bottom).
         historyBoundaryAt: null,
         historyBoundarySeq: null,
-        provisionalBoundaryGeneration: null
+        provisionalBoundaryGeneration: null,
+        olderGeneration: invalidateInFlight ? previous.olderGeneration + 1 : previous.olderGeneration,
+        isLoadingMore: invalidateInFlight ? false : previous.isLoadingMore
     })
 }
 
@@ -1048,6 +1054,7 @@ export async function fetchOlderMessages(
                 return installedProvisionalBoundary ? trimReleasedProvisionalWindow(cleared) : cleared
             }
             const installBoundaryNow = options.shouldInstallBoundary?.() === true
+            const compactedOnClose = !installBoundaryNow && installedProvisionalBoundary && previous.viewMode === 'tail'
             let merged = mergeIntoWindow(previous, response.messages, {
                 // In history mode keep the oldest side (the loaded pages the
                 // user is browsing); in tail mode keep the whole window while
@@ -1057,21 +1064,31 @@ export async function fetchOlderMessages(
                 historyBoundaryAt: previous.historyBoundaryAt ?? (installBoundaryNow ? before.at : undefined),
                 historyBoundarySeq: previous.historyBoundarySeq ?? (installBoundaryNow ? before.seq : undefined)
             })
-            if (!installBoundaryNow && installedProvisionalBoundary && previous.viewMode === 'tail') {
+            let oldestPositionAt: number | null = response.page.nextBeforeAt
+            let oldestPositionSeq: number | null = response.page.nextBeforeSeq
+            if (compactedOnClose) {
                 // The outline closed while the request was in flight: the
                 // boundary dies with the apply, and in tail mode the rows
                 // accumulated by the no-trim branch are shed back to the
                 // bounded tail window. In history mode the user is reading
                 // the loaded range — the oldest-kept trim protects it and the
                 // next ingest sheds only the tail overflow.
-                merged = trimReleasedProvisionalWindow(merged)
+                const trimmed = trimReleasedProvisionalWindow(merged)
+                if (trimmed !== merged) {
+                    // Rows were shed from the oldest end: the pagination
+                    // cursor must bookend the compacted window, not the
+                    // response's nextBefore (which would point into the gap).
+                    oldestPositionAt = trimmed.oldestPositionAt
+                    oldestPositionSeq = trimmed.oldestPositionSeq
+                }
+                merged = trimmed
             }
             historyVersion = nextHistoryVersion
             return buildState(merged, {
                 hasMore: response.page.hasMore,
                 epoch: response.page.epoch,
-                oldestPositionAt: response.page.nextBeforeAt,
-                oldestPositionSeq: response.page.nextBeforeSeq,
+                oldestPositionAt,
+                oldestPositionSeq,
                 // The boundary was installed at request start; carry it past
                 // the apply only while the outline is still open. If it
                 // closed while the request was in flight, drop the boundary

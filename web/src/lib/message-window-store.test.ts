@@ -1593,6 +1593,80 @@ describe('history view and older pagination', () => {
         expect(state.oldestSeq).toBe(state.messages[0]!.seq)
     })
 
+    // Regression: re-asserting tail mode (outline closed / back at the bottom)
+    // compacts the window while an outline request is still in flight; the
+    // compaction can evict the request's `before` cursor row, so the request
+    // must be invalidated instead of applying against a stale cursor.
+    it('invalidates an in-flight outline request when the tail compacts it', async () => {
+        const id = sessionId('outline-compact-invalidates-inflight')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const pending = deferred<MessagesResponse>()
+        let outlinePending = false
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                if (!outlinePending) {
+                    outlinePending = true
+                    return await pending.promise
+                }
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+
+        // Outline load starts (pending) and the provisional boundary lets SSE
+        // rows accumulate past the tail cap.
+        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(outlinePending).toBe(true)
+        for (let seq = 601; seq <= 850; seq += 1) {
+            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
+        }
+        expect(getMessageWindowState(id).messages).toHaveLength(450)
+
+        // Returning to the tail compacts the window and must invalidate the
+        // in-flight request (its `before` cursor row was shed).
+        setMessageViewMode(id, 'tail')
+        const compacted = getMessageWindowState(id)
+        expect(compacted.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(compacted.messages.at(-1)!.seq).toBe(850)
+
+        pending.resolve(beforeResponse(all.slice(0, 200), {
+            epoch: 0,
+            hasMore: false,
+            nextBeforeAt: 1,
+            nextBeforeSeq: 1
+        }))
+        const outcome = await loading
+        expect(outcome.kind).toBe('stopped')
+
+        // The window stays bounded and the cursor keeps bookending it.
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
+        expect(state.messages.at(-1)!.seq).toBe(850)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>
