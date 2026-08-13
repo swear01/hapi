@@ -12,6 +12,7 @@ import { useAgyModels } from '@/hooks/queries/useAgyModels'
 import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd'
 import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
 import { useCopilotModelsForCwd } from '@/hooks/queries/useCopilotModelsForCwd'
+import { usePiModelsForMachine } from '@/hooks/queries/usePiModelsForMachine'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
@@ -50,10 +51,10 @@ import { FastModeSelector } from './FastModeSelector'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
 import { OpencodeModelSelector } from './OpencodeModelSelector'
-import { LaunchEffortSelector } from './LaunchEffortSelector'
+import { EffortField } from './EffortField'
 import { shouldEnableOpencodeModelDiscovery } from './opencodeModelsGate'
 import { buildGrokEffortOptions, buildGrokModelOptions, shouldEnableGrokModelDiscovery } from './grokModels'
-import { ReasoningEffortSelector } from './ReasoningEffortSelector'
+import { groupModelsByProvider } from '@/components/AssistantChat/piModelGroups'
 import {
     loadPreferredAgent,
     loadPreferredLaunchSettings,
@@ -583,6 +584,45 @@ export function NewSession(props: {
         machineId,
         enabled: agent === 'agy' && Boolean(machineId)
     })
+    const piModelsState = usePiModelsForMachine({
+        api: props.api,
+        machineId,
+        enabled: agent === 'pi' && Boolean(machineId)
+    })
+    // Pi models are grouped by provider (optionSource: 'machine' in the agent
+    // config descriptor). Option values are provider-qualified
+    // (`provider/modelId`) so two providers sharing a modelId stay distinct;
+    // the CLI startup match resolves the qualified id before applying set_model.
+    const piModelOptions = useMemo(() => {
+        const groups = groupModelsByProvider(piModelsState.availableModels)
+        return [
+            { value: 'auto', label: 'Default' },
+            ...groups.flatMap((group) => group.models.map((model) => ({
+                value: `${model.provider || 'unknown'}/${model.modelId}`,
+                label: model.name ?? model.modelId,
+                group: group.label,
+            }))),
+        ]
+    }, [piModelsState.availableModels])
+    const piSelectedModel = useMemo(() => {
+        if (agent !== 'pi' || model === 'auto') return null
+        const slash = model.indexOf('/')
+        if (slash > 0) {
+            const provider = model.slice(0, slash)
+            const modelId = model.slice(slash + 1)
+            return piModelsState.availableModels.find(
+                (candidate) => candidate.provider === provider && candidate.modelId === modelId
+            ) ?? null
+        }
+        return piModelsState.availableModels.find((candidate) => candidate.modelId === model) ?? null
+    }, [agent, model, piModelsState.availableModels])
+    useEffect(() => {
+        // A non-reasoning Pi model must not carry a stale launch effort (the
+        // CLI would reject it and fall back to Pi's default).
+        if (agent === 'pi' && piSelectedModel?.reasoning === false && effort !== 'auto') {
+            setEffort('auto')
+        }
+    }, [agent, piSelectedModel, effort])
     useEffect(() => {
         if (preserveRestoredDraftRef.current) {
             return
@@ -1325,7 +1365,7 @@ export function NewSession(props: {
                 : agent === 'agy'
                     ? (agySelectedModel ?? undefined)
                     : (model !== 'auto' ? model : undefined)
-            const resolvedEffort = (agent === 'claude' || agent === 'grok') && effort !== 'auto'
+            const resolvedEffort = (agent === 'claude' || agent === 'grok' || agent === 'pi') && effort !== 'auto'
                 ? effort
                 : undefined
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
@@ -1644,41 +1684,44 @@ export function NewSession(props: {
                                     ? grokModelOptions
                                     : agent === 'copilot'
                                         ? copilotModelOptions
-                                : undefined
+                                        : agent === 'pi'
+                                            ? piModelOptions
+                                    : undefined
                         }
                         isDisabled={
                             isFormDisabled
                             || (agent === 'codex' && Boolean(codexModelsState.error))
                             || (agent === 'grok' && Boolean(grokModelsState.error))
                             || (agent === 'copilot' && Boolean(copilotModelsState.error))
+                            || (agent === 'pi' && Boolean(piModelsState.error))
                         }
                         isLoading={(agent === 'codex' && codexModelsState.isLoading)
                             || (agent === 'grok' && grokModelsState.isLoading)
-                            || (agent === 'copilot' && copilotModelsState.isLoading)}
+                            || (agent === 'copilot' && copilotModelsState.isLoading)
+                            || (agent === 'pi' && piModelsState.isLoading)}
                         error={agent === 'codex' && codexModelsState.error
                             ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`
                             : agent === 'grok' && grokModelsState.error
                                 ? `${t('newSession.model.loadFailed')}: ${grokModelsState.error}`
                                 : agent === 'copilot' && copilotModelsState.error
                                     ? `${t('newSession.model.loadFailed')}: ${copilotModelsState.error}`
-                                : null}
+                                    : agent === 'pi' && piModelsState.error
+                                        ? `${t('newSession.model.loadFailed')}: ${piModelsState.error}`
+                                    : null}
                         onModelChange={setModel}
                     />
                 )
             )}
-            <LaunchEffortSelector
+            <EffortField
                 agent={agent}
                 effort={effort}
-                isDisabled={isFormDisabled}
                 onEffortChange={setEffort}
-                grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
-            />
-            <ReasoningEffortSelector
-                agent={agent}
-                value={modelReasoningEffort}
-                availableOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
+                reasoningEffort={modelReasoningEffort}
+                onReasoningEffortChange={setModelReasoningEffort}
                 isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
-                onChange={setModelReasoningEffort}
+                grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
+                codexReasoningOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
+                piSelectedModel={agent === 'pi' ? piSelectedModel : null}
             />
             <PermissionField
                 agent={agent}

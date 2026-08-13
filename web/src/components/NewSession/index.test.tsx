@@ -24,6 +24,9 @@ const mocks = vi.hoisted(() => ({
     opencodeModels: [] as Array<{ modelId: string; name?: string }>,
     opencodeModelsLoading: false,
     piDialogSelection: ['pi-native-1'] as string[],
+    piModels: [] as Array<{ provider: string; modelId: string; name?: string; reasoning?: boolean }>,
+    piModelsLoading: false,
+    nextModelValue: 'gpt-5.6-terra',
     refetchSessions: vi.fn(),
     addToast: vi.fn()
 }))
@@ -132,6 +135,14 @@ vi.mock('@/hooks/queries/useCopilotModelsForCwd', () => ({
         error: null
     })
 }))
+vi.mock('@/hooks/queries/usePiModelsForMachine', () => ({
+    usePiModelsForMachine: () => ({
+        availableModels: mocks.piModels,
+        currentModelId: null,
+        isLoading: mocks.piModelsLoading,
+        error: null
+    })
+}))
 vi.mock('../../utils/formatRunnerSpawnError', () => ({
     formatRunnerSpawnError: () => null
 }))
@@ -194,9 +205,14 @@ vi.mock('./AgyModelSelector', () => ({
         </button>
     )
 }))
-vi.mock('./LaunchEffortSelector', () => ({
-    LaunchEffortSelector: (props: { effort: string }) => (
-        <div data-testid="launch-effort">{props.effort}</div>
+vi.mock('./EffortField', () => ({
+    EffortField: (props: { effort: string; reasoningEffort: string; onReasoningEffortChange: (v: string) => void }) => (
+        <>
+            <div data-testid="launch-effort">{props.effort}</div>
+            <button type="button" data-testid="reasoning" onClick={() => props.onReasoningEffortChange('max')}>
+                {props.reasoningEffort}
+            </button>
+        </>
     )
 }))
 vi.mock('./ModelSelector', () => ({
@@ -206,18 +222,11 @@ vi.mock('./ModelSelector', () => ({
         onModelChange: (model: string) => void
     }) => (
         <>
-            <button type="button" data-testid="model" onClick={() => props.onModelChange('gpt-5.6-terra')}>
+            <button type="button" data-testid="model" onClick={() => props.onModelChange(mocks.nextModelValue)}>
                 {props.model}
             </button>
             <div data-testid="model-options">{props.options?.map((option) => option.label).join(',')}</div>
         </>
-    )
-}))
-vi.mock('./ReasoningEffortSelector', () => ({
-    ReasoningEffortSelector: (props: { value: string; onChange: (effort: string) => void }) => (
-        <button type="button" data-testid="reasoning" onClick={() => props.onChange('max')}>
-            {props.value}
-        </button>
     )
 }))
 vi.mock('./ActionButtons', () => ({
@@ -252,6 +261,9 @@ describe('NewSession launch preferences', () => {
         mocks.opencodeModels = [{ modelId: 'provider/current', name: 'Current' }]
         mocks.opencodeModelsLoading = false
         mocks.piDialogSelection = ['pi-native-1']
+        mocks.piModels = []
+        mocks.piModelsLoading = false
+        mocks.nextModelValue = 'gpt-5.6-terra'
         mocks.refetchSessions.mockReset()
         mocks.refetchSessions.mockResolvedValue(undefined)
         mocks.addToast.mockReset()
@@ -822,5 +834,44 @@ describe('NewSession launch preferences', () => {
             expect(screen.getByTestId('model')).toHaveTextContent('gpt-5.6-terra')
             expect(screen.getByTestId('reasoning')).toHaveTextContent('max')
         })
+    })
+
+    it('shows Pi machine models and thinking-level effort and forwards both on create', async () => {
+        savePreferredAgent('pi')
+        mocks.piModels = [
+            { provider: 'openai-codex', modelId: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
+            { provider: 'opencode-go', modelId: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+        ]
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        await waitFor(() => {
+            // Provider-qualified options surfaced through the unified ModelSelector.
+            expect(screen.getByTestId('model-options')).toHaveTextContent('GPT-5.6 Sol')
+            expect(screen.getByTestId('model-options')).toHaveTextContent('DeepSeek V4 Pro')
+        })
+
+        // Select the second provider's model and a thinking level.
+        act(() => {
+            mocks.spawnSession.mockImplementation(async () => ({ type: 'success', sessionId: 'session-1' }))
+        })
+        mocks.nextModelValue = 'opencode-go/deepseek-v4-pro'
+        fireEvent.click(screen.getByTestId('model'))
+        fireEvent.click(screen.getByTestId('create'))
+
+        await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('session-1'))
+        expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+            agent: 'pi',
+            model: 'opencode-go/deepseek-v4-pro',
+        }))
     })
 })

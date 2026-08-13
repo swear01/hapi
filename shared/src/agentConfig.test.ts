@@ -34,6 +34,17 @@ describe('agent config descriptors', () => {
             kind: 'status',
             availability: 'managed'
         }))
+        expect(descriptor.fields).toContainEqual(expect.objectContaining({
+            id: 'model',
+            kind: 'grouped-select',
+            optionSource: 'machine',
+            availability: 'both'
+        }))
+        expect(descriptor.fields).toContainEqual(expect.objectContaining({
+            id: 'effort',
+            optionSource: 'static',
+            availability: 'both'
+        }))
         expect(resolveHapiYoloPermissionMode('pi')).toBeNull()
     })
 

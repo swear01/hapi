@@ -81,8 +81,8 @@ const BUILTIN_DESCRIPTORS: Record<AgentFlavor, AgentConfigFieldDescriptor[]> = {
         PERMISSION
     ),
     pi: fields(
-        { id: 'model', section: 'model', kind: 'grouped-select', optionSource: 'session', availability: 'session' },
-        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'model', availability: 'session' },
+        { id: 'model', section: 'model', kind: 'grouped-select', optionSource: 'machine', availability: 'both' },
+        { id: 'effort', section: 'effort', kind: 'select', optionSource: 'static', availability: 'both' },
         MANAGED_PERMISSION
     )
 }

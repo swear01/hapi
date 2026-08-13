@@ -304,7 +304,8 @@ function handleResponse(
                 // await so resolving the get_available_models RPC itself is not
                 // blocked (it may be awaited by ListPiModels).
                 if (session.initialModel && transport) {
-                    const match = models.find((m) => m.modelId === session.initialModel);
+                    const match = models.find((m) => m.modelId === session.initialModel)
+                        ?? models.find((m) => `${m.provider}/${m.modelId}` === session.initialModel);
                     if (match) {
                         void (async () => {
                             try {
