@@ -34,6 +34,7 @@ import { createNotificationPreferencesRoutes } from './routes/notificationPrefer
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
 import { createHubSettingsRoutes } from './routes/hubSettings'
+import { createNamespaceSettingsRoutes } from './routes/namespaceSettings'
 import { createWorkGraphRoutes } from './routes/workGraph'
 import { createNotificationCopyRoutes } from './routes/notificationCopy'
 import type { SSEManager } from '../sse/sseManager'
@@ -281,7 +282,7 @@ function createWebApp(options: {
         return next()
     })
 
-    app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/cli', createCliRoutes(options.getSyncEngine, configuration.dataDir))
     app.route('/cli', createUpgradeCliRoutes())
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
@@ -296,7 +297,7 @@ function createWebApp(options: {
 
     app.route('/api', createStorageRoutes(options.store))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
-
+    app.route('/api', createNamespaceSettingsRoutes(configuration.dataDir))
     app.route('/api', createUsageRoutes(options.store))
     app.route('/api', createUpgradeRoutes(options.getSyncEngine))
     app.route('/api', createGitRoutes(options.getSyncEngine))

@@ -10,6 +10,7 @@ import {
 import { getConfiguration } from '../../configuration'
 import { readAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
 import { readSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
+import { readNamespaceLocale } from '../../config/namespaceSettings'
 import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
 import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
@@ -91,7 +92,10 @@ function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
                 : 500
 }
 
-export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<CliEnv> {
+export function createCliRoutes(
+    getSyncEngine: () => SyncEngine | null,
+    dataDir?: string
+): Hono<CliEnv> {
     const app = new Hono<CliEnv>()
 
     app.use('*', async (c, next) => {
@@ -176,11 +180,12 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
             )
             const dataDir = getConfiguration().dataDir
             const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
+            const sessionSummaryLocale = await readNamespaceLocale(dataDir, namespace)
             // Owner-only hub setting — never enable auto-bridge for tenant namespaces.
             const autoBridgeTransientModelErrors = namespace === 'default'
                 ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
                 : false
-            return c.json({ session, sessionSummaryContract, autoBridgeTransientModelErrors })
+            return c.json({ session, sessionSummaryContract, sessionSummaryLocale, autoBridgeTransientModelErrors })
         } catch (error) {
             if (error instanceof SessionIdentityConflictError) {
                 return c.json({ error: error.message }, 409)
@@ -299,12 +304,14 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
         }
         const dataDir = getConfiguration().dataDir
         const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
+        const sessionSummaryLocale = await readNamespaceLocale(dataDir, namespace)
         const autoBridgeTransientModelErrors = namespace === 'default'
             ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
             : false
         return c.json({
             session: resolved.session,
             sessionSummaryContract,
+            sessionSummaryLocale,
             autoBridgeTransientModelErrors
         })
     })

@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type { AgentState, ClearOpencodeSessionCallbackRequest, ClearOpencodeSessionResponse, CreateMachineResponse, CreateSessionResponse, RunnerState, Machine, MachineMetadata, Metadata, Session } from '@/api/types'
 import { applyHubSessionSummaryContract } from '@/modules/common/sessionSummaryInstruction'
+import { applyHubSessionSummaryLocale } from '@/modules/common/sessionSummaryInstruction'
 import { setAutoBridgeTransientModelErrors } from '@/cursor/cursorModelErrorBridgePrefs'
 import type { LocalResumeTarget, ResumableSession } from '@hapi/protocol'
 import {
@@ -92,6 +93,9 @@ export class ApiClient {
         if (typeof parsed.data.autoBridgeTransientModelErrors === 'boolean') {
             setAutoBridgeTransientModelErrors(parsed.data.autoBridgeTransientModelErrors)
         }
+        if (parsed.data.sessionSummaryLocale !== undefined) {
+            applyHubSessionSummaryLocale(parsed.data.sessionSummaryLocale)
+        }
 
         const raw = parsed.data.session
 
@@ -150,6 +154,9 @@ export class ApiClient {
         }
         if (typeof parsed.data.autoBridgeTransientModelErrors === 'boolean') {
             setAutoBridgeTransientModelErrors(parsed.data.autoBridgeTransientModelErrors)
+        }
+        if (parsed.data.sessionSummaryLocale !== undefined) {
+            applyHubSessionSummaryLocale(parsed.data.sessionSummaryLocale)
         }
 
         const raw = parsed.data.session

@@ -36,6 +36,7 @@ import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
 import { PwaUpdateProvider } from '@/lib/pwa-update-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
+import { NamespaceLocaleSync } from '@/components/NamespaceLocaleSync'
 import type { SyncEvent } from '@/types/api'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
@@ -484,6 +485,7 @@ function AppInner() {
 
     return (
         <AppContextProvider value={{ api, token, baseUrl }}>
+            <NamespaceLocaleSync />
             <VoiceProvider>
                 <PwaUpdateBannerWithStatusOffset
                     isSyncing={isSyncing}

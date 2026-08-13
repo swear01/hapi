@@ -59,6 +59,8 @@ import type {
     VacuumStorageResponse,
     HubSettingsResponse,
     UpdateHubSettingsRequest,
+    NamespaceSettingsResponse,
+    UpdateNamespaceSettingsRequest,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
@@ -883,6 +885,17 @@ export class ApiClient {
 
     async updateHubSettings(settings: UpdateHubSettingsRequest): Promise<HubSettingsResponse> {
         return await this.request<HubSettingsResponse>('/api/hub-settings', {
+            method: 'PUT',
+            body: JSON.stringify(settings)
+        })
+    }
+
+    async getNamespaceSettings(): Promise<NamespaceSettingsResponse> {
+        return await this.request<NamespaceSettingsResponse>('/api/namespace-settings')
+    }
+
+    async updateNamespaceSettings(settings: UpdateNamespaceSettingsRequest): Promise<NamespaceSettingsResponse> {
+        return await this.request<NamespaceSettingsResponse>('/api/namespace-settings', {
             method: 'PUT',
             body: JSON.stringify(settings)
         })
