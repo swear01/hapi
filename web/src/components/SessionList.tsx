@@ -985,7 +985,7 @@ function SessionItem(props: {
             <button
                 type="button"
                 {...longPressHandlers}
-                draggable={!isTouch}
+                draggable={!isTouch && hasSessionTitleSignal(s)}
                 onDragStart={(event) => {
                     // A drag supersedes the press gesture: cancel any pending
                     // long-press and close a menu already opened by a slow grab.
