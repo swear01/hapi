@@ -323,14 +323,19 @@ function handleResponse(
                             } catch (error) {
                                 if (error instanceof PiRpcTimeoutError) {
                                     onStartupFailure?.(new Error(`Pi startup model outcome is indeterminate: ${error.message}`));
+                                    session.resolveStartupModelSettled?.();
                                     return;
                                 }
                                 logger.debug(`[pi] Startup model set_model rejected, keeping Pi default: ${error instanceof Error ? error.message : String(error)}`);
                             }
+                            session.resolveStartupModelSettled?.();
                         })();
                     } else {
                         logger.debug(`[pi] Startup model not found in available models: ${session.initialModel}`);
+                        session.resolveStartupModelSettled?.();
                     }
+                } else {
+                    session.resolveStartupModelSettled?.();
                 }
             }
             resolvePendingRpc(resolver, response);

@@ -1180,6 +1180,9 @@ export function NewSession(props: {
         () => piImportSessions.find((session) => session.id === selectedPiImportSessionId) ?? null,
         [piImportSessions, selectedPiImportSessionId]
     )
+    // Pi history import reopens the native session as-is; the launch-only
+    // model/effort controls would silently not apply, so hide them.
+    const showPiLaunchConfig = agent !== 'pi' || !selectedPiImportSession
 
     const handleAgentChange = useCallback((newAgent: AgentType) => {
         preserveRestoredDraftRef.current = false
@@ -1706,7 +1709,7 @@ export function NewSession(props: {
                                     : agent === 'copilot'
                                         ? copilotModelOptions
                                         : agent === 'pi'
-                                            ? piModelOptions
+                                            ? (showPiLaunchConfig ? piModelOptions : undefined)
                                     : undefined
                         }
                         isDisabled={
@@ -1733,17 +1736,19 @@ export function NewSession(props: {
                     />
                 )
             )}
-            <EffortField
-                agent={agent}
-                effort={effort}
-                onEffortChange={setEffort}
-                reasoningEffort={modelReasoningEffort}
-                onReasoningEffortChange={setModelReasoningEffort}
-                isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
-                grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
-                codexReasoningOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
-                piSelectedModel={agent === 'pi' ? piSelectedModel : null}
-            />
+            {showPiLaunchConfig ? (
+                <EffortField
+                    agent={agent}
+                    effort={effort}
+                    onEffortChange={setEffort}
+                    reasoningEffort={modelReasoningEffort}
+                    onReasoningEffortChange={setModelReasoningEffort}
+                    isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
+                    grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
+                    codexReasoningOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
+                    piSelectedModel={agent === 'pi' ? piSelectedModel : null}
+                />
+            ) : null}
             <PermissionField
                 agent={agent}
                 nativeValue={agent === 'grok' ? grokPermissionMode : codexFamilyPermissionMode}
