@@ -213,6 +213,11 @@ function handleResponse(
         if (command === 'get_state' && session.expectedNativeSessionId && !session.isNativeReady) {
             onStartupFailure?.(new Error(`Pi get_state failed: ${error}`));
         }
+        // A failed model discovery must not strand a startup effort that waits
+        // on the startup-model gate (see runPi startup effort).
+        if (command === 'get_available_models') {
+            session.resolveStartupModelSettled?.();
+        }
         return {};
     }
 
@@ -337,6 +342,10 @@ function handleResponse(
                 } else {
                     session.resolveStartupModelSettled?.();
                 }
+            } else {
+                // Empty discovery — settle the startup-model gate so a waiting
+                // startup effort does not strand (nothing to match against).
+                session.resolveStartupModelSettled?.();
             }
             resolvePendingRpc(resolver, response);
             break;
