@@ -621,6 +621,24 @@ function mergeIntoWindow(
     })
 }
 
+// Rows accumulated while a provisional boundary held the no-trim branch have
+// no loaded page to justify them once the boundary is released; shed them back
+// to the bounded tail window immediately so the rendered and persisted state
+// does not linger over budget.
+function trimReleasedProvisionalWindow(previous: InternalState): InternalState {
+    const { kept, dropped } = trimPreservingQueued(previous.messages, VISIBLE_WINDOW_SIZE, 'append')
+    if (dropped.length === 0) {
+        return previous
+    }
+    const oldest = derivePosition(kept, 'oldest')
+    return buildState(previous, {
+        messages: kept,
+        hasMore: true,
+        oldestPositionAt: oldest?.at ?? previous.oldestPositionAt,
+        oldestPositionSeq: oldest?.seq ?? previous.oldestPositionSeq
+    })
+}
+
 function pagePosition(at: number | null, seq: number | null): MessagePosition | null {
     return at !== null && seq !== null ? { at, seq } : null
 }
@@ -1011,22 +1029,23 @@ export async function fetchOlderMessages(
             const nextHistoryVersion = previous.historyVersion + 1
             if (options.onBeforeApply && !options.onBeforeApply(nextHistoryVersion)) {
                 applyRejected = true
-                return buildState(previous, {
+                // A rejected apply never delivers the loaded page; restore the
+                // bounded window if we provisionally installed the boundary,
+                // and shed the rows the no-trim branch accumulated.
+                const cleared = buildState(previous, {
                     olderGeneration: previous.olderGeneration + 1,
                     isLoadingMore: false,
                     warning: null,
-                    // A rejected apply never delivers the loaded page; restore
-                    // the bounded window if we provisionally installed the
-                    // boundary for this request.
                     historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
                     historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq,
                     provisionalBoundaryGeneration: installedProvisionalBoundary
                         ? null
                         : previous.provisionalBoundaryGeneration
                 })
+                return installedProvisionalBoundary ? trimReleasedProvisionalWindow(cleared) : cleared
             }
             const installBoundaryNow = options.shouldInstallBoundary?.() === true
-            const merged = mergeIntoWindow(previous, response.messages, {
+            let merged = mergeIntoWindow(previous, response.messages, {
                 // In history mode keep the oldest side (the loaded pages the
                 // user is browsing); in tail mode keep the whole window while
                 // the history boundary is held so the live tail keeps streaming.
@@ -1035,6 +1054,12 @@ export async function fetchOlderMessages(
                 historyBoundaryAt: previous.historyBoundaryAt ?? (installBoundaryNow ? before.at : undefined),
                 historyBoundarySeq: previous.historyBoundarySeq ?? (installBoundaryNow ? before.seq : undefined)
             })
+            if (!installBoundaryNow && installedProvisionalBoundary) {
+                // The outline closed while the request was in flight: the
+                // boundary dies with the apply, and the rows accumulated by
+                // the no-trim branch are shed back to the bounded tail window.
+                merged = trimReleasedProvisionalWindow(merged)
+            }
             historyVersion = nextHistoryVersion
             return buildState(merged, {
                 hasMore: response.page.hasMore,
@@ -1081,17 +1106,22 @@ export async function fetchOlderMessages(
             : new Error('Failed to load older messages')
         updateState(sessionId, (previous) => {
             if (previous.olderGeneration !== generation) return previous
-            return buildState(previous, {
+            // A failed request never delivers the loaded page; restore the
+            // bounded window if we provisionally installed the boundary, and
+            // shed the rows the no-trim branch accumulated while it was held.
+            if (!installedProvisionalBoundary) {
+                return buildState(previous, {
+                    isLoadingMore: false,
+                    warning: loadError.message
+                })
+            }
+            return trimReleasedProvisionalWindow(buildState(previous, {
                 isLoadingMore: false,
                 warning: loadError.message,
-                // A failed request never delivers the loaded page; restore the
-                // bounded window if we provisionally installed the boundary.
-                historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
-                historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq,
-                provisionalBoundaryGeneration: installedProvisionalBoundary
-                    ? null
-                    : previous.provisionalBoundaryGeneration
-            })
+                historyBoundaryAt: null,
+                historyBoundarySeq: null,
+                provisionalBoundaryGeneration: null
+            }))
         })
         return { kind: 'failed', error: loadError }
     }

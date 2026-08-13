@@ -1468,12 +1468,18 @@ describe('history view and older pagination', () => {
         const all = Array.from({ length: 600 }, (_, index) =>
             makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
         )
+        const pending = deferred<MessagesResponse>()
+        let outlinePending = false
         const getMessages = vi.fn(async (_sid: string, query: {
             limit?: number
             beforeAt?: number | null
             beforeSeq?: number | null
         }) => {
             if (query.beforeSeq != null || query.beforeAt != null) {
+                if (!outlinePending) {
+                    outlinePending = true
+                    return await pending.promise
+                }
                 throw new Error('fixture: forced before-page failure')
             }
             return latestResponse(all.slice(-200), {
@@ -1486,17 +1492,34 @@ describe('history view and older pagination', () => {
         const api = createApi(getMessages)
         await syncTailMessages(api, id)
 
-        const outcome = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
-        expect(outcome.kind).toBe('failed')
-
-        // The provisional boundary is gone: streaming ingests trim back to
-        // the tail cap instead of taking the no-trim branch.
+        // Outline load starts; while it is pending, SSE rows accumulate past
+        // the tail cap because the provisional boundary holds the no-trim
+        // branch.
+        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(outlinePending).toBe(true)
         for (let seq = 601; seq <= 850; seq += 1) {
             ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
         }
-        const state = getMessageWindowState(id)
+        expect(getMessageWindowState(id).messages).toHaveLength(450)
+
+        // The load fails: the provisional boundary is released and the window
+        // is compacted back to the tail cap immediately.
+        pending.reject(new Error('fixture: forced before-page failure'))
+        const outcome = await loading
+        expect(outcome.kind).toBe('failed')
+        let state = getMessageWindowState(id)
         expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
         expect(state.messages.at(-1)!.seq).toBe(850)
+        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
+
+        // Further ingests keep trimming normally (no no-trim branch).
+        for (let seq = 851; seq <= 900; seq += 1) {
+            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
+        }
+        state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages.at(-1)!.seq).toBe(900)
         expect(state.oldestSeq).toBe(state.messages[0]!.seq)
     })
 
