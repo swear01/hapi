@@ -712,7 +712,7 @@ function beginTailSync(sessionId: string): number {
         // outlive it and the window would grow without limit.
         const releaseProvisional = previous.provisionalBoundaryGeneration !== null
             && previous.provisionalBoundaryGeneration === previous.olderGeneration
-        return buildState(previous, {
+        const cleared = buildState(previous, {
             syncGeneration: generation,
             // Tail reconciliation owns the authoritative epoch. An older-page
             // response captured before this point must not commit while the tail
@@ -725,6 +725,9 @@ function beginTailSync(sessionId: string): number {
             historyBoundarySeq: releaseProvisional ? null : previous.historyBoundarySeq,
             provisionalBoundaryGeneration: releaseProvisional ? null : previous.provisionalBoundaryGeneration
         })
+        // Shed the rows the no-trim branch accumulated while the provisional
+        // boundary was held, immediately rather than on the next ingest.
+        return releaseProvisional ? trimReleasedProvisionalWindow(cleared) : cleared
     })
     return generation
 }
@@ -1054,10 +1057,13 @@ export async function fetchOlderMessages(
                 historyBoundaryAt: previous.historyBoundaryAt ?? (installBoundaryNow ? before.at : undefined),
                 historyBoundarySeq: previous.historyBoundarySeq ?? (installBoundaryNow ? before.seq : undefined)
             })
-            if (!installBoundaryNow && installedProvisionalBoundary) {
+            if (!installBoundaryNow && installedProvisionalBoundary && previous.viewMode === 'tail') {
                 // The outline closed while the request was in flight: the
-                // boundary dies with the apply, and the rows accumulated by
-                // the no-trim branch are shed back to the bounded tail window.
+                // boundary dies with the apply, and in tail mode the rows
+                // accumulated by the no-trim branch are shed back to the
+                // bounded tail window. In history mode the user is reading
+                // the loaded range — the oldest-kept trim protects it and the
+                // next ingest sheds only the tail overflow.
                 merged = trimReleasedProvisionalWindow(merged)
             }
             historyVersion = nextHistoryVersion
@@ -1134,7 +1140,7 @@ export function cancelOlderMessageLoad(sessionId: string): void {
         }
         const releaseProvisional = previous.provisionalBoundaryGeneration !== null
             && previous.provisionalBoundaryGeneration === previous.olderGeneration
-        return buildState(previous, {
+        const cleared = buildState(previous, {
             olderGeneration: previous.olderGeneration + 1,
             isLoadingMore: false,
             warning: null,
@@ -1142,6 +1148,7 @@ export function cancelOlderMessageLoad(sessionId: string): void {
             historyBoundarySeq: releaseProvisional ? null : previous.historyBoundarySeq,
             provisionalBoundaryGeneration: releaseProvisional ? null : previous.provisionalBoundaryGeneration
         })
+        return releaseProvisional ? trimReleasedProvisionalWindow(cleared) : cleared
     }, true)
 }
 
