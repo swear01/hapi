@@ -62,7 +62,12 @@ vi.mock('@/lib/composer-drafts', () => ({
 }))
 
 vi.mock('@/lib/use-translation', () => ({
-    useTranslation: () => ({ t: (key: string) => key }),
+    useTranslation: () => ({
+        t: (key: string) => ({
+            'queuedMessages.edit': 'Edit queued message',
+            'queuedMessages.cancel': 'Cancel queued message',
+        })[key] ?? key,
+    }),
 }))
 
 vi.mock('@/lib/toast-context', () => ({

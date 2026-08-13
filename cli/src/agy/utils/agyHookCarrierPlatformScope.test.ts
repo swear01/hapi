@@ -247,7 +247,7 @@ describe('warmCarrierScope memoization', () => {
         _resetCarrierScopeCacheForTests();
     });
 
-    it('computes the scope only once across repeated warm calls with the same probe', async () => {
+    it.skipIf(process.platform !== 'linux')('computes the scope only once across repeated warm calls with the same probe', async () => {
         restorePlatform = stubPlatform('darwin');
         const readDarwinMachineId = vi.fn(async () => 'D8F7807A-6B93-57A4-9DF2-E9A54FA2E046');
         const readDarwinBootSessionId = vi.fn(async () => '76A5605C-FF4D-4B31-80D8-239964198B7D');
@@ -430,7 +430,7 @@ describe('real defaultScopeProbe (smoke test, no macOS tooling on this Linux hos
         _resetCarrierScopeCacheForTests();
     });
 
-    it('resolves to undefined (never hangs, never throws) when stubbed to darwin on a non-macOS host', async () => {
+    it.skipIf(process.platform !== 'linux')('resolves to undefined (never hangs, never throws) when stubbed to darwin on a non-macOS host', async () => {
         restorePlatform = stubPlatform('darwin');
         await expect(warmCarrierScope()).resolves.toBeUndefined();
 

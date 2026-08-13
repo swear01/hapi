@@ -1,0 +1,3132 @@
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index eaa2384f6..11547d56a 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto'
+ import { dirname, join } from 'node:path'
+ import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
+ 
++import type { NotificationCopyConfig } from '../push/notificationCopy'
++
+ export interface Settings {
+     machineId?: string
+     machineIdConfirmedByServer?: boolean
+@@ -34,6 +36,8 @@ export interface Settings {
+      * Env vars still win when set at process start (ops override).
+      */
+     providerCredentials?: Partial<Record<string, string>>
++    /** Custom push notification copy templates (web push only). Empty fields fall back to defaults. */
++    notificationCopy?: NotificationCopyConfig
+ }
+ 
+ export function getSettingsFile(dataDir: string): string {
+diff --git a/hub/src/notifications/notificationHub.test.ts b/hub/src/notifications/notificationHub.test.ts
+index c28443882..e0eea4adb 100644
+--- a/hub/src/notifications/notificationHub.test.ts
++++ b/hub/src/notifications/notificationHub.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, it } from 'bun:test'
+ import type { Session, SyncEvent, SyncEventListener, SyncEngine } from '../sync/syncEngine'
+ import type { SessionEndReason } from '@hapi/protocol'
++import type { Store } from '../store'
+ import type { NotificationChannel, TaskNotification } from './notificationTypes'
+ import { NotificationHub } from './notificationHub'
+ 
+@@ -245,4 +246,157 @@ describe('NotificationHub', () => {
+ 
+         hub.stop()
+     })
++
++    it('suppresses all notification types when preferences are disabled', async () => {
++        const engine = new FakeSyncEngine()
++        const channel = new StubChannel()
++        const store = {
++            notificationPrefs: {
++                getPreferenceFlags: () => ({
++                    permissionRequests: 0,
++                    sessionReady: 0,
++                    taskNotifications: 0,
++                    sessionCompletion: 0
++                })
++            }
++        } as unknown as Store
++        const hub = new NotificationHub(engine as unknown as SyncEngine, [channel], {
++            permissionDebounceMs: 5,
++            readyCooldownMs: 5
++        }, store)
++
++        const session = createSession({
++            agentState: {
++                requests: {
++                    req1: { tool: 'Edit', arguments: {}, createdAt: 1 }
++                }
++            }
++        })
++        engine.setSession(session)
++        engine.emit({ type: 'session-updated', sessionId: session.id })
++        await sleep(25)
++
++        expect(channel.permissionSessions).toHaveLength(0)
++
++        const readyEvent: SyncEvent = {
++            type: 'message-received',
++            sessionId: session.id,
++            message: {
++                id: 'message-1',
++                seq: 1,
++                localId: null,
++                createdAt: 0,
++                content: {
++                    role: 'agent',
++                    content: {
++                        id: 'event-1',
++                        type: 'event',
++                        data: { type: 'ready' }
++                    }
++                }
++            }
++        }
++        engine.emit(readyEvent)
++        await sleep(5)
++        expect(channel.readySessions).toHaveLength(0)
++
++        const taskEvent: SyncEvent = {
++            type: 'message-received',
++            sessionId: session.id,
++            message: {
++                id: 'message-task',
++                seq: 2,
++                localId: null,
++                createdAt: 0,
++                content: {
++                    role: 'agent',
++                    content: {
++                        type: 'output',
++                        data: {
++                            type: 'system',
++                            subtype: 'task_notification',
++                            status: 'completed',
++                            summary: 'Commit T4 finished'
++                        }
++                    }
++                }
++            }
++        }
++        engine.emit(taskEvent)
++        await sleep(5)
++        expect(channel.taskNotifications).toHaveLength(0)
++
++        engine.emit({
++            type: 'session-ended',
++            sessionId: session.id,
++            reason: 'completed' satisfies SessionEndReason
++        })
++        await sleep(5)
++        expect(channel.sessionCompletions).toHaveLength(0)
++
++        hub.stop()
++    })
++
++    it('filters per event type by namespace preferences', async () => {
++        const engine = new FakeSyncEngine()
++        const channel = new StubChannel()
++        const store = {
++            notificationPrefs: {
++                getPreferenceFlags: () => ({
++                    permissionRequests: 0,
++                    sessionReady: 1,
++                    taskNotifications: 1,
++                    sessionCompletion: 0
++                })
++            }
++        } as unknown as Store
++        const hub = new NotificationHub(engine as unknown as SyncEngine, [channel], {
++            permissionDebounceMs: 5,
++            readyCooldownMs: 5
++        }, store)
++
++        const session = createSession({
++            agentState: {
++                requests: {
++                    req1: { tool: 'Edit', arguments: {}, createdAt: 1 }
++                }
++            }
++        })
++        engine.setSession(session)
++        engine.emit({ type: 'session-updated', sessionId: session.id })
++        await sleep(25)
++        expect(channel.permissionSessions).toHaveLength(0)
++
++        const readyEvent: SyncEvent = {
++            type: 'message-received',
++            sessionId: session.id,
++            message: {
++                id: 'message-1',
++                seq: 1,
++                localId: null,
++                createdAt: 0,
++                content: {
++                    role: 'agent',
++                    content: {
++                        id: 'event-1',
++                        type: 'event',
++                        data: { type: 'ready' }
++                    }
++                }
++            }
++        }
++        engine.emit(readyEvent)
++        await sleep(5)
++        expect(channel.readySessions).toHaveLength(1)
++
++        engine.emit({
++            type: 'session-ended',
++            sessionId: session.id,
++            reason: 'completed' satisfies SessionEndReason
++        })
++        await sleep(5)
++        expect(channel.sessionCompletions).toHaveLength(0)
++
++        hub.stop()
++    })
+ })
+diff --git a/hub/src/notifications/notificationHub.ts b/hub/src/notifications/notificationHub.ts
+index f9d627e1e..fdcfc970f 100644
+--- a/hub/src/notifications/notificationHub.ts
++++ b/hub/src/notifications/notificationHub.ts
+@@ -1,5 +1,6 @@
+ import type { Session, SyncEngine, SyncEvent } from '../sync/syncEngine'
+ import type { SessionEndReason } from '@hapi/protocol'
++import type { Store } from '../store'
+ import type { NotificationChannel, NotificationHubOptions, TaskNotification } from './notificationTypes'
+ import type { NotificationSendContext } from './notificationSendContext'
+ import { extractMessageEventType, extractTaskNotification } from './eventParsing'
+@@ -16,7 +17,8 @@ export class NotificationHub {
+     constructor(
+         private readonly syncEngine: SyncEngine,
+         channels: NotificationChannel[],
+-        options?: NotificationHubOptions
++        options?: NotificationHubOptions,
++        private readonly store?: Store
+     ) {
+         this.channels = channels
+         this.readyCooldownMs = options?.readyCooldownMs ?? 5000
+@@ -182,7 +184,21 @@ export class NotificationHub {
+         await this.notifySessionCompletion(session, reason)
+     }
+ 
++    /**
++     * Per-namespace preference gate. Without a store (or a missing row) every
++     * event type is enabled, preserving the pre-preferences behavior.
++     */
++    private isEventEnabled(session: Session, flag: 'permissionRequests' | 'sessionReady' | 'taskNotifications' | 'sessionCompletion'): boolean {
++        if (!this.store) {
++            return true
++        }
++        return Boolean(this.store.notificationPrefs.getPreferenceFlags(session.namespace)[flag])
++    }
++
+     private async notifyReady(session: Session): Promise<void> {
++        if (!this.isEventEnabled(session, 'sessionReady')) {
++            return
++        }
+         const ctx: NotificationSendContext = { nativeGate: { sent: false } }
+         for (const channel of this.channels) {
+             try {
+@@ -194,6 +210,9 @@ export class NotificationHub {
+     }
+ 
+     private async notifyPermission(session: Session): Promise<void> {
++        if (!this.isEventEnabled(session, 'permissionRequests')) {
++            return
++        }
+         const ctx: NotificationSendContext = { nativeGate: { sent: false } }
+         for (const channel of this.channels) {
+             try {
+@@ -205,6 +224,9 @@ export class NotificationHub {
+     }
+ 
+     private async notifyTask(session: Session, notification: TaskNotification): Promise<void> {
++        if (!this.isEventEnabled(session, 'taskNotifications')) {
++            return
++        }
+         const ctx: NotificationSendContext = { nativeGate: { sent: false } }
+         for (const channel of this.channels) {
+             try {
+@@ -216,6 +238,9 @@ export class NotificationHub {
+     }
+ 
+     private async notifySessionCompletion(session: Session, reason: SessionEndReason): Promise<void> {
++        if (!this.isEventEnabled(session, 'sessionCompletion')) {
++            return
++        }
+         for (const channel of this.channels) {
+             if (typeof channel.sendSessionCompletion !== 'function') {
+                 continue
+diff --git a/hub/src/push/notificationCopy.test.ts b/hub/src/push/notificationCopy.test.ts
+new file mode 100644
+index 000000000..1ab57aa17
+--- /dev/null
++++ b/hub/src/push/notificationCopy.test.ts
+@@ -0,0 +1,181 @@
++import { describe, expect, it } from 'bun:test'
++import { mkdtemp, rm, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import type { Session } from '../sync/syncEngine'
++import {
++    DEFAULT_COPY,
++    buildPermissionRequestCopy,
++    buildReadyCopy,
++    buildSessionCompletionCopy,
++    buildTaskCopy,
++    isTaskFailure,
++    loadNotificationCopy,
++    renderTemplate,
++    resolveCopy
++} from './notificationCopy'
++
++function createSession(overrides: Partial<Session> = {}): Session {
++    return {
++        id: 'session-1',
++        namespace: 'default',
++        active: true,
++        metadata: { name: 'Demo task', flavor: 'codex' },
++        ...overrides
++    } as Session
++}
++
++describe('renderTemplate', () => {
++    it('replaces known variables and leaves unknown ones as-is', () => {
++        expect(renderTemplate('{agentName} in {sessionName} and {typo}', {
++            agentName: 'Codex',
++            sessionName: 'Demo task'
++        })).toBe('Codex in Demo task and {typo}')
++    })
++
++    it('handles empty vars', () => {
++        expect(renderTemplate('{agentName} hello', {})).toBe('{agentName} hello')
++    })
++})
++
++describe('loadNotificationCopy', () => {
++    it('returns empty config when settings.json is missing', async () => {
++        const dir = await mkdtemp(join(tmpdir(), 'hapi-copy-test-'))
++        try {
++            expect(await loadNotificationCopy(dir)).toEqual({})
++        } finally {
++            await rm(dir, { recursive: true, force: true })
++        }
++    })
++
++    it('returns stored overrides and ignores other keys', async () => {
++        const dir = await mkdtemp(join(tmpdir(), 'hapi-copy-test-'))
++        try {
++            await writeFile(join(dir, 'settings.json'), JSON.stringify({
++                cliApiToken: 'abc',
++                notificationCopy: {
++                    ready: { title: 'Hey!', body: '{agentName} wants you' }
++                }
++            }))
++            expect(await loadNotificationCopy(dir)).toEqual({
++                ready: { title: 'Hey!', body: '{agentName} wants you' }
++            })
++        } finally {
++            await rm(dir, { recursive: true, force: true })
++        }
++    })
++
++    it('returns empty config when persisted copy is malformed', async () => {
++        const dir = await mkdtemp(join(tmpdir(), 'hapi-copy-test-'))
++        try {
++            await writeFile(join(dir, 'settings.json'), JSON.stringify({
++                notificationCopy: { ready: { title: 42, body: 'hello' } }
++            }))
++            expect(await loadNotificationCopy(dir)).toEqual({})
++        } finally {
++            await rm(dir, { recursive: true, force: true })
++        }
++    })
++})
++
++describe('resolveCopy', () => {
++    it('returns the default when no stored template exists', () => {
++        expect(resolveCopy('ready', {})).toEqual(DEFAULT_COPY.ready)
++    })
++
++    it('falls back only the title when title is empty', () => {
++        expect(resolveCopy('ready', { ready: { title: '  ', body: 'custom' } })).toEqual({
++            title: DEFAULT_COPY.ready.title,
++            body: 'custom'
++        })
++    })
++
++    it('falls back only the body when body is empty', () => {
++        expect(resolveCopy('ready', { ready: { title: 'custom', body: '' } })).toEqual({
++            title: 'custom',
++            body: DEFAULT_COPY.ready.body
++        })
++    })
++
++    it('returns the stored template when both fields are non-empty', () => {
++        expect(resolveCopy('ready', { ready: { title: 'custom', body: 'hello {agentName}' } }))
++            .toEqual({ title: 'custom', body: 'hello {agentName}' })
++    })
++})
++
++describe('isTaskFailure', () => {
++    it('treats failed/error/killed/aborted as failure, case-insensitively', () => {
++        for (const status of ['failed', 'error', 'killed', 'aborted', 'FAILED', ' Error ']) {
++            expect(isTaskFailure(status)).toBe(true)
++        }
++    })
++
++    it('treats completed and undefined as success', () => {
++        expect(isTaskFailure('completed')).toBe(false)
++        expect(isTaskFailure(undefined)).toBe(false)
++    })
++})
++
++describe('build*Copy', () => {
++    it('substitutes variables in permission copy with tool formatting', () => {
++        const session = createSession({
++            agentState: { requests: { 'r-1': { tool: 'Bash', arguments: {} } } }
++        })
++        const result = buildPermissionRequestCopy(session, {}, '/sessions/session-1')
++        expect(result).toEqual({
++            title: 'Permission Request',
++            body: 'Demo task (Bash)'
++        })
++    })
++
++    it('omits tool formatting when no tool is requested', () => {
++        const result = buildPermissionRequestCopy(createSession(), {}, '/sessions/session-1')
++        expect(result.body).toBe('Demo task')
++    })
++
++    it('applies a custom permission template', () => {
++        const session = createSession({
++            agentState: { requests: { 'r-1': { tool: 'Bash', arguments: {} } } }
++        })
++        // Note: {tool} includes the leading space + parens (e.g. " (Bash)"),
++        // matching the pre-customization body format.
++        const result = buildPermissionRequestCopy(session, {
++            permissionRequest: { title: '{agentName} needs approval', body: '{sessionName} wants{tool} at {url}' }
++        }, '/sessions/session-1')
++        expect(result).toEqual({
++            title: 'Codex needs approval',
++            body: 'Demo task wants (Bash) at /sessions/session-1'
++        })
++    })
++
++    it('renders ready copy with defaults', () => {
++        expect(buildReadyCopy(createSession(), {}, '/sessions/session-1')).toEqual({
++            title: 'Ready for input',
++            body: 'Codex is waiting in Demo task'
++        })
++    })
++
++    it('selects taskFailed for failure statuses and renders variables', () => {
++        const result = buildTaskCopy(createSession(), { status: 'failed', summary: 'Build broke' }, {}, '/sessions/session-1')
++        expect(result.isFailure).toBe(true)
++        expect(result.title).toBe('Task failed')
++        expect(result.body).toBe('Codex · Demo task · Build broke')
++    })
++
++    it('selects taskCompleted for success statuses', () => {
++        const result = buildTaskCopy(createSession(), { status: 'completed', summary: 'All green' }, {}, '/sessions/session-1')
++        expect(result.isFailure).toBe(false)
++        expect(result.title).toBe('Task completed')
++        expect(result.body).toBe('Codex · Demo task · All green')
++    })
++
++    it('renders session completion copy with reason variable', () => {
++        const result = buildSessionCompletionCopy(createSession(), 'completed', {
++            sessionCompletion: { title: '{sessionName} finished', body: 'via {reason} — {agentName}' }
++        }, '/sessions/session-1')
++        expect(result).toEqual({
++            title: 'Demo task finished',
++            body: 'via completed — Codex'
++        })
++    })
++})
+diff --git a/hub/src/push/notificationCopy.ts b/hub/src/push/notificationCopy.ts
+new file mode 100644
+index 000000000..390aa8372
+--- /dev/null
++++ b/hub/src/push/notificationCopy.ts
+@@ -0,0 +1,160 @@
++import type { SessionEndReason } from '@hapi/protocol'
++import { z } from 'zod'
++import { getSettingsFile, readSettings } from '../config/settings'
++import type { TaskNotification } from '../notifications/notificationTypes'
++import { getAgentName, getSessionName } from '../notifications/sessionInfo'
++import type { Session } from '../sync/syncEngine'
++
++export type CopyKey = 'permissionRequest' | 'ready' | 'taskCompleted' | 'taskFailed' | 'sessionCompletion'
++
++const copyTemplateSchema = z.object({
++    title: z.string().max(500),
++    body: z.string().max(500)
++})
++
++export const notificationCopySchema = z.object({
++    permissionRequest: copyTemplateSchema.optional(),
++    ready: copyTemplateSchema.optional(),
++    taskCompleted: copyTemplateSchema.optional(),
++    taskFailed: copyTemplateSchema.optional(),
++    sessionCompletion: copyTemplateSchema.optional()
++})
++
++export type CopyTemplate = z.infer<typeof copyTemplateSchema>
++export type NotificationCopyConfig = z.infer<typeof notificationCopySchema>
++
++export const COPY_KEYS: readonly CopyKey[] = [
++    'permissionRequest',
++    'ready',
++    'taskCompleted',
++    'taskFailed',
++    'sessionCompletion'
++] as const
++
++/**
++ * Default copy mirrors the pre-customization hardcoded strings exactly, so a
++ * hub with no `notificationCopy` in settings.json behaves identically.
++ */
++export const DEFAULT_COPY: Record<CopyKey, CopyTemplate> = {
++    permissionRequest: { title: 'Permission Request', body: '{sessionName}{tool}' },
++    ready: { title: 'Ready for input', body: '{agentName} is waiting in {sessionName}' },
++    taskCompleted: { title: 'Task completed', body: '{agentName} · {sessionName} · {summary}' },
++    taskFailed: { title: 'Task failed', body: '{agentName} · {sessionName} · {summary}' },
++    sessionCompletion: { title: 'Session completed', body: '{agentName} · {sessionName}' }
++}
++
++export async function loadNotificationCopy(dataDir: string): Promise<NotificationCopyConfig> {
++    try {
++        const settings = await readSettings(getSettingsFile(dataDir))
++        const parsed = notificationCopySchema.safeParse(settings?.notificationCopy ?? {})
++        return parsed.success ? parsed.data : {}
++    } catch {
++        return {}
++    }
++}
++
++/**
++ * Empty fields fall back independently so a title-only or body-only override
++ * still takes effect.
++ */
++export function resolveCopy(key: CopyKey, stored: NotificationCopyConfig): CopyTemplate {
++    const template = stored[key]
++    const defaults = DEFAULT_COPY[key]
++    return {
++        title: template?.title.trim() ? template.title : defaults.title,
++        body: template?.body.trim() ? template.body : defaults.body
++    }
++}
++
++/**
++ * Replaces `{var}` placeholders. Unknown placeholders are left as-is so a
++ * typo stays visible in the delivered notification instead of vanishing.
++ */
++export function renderTemplate(template: string, vars: Record<string, string>): string {
++    return template.replace(/\{(\w+)\}/g, (match, key: string) => {
++        return key in vars ? vars[key] : match
++    })
++}
++
++export type NotificationCopyResult = {
++    title: string
++    body: string
++}
++
++function render(template: CopyTemplate, vars: Record<string, string>): NotificationCopyResult {
++    return {
++        title: renderTemplate(template.title, vars),
++        body: renderTemplate(template.body, vars)
++    }
++}
++
++/**
++ * `{tool}` resolves to ` (ToolName)` (leading space + parens) or the empty
++ * string — matching the pre-customization body format.
++ */
++export function buildPermissionRequestCopy(
++    session: Session,
++    stored: NotificationCopyConfig,
++    url: string
++): NotificationCopyResult {
++    const request = Object.entries(session.agentState?.requests ?? {})[0]?.[1] ?? null
++    const tool = request?.tool ? ` (${request.tool})` : ''
++    return render(resolveCopy('permissionRequest', stored), {
++        agentName: getAgentName(session),
++        sessionName: getSessionName(session),
++        tool,
++        url
++    })
++}
++
++export function buildReadyCopy(
++    session: Session,
++    stored: NotificationCopyConfig,
++    url: string
++): NotificationCopyResult {
++    return render(resolveCopy('ready', stored), {
++        agentName: getAgentName(session),
++        sessionName: getSessionName(session),
++        url
++    })
++}
++
++export function isTaskFailure(status: string | undefined): boolean {
++    const normalized = status?.trim().toLowerCase()
++    return normalized === 'failed'
++        || normalized === 'error'
++        || normalized === 'killed'
++        || normalized === 'aborted'
++}
++
++export function buildTaskCopy(
++    session: Session,
++    notification: TaskNotification,
++    stored: NotificationCopyConfig,
++    url: string
++): NotificationCopyResult & { isFailure: boolean } {
++    const isFailure = isTaskFailure(notification.status)
++    const key: CopyKey = isFailure ? 'taskFailed' : 'taskCompleted'
++    const rendered = render(resolveCopy(key, stored), {
++        agentName: getAgentName(session),
++        sessionName: getSessionName(session),
++        summary: notification.summary,
++        status: notification.status ?? '',
++        url
++    })
++    return { ...rendered, isFailure }
++}
++
++export function buildSessionCompletionCopy(
++    session: Session,
++    reason: SessionEndReason,
++    stored: NotificationCopyConfig,
++    url: string
++): NotificationCopyResult {
++    return render(resolveCopy('sessionCompletion', stored), {
++        agentName: getAgentName(session),
++        sessionName: getSessionName(session),
++        reason,
++        url
++    })
++}
+diff --git a/hub/src/push/pushNotificationChannel.test.ts b/hub/src/push/pushNotificationChannel.test.ts
+index bd0d0c330..4c8a42d54 100644
+--- a/hub/src/push/pushNotificationChannel.test.ts
++++ b/hub/src/push/pushNotificationChannel.test.ts
+@@ -7,9 +7,8 @@ function createSession(overrides: Partial<Session> = {}): Session {
+     return {
+         id: 'session-task-toast',
+         namespace: 'default',
+-        name: 'Demo task',
+         active: true,
+-        metadata: { flavor: 'codex' },
++        metadata: { name: 'Demo task', flavor: 'codex' },
+         ...overrides
+     } as Session
+ }
+@@ -153,6 +152,141 @@ describe('PushNotificationChannel', () => {
+         expect(pushed).toHaveLength(1)
+     })
+ 
++    it('applies custom copy from getCopyConfig', async () => {
++        const pushed: Array<{ namespace: string; payload: PushPayload }> = []
++        const channel = new PushNotificationChannel(
++            {
++                sendToNamespace: async (namespace: string, payload: PushPayload) => {
++                    pushed.push({ namespace, payload })
++                }
++            } as never,
++            {
++                sendToast: async () => 0
++            } as never,
++            {
++                hasVisibleConnection: () => false
++            } as never,
++            '',
++            async () => ({
++                ready: { title: 'Yo {agentName}', body: '{sessionName} is ready at {url}' }
++            })
++        )
++
++        await channel.sendReady(createSession())
++
++        expect(pushed).toHaveLength(1)
++        expect(pushed[0].payload.title).toBe('Yo Codex')
++        expect(pushed[0].payload.body).toBe('Demo task is ready at /sessions/session-task-toast')
++    })
++
++    it('falls back to defaults for empty template fields', async () => {
++        const pushed: Array<{ namespace: string; payload: PushPayload }> = []
++        const channel = new PushNotificationChannel(
++            {
++                sendToNamespace: async (namespace: string, payload: PushPayload) => {
++                    pushed.push({ namespace, payload })
++                }
++            } as never,
++            {
++                sendToast: async () => 0
++            } as never,
++            {
++                hasVisibleConnection: () => false
++            } as never,
++            '',
++            async () => ({
++                ready: { title: '', body: '  ' }
++            })
++        )
++
++        await channel.sendReady(createSession())
++
++        expect(pushed[0].payload.title).toBe('Ready for input')
++        expect(pushed[0].payload.body).toBe('Codex is waiting in Demo task')
++    })
++
++    it('selects taskFailed vs taskCompleted copy by status', async () => {
++        const pushed: Array<{ namespace: string; payload: PushPayload }> = []
++        const channel = new PushNotificationChannel(
++            {
++                sendToNamespace: async (namespace: string, payload: PushPayload) => {
++                    pushed.push({ namespace, payload })
++                }
++            } as never,
++            {
++                sendToast: async () => 0
++            } as never,
++            {
++                hasVisibleConnection: () => false
++            } as never,
++            '',
++            async () => ({
++                taskFailed: { title: 'Oops', body: '{summary}' },
++                taskCompleted: { title: 'Nice', body: '{summary}' }
++            })
++        )
++
++        await channel.sendTaskNotification(createSession(), { status: 'failed', summary: 'Broke' })
++        await channel.sendTaskNotification(createSession(), { status: 'completed', summary: 'Passed' })
++
++        expect(pushed[0].payload.title).toBe('Oops')
++        expect(pushed[1].payload.title).toBe('Nice')
++    })
++
++    it('delivers session completion via web push even when the session is inactive', async () => {
++        const pushed: Array<{ namespace: string; payload: PushPayload }> = []
++        const channel = new PushNotificationChannel(
++            {
++                sendToNamespace: async (namespace: string, payload: PushPayload) => {
++                    pushed.push({ namespace, payload })
++                }
++            } as never,
++            {
++                sendToast: async () => 0
++            } as never,
++            {
++                hasVisibleConnection: () => false
++            } as never,
++            '',
++            async () => ({
++                sessionCompletion: { title: '{sessionName} done', body: '{agentName} finished' }
++            })
++        )
++
++        await channel.sendSessionCompletion(createSession({ active: false }), 'completed')
++
++        expect(pushed).toHaveLength(1)
++        expect(pushed[0].payload.tag).toBe('session-completion-session-task-toast')
++        expect(pushed[0].payload.title).toBe('Demo task done')
++        expect(pushed[0].payload.body).toBe('Codex finished')
++    })
++
++    it('still delivers with defaults when getCopyConfig throws', async () => {
++        const pushed: Array<{ namespace: string; payload: PushPayload }> = []
++        const channel = new PushNotificationChannel(
++            {
++                sendToNamespace: async (namespace: string, payload: PushPayload) => {
++                    pushed.push({ namespace, payload })
++                }
++            } as never,
++            {
++                sendToast: async () => 0
++            } as never,
++            {
++                hasVisibleConnection: () => false
++            } as never,
++            '',
++            async () => {
++                throw new Error('settings unreadable')
++            }
++        )
++
++        await channel.sendReady(createSession())
++
++        expect(pushed).toHaveLength(1)
++        expect(pushed[0].payload.title).toBe('Ready for input')
++    })
++
+     it('also skips SSE in-page toast when native gate reports delivery', async () => {
+         const pushed: Array<{ namespace: string; payload: PushPayload }> = []
+         const toasts: unknown[] = []
+diff --git a/hub/src/push/pushNotificationChannel.ts b/hub/src/push/pushNotificationChannel.ts
+index bfe751f55..4d80a6e55 100644
+--- a/hub/src/push/pushNotificationChannel.ts
++++ b/hub/src/push/pushNotificationChannel.ts
+@@ -1,9 +1,11 @@
+-import type { Session } from '../sync/syncEngine'
++import type { SessionEndReason } from '@hapi/protocol'
+ import type { NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
+ import type { NotificationSendContext } from '../notifications/notificationSendContext'
+-import { getAgentName, getSessionName } from '../notifications/sessionInfo'
+ import type { SSEManager } from '../sse/sseManager'
++import type { Session } from '../sync/syncEngine'
+ import type { VisibilityTracker } from '../visibility/visibilityTracker'
++import type { NotificationCopyConfig } from './notificationCopy'
++import { buildPermissionRequestCopy, buildReadyCopy, buildSessionCompletionCopy, buildTaskCopy, DEFAULT_COPY } from './notificationCopy'
+ import type { PushPayload, PushService } from './pushService'
+ 
+ export class PushNotificationChannel implements NotificationChannel {
+@@ -11,7 +13,8 @@ export class PushNotificationChannel implements NotificationChannel {
+         private readonly pushService: PushService,
+         private readonly sseManager: SSEManager,
+         private readonly visibilityTracker: VisibilityTracker,
+-        _appUrl: string
++        _appUrl: string,
++        private readonly getCopyConfig: () => Promise<NotificationCopyConfig> = async () => ({})
+     ) {}
+ 
+     /**
+@@ -26,25 +29,37 @@ export class PushNotificationChannel implements NotificationChannel {
+         console.log(`[Push.${method}] ns=${namespace} ${branch}${note}`)
+     }
+ 
++    /**
++     * Loads custom copy, never failing a notification because of bad config:
++     * any loader error degrades to the hardcoded defaults.
++     */
++    private async loadCopy(): Promise<NotificationCopyConfig> {
++        try {
++            return await this.getCopyConfig()
++        } catch {
++            return DEFAULT_COPY
++        }
++    }
++
+     async sendPermissionRequest(session: Session, ctx?: NotificationSendContext): Promise<void> {
+         if (!session.active) {
+             return
+         }
+ 
+-        const name = getSessionName(session)
+-        const requests = session.agentState?.requests ?? null
+-        const requestEntries = requests ? Object.entries(requests) : []
+-        const [requestId, request] = requestEntries[0] ?? [undefined, null]
+-        const toolName = request?.tool ? ` (${request.tool})` : ''
++        const requestEntries = Object.entries(session.agentState?.requests ?? {})
++        const [requestId] = requestEntries[0] ?? [undefined]
++        const stored = await this.loadCopy()
++        const url = this.buildSessionPath(session.id)
++        const { title, body } = buildPermissionRequestCopy(session, stored, url)
+ 
+         const payload: PushPayload = {
+-            title: 'Permission Request',
+-            body: `${name}${toolName}`,
++            title,
++            body,
+             tag: `permission-${session.id}`,
+             data: {
+                 type: 'permission-request',
+                 sessionId: session.id,
+-                url: this.buildSessionPath(session.id),
++                url,
+                 requestId
+             }
+         }
+@@ -57,17 +72,18 @@ export class PushNotificationChannel implements NotificationChannel {
+             return
+         }
+ 
+-        const agentName = getAgentName(session)
+-        const name = getSessionName(session)
++        const stored = await this.loadCopy()
++        const url = this.buildSessionPath(session.id)
++        const { title, body } = buildReadyCopy(session, stored, url)
+ 
+         const payload: PushPayload = {
+-            title: 'Ready for input',
+-            body: `${agentName} is waiting in ${name}`,
++            title,
++            body,
+             tag: `ready-${session.id}`,
+             data: {
+                 type: 'ready',
+                 sessionId: session.id,
+-                url: this.buildSessionPath(session.id)
++                url
+             }
+         }
+ 
+@@ -79,32 +95,52 @@ export class PushNotificationChannel implements NotificationChannel {
+             return
+         }
+ 
+-        const agentName = getAgentName(session)
+-        const name = getSessionName(session)
+-        const normalizedStatus = notification.status?.trim().toLowerCase()
+-        const isFailure = normalizedStatus === 'failed'
+-            || normalizedStatus === 'error'
+-            || normalizedStatus === 'killed'
+-            || normalizedStatus === 'aborted'
++        const stored = await this.loadCopy()
++        const url = this.buildSessionPath(session.id)
++        const { title, body } = buildTaskCopy(session, notification, stored, url)
+ 
+         const payload: PushPayload = {
+-            title: isFailure ? 'Task failed' : 'Task completed',
+-            body: `${agentName} · ${name} · ${notification.summary}`,
++            title,
++            body,
+             data: {
+                 type: 'task-notification',
+                 sessionId: session.id,
+-                url: this.buildSessionPath(session.id)
++                url
+             }
+         }
+ 
+         await this.deliverWebOrToast(session, payload, ctx, 'task')
+     }
+ 
++    /**
++     * Session-completion pushes. Deliberately no `session.active` gate: the
++     * session has already become inactive by the time this fires (see
++     * NotificationHub.sendSessionCompletion, which reads the session directly).
++     */
++    async sendSessionCompletion(session: Session, reason: SessionEndReason, ctx?: NotificationSendContext): Promise<void> {
++        const stored = await this.loadCopy()
++        const url = this.buildSessionPath(session.id)
++        const { title, body } = buildSessionCompletionCopy(session, reason, stored, url)
++
++        const payload: PushPayload = {
++            title,
++            body,
++            tag: `session-completion-${session.id}`,
++            data: {
++                type: 'session-completion',
++                sessionId: session.id,
++                url
++            }
++        }
++
++        await this.deliverWebOrToast(session, payload, ctx, 'session-completion')
++    }
++
+     private async deliverWebOrToast(
+         session: Session,
+         payload: PushPayload,
+         ctx: NotificationSendContext | undefined,
+-        method: 'permission' | 'ready' | 'task'
++        method: 'permission' | 'ready' | 'task' | 'session-completion'
+     ): Promise<void> {
+         if (ctx?.nativeGate?.sent) {
+             this.logBranch(method, session.namespace, 'defer-to-native', 'fcm-delivered-this-dispatch')
+diff --git a/hub/src/push/pushService.test.ts b/hub/src/push/pushService.test.ts
+new file mode 100644
+index 000000000..7d381c509
+--- /dev/null
++++ b/hub/src/push/pushService.test.ts
+@@ -0,0 +1,69 @@
++import { beforeEach, describe, expect, it, mock } from 'bun:test'
++import { PushService, type PushPayload } from './pushService'
++
++const sendNotification = mock(async (_subscription: unknown, _body: string) => ({}))
++
++mock.module('web-push', () => ({
++    setVapidDetails: mock(() => {}),
++    sendNotification
++}))
++
++type Subscription = {
++    endpoint: string
++    p256dh: string
++    auth: string
++}
++
++function createService(subscriptions: Subscription[]) {
++    const removePushSubscription = mock(() => {})
++    const store = {
++        push: {
++            getPushSubscriptionsByNamespace: mock(() => subscriptions),
++            removePushSubscription
++        }
++    }
++    return {
++        service: new PushService(
++            { publicKey: 'test-public', privateKey: 'test-private' },
++            'mailto:test@example.com',
++            store as never
++        ),
++        removePushSubscription
++    }
++}
++
++const payload: PushPayload = {
++    title: 'Test',
++    body: 'Test body'
++}
++
++beforeEach(() => {
++    sendNotification.mockClear()
++    sendNotification.mockImplementation(async () => ({}))
++})
++
++describe('PushService.sendToNamespace', () => {
++    it('returns zero when the namespace has no subscriptions', async () => {
++        const { service } = createService([])
++
++        expect(await service.sendToNamespace('default', payload)).toBe(0)
++        expect(sendNotification).not.toHaveBeenCalled()
++    })
++
++    it('counts only successful deliveries', async () => {
++        const subscriptions = [
++            { endpoint: 'https://push.example/ok', p256dh: 'key-1', auth: 'auth-1' },
++            { endpoint: 'https://push.example/gone', p256dh: 'key-2', auth: 'auth-2' }
++        ]
++        sendNotification.mockImplementation(async (subscription: unknown) => {
++            if ((subscription as { endpoint: string }).endpoint.endsWith('/gone')) {
++                throw { statusCode: 410 }
++            }
++            return {}
++        })
++        const { service, removePushSubscription } = createService(subscriptions)
++
++        expect(await service.sendToNamespace('default', payload)).toBe(1)
++        expect(removePushSubscription).toHaveBeenCalledWith('default', 'https://push.example/gone')
++    })
++})
+diff --git a/hub/src/push/pushService.ts b/hub/src/push/pushService.ts
+index e44a8fd9e..fb60f2ba6 100644
+--- a/hub/src/push/pushService.ts
++++ b/hub/src/push/pushService.ts
+@@ -38,23 +38,24 @@ export class PushService {
+         webPush.setVapidDetails(this.subject, this.vapidKeys.publicKey, this.vapidKeys.privateKey)
+     }
+ 
+-    async sendToNamespace(namespace: string, payload: PushPayload): Promise<void> {
++    async sendToNamespace(namespace: string, payload: PushPayload): Promise<number> {
+         const subscriptions = this.store.push.getPushSubscriptionsByNamespace(namespace)
+         if (subscriptions.length === 0) {
+-            return
++            return 0
+         }
+ 
+         const body = JSON.stringify(payload)
+-        await Promise.all(subscriptions.map((subscription) => {
++        const delivered = await Promise.all(subscriptions.map((subscription) => {
+             return this.sendToSubscription(namespace, subscription, body)
+         }))
++        return delivered.filter(Boolean).length
+     }
+ 
+     private async sendToSubscription(
+         namespace: string,
+         subscription: StoredSubscription,
+         body: string
+-    ): Promise<void> {
++    ): Promise<boolean> {
+         const pushSubscription: PushSubscription = {
+             endpoint: subscription.endpoint,
+             keys: {
+@@ -65,6 +66,7 @@ export class PushService {
+ 
+         try {
+             await webPush.sendNotification(pushSubscription, body)
++            return true
+         } catch (error) {
+             const statusCode = typeof (error as { statusCode?: unknown }).statusCode === 'number'
+                 ? (error as { statusCode: number }).statusCode
+@@ -72,10 +74,11 @@ export class PushService {
+ 
+             if (statusCode === 410) {
+                 this.store.push.removePushSubscription(namespace, subscription.endpoint)
+-                return
++                return false
+             }
+ 
+             console.error('[PushService] Failed to send notification:', error)
++            return false
+         }
+     }
+ }
+diff --git a/hub/src/startHub.ts b/hub/src/startHub.ts
+index 3d5a75879..eeab9e6d9 100644
+--- a/hub/src/startHub.ts
++++ b/hub/src/startHub.ts
+@@ -12,6 +12,7 @@ import { SSEManager } from './sse/sseManager'
+ import { getOrCreateVapidKeys } from './config/vapidKeys'
+ import { PushService } from './push/pushService'
+ import { PushNotificationChannel } from './push/pushNotificationChannel'
++import { loadNotificationCopy } from './push/notificationCopy'
+ import { FcmService } from './fcm/fcmService'
+ import { FcmNotificationChannel } from './fcm/fcmNotificationChannel'
+ import { resolveFcmConfig } from './fcm/fcmConfig'
+@@ -227,7 +228,8 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+             pushService,
+             sseManager,
+             visibilityTracker,
+-            config.publicUrl
++            config.publicUrl,
++            () => loadNotificationCopy(config.dataDir)
+         )
+     )
+ 
+@@ -249,7 +251,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+         }
+     }
+ 
+-    notificationHub = new NotificationHub(syncEngine, notificationChannels)
++    notificationHub = new NotificationHub(syncEngine, notificationChannels, undefined, store)
+ 
+     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
+     webServer = await startWebServer({
+@@ -259,6 +261,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+         jwtSecret,
+         store,
+         vapidPublicKey: vapidKeys.publicKey,
++        pushService,
+         socketEngine: socketServer.engine,
+         corsOrigins,
+         relayMode: relayFlag.enabled,
+diff --git a/hub/src/store/index.ts b/hub/src/store/index.ts
+index c5db9ec0e..f97d4b8d0 100644
+--- a/hub/src/store/index.ts
++++ b/hub/src/store/index.ts
+@@ -8,6 +8,7 @@ import { addMessage } from './messages'
+ import type { StoredMessage } from './types'
+ import { PushStore } from './pushStore'
+ import { FcmStore } from './fcmStore'
++import { NotificationPreferenceStore } from './notificationPreferenceStore'
+ import { ScratchlistStore } from './scratchlistStore'
+ import { SessionStore } from './sessionStore'
+ import { UserStore } from './userStore'
+@@ -29,6 +30,7 @@ export { MachineStore } from './machineStore'
+ export { MessageStore } from './messageStore'
+ export { PushStore } from './pushStore'
+ export { FcmStore } from './fcmStore'
++export { NotificationPreferenceStore } from './notificationPreferenceStore'
+ export { ScratchlistStore } from './scratchlistStore'
+ export { SessionStore } from './sessionStore'
+ export { UserStore } from './userStore'
+@@ -40,7 +42,7 @@ export {
+     WorkGraphValidationError
+ } from './workGraph'
+ 
+-const SCHEMA_VERSION: number = 23
++const SCHEMA_VERSION: number = 24
+ const REQUIRED_TABLES = [
+     'sessions',
+     'machines',
+@@ -53,7 +55,8 @@ const REQUIRED_TABLES = [
+     'usage_events',
+     'usage_scan_state',
+     'events',
+-    'event_links'
++    'event_links',
++    'notification_preferences'
+ ] as const
+ 
+ export class Store {
+@@ -70,6 +73,7 @@ export class Store {
+     readonly scratchlist: ScratchlistStore
+     readonly usage: UsageStore
+     readonly workGraph: WorkGraphStore
++    readonly notificationPrefs: NotificationPreferenceStore
+ 
+     /**
+      * Filesystem path of the underlying SQLite database, or ':memory:' for
+@@ -124,6 +128,7 @@ export class Store {
+         this.scratchlist = new ScratchlistStore(this.db)
+         this.usage = new UsageStore(this.db)
+         this.workGraph = new WorkGraphStore(this.db)
++        this.notificationPrefs = new NotificationPreferenceStore(this.db)
+     }
+ 
+     /**
+@@ -302,6 +307,7 @@ export class Store {
+             20: () => this.migrateFromV20ToV21(),
+             21: () => this.migrateFromV21ToV22(),
+             22: () => this.migrateFromV22ToV23(),
++            23: () => this.migrateFromV23ToV24(),
+         })
+ 
+         if (currentVersion === 0) {
+@@ -544,6 +550,15 @@ export class Store {
+                 ON event_links(namespace, from_event_id);
+             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
+                 ON event_links(namespace, to_event_id);
++
++            CREATE TABLE IF NOT EXISTS notification_preferences (
++                namespace TEXT PRIMARY KEY,
++                permission_requests INTEGER NOT NULL DEFAULT 1,
++                session_ready INTEGER NOT NULL DEFAULT 1,
++                task_notifications INTEGER NOT NULL DEFAULT 1,
++                session_completion INTEGER NOT NULL DEFAULT 1,
++                updated_at INTEGER NOT NULL
++            );
+         `)
+     }
+ 
+@@ -972,6 +987,21 @@ export class Store {
+         `)
+     }
+ 
++    private migrateFromV23ToV24(): void {
++        // Per-namespace notification preferences. Defaults are all-enabled so
++        // existing namespaces keep the pre-preferences behavior.
++        this.db.exec(`
++            CREATE TABLE IF NOT EXISTS notification_preferences (
++                namespace TEXT PRIMARY KEY,
++                permission_requests INTEGER NOT NULL DEFAULT 1,
++                session_ready INTEGER NOT NULL DEFAULT 1,
++                task_notifications INTEGER NOT NULL DEFAULT 1,
++                session_completion INTEGER NOT NULL DEFAULT 1,
++                updated_at INTEGER NOT NULL
++            );
++        `)
++    }
++
+     private getSessionColumnNames(): Set<string> {
+         const rows = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
+         return new Set(rows.map((row) => row.name))
+diff --git a/hub/src/store/migration-v13.test.ts b/hub/src/store/migration-v13.test.ts
+index 1780813ed..d11eeb906 100644
+--- a/hub/src/store/migration-v13.test.ts
++++ b/hub/src/store/migration-v13.test.ts
+@@ -10,7 +10,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+         const store = new Store(':memory:')
+         expect(tableExists(store, 'message_epochs')).toBe(true)
+         expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-        expect(getUserVersion(store)).toBe(23)
++        expect(getUserVersion(store)).toBe(24)
+         store.close()
+     })
+ 
+@@ -34,7 +34,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(23)
++            expect(getUserVersion(store)).toBe(24)
+             expect(store.messages.getMessageEpoch('session-1')).toBe(0)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+@@ -72,7 +72,7 @@ describe('Store V12/V13→V14 schema reconciliation', () => {
+             store = new Store(dbPath)
+             expect(tableExists(store, 'message_epochs')).toBe(true)
+             expect(tableExists(store, 'session_scratchlist')).toBe(true)
+-            expect(getUserVersion(store)).toBe(23)
++            expect(getUserVersion(store)).toBe(24)
+             expect(store.messages.getMessages('session-1')).toHaveLength(1)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v15.test.ts b/hub/src/store/migration-v15.test.ts
+index a323fdeb4..57fd40790 100644
+--- a/hub/src/store/migration-v15.test.ts
++++ b/hub/src/store/migration-v15.test.ts
+@@ -19,7 +19,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+         expect(cols).toContain('attachments')
+         expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+         expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-        expect(getUserVersion(store)).toBe(23)
++        expect(getUserVersion(store)).toBe(24)
+         store.close()
+     })
+ 
+@@ -40,7 +40,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             expect(cols).toContain('attachments')
+             expect(getColumns(store, 'usage_events')).toContain('last_input_tokens')
+             expect(getColumns(store, 'usage_scan_state')).toContain('last_seq')
+-            expect(getUserVersion(store)).toBe(23)
++            expect(getUserVersion(store)).toBe(24)
+         } finally {
+             store?.close()
+             rmSync(dir, { recursive: true, force: true })
+@@ -60,7 +60,7 @@ describe('Store V14→V15 migration: scratchlist attachments column', () => {
+             store2 = new Store(dbPath)
+             const cols2 = getColumns(store2, 'session_scratchlist')
+             expect(cols2).toEqual(cols1)
+-            expect(getUserVersion(store2)).toBe(23)
++            expect(getUserVersion(store2)).toBe(24)
+         } finally {
+             store2?.close()
+             store1?.close()
+diff --git a/hub/src/store/migration-v18.test.ts b/hub/src/store/migration-v18.test.ts
+index 75861a17a..7b0b971c4 100644
+--- a/hub/src/store/migration-v18.test.ts
++++ b/hub/src/store/migration-v18.test.ts
+@@ -38,7 +38,7 @@ describe('Store V18->V19 migration: usage scan state', () => {
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+             expect(table?.name).toBe('usage_scan_state')
+-            expect(version.user_version).toBe(23)
++            expect(version.user_version).toBe(24)
+             expect(usageRows.count).toBe(0)
+         } finally {
+             store?.close()
+diff --git a/hub/src/store/migration-v19.test.ts b/hub/src/store/migration-v19.test.ts
+index 5688e6153..49f82164f 100644
+--- a/hub/src/store/migration-v19.test.ts
++++ b/hub/src/store/migration-v19.test.ts
+@@ -37,7 +37,7 @@ describe('Store V19->current migration: usage re-index', () => {
+             const scanRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }
+             const usageRows = internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }
+ 
+-            expect(version.user_version).toBe(23)
++            expect(version.user_version).toBe(24)
+             expect(scanRows.count).toBe(0)
+             expect(usageRows.count).toBe(0)
+         } finally {
+diff --git a/hub/src/store/migration-v20.test.ts b/hub/src/store/migration-v20.test.ts
+index 529dff11d..b3a62cb38 100644
+--- a/hub/src/store/migration-v20.test.ts
++++ b/hub/src/store/migration-v20.test.ts
+@@ -43,7 +43,7 @@ describe('Store V20->V21 migration: usage semantics re-index', () => {
+             store = new Store(dbPath)
+             const internalDb = (store as unknown as { db: Database }).db
+             const count = (table: string): number => (internalDb.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
+-            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(23)
++            expect((internalDb.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(24)
+             expect(count('usage_events')).toBe(0)
+             expect(count('usage_scan_state')).toBe(0)
+             expect(store.messages.getMessages(session.id)).toHaveLength(1)
+diff --git a/hub/src/store/migration-v23.test.ts b/hub/src/store/migration-v23.test.ts
+index 9fc948933..f587518c3 100644
+--- a/hub/src/store/migration-v23.test.ts
++++ b/hub/src/store/migration-v23.test.ts
+@@ -40,7 +40,7 @@ describe('schema migration v22 to v23', () => {
+ 
+         expect(events?.name).toBe('events')
+         expect(links?.name).toBe('event_links')
+-        expect(version.user_version).toBe(23)
++        expect(version.user_version).toBe(24)
+         migrated.close()
+     })
+ })
+diff --git a/hub/src/store/migration-v24.test.ts b/hub/src/store/migration-v24.test.ts
+new file mode 100644
+index 000000000..da524e63c
+--- /dev/null
++++ b/hub/src/store/migration-v24.test.ts
+@@ -0,0 +1,45 @@
++import { describe, expect, it } from 'bun:test'
++import { Database } from 'bun:sqlite'
++import { mkdtempSync, rmSync } from 'node:fs'
++import { join } from 'node:path'
++import { tmpdir } from 'node:os'
++import { Store } from './index'
++
++describe('Store V23->V24 migration: notification preferences', () => {
++    it('creates notification preferences for an existing V23 database', () => {
++        const directory = mkdtempSync(join(tmpdir(), 'hapi-migration-v23-to-v24-'))
++        const dbPath = join(directory, 'test.db')
++        let store: Store | undefined
++        try {
++            store = new Store(dbPath)
++            store.close()
++            store = undefined
++
++            const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
++            db.exec(`
++                DROP TABLE notification_preferences;
++                PRAGMA user_version = 23;
++            `)
++            db.close()
++
++            store = new Store(dbPath)
++            const internalDb = (store as unknown as { db: Database }).db
++            const table = internalDb.prepare(
++                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notification_preferences'"
++            ).get() as { name: string } | null
++            const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
++
++            expect(table?.name).toBe('notification_preferences')
++            expect(version.user_version).toBe(24)
++            expect(store.notificationPrefs.getPreferenceFlags('default')).toEqual({
++                permissionRequests: 1,
++                sessionReady: 1,
++                taskNotifications: 1,
++                sessionCompletion: 1
++            })
++        } finally {
++            store?.close()
++            rmSync(directory, { recursive: true, force: true })
++        }
++    })
++})
+diff --git a/hub/src/store/notificationPreferenceStore.ts b/hub/src/store/notificationPreferenceStore.ts
+new file mode 100644
+index 000000000..9186e1f55
+--- /dev/null
++++ b/hub/src/store/notificationPreferenceStore.ts
+@@ -0,0 +1,27 @@
++import type { Database } from 'bun:sqlite'
++
++import type { NotificationPreferenceFlags, NotificationPreferences } from './notificationPreferences'
++import { getPreferenceFlags, getPreferences, setPreferences } from './notificationPreferences'
++
++export class NotificationPreferenceStore {
++    private readonly db: Database
++
++    constructor(db: Database) {
++        this.db = db
++    }
++
++    getPreferences(namespace: string): NotificationPreferences {
++        return getPreferences(this.db, namespace)
++    }
++
++    getPreferenceFlags(namespace: string): NotificationPreferenceFlags {
++        return getPreferenceFlags(this.db, namespace)
++    }
++
++    setPreferences(
++        namespace: string,
++        partial: Partial<NotificationPreferenceFlags>
++    ): NotificationPreferences {
++        return setPreferences(this.db, namespace, partial)
++    }
++}
+diff --git a/hub/src/store/notificationPreferences.test.ts b/hub/src/store/notificationPreferences.test.ts
+new file mode 100644
+index 000000000..83ac5058d
+--- /dev/null
++++ b/hub/src/store/notificationPreferences.test.ts
+@@ -0,0 +1,50 @@
++import { describe, expect, it } from 'bun:test'
++import { Store } from './index'
++
++describe('notificationPreferences', () => {
++    it('returns all-enabled defaults when no row exists', () => {
++        const store = new Store(':memory:')
++        expect(store.notificationPrefs.getPreferences('ns-1')).toEqual({
++            namespace: 'ns-1',
++            permissionRequests: 1,
++            sessionReady: 1,
++            taskNotifications: 1,
++            sessionCompletion: 1,
++            updatedAt: 0
++        })
++    })
++
++    it('upserts on first set, defaulting untouched fields', () => {
++        const store = new Store(':memory:')
++        const prefs = store.notificationPrefs.setPreferences('ns-1', { sessionReady: 0 })
++        expect(prefs.sessionReady).toBe(0)
++        expect(prefs.permissionRequests).toBe(1)
++        expect(prefs.taskNotifications).toBe(1)
++        expect(prefs.sessionCompletion).toBe(1)
++        expect(prefs.updatedAt).toBeGreaterThan(0)
++    })
++
++    it('updates only the provided fields on an existing row', () => {
++        const store = new Store(':memory:')
++        store.notificationPrefs.setPreferences('ns-1', { sessionReady: 0, taskNotifications: 0 })
++        const after = store.notificationPrefs.setPreferences('ns-1', { permissionRequests: 0 })
++        expect(after).toMatchObject({
++            permissionRequests: 0,
++            sessionReady: 0,
++            taskNotifications: 0,
++            sessionCompletion: 1
++        })
++    })
++
++    it('keeps namespaces independent', () => {
++        const store = new Store(':memory:')
++        store.notificationPrefs.setPreferences('ns-a', { sessionReady: 0 })
++        expect(store.notificationPrefs.getPreferenceFlags('ns-a').sessionReady).toBe(0)
++        expect(store.notificationPrefs.getPreferenceFlags('ns-b')).toEqual({
++            permissionRequests: 1,
++            sessionReady: 1,
++            taskNotifications: 1,
++            sessionCompletion: 1
++        })
++    })
++})
+diff --git a/hub/src/store/notificationPreferences.ts b/hub/src/store/notificationPreferences.ts
+new file mode 100644
+index 000000000..89d806f5e
+--- /dev/null
++++ b/hub/src/store/notificationPreferences.ts
+@@ -0,0 +1,123 @@
++import type { Database } from 'bun:sqlite'
++
++export type NotificationPreferenceFlags = {
++    permissionRequests: number
++    sessionReady: number
++    taskNotifications: number
++    sessionCompletion: number
++}
++
++export type NotificationPreferences = NotificationPreferenceFlags & {
++    namespace: string
++    updatedAt: number
++}
++
++type DbPreferenceRow = {
++    namespace: string
++    permission_requests: number
++    session_ready: number
++    task_notifications: number
++    session_completion: number
++    updated_at: number
++}
++
++// All event types default to enabled — new namespaces behave exactly like the
++// pre-preferences behavior (push everything).
++const DEFAULTS: NotificationPreferenceFlags = {
++    permissionRequests: 1,
++    sessionReady: 1,
++    taskNotifications: 1,
++    sessionCompletion: 1
++}
++
++function rowToFlags(row: DbPreferenceRow): NotificationPreferenceFlags {
++    return {
++        permissionRequests: row.permission_requests,
++        sessionReady: row.session_ready,
++        taskNotifications: row.task_notifications,
++        sessionCompletion: row.session_completion
++    }
++}
++
++function getRow(db: Database, namespace: string): DbPreferenceRow | undefined {
++    return db.prepare(
++        'SELECT * FROM notification_preferences WHERE namespace = ?'
++    ).get(namespace) as DbPreferenceRow | undefined
++}
++
++export function getPreferences(db: Database, namespace: string): NotificationPreferences {
++    const row = getRow(db, namespace)
++    if (row) {
++        return {
++            namespace: row.namespace,
++            ...rowToFlags(row),
++            updatedAt: row.updated_at
++        }
++    }
++    return {
++        namespace,
++        ...DEFAULTS,
++        updatedAt: 0
++    }
++}
++
++/**
++ * Fast path for the notification hot loop: flags only, no timestamp.
++ */
++export function getPreferenceFlags(db: Database, namespace: string): NotificationPreferenceFlags {
++    const row = getRow(db, namespace)
++    if (row) {
++        return rowToFlags(row)
++    }
++    return { ...DEFAULTS }
++}
++
++/**
++ * Upserts a partial preference update. When no row exists yet, defaults are
++ * merged with the provided flags before inserting.
++ */
++export function setPreferences(
++    db: Database,
++    namespace: string,
++    partial: Partial<NotificationPreferenceFlags>
++): NotificationPreferences {
++    const existing = getRow(db, namespace)
++    const now = Date.now()
++    if (existing) {
++        const fields: string[] = ['updated_at = @updated_at']
++        const params: Record<string, number | string> = { namespace, updated_at: now }
++        for (const [key, column] of [
++            ['permissionRequests', 'permission_requests'],
++            ['sessionReady', 'session_ready'],
++            ['taskNotifications', 'task_notifications'],
++            ['sessionCompletion', 'session_completion']
++        ] as const) {
++            if (partial[key] !== undefined) {
++                fields.push(`${column} = @${key}`)
++                params[key] = partial[key]
++            }
++        }
++        db.prepare(
++            `UPDATE notification_preferences SET ${fields.join(', ')} WHERE namespace = @namespace`
++        ).run(params)
++    } else {
++        const flags = { ...DEFAULTS, ...partial }
++        db.prepare(`
++            INSERT INTO notification_preferences (
++                namespace, permission_requests, session_ready,
++                task_notifications, session_completion, updated_at
++            ) VALUES (
++                @namespace, @permissionRequests, @sessionReady,
++                @taskNotifications, @sessionCompletion, @updatedAt
++            )
++        `).run({
++            namespace,
++            permissionRequests: flags.permissionRequests,
++            sessionReady: flags.sessionReady,
++            taskNotifications: flags.taskNotifications,
++            sessionCompletion: flags.sessionCompletion,
++            updatedAt: now
++        })
++    }
++    return getPreferences(db, namespace)
++}
+diff --git a/hub/src/web/routes/notificationCopy.test.ts b/hub/src/web/routes/notificationCopy.test.ts
+new file mode 100644
+index 000000000..0348dbebb
+--- /dev/null
++++ b/hub/src/web/routes/notificationCopy.test.ts
+@@ -0,0 +1,159 @@
++import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
++import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { Hono } from 'hono'
++import type { WebAppEnv } from '../middleware/auth'
++import { resolveRelayAuthKey } from '../../tunnel/relayAuth'
++import { createNotificationCopyRoutes } from './notificationCopy'
++
++let dir: string
++
++async function createApp(namespace: string): Promise<Hono<WebAppEnv>> {
++    const app = new Hono<WebAppEnv>()
++    app.use('*', async (c, next) => {
++        c.set('namespace', namespace)
++        await next()
++    })
++    app.route('/api', createNotificationCopyRoutes(dir))
++    return app
++}
++
++function readSettings(): Promise<Record<string, unknown>> {
++    return readFile(join(dir, 'settings.json'), 'utf8').then(JSON.parse)
++}
++
++beforeEach(async () => {
++    dir = await mkdtemp(join(tmpdir(), 'hapi-copy-route-'))
++    await writeFile(join(dir, 'settings.json'), JSON.stringify({ cliApiToken: 'abc' }))
++})
++
++afterEach(async () => {
++    await rm(dir, { recursive: true, force: true })
++})
++
++describe('GET /api/notification-copy', () => {
++    it('rejects non-default namespaces with 403', async () => {
++        const app = await createApp('user-1')
++        const res = await app.request('/api/notification-copy')
++        expect(res.status).toBe(403)
++    })
++
++    it('returns stored copy plus defaults for the admin namespace', async () => {
++        await writeFile(join(dir, 'settings.json'), JSON.stringify({
++            cliApiToken: 'abc',
++            notificationCopy: { ready: { title: 'Hey', body: '{agentName}' } }
++        }))
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy')
++        expect(res.status).toBe(200)
++        const body = await res.json() as { copy: Record<string, unknown>; defaults: Record<string, unknown> }
++        expect(body.copy).toEqual({ ready: { title: 'Hey', body: '{agentName}' } })
++        expect(body.defaults.ready).toBeTruthy()
++    })
++
++    it('returns empty copy when no notificationCopy key exists', async () => {
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy')
++        const body = await res.json() as { copy: Record<string, unknown> }
++        expect(body.copy).toEqual({})
++    })
++
++    it('returns empty copy when persisted notification copy is malformed', async () => {
++        await writeFile(join(dir, 'settings.json'), JSON.stringify({
++            notificationCopy: { ready: { title: 42, body: 'hello' } }
++        }))
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy')
++        const body = await res.json() as { copy: Record<string, unknown> }
++        expect(body.copy).toEqual({})
++    })
++})
++
++describe('PUT /api/notification-copy', () => {
++    it('rejects non-default namespaces with 403', async () => {
++        const app = await createApp('user-1')
++        const res = await app.request('/api/notification-copy', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ready: { title: 'x', body: 'y' } })
++        })
++        expect(res.status).toBe(403)
++    })
++
++    it('stores only the provided keys and preserves other settings', async () => {
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ready: { title: 'Hey', body: '{agentName}' } })
++        })
++        expect(res.status).toBe(200)
++        const settings = await readSettings()
++        expect(settings.cliApiToken).toBe('abc')
++        expect(settings.notificationCopy).toEqual({ ready: { title: 'Hey', body: '{agentName}' } })
++    })
++
++    it('stores empty templates as reset-to-default markers', async () => {
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ready: { title: '', body: '' } })
++        })
++        expect(res.status).toBe(200)
++        const settings = await readSettings()
++        expect(settings.notificationCopy).toEqual({ ready: { title: '', body: '' } })
++    })
++
++    it('preserves a concurrent relay key update', async () => {
++        let releaseIssue: () => void = () => {}
++        let issueStarted: () => void = () => {}
++        const started = new Promise<void>((resolve) => {
++            issueStarted = resolve
++        })
++        const release = new Promise<void>((resolve) => {
++            releaseIssue = resolve
++        })
++        const relayKey = resolveRelayAuthKey('relay.example.com', join(dir, 'settings.json'), async () => {
++            issueStarted()
++            await release
++            return Response.json({ key: 'relay-key' })
++        })
++        await started
++
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ready: { title: 'Hey', body: '{agentName}' } })
++        })
++        expect(res.status).toBe(200)
++        releaseIssue()
++        await relayKey
++
++        const settings = await readSettings()
++        expect(settings.relayAuthKey).toBe('relay-key')
++        expect(settings.notificationCopy).toEqual({ ready: { title: 'Hey', body: '{agentName}' } })
++    })
++
++    it('rejects title over 500 chars', async () => {
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ready: { title: 'x'.repeat(501), body: 'y' } })
++        })
++        expect(res.status).toBe(400)
++    })
++
++    it('rejects invalid bodies', async () => {
++        const app = await createApp('default')
++        const res = await app.request('/api/notification-copy', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ ready: { title: 42 } })
++        })
++        expect(res.status).toBe(400)
++    })
++})
+diff --git a/hub/src/web/routes/notificationCopy.ts b/hub/src/web/routes/notificationCopy.ts
+new file mode 100644
+index 000000000..fe1cbe89e
+--- /dev/null
++++ b/hub/src/web/routes/notificationCopy.ts
+@@ -0,0 +1,62 @@
++import { Hono } from 'hono'
++import { getSettingsFile, readSettingsOrThrow, updateSettings } from '../../config/settings'
++import {
++    COPY_KEYS,
++    DEFAULT_COPY,
++    notificationCopySchema,
++    type CopyKey,
++    type NotificationCopyConfig
++} from '../../push/notificationCopy'
++import type { WebAppEnv } from '../middleware/auth'
++
++function isAdmin(namespace: string): boolean {
++    return namespace === 'default'
++}
++
++export function createNotificationCopyRoutes(dataDir: string): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++    const settingsFile = getSettingsFile(dataDir)
++
++    app.get('/notification-copy', async (c) => {
++        const namespace = c.get('namespace')
++        if (!isAdmin(namespace)) {
++            return c.json({ error: 'Forbidden: admin only' }, 403)
++        }
++        const settings = await readSettingsOrThrow(settingsFile)
++        const parsed = notificationCopySchema.safeParse(settings.notificationCopy ?? {})
++        return c.json({
++            copy: parsed.success ? parsed.data : {},
++            defaults: DEFAULT_COPY
++        })
++    })
++
++    app.put('/notification-copy', async (c) => {
++        const namespace = c.get('namespace')
++        if (!isAdmin(namespace)) {
++            return c.json({ error: 'Forbidden: admin only' }, 403)
++        }
++        const json = await c.req.json().catch(() => null)
++        const parsed = notificationCopySchema.safeParse(json)
++        if (!parsed.success) {
++            return c.json({ error: 'Invalid body', issues: parsed.error.flatten() }, 400)
++        }
++
++        const copy: NotificationCopyConfig = {}
++        for (const key of COPY_KEYS) {
++            const template = parsed.data[key]
++            if (template) {
++                copy[key as CopyKey] = template
++            }
++        }
++        await updateSettings(settingsFile, (settings) => ({
++            settings: { ...settings, notificationCopy: copy },
++            result: undefined,
++        }))
++        return c.json({
++            copy,
++            defaults: DEFAULT_COPY
++        })
++    })
++
++    return app
++}
+diff --git a/hub/src/web/routes/notificationPreferences.test.ts b/hub/src/web/routes/notificationPreferences.test.ts
+new file mode 100644
+index 000000000..c7801726c
+--- /dev/null
++++ b/hub/src/web/routes/notificationPreferences.test.ts
+@@ -0,0 +1,85 @@
++import { describe, expect, it } from 'bun:test'
++import { Hono } from 'hono'
++import { Store } from '../../store'
++import type { WebAppEnv } from '../middleware/auth'
++import { createNotificationPreferencesRoutes } from './notificationPreferences'
++
++function createApp(): Hono<WebAppEnv> {
++    const store = new Store(':memory:')
++    const app = new Hono<WebAppEnv>()
++    app.use('*', async (c, next) => {
++        c.set('namespace', 'test-ns')
++        await next()
++    })
++    app.route('/api', createNotificationPreferencesRoutes(store))
++    return app
++}
++
++describe('GET /api/notification-preferences', () => {
++    it('returns all-enabled defaults for a namespace with no row', async () => {
++        const app = createApp()
++        const res = await app.request('/api/notification-preferences')
++        expect(res.status).toBe(200)
++        expect(await res.json()).toEqual({
++            namespace: 'test-ns',
++            permissionRequests: 1,
++            sessionReady: 1,
++            taskNotifications: 1,
++            sessionCompletion: 1,
++            updatedAt: 0
++        })
++    })
++})
++
++describe('PUT /api/notification-preferences', () => {
++    it('updates only the provided fields and returns the merged result', async () => {
++        const app = createApp()
++        const res = await app.request('/api/notification-preferences', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ sessionReady: 0 })
++        })
++        expect(res.status).toBe(200)
++        expect(await res.json()).toMatchObject({
++            namespace: 'test-ns',
++            permissionRequests: 1,
++            sessionReady: 0,
++            taskNotifications: 1,
++            sessionCompletion: 1
++        })
++
++        const getRes = await app.request('/api/notification-preferences')
++        const body = await getRes.json() as { sessionReady: number }
++        expect(body.sessionReady).toBe(0)
++    })
++
++    it('rejects out-of-range values', async () => {
++        const app = createApp()
++        const res = await app.request('/api/notification-preferences', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ permissionRequests: 2 })
++        })
++        expect(res.status).toBe(400)
++    })
++
++    it('rejects fractional preference values', async () => {
++        const app = createApp()
++        const res = await app.request('/api/notification-preferences', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ permissionRequests: 0.5 })
++        })
++        expect(res.status).toBe(400)
++    })
++
++    it('rejects invalid bodies', async () => {
++        const app = createApp()
++        const res = await app.request('/api/notification-preferences', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ sessionReady: 'yes' })
++        })
++        expect(res.status).toBe(400)
++    })
++})
+diff --git a/hub/src/web/routes/notificationPreferences.ts b/hub/src/web/routes/notificationPreferences.ts
+new file mode 100644
+index 000000000..aa79ef01b
+--- /dev/null
++++ b/hub/src/web/routes/notificationPreferences.ts
+@@ -0,0 +1,33 @@
++import { Hono } from 'hono'
++import { z } from 'zod'
++import type { Store } from '../../store'
++import type { WebAppEnv } from '../middleware/auth'
++
++const updateSchema = z.object({
++    permissionRequests: z.number().int().min(0).max(1).optional(),
++    sessionReady: z.number().int().min(0).max(1).optional(),
++    taskNotifications: z.number().int().min(0).max(1).optional(),
++    sessionCompletion: z.number().int().min(0).max(1).optional()
++})
++
++export function createNotificationPreferencesRoutes(store: Store): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++
++    app.get('/notification-preferences', (c) => {
++        const namespace = c.get('namespace')
++        return c.json(store.notificationPrefs.getPreferences(namespace))
++    })
++
++    app.put('/notification-preferences', async (c) => {
++        const json = await c.req.json().catch(() => null)
++        const parsed = updateSchema.safeParse(json)
++        if (!parsed.success) {
++            return c.json({ error: 'Invalid body', issues: parsed.error.flatten() }, 400)
++        }
++
++        const namespace = c.get('namespace')
++        return c.json(store.notificationPrefs.setPreferences(namespace, parsed.data))
++    })
++
++    return app
++}
+diff --git a/hub/src/web/routes/push.test.ts b/hub/src/web/routes/push.test.ts
+new file mode 100644
+index 000000000..23e3202d0
+--- /dev/null
++++ b/hub/src/web/routes/push.test.ts
+@@ -0,0 +1,40 @@
++import { describe, expect, it } from 'bun:test'
++import { Hono } from 'hono'
++import type { PushPayload } from '../../push/pushService'
++import type { WebAppEnv } from '../middleware/auth'
++import { createPushRoutes } from './push'
++
++function createApp(sendToNamespace: (namespace: string, payload: PushPayload) => Promise<number>): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++    app.use('*', async (c, next) => {
++        c.set('namespace', 'default')
++        await next()
++    })
++    app.route('/api', createPushRoutes({} as never, 'test-key', { sendToNamespace } as never))
++    return app
++}
++
++describe('POST /api/push/test', () => {
++    it('returns success when at least one subscription receives the push', async () => {
++        const sent: Array<{ namespace: string; payload: PushPayload }> = []
++        const app = createApp(async (namespace, payload) => {
++            sent.push({ namespace, payload })
++            return 1
++        })
++
++        const response = await app.request('/api/push/test', { method: 'POST' })
++
++        expect(response.status).toBe(200)
++        expect(sent[0]?.namespace).toBe('default')
++        expect(sent[0]?.payload.tag).toBe('test-push')
++    })
++
++    it('returns 503 when no subscription receives the push', async () => {
++        const app = createApp(async () => 0)
++
++        const response = await app.request('/api/push/test', { method: 'POST' })
++
++        expect(response.status).toBe(503)
++        expect(await response.json()).toEqual({ error: 'No push notification was delivered' })
++    })
++})
+diff --git a/hub/src/web/routes/push.ts b/hub/src/web/routes/push.ts
+index 0bf74e883..7c3cd5c3e 100644
+--- a/hub/src/web/routes/push.ts
++++ b/hub/src/web/routes/push.ts
+@@ -1,5 +1,6 @@
+ import { Hono } from 'hono'
+ import { z } from 'zod'
++import type { PushService } from '../../push/pushService'
+ import type { Store } from '../../store'
+ import type { WebAppEnv } from '../middleware/auth'
+ 
+@@ -15,7 +16,11 @@ const unsubscribeSchema = z.object({
+     endpoint: z.string().min(1)
+ })
+ 
+-export function createPushRoutes(store: Store, vapidPublicKey: string): Hono<WebAppEnv> {
++export function createPushRoutes(
++    store: Store,
++    vapidPublicKey: string,
++    pushService: PushService
++): Hono<WebAppEnv> {
+     const app = new Hono<WebAppEnv>()
+ 
+     app.get('/push/vapid-public-key', (c) => {
+@@ -52,5 +57,29 @@ export function createPushRoutes(store: Store, vapidPublicKey: string): Hono<Web
+         return c.json({ ok: true })
+     })
+ 
++    // User-initiated test push: deliberately bypasses notification preferences.
++    app.post('/push/test', async (c) => {
++        const namespace = c.get('namespace')
++        try {
++            const delivered = await pushService.sendToNamespace(namespace, {
++                title: 'HAPI Test Notification',
++                body: 'Your push notifications are working.',
++                tag: 'test-push',
++                data: {
++                    type: 'test',
++                    sessionId: '',
++                    url: '/settings/notifications'
++                }
++            })
++            if (delivered === 0) {
++                return c.json({ error: 'No push notification was delivered' }, 503)
++            }
++            return c.json({ ok: true })
++        } catch (error) {
++            console.error('[PushRoutes] Test push failed:', error)
++            return c.json({ error: 'Failed to send test push' }, 500)
++        }
++    })
++
+     return app
+ }
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 312dac633..44a436be4 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -12,6 +12,7 @@ import { getProviderEnvironment } from '../config/providerCredentials'
+ import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
+ import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
+ import type { SyncEngine } from '../sync/syncEngine'
++import type { PushService } from '../push/pushService'
+ import { createAuthMiddleware, type WebAppEnv } from './middleware/auth'
+ import { createAuthRoutes } from './routes/auth'
+ import { createBindRoutes } from './routes/bind'
+@@ -27,10 +28,12 @@ import { createCliRoutes } from './routes/cli'
+ import { createCodexDesktopRoutes } from './routes/codexDesktop'
+ import { createPiSessionRoutes } from './routes/piSessions'
+ import { createPushRoutes } from './routes/push'
++import { createNotificationPreferencesRoutes } from './routes/notificationPreferences'
+ import { createDevicesRoutes } from './routes/devices'
+ import { createVoiceRoutes } from './routes/voice'
+ import { createHubSettingsRoutes } from './routes/hubSettings'
+ import { createWorkGraphRoutes } from './routes/workGraph'
++import { createNotificationCopyRoutes } from './routes/notificationCopy'
+ import type { SSEManager } from '../sse/sseManager'
+ import type { VisibilityTracker } from '../visibility/visibilityTracker'
+ import type { Server as BunServer, ServerWebSocket } from 'bun'
+@@ -223,6 +226,7 @@ function createWebApp(options: {
+     jwtSecret: Uint8Array
+     store: Store
+     vapidPublicKey: string
++    pushService: PushService
+     corsOrigins?: string[]
+     embeddedAssetMap: Map<string, EmbeddedWebAsset> | null
+     relayMode?: boolean
+@@ -298,7 +302,9 @@ function createWebApp(options: {
+         store: options.store,
+         getSyncEngine: options.getSyncEngine
+     }))
+-    app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
++    app.route('/api', createPushRoutes(options.store, options.vapidPublicKey, options.pushService))
++    app.route('/api', createNotificationPreferencesRoutes(options.store))
++    app.route('/api', createNotificationCopyRoutes(configuration.dataDir))
+     app.route('/api', createDevicesRoutes(options.store))
+     app.route('/api', createVoiceRoutes({ dataDir: configuration.dataDir }))
+     // Path is intentionally NOT `/api/events` — that route is the SSE stream.
+@@ -414,6 +420,7 @@ export async function startWebServer(options: {
+     jwtSecret: Uint8Array
+     store: Store
+     vapidPublicKey: string
++    pushService: PushService
+     socketEngine: SocketEngine
+     corsOrigins?: string[]
+     relayMode?: boolean
+@@ -428,6 +435,7 @@ export async function startWebServer(options: {
+         jwtSecret: options.jwtSecret,
+         store: options.store,
+         vapidPublicKey: options.vapidPublicKey,
++        pushService: options.pushService,
+         corsOrigins: options.corsOrigins,
+         embeddedAssetMap,
+         relayMode: options.relayMode,
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 3f9ea2c39..5dec2ef11 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -328,6 +328,13 @@ function AppInner() {
+             }
+         }
+ 
++        if (normalizedTitle === 'Session completed') {
++            return {
++                title: t('toast.session.completed'),
++                body: normalizedBody
++            }
++        }
++
+         return { title, body }
+     }, [t])
+ 
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 08650fdd6..fa2bf0fc6 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -16,9 +16,14 @@ import type {
+     PermissionMode,
+     PiImportSessionsResponse,
+     PiLocalSessionsResponse,
++    NotificationCopyConfig,
++    NotificationCopyResponse,
++    NotificationPreferences,
++    NotificationPreferencesUpdate,
+     PushSubscriptionPayload,
+     PushUnsubscribePayload,
+     PushVapidPublicKeyResponse,
++    TestPushResponse,
+     SlashCommandsResponse,
+     SkillsResponse,
+     SpawnResponse,
+@@ -257,6 +262,37 @@ export class ApiClient {
+         })
+     }
+ 
++    async getNotificationPreferences(): Promise<NotificationPreferences> {
++        return await this.request<NotificationPreferences>('/api/notification-preferences')
++    }
++
++    async updateNotificationPreferences(
++        update: NotificationPreferencesUpdate
++    ): Promise<NotificationPreferences> {
++        return await this.request<NotificationPreferences>('/api/notification-preferences', {
++            method: 'PUT',
++            body: JSON.stringify(update)
++        })
++    }
++
++    async sendTestPush(): Promise<TestPushResponse> {
++        return await this.request<TestPushResponse>('/api/push/test', {
++            method: 'POST',
++            body: JSON.stringify({})
++        })
++    }
++
++    async getNotificationCopy(): Promise<NotificationCopyResponse> {
++        return await this.request<NotificationCopyResponse>('/api/notification-copy')
++    }
++
++    async updateNotificationCopy(copy: NotificationCopyConfig): Promise<NotificationCopyResponse> {
++        return await this.request<NotificationCopyResponse>('/api/notification-copy', {
++            method: 'PUT',
++            body: JSON.stringify(copy)
++        })
++    }
++
+     async syncCodexSession(payload?: CodexDesktopSyncRequest): Promise<CodexDesktopScriptResponse> {
+         // 中文注释：当前按钮语义已改为“从 Codex 导入到 Hapi”；这里提交的是本地 transcript 对应的 Codex thread ID 列表。
+         return await this.request<CodexDesktopScriptResponse>('/api/codex/sync-session', {
+diff --git a/web/src/components/settings/SettingsNav.tsx b/web/src/components/settings/SettingsNav.tsx
+index 5e4fbea52..61b2ae21c 100644
+--- a/web/src/components/settings/SettingsNav.tsx
++++ b/web/src/components/settings/SettingsNav.tsx
+@@ -34,6 +34,7 @@ export function SettingsNav(props: { activeId?: string; mobile?: boolean }) {
+         display: `${t(`settings.display.appearance.${appearance}`)} · ${Math.round(fontScale * 100)}%`,
+         chat: t(`settings.chat.enterBehavior.${composerEnterBehavior}`),
+         voice: t('settings.hub.voice.summary'),
++        notifications: t('settings.notifications.summary'),
+         machines: t('settings.hub.machines.summary'),
+         storage: t('settings.storage.summary'),
+         usage: t('settings.usage.summary'),
+diff --git a/web/src/components/settings/SettingsPrimitives.tsx b/web/src/components/settings/SettingsPrimitives.tsx
+index b695cdc27..2f49fa7e0 100644
+--- a/web/src/components/settings/SettingsPrimitives.tsx
++++ b/web/src/components/settings/SettingsPrimitives.tsx
+@@ -19,6 +19,14 @@ export function ChevronRightIcon(props: { className?: string }) {
+     )
+ }
+ 
++export function ChevronDownIcon(props: { className?: string }) {
++    return (
++        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={props.className} aria-hidden="true">
++            <path d="m6 9 6 6 6-6" />
++        </svg>
++    )
++}
++
+ export function CheckIcon(props: { className?: string }) {
+     return (
+         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className={props.className} aria-hidden="true">
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 7f7117191..ce3f48044 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -682,6 +682,7 @@ export default {
+   'toast.permission.title': 'Permission Request',
+   'toast.task.completed': 'Task completed',
+   'toast.task.failed': 'Task failed',
++  'toast.session.completed': 'Session completed',
+ 
+   // Install prompt
+   'install.title': 'Install HAPI',
+@@ -999,6 +1000,41 @@ export default {
+   'settings.companion.copyLink': 'Copy link',
+   'settings.companion.copied': 'Copied!',
+   'settings.companion.hide': 'Hide',
++  'settings.notifications.title': 'Notifications',
++  'settings.notifications.description': 'Choose which events trigger push notifications on your devices.',
++  'settings.notifications.summary': 'Push notification preferences',
++  'settings.notifications.section': 'Notification types',
++  'settings.notifications.permissionRequests': 'Permission requests',
++  'settings.notifications.permissionRequestsDescription': 'When an agent needs your approval to run a tool.',
++  'settings.notifications.sessionReady': 'Session ready',
++  'settings.notifications.sessionReadyDescription': 'When an agent is waiting for your input.',
++  'settings.notifications.taskNotifications': 'Task notifications',
++  'settings.notifications.taskNotificationsDescription': 'When a task completes or fails.',
++  'settings.notifications.sessionCompletion': 'Session completion',
++  'settings.notifications.sessionCompletionDescription': 'When a session finishes.',
++  'settings.notifications.disablePermissionTitle': 'Turn off permission request notifications?',
++  'settings.notifications.disablePermissionDescription': 'You will no longer be notified on your phone when an agent needs your approval. Pending requests will only be visible in the web app.',
++  'settings.notifications.disablePermissionConfirm': 'Turn off anyway',
++  'settings.notifications.testPush': 'Send test push',
++  'settings.notifications.testPushSending': 'Sending…',
++  'settings.notifications.testPushSent': 'Test notification sent!',
++  'settings.notifications.testPushError': 'Failed to send test notification',
++  'settings.notifications.saveError': 'Failed to save preferences',
++  'settings.notifications.copy.title': 'Push notification copy',
++  'settings.notifications.copy.description': 'Notification titles and messages.',
++  'settings.notifications.copy.titleLabel': 'Title',
++  'settings.notifications.copy.bodyLabel': 'Body',
++  'settings.notifications.copy.preview': 'Preview',
++  'settings.notifications.copy.resetDefault': 'Reset to default',
++  'settings.notifications.copy.save': 'Save copy',
++  'settings.notifications.copy.saved': 'Copy saved',
++  'settings.notifications.copy.saveError': 'Failed to save notification copy',
++  'settings.notifications.copy.testPushNote': 'The test push button always sends fixed copy.',
++  'settings.notifications.copy.permissionRequest': 'Permission request',
++  'settings.notifications.copy.ready': 'Session ready',
++  'settings.notifications.copy.taskCompleted': 'Task completed',
++  'settings.notifications.copy.taskFailed': 'Task failed',
++  'settings.notifications.copy.sessionCompletion': 'Session completed',
+   'settings.machines.title': 'Machines',
+   'settings.machines.description': 'Give your machines names of your own. Only machines that are currently online are listed.',
+   'settings.machines.section': 'Your machines',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 0b95581b1..b9175946e 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -681,6 +681,7 @@ export default {
+   'toast.permission.title': '权限请求',
+   'toast.task.completed': '任务完成',
+   'toast.task.failed': '任务失败',
++  'toast.session.completed': '会话完成',
+ 
+   // Install prompt
+   'install.title': '安装 HAPI',
+@@ -998,6 +999,41 @@ export default {
+   'settings.companion.copyLink': '复制链接',
+   'settings.companion.copied': '已复制！',
+   'settings.companion.hide': '隐藏',
++  'settings.notifications.title': '通知',
++  'settings.notifications.description': '选择哪些事件会触发推送到你设备的通知。',
++  'settings.notifications.summary': '推送通知偏好',
++  'settings.notifications.section': '通知类型',
++  'settings.notifications.permissionRequests': '权限请求',
++  'settings.notifications.permissionRequestsDescription': '当 Agent 需要你批准执行某个工具时。',
++  'settings.notifications.sessionReady': '会话就绪',
++  'settings.notifications.sessionReadyDescription': '当 Agent 等待你的输入时。',
++  'settings.notifications.taskNotifications': '任务通知',
++  'settings.notifications.taskNotificationsDescription': '当任务完成或失败时。',
++  'settings.notifications.sessionCompletion': '会话完成',
++  'settings.notifications.sessionCompletionDescription': '当会话结束时。',
++  'settings.notifications.disablePermissionTitle': '关闭权限请求通知?',
++  'settings.notifications.disablePermissionDescription': '关闭后,当 Agent 需要你批准时手机将不再收到通知,待处理的请求只能通过网页查看。',
++  'settings.notifications.disablePermissionConfirm': '仍然关闭',
++  'settings.notifications.testPush': '发送测试推送',
++  'settings.notifications.testPushSending': '发送中…',
++  'settings.notifications.testPushSent': '测试通知已发送!',
++  'settings.notifications.testPushError': '发送测试通知失败',
++  'settings.notifications.saveError': '保存偏好设置失败',
++  'settings.notifications.copy.title': '推送文案',
++  'settings.notifications.copy.description': '通知标题与正文。',
++  'settings.notifications.copy.titleLabel': '标题',
++  'settings.notifications.copy.bodyLabel': '正文',
++  'settings.notifications.copy.preview': '预览',
++  'settings.notifications.copy.resetDefault': '恢复默认',
++  'settings.notifications.copy.save': '保存文案',
++  'settings.notifications.copy.saved': '文案已保存',
++  'settings.notifications.copy.saveError': '保存推送文案失败',
++  'settings.notifications.copy.testPushNote': '测试推送按钮始终发送固定文案。',
++  'settings.notifications.copy.permissionRequest': '权限请求',
++  'settings.notifications.copy.ready': '会话就绪',
++  'settings.notifications.copy.taskCompleted': '任务完成',
++  'settings.notifications.copy.taskFailed': '任务失败',
++  'settings.notifications.copy.sessionCompletion': '会话完成',
+   'settings.machines.title': '设备',
+   'settings.machines.description': '给设备起自己的名字。这里只列出当前在线的设备。',
+   'settings.machines.section': '我的设备',
+diff --git a/web/src/lib/query-keys.ts b/web/src/lib/query-keys.ts
+index 00cd3a026..5bd68baa3 100644
+--- a/web/src/lib/query-keys.ts
++++ b/web/src/lib/query-keys.ts
+@@ -5,6 +5,8 @@ export const queryKeys = {
+     machines: ['machines'] as const,
+     sqliteStorage: ['sqlite-storage'] as const,
+     hubSettings: ['hub-settings'] as const,
++    notificationPreferences: ['notification-preferences'] as const,
++    notificationCopy: ['notification-copy'] as const,
+     usageSummary: (range: string, timeZone: string) => ['usage-summary', range, timeZone] as const,
+     machineCodexModels: (machineId: string) => ['machine-codex-models', machineId] as const,
+     sessionCodexModels: (sessionId: string) => ['session-codex-models', sessionId] as const,
+diff --git a/web/src/lib/template.ts b/web/src/lib/template.ts
+new file mode 100644
+index 000000000..6f057717c
+--- /dev/null
++++ b/web/src/lib/template.ts
+@@ -0,0 +1,10 @@
++/**
++ * Client-side mirror of hub/src/push/notificationCopy.ts renderTemplate —
++ * used for live preview of push copy templates. Unknown placeholders are
++ * left as-is so a typo stays visible instead of vanishing.
++ */
++export function renderTemplate(template: string, vars: Record<string, string>): string {
++    return template.replace(/\{(\w+)\}/g, (match, key: string) => {
++        return key in vars ? vars[key] : match
++    })
++}
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 086492af0..b02a4fb54 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -64,6 +64,7 @@ import SettingsVoicePage from '@/routes/settings/voice'
+ import SettingsVoiceVoicesPage from '@/routes/settings/voice-voices'
+ import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
+ import SettingsMachinesPage from '@/routes/settings/machines'
++import SettingsNotificationsPage from '@/routes/settings/notifications'
+ import SettingsAboutPage from '@/routes/settings/about'
+ import SettingsStoragePage from '@/routes/settings/storage'
+ import SettingsUsagePage from '@/routes/settings/usage'
+@@ -1197,6 +1198,12 @@ const settingsMachinesRoute = createRoute({
+     component: SettingsMachinesPage,
+ })
+ 
++const settingsNotificationsRoute = createRoute({
++    getParentRoute: () => settingsRoute,
++    path: 'notifications',
++    component: SettingsNotificationsPage,
++})
++
+ const settingsAboutRoute = createRoute({
+     getParentRoute: () => settingsRoute,
+     path: 'about',
+@@ -1255,6 +1262,7 @@ export const routeTree = rootRoute.addChildren([
+         settingsVoiceVoicesRoute,
+         settingsVoiceAdvancedRoute,
+         settingsMachinesRoute,
++        settingsNotificationsRoute,
+         settingsStorageRoute,
+         settingsUsageRoute,
+         settingsAboutRoute,
+diff --git a/web/src/routes/settings/categories.ts b/web/src/routes/settings/categories.ts
+index 793efed4a..18d03569d 100644
+--- a/web/src/routes/settings/categories.ts
++++ b/web/src/routes/settings/categories.ts
+@@ -3,6 +3,7 @@ export const settingsCategories = [
+     { id: 'display', path: '/settings/display', titleKey: 'settings.display.title' },
+     { id: 'chat', path: '/settings/chat', titleKey: 'settings.chat.title' },
+     { id: 'voice', path: '/settings/voice', titleKey: 'settings.voice.title' },
++    { id: 'notifications', path: '/settings/notifications', titleKey: 'settings.notifications.title' },
+     { id: 'machines', path: '/settings/machines', titleKey: 'settings.machines.title' },
+     { id: 'storage', path: '/settings/storage', titleKey: 'settings.storage.title' },
+     { id: 'usage', path: '/settings/usage', titleKey: 'settings.usage.title' },
+diff --git a/web/src/routes/settings/notifications.test.tsx b/web/src/routes/settings/notifications.test.tsx
+new file mode 100644
+index 000000000..cdb3a46b8
+--- /dev/null
++++ b/web/src/routes/settings/notifications.test.tsx
+@@ -0,0 +1,300 @@
++import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/lib/i18n-context'
++import { queryKeys } from '@/lib/query-keys'
++import SettingsNotificationsPage from './notifications'
++
++const defaultPrefs = {
++    namespace: 'default',
++    permissionRequests: 1,
++    sessionReady: 1,
++    taskNotifications: 1,
++    sessionCompletion: 1,
++    updatedAt: Date.now(),
++}
++
++const defaultCopyResponse = {
++    copy: {},
++    defaults: {
++        permissionRequest: { title: 'Permission Request', body: '{sessionName}{tool}' },
++        ready: { title: 'Ready for input', body: '{agentName} is waiting in {sessionName}' },
++        taskCompleted: { title: 'Task completed', body: '{agentName} · {sessionName} · {summary}' },
++        taskFailed: { title: 'Task failed', body: '{agentName} · {sessionName} · {summary}' },
++        sessionCompletion: { title: 'Session completed', body: '{agentName} · {sessionName}' },
++    },
++}
++
++const getNotificationPreferences = vi.fn()
++const updateNotificationPreferences = vi.fn()
++const sendTestPush = vi.fn()
++const getNotificationCopy = vi.fn()
++const updateNotificationCopy = vi.fn()
++
++function makeToken(ns: string): string {
++    return `header.${btoa(JSON.stringify({ ns }))}.sig`
++}
++
++let mockToken = makeToken('default')
++
++vi.mock('@/lib/app-context', () => ({
++    useAppContext: () => ({
++        api: { getNotificationPreferences, updateNotificationPreferences, sendTestPush, getNotificationCopy, updateNotificationCopy },
++        token: mockToken,
++    }),
++}))
++
++describe('SettingsNotificationsPage', () => {
++    beforeEach(() => {
++        mockToken = makeToken('default')
++        getNotificationPreferences.mockResolvedValue(defaultPrefs)
++        updateNotificationPreferences.mockResolvedValue(defaultPrefs)
++        sendTestPush.mockResolvedValue({ ok: true })
++        getNotificationCopy.mockResolvedValue(defaultCopyResponse)
++        updateNotificationCopy.mockResolvedValue(defaultCopyResponse)
++    })
++
++    afterEach(() => {
++        vi.clearAllMocks()
++    })
++
++    function renderPage() {
++        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++        render(
++            <QueryClientProvider client={queryClient}>
++                <I18nProvider>
++                    <SettingsNotificationsPage />
++                </I18nProvider>
++            </QueryClientProvider>,
++        )
++        return queryClient
++    }
++
++    it('renders all four toggles from server preferences', async () => {
++        renderPage()
++        const permissionSwitch = await screen.findByLabelText('Permission requests')
++        expect(permissionSwitch).toBeChecked()
++        expect(screen.getByLabelText('Session ready')).toBeChecked()
++        expect(screen.getByLabelText('Task notifications')).toBeChecked()
++        expect(screen.getByLabelText('Session completion')).toBeChecked()
++    })
++
++    it('saves a toggle change through the API', async () => {
++        renderPage()
++        const sessionReadySwitch = await screen.findByLabelText('Session ready')
++        fireEvent.click(sessionReadySwitch)
++        await waitFor(() => {
++            expect(updateNotificationPreferences).toHaveBeenCalledWith({ sessionReady: 0 })
++        })
++    })
++
++    it('serializes preference saves before applying full response snapshots', async () => {
++        let resolveFirst: (value: typeof defaultPrefs) => void = () => {}
++        let resolveSecond: (value: typeof defaultPrefs) => void = () => {}
++        updateNotificationPreferences
++            .mockReturnValueOnce(new Promise((resolve) => {
++                resolveFirst = resolve
++            }))
++            .mockReturnValueOnce(new Promise((resolve) => {
++                resolveSecond = resolve
++            }))
++        const queryClient = renderPage()
++
++        fireEvent.click(await screen.findByLabelText('Session ready'))
++        fireEvent.click(screen.getByLabelText('Task notifications'))
++
++        await waitFor(() => expect(updateNotificationPreferences).toHaveBeenCalledTimes(1))
++        expect(updateNotificationPreferences).toHaveBeenNthCalledWith(1, { sessionReady: 0 })
++
++        await act(async () => {
++            resolveFirst({ ...defaultPrefs, sessionReady: 0 })
++        })
++        await waitFor(() => expect(updateNotificationPreferences).toHaveBeenCalledTimes(2))
++        expect(updateNotificationPreferences).toHaveBeenNthCalledWith(2, { taskNotifications: 0 })
++
++        await act(async () => {
++            resolveSecond({ ...defaultPrefs, sessionReady: 0, taskNotifications: 0 })
++        })
++        await waitFor(() => {
++            expect(queryClient.getQueryData(queryKeys.notificationPreferences)).toMatchObject({
++                sessionReady: 0,
++                taskNotifications: 0,
++            })
++        })
++    })
++
++    it('asks for confirmation before disabling permission requests', async () => {
++        renderPage()
++        const permissionSwitch = await screen.findByLabelText('Permission requests')
++        fireEvent.click(permissionSwitch)
++        expect(updateNotificationPreferences).not.toHaveBeenCalled()
++        expect(screen.getByText('Turn off permission request notifications?')).toBeTruthy()
++    })
++
++    it('applies the permission disable after confirming', async () => {
++        renderPage()
++        const permissionSwitch = await screen.findByLabelText('Permission requests')
++        fireEvent.click(permissionSwitch)
++        const confirmButton = screen.getByText('Turn off anyway')
++        fireEvent.click(confirmButton)
++        await waitFor(() => {
++            expect(updateNotificationPreferences).toHaveBeenCalledWith({ permissionRequests: 0 })
++        })
++    })
++
++    it('keeps the confirmation open when disabling permission notifications fails', async () => {
++        updateNotificationPreferences.mockRejectedValueOnce(new Error('save failed'))
++        renderPage()
++        fireEvent.click(await screen.findByLabelText('Permission requests'))
++        fireEvent.click(screen.getByText('Turn off anyway'))
++
++        expect(await screen.findByText('save failed')).toBeTruthy()
++        expect(screen.getByText('Turn off permission request notifications?')).toBeTruthy()
++    })
++
++    it('sends a test push and reports success', async () => {
++        renderPage()
++        const button = await screen.findByRole('button', { name: 'Send test push' })
++        fireEvent.click(button)
++        expect(sendTestPush).toHaveBeenCalled()
++        expect(await screen.findByText('Test notification sent!')).toBeTruthy()
++    })
++
++    it('hides the copy section for non-admin namespaces', async () => {
++        mockToken = makeToken('user-1')
++        renderPage()
++        expect(screen.queryByText('Push notification copy')).toBeNull()
++    })
++
++    it('renders the copy section for the admin namespace', async () => {
++        renderPage()
++        expect(await screen.findByText('Push notification copy')).toBeTruthy()
++        expect(await screen.findByText('Session completed')).toBeTruthy()
++    })
++
++    it('does not expose the editor before existing copy is loaded', async () => {
++        let resolveCopy: (value: typeof defaultCopyResponse) => void = () => {}
++        getNotificationCopy.mockReturnValue(new Promise((resolve) => {
++            resolveCopy = resolve
++        }))
++        renderPage()
++        await screen.findByLabelText('Permission requests')
++
++        expect(screen.queryByText('Push notification copy')).toBeNull()
++        resolveCopy(defaultCopyResponse)
++        expect(await screen.findByText('Push notification copy')).toBeTruthy()
++    })
++
++    it('saves edited copy through the API', async () => {
++        renderPage()
++        const readyRow = await screen.findByRole('button', { name: /Session ready.*Ready for input/ })
++        fireEvent.click(readyRow)
++        fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Custom {agentName}' } })
++        const saveButton = screen.getByRole('button', { name: 'Save copy' })
++        fireEvent.click(saveButton)
++        await waitFor(() => {
++            expect(updateNotificationCopy).toHaveBeenCalledWith({
++                ready: {
++                    title: 'Custom {agentName}',
++                    body: '{agentName} is waiting in {sessionName}'
++                },
++            })
++        })
++    })
++
++    it('reports a rejected notification copy save', async () => {
++        updateNotificationCopy.mockRejectedValueOnce(new Error('write failed'))
++        renderPage()
++        await screen.findByText('Push notification copy')
++
++        fireEvent.click(screen.getByRole('button', { name: 'Save copy' }))
++
++        expect(await screen.findByText('Failed to save notification copy')).toBeTruthy()
++    })
++
++    it('accepts refreshed copy after a successful save', async () => {
++        updateNotificationCopy.mockResolvedValueOnce({
++            ...defaultCopyResponse,
++            copy: { ready: { title: 'Saved title', body: 'Saved body' } }
++        })
++        const queryClient = renderPage()
++        const readyRow = await screen.findByRole('button', { name: /Session ready.*Ready for input/ })
++        fireEvent.click(readyRow)
++        fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Saved title' } })
++        fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'Saved body' } })
++        fireEvent.click(screen.getByRole('button', { name: 'Save copy' }))
++        expect(await screen.findByText('Copy saved')).toBeTruthy()
++
++        act(() => {
++            queryClient.setQueryData(queryKeys.notificationCopy, {
++                ...defaultCopyResponse,
++                copy: { ready: { title: 'Remote title', body: 'Remote body' } }
++            })
++        })
++
++        expect(await screen.findByRole('button', { name: /Session ready.*Remote title.*Remote body/ })).toBeTruthy()
++    })
++
++    it('preserves copy edits made while a save is in flight', async () => {
++        let resolveSave: (value: typeof defaultCopyResponse) => void = () => {}
++        updateNotificationCopy.mockReturnValueOnce(new Promise((resolve) => {
++            resolveSave = resolve
++        }))
++        const queryClient = renderPage()
++        const readyRow = await screen.findByRole('button', { name: /Session ready.*Ready for input/ })
++        fireEvent.click(readyRow)
++        const titleInput = screen.getByLabelText('Title')
++        fireEvent.change(titleInput, { target: { value: 'Saved title' } })
++        fireEvent.click(screen.getByRole('button', { name: 'Save copy' }))
++        await waitFor(() => expect(updateNotificationCopy).toHaveBeenCalledTimes(1))
++
++        fireEvent.change(titleInput, { target: { value: 'Newer unsaved title' } })
++        await act(async () => {
++            resolveSave({
++                ...defaultCopyResponse,
++                copy: { ready: { title: 'Saved title', body: 'Saved body' } },
++            })
++        })
++
++        expect(titleInput).toHaveValue('Newer unsaved title')
++        expect(queryClient.getQueryData(queryKeys.notificationCopy)).toMatchObject({
++            copy: { ready: { title: 'Saved title', body: 'Saved body' } },
++        })
++        expect(screen.queryByText('Copy saved')).toBeNull()
++    })
++
++    it('keeps copy editors collapsed and prefills defaults when opened', async () => {
++        renderPage()
++        const readyRow = await screen.findByRole('button', { name: /Session ready.*Ready for input/ })
++        expect(screen.queryByLabelText('Title')).toBeNull()
++
++        fireEvent.click(readyRow)
++        expect(screen.getByLabelText('Title')).toHaveValue('Ready for input')
++        expect(screen.getByLabelText('Body')).toHaveValue('{agentName} is waiting in {sessionName}')
++    })
++
++    it('updates the collapsed summary while editing', async () => {
++        renderPage()
++        const readyRow = await screen.findByRole('button', { name: /Session ready.*Ready for input/ })
++        fireEvent.click(readyRow)
++        fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Custom {agentName}' } })
++
++        expect(await screen.findByRole('button', { name: /Custom Claude.*Claude is waiting in My Project/ })).toBeTruthy()
++    })
++
++    it('restores a customized block to its visible defaults', async () => {
++        getNotificationCopy.mockResolvedValue({
++            ...defaultCopyResponse,
++            copy: {
++                ready: { title: 'Custom title', body: 'Custom body' }
++            }
++        })
++        renderPage()
++        const readyRow = await screen.findByRole('button', { name: /Session ready.*Custom title.*Custom body/ })
++        fireEvent.click(readyRow)
++        fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }))
++
++        expect(screen.getByLabelText('Title')).toHaveValue('Ready for input')
++        expect(screen.getByLabelText('Body')).toHaveValue('{agentName} is waiting in {sessionName}')
++    })
++})
+diff --git a/web/src/routes/settings/notifications.tsx b/web/src/routes/settings/notifications.tsx
+new file mode 100644
+index 000000000..4f18734f5
+--- /dev/null
++++ b/web/src/routes/settings/notifications.tsx
+@@ -0,0 +1,356 @@
++import { useEffect, useRef, useState } from 'react'
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
++import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
++import { ChevronDownIcon, SettingsPageContent, SettingsRow, SettingsSection, SettingsSwitch } from '@/components/settings/SettingsPrimitives'
++import { useAppContext } from '@/lib/app-context'
++import { queryKeys } from '@/lib/query-keys'
++import { renderTemplate } from '@/lib/template'
++import { useTranslation } from '@/lib/use-translation'
++import type { CopyTemplate, NotificationCopyConfig, NotificationPreferencesUpdate } from '@/types/api'
++
++type ToggleKey = keyof NotificationPreferencesUpdate
++type CopyKey = keyof NotificationCopyConfig
++
++const COPY_BLOCKS: Array<{ key: CopyKey; labelKey: string }> = [
++    { key: 'permissionRequest', labelKey: 'settings.notifications.copy.permissionRequest' },
++    { key: 'ready', labelKey: 'settings.notifications.copy.ready' },
++    { key: 'taskCompleted', labelKey: 'settings.notifications.copy.taskCompleted' },
++    { key: 'taskFailed', labelKey: 'settings.notifications.copy.taskFailed' },
++    { key: 'sessionCompletion', labelKey: 'settings.notifications.copy.sessionCompletion' },
++]
++
++// Sample values used for the live preview only.
++const PREVIEW_VARS: Record<string, string> = {
++    agentName: 'Claude',
++    sessionName: 'My Project',
++    tool: ' (Bash)',
++    summary: 'Build the feature',
++    status: 'completed',
++    reason: 'completed',
++    url: '/sessions/abc123',
++}
++
++function getNamespace(token: string): string | null {
++    try {
++        const payload = token.split('.')[1]
++        if (!payload) return null
++        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(payload.length / 4) * 4, '=')
++        const decoded = JSON.parse(atob(base64)) as { ns?: unknown }
++        return typeof decoded.ns === 'string' ? decoded.ns : null
++    } catch {
++        return null
++    }
++}
++
++function resolveCopyTemplate(
++    copy: NotificationCopyConfig,
++    defaults: Record<string, CopyTemplate>,
++    key: CopyKey
++): CopyTemplate {
++    const template = copy[key]
++    const fallback = defaults[key]
++    return {
++        title: template?.title.trim() ? template.title : (fallback?.title ?? ''),
++        body: template?.body.trim() ? template.body : (fallback?.body ?? '')
++    }
++}
++
++function resolveEffectiveCopy(
++    copy: NotificationCopyConfig,
++    defaults: Record<string, CopyTemplate>
++): NotificationCopyConfig {
++    return Object.fromEntries(
++        COPY_BLOCKS.map(({ key }) => [key, resolveCopyTemplate(copy, defaults, key)])
++    ) as NotificationCopyConfig
++}
++
++function getCopyOverrides(
++    draft: NotificationCopyConfig,
++    defaults: Record<string, CopyTemplate>
++): NotificationCopyConfig {
++    const overrides: NotificationCopyConfig = {}
++    for (const { key } of COPY_BLOCKS) {
++        const template = resolveCopyTemplate(draft, defaults, key)
++        const fallback = defaults[key]
++        if (!fallback || template.title !== fallback.title || template.body !== fallback.body) {
++            overrides[key] = template
++        }
++    }
++    return overrides
++}
++
++export default function SettingsNotificationsPage() {
++    const { api, token } = useAppContext()
++    const { t } = useTranslation()
++    const queryClient = useQueryClient()
++    const [confirmDisablePermission, setConfirmDisablePermission] = useState(false)
++    const [testPushLabel, setTestPushLabel] = useState<string | null>(null)
++    const [saveError, setSaveError] = useState<string | null>(null)
++    const [copySaved, setCopySaved] = useState(false)
++    const [copySaveError, setCopySaveError] = useState<string | null>(null)
++    const [openCopyBlock, setOpenCopyBlock] = useState<CopyKey | null>(null)
++
++    const isAdmin = Boolean(token) && getNamespace(token) === 'default'
++
++    const query = useQuery({
++        queryKey: queryKeys.notificationPreferences,
++        queryFn: async () => {
++            if (!api) throw new Error('API unavailable')
++            return await api.getNotificationPreferences()
++        },
++        enabled: Boolean(api),
++        staleTime: 0,
++        retry: false,
++    })
++
++    const mutation = useMutation({
++        scope: { id: 'notification-preferences' },
++        mutationFn: async (update: NotificationPreferencesUpdate) => {
++            if (!api) throw new Error('API unavailable')
++            return await api.updateNotificationPreferences(update)
++        },
++        onSuccess: (data) => {
++            queryClient.setQueryData(queryKeys.notificationPreferences, data)
++            setSaveError(null)
++        },
++        onError: () => {
++            setSaveError(t('settings.notifications.saveError'))
++        },
++    })
++
++    const copyQuery = useQuery({
++        queryKey: queryKeys.notificationCopy,
++        queryFn: async () => {
++            if (!api) throw new Error('API unavailable')
++            return await api.getNotificationCopy()
++        },
++        enabled: Boolean(api) && isAdmin,
++        staleTime: 0,
++        retry: false,
++    })
++
++    const [draft, setDraft] = useState<NotificationCopyConfig>({})
++    const userEditedRef = useRef(false)
++    const editRevisionRef = useRef(0)
++    useEffect(() => {
++        // Initialize the draft from server copy, but never clobber edits made
++        // while the query was still resolving.
++        if (copyQuery.data && !userEditedRef.current) {
++            setDraft(resolveEffectiveCopy(copyQuery.data.copy, copyQuery.data.defaults))
++        }
++    }, [copyQuery.data])
++
++    const copyMutation = useMutation({
++        mutationFn: async (copy: NotificationCopyConfig) => {
++            if (!api) throw new Error('API unavailable')
++            return await api.updateNotificationCopy(copy)
++        },
++        onMutate: () => {
++            setCopySaveError(null)
++            setCopySaved(false)
++            return { editRevision: editRevisionRef.current }
++        },
++        onSuccess: (data, _copy, context) => {
++            queryClient.setQueryData(queryKeys.notificationCopy, data)
++            const savedCurrentDraft = context?.editRevision === editRevisionRef.current
++            if (savedCurrentDraft) {
++                userEditedRef.current = false
++                setDraft(resolveEffectiveCopy(data.copy, data.defaults))
++                setCopySaved(true)
++                setTimeout(() => setCopySaved(false), 3000)
++            }
++            setCopySaveError(null)
++        },
++        onError: () => {
++            setCopySaved(false)
++            setCopySaveError(t('settings.notifications.copy.saveError'))
++        },
++    })
++
++    const handleToggle = (key: ToggleKey) => (checked: boolean) => {
++        // Turning off permission requests needs explicit confirmation — it
++        // disables phone-side approval, the core remote-control flow.
++        if (key === 'permissionRequests' && !checked) {
++            setConfirmDisablePermission(true)
++            return
++        }
++        mutation.mutate({ [key]: checked ? 1 : 0 })
++    }
++
++    const sendTestPush = async () => {
++        if (!api) return
++        setTestPushLabel(t('settings.notifications.testPushSending'))
++        try {
++            const result = await api.sendTestPush()
++            setTestPushLabel('ok' in result
++                ? t('settings.notifications.testPushSent')
++                : t('settings.notifications.testPushError'))
++        } catch {
++            setTestPushLabel(t('settings.notifications.testPushError'))
++        }
++        setTimeout(() => setTestPushLabel(null), 3000)
++    }
++
++    const updateDraftField = (block: CopyKey, field: 'title' | 'body', value: string) => {
++        userEditedRef.current = true
++        editRevisionRef.current += 1
++        setDraft((prev) => {
++            const current = prev[block] ?? { title: '', body: '' }
++            return { ...prev, [block]: { ...current, [field]: value } }
++        })
++    }
++
++    const resetDraftBlock = (block: CopyKey) => {
++        userEditedRef.current = true
++        editRevisionRef.current += 1
++        setDraft((prev) => {
++            const fallback = copyQuery.data?.defaults[block]
++            return fallback ? { ...prev, [block]: fallback } : prev
++        })
++    }
++
++    const resolvePreview = (block: CopyKey): { title: string; body: string } => {
++        const d = draft[block]
++        const defaults = copyQuery.data?.defaults
++        const def = defaults ? defaults[block] as CopyTemplate | undefined : undefined
++        return {
++            title: renderTemplate(d?.title.trim() ? d.title : (def?.title ?? ''), PREVIEW_VARS),
++            body: renderTemplate(d?.body.trim() ? d.body : (def?.body ?? ''), PREVIEW_VARS)
++        }
++    }
++
++    const prefs = query.data
++
++    return (
++        <SettingsPageContent description={t('settings.notifications.description')}>
++            <SettingsSection title={t('settings.notifications.section')}>
++                <SettingsSwitch
++                    label={t('settings.notifications.permissionRequests')}
++                    description={t('settings.notifications.permissionRequestsDescription')}
++                    checked={prefs ? Boolean(prefs.permissionRequests) : true}
++                    onChange={handleToggle('permissionRequests')}
++                />
++                <SettingsSwitch
++                    label={t('settings.notifications.sessionReady')}
++                    description={t('settings.notifications.sessionReadyDescription')}
++                    checked={prefs ? Boolean(prefs.sessionReady) : true}
++                    onChange={handleToggle('sessionReady')}
++                />
++                <SettingsSwitch
++                    label={t('settings.notifications.taskNotifications')}
++                    description={t('settings.notifications.taskNotificationsDescription')}
++                    checked={prefs ? Boolean(prefs.taskNotifications) : true}
++                    onChange={handleToggle('taskNotifications')}
++                />
++                <SettingsSwitch
++                    label={t('settings.notifications.sessionCompletion')}
++                    description={t('settings.notifications.sessionCompletionDescription')}
++                    checked={prefs ? Boolean(prefs.sessionCompletion) : true}
++                    onChange={handleToggle('sessionCompletion')}
++                />
++                {saveError ? <SettingsRow label={saveError} /> : null}
++            </SettingsSection>
++
++            {isAdmin && copyQuery.data ? (
++                <SettingsSection
++                    title={t('settings.notifications.copy.title')}
++                    description={t('settings.notifications.copy.description')}
++                >
++                    {COPY_BLOCKS.map((block) => {
++                        const current = resolveCopyTemplate(draft, copyQuery.data?.defaults ?? {}, block.key)
++                        const preview = resolvePreview(block.key)
++                        const isOpen = openCopyBlock === block.key
++                        const editorId = `notification-copy-${block.key}`
++                        return (
++                            <div key={block.key}>
++                                <button
++                                    type="button"
++                                    onClick={() => setOpenCopyBlock((currentBlock) => currentBlock === block.key ? null : block.key)}
++                                    aria-expanded={isOpen}
++                                    aria-controls={editorId}
++                                    className="flex min-h-14 w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
++                                >
++                                    <span className="min-w-0 flex-1">
++                                        <span className="block text-sm font-medium text-[var(--app-fg)]">{t(block.labelKey)}</span>
++                                        <span className="mt-0.5 block truncate text-xs text-[var(--app-hint)]">
++                                            {preview.title} · {preview.body}
++                                        </span>
++                                    </span>
++                                    <ChevronDownIcon className={`h-4 w-4 shrink-0 text-[var(--app-hint)] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
++                                </button>
++                                {isOpen ? (
++                                    <div id={editorId} className="space-y-3 border-t border-[var(--app-divider)] bg-[var(--app-subtle-bg)]/40 px-3 py-3">
++                                        <label className="block">
++                                            <span className="text-xs text-[var(--app-hint)]">{t('settings.notifications.copy.titleLabel')}</span>
++                                            <input
++                                                type="text"
++                                                value={current.title}
++                                                maxLength={500}
++                                                onChange={(event) => updateDraftField(block.key, 'title', event.target.value)}
++                                                className="mt-1 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]"
++                                            />
++                                        </label>
++                                        <label className="block">
++                                            <span className="text-xs text-[var(--app-hint)]">{t('settings.notifications.copy.bodyLabel')}</span>
++                                            <textarea
++                                                value={current.body}
++                                                maxLength={500}
++                                                rows={2}
++                                                onChange={(event) => updateDraftField(block.key, 'body', event.target.value)}
++                                                className="mt-1 w-full resize-y rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-sm text-[var(--app-fg)]"
++                                            />
++                                        </label>
++                                        <div className="flex justify-end">
++                                            <button
++                                                type="button"
++                                                onClick={() => resetDraftBlock(block.key)}
++                                                className="text-xs text-[var(--app-link)] hover:underline"
++                                            >
++                                                {t('settings.notifications.copy.resetDefault')}
++                                            </button>
++                                        </div>
++                                    </div>
++                                ) : null}
++                            </div>
++                        )
++                    })}
++                    <div className="flex min-h-14 items-center justify-between gap-3 px-3 py-3">
++                        <span className="text-xs text-[var(--app-hint)]" aria-live="polite">
++                            {copySaveError ?? (copySaved ? t('settings.notifications.copy.saved') : '')}
++                        </span>
++                        <button
++                            type="button"
++                            onClick={() => copyMutation.mutate(getCopyOverrides(draft, copyQuery.data?.defaults ?? {}))}
++                            disabled={copyMutation.isPending || !copyQuery.data}
++                            className="rounded-lg bg-[var(--app-button)] px-3 py-2 text-sm font-medium text-[var(--app-button-text)] disabled:opacity-50"
++                        >
++                            {t('settings.notifications.copy.save')}
++                        </button>
++                    </div>
++                </SettingsSection>
++            ) : null}
++
++            <button
++                type="button"
++                onClick={() => void sendTestPush()}
++                disabled={testPushLabel !== null || !Boolean(api)}
++                className="rounded-lg bg-[var(--app-button)] px-3 py-2 text-sm font-medium text-[var(--app-button-text)] disabled:opacity-50"
++            >
++                {testPushLabel ?? t('settings.notifications.testPush')}
++            </button>
++            <ConfirmDialog
++                isOpen={confirmDisablePermission}
++                onClose={() => setConfirmDisablePermission(false)}
++                title={t('settings.notifications.disablePermissionTitle')}
++                description={t('settings.notifications.disablePermissionDescription')}
++                confirmLabel={t('settings.notifications.disablePermissionConfirm')}
++                confirmingLabel={t('settings.notifications.disablePermissionConfirm')}
++                onConfirm={async () => {
++                    await mutation.mutateAsync({ permissionRequests: 0 })
++                }}
++                isPending={mutation.isPending}
++                destructive
++            />
++        </SettingsPageContent>
++    )
++}
+diff --git a/web/src/types/api.ts b/web/src/types/api.ts
+index f2e40455e..551377827 100644
+--- a/web/src/types/api.ts
++++ b/web/src/types/api.ts
+@@ -176,6 +176,41 @@ export type PushVapidPublicKeyResponse = {
+     publicKey: string
+ }
+ 
++export type NotificationPreferences = {
++    namespace: string
++    permissionRequests: number
++    sessionReady: number
++    taskNotifications: number
++    sessionCompletion: number
++    updatedAt: number
++}
++
++export type NotificationPreferencesUpdate = Partial<
++    Pick<NotificationPreferences, 'permissionRequests' | 'sessionReady' | 'taskNotifications' | 'sessionCompletion'>
++>
++
++export type TestPushResponse =
++    | { ok: true }
++    | { error: string }
++
++export type CopyTemplate = {
++    title: string
++    body: string
++}
++
++export type NotificationCopyConfig = Partial<{
++    permissionRequest: CopyTemplate
++    ready: CopyTemplate
++    taskCompleted: CopyTemplate
++    taskFailed: CopyTemplate
++    sessionCompletion: CopyTemplate
++}>
++
++export type NotificationCopyResponse = {
++    copy: NotificationCopyConfig
++    defaults: Record<string, CopyTemplate>
++}
++
+ export type CodexDesktopScriptResponse = {
+     success: boolean
+     message?: string
+diff --git a/web/vite.config.ts b/web/vite.config.ts
+index d08c03157..8261eb473 100644
+--- a/web/vite.config.ts
++++ b/web/vite.config.ts
+@@ -156,10 +156,9 @@ export default defineConfig({
+             },
+             injectManifest: {
+                 globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+-                // The SPA entry contains the complete multi-agent control surface.
+-                // Keep it available offline after adding Pi history import instead
+-                // of silently dropping the entry chunk from the PWA precache.
+-                maximumFileSizeToCacheInBytes: 3 * 1024 * 1024
++                // The app's main chunk exceeds workbox's 2MiB default precache
++                // cap; raising the limit keeps the SPA fully precached offline.
++                maximumFileSizeToCacheInBytes: 4 * 1024 * 1024
+             },
+             devOptions: {
+                 enabled: true,

@@ -1,0 +1,10 @@
+patch	state	upstream_ref	source_commits
+# v0.27.3.1 — UFR from upstream v0.27.3; previous maintained tree is a second-parent reference.
+previous-overlay	regenerate	fork-overlay	32e025204180ce13a80a3b131f9f0f1621b0a639
+01-pr-1158.patch	carry	pr-1158	b00e39794e707d3bdbd6ab1029b5a6576b3cf985
+02-pr-1447.patch	carry	pr-1447	703c1adef0e967187796d6cee0a1b0043057c21
+03-pr-1530.patch	carry	pr-1530	b5b72457b3184524588008b3492013682db0f5cd
+04-pr-1529.patch	carry	pr-1529	7bfdac6394222e4603d1d03b408f3d93ce2f520a
+operator-drop	drop	pr-1468	fd2e0775c42463bb122f40b0c7b2c4872a729308
+permanent-exclusion	drop	pr-1320	-
+distribution-overlay	regenerate	fork-overlay	-

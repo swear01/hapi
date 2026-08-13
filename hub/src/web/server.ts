@@ -12,6 +12,7 @@ import { getProviderEnvironment } from '../config/providerCredentials'
 import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
+import type { PushService } from '../push/pushService'
 import { createAuthMiddleware, type WebAppEnv } from './middleware/auth'
 import { createAuthRoutes } from './routes/auth'
 import { createBindRoutes } from './routes/bind'
@@ -22,15 +23,19 @@ import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
 import { createUsageRoutes } from './routes/usage'
+import { createUpgradeRoutes, createUpgradeCliRoutes } from './routes/upgrade'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
+import { createClaudeSessionRoutes } from './routes/claudeSessions'
 import { createPiSessionRoutes } from './routes/piSessions'
 import { createPushRoutes } from './routes/push'
+import { createNotificationPreferencesRoutes } from './routes/notificationPreferences'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
 import { createHubSettingsRoutes } from './routes/hubSettings'
 import { createWorkGraphRoutes } from './routes/workGraph'
+import { createNotificationCopyRoutes } from './routes/notificationCopy'
 import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
@@ -223,6 +228,7 @@ function createWebApp(options: {
     jwtSecret: Uint8Array
     store: Store
     vapidPublicKey: string
+    pushService: PushService
     corsOrigins?: string[]
     embeddedAssetMap: Map<string, EmbeddedWebAsset> | null
     relayMode?: boolean
@@ -245,6 +251,7 @@ function createWebApp(options: {
     const corsOriginOption = corsOrigins.includes('*') ? '*' : corsOrigins
     const corsMiddleware = cors({
         origin: corsOriginOption,
+        // PUT: fleet upgrade policy route (this PR).
         allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
         // last-event-id: browsers attach it to EventSource reconnects for
         // SSE replay; allow it in case a browser preflights the request.
@@ -275,6 +282,7 @@ function createWebApp(options: {
     })
 
     app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/cli', createUpgradeCliRoutes())
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
@@ -285,12 +293,19 @@ function createWebApp(options: {
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
-    app.route('/api', createStorageRoutes(configuration.dbPath))
+
+    app.route('/api', createStorageRoutes(options.store))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
+
     app.route('/api', createUsageRoutes(options.store))
+    app.route('/api', createUpgradeRoutes(options.getSyncEngine))
     app.route('/api', createGitRoutes(options.getSyncEngine))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
     app.route('/api', createCodexDesktopRoutes({
+        store: options.store,
+        getSyncEngine: options.getSyncEngine
+    }))
+    app.route('/api', createClaudeSessionRoutes({
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))
@@ -298,7 +313,9 @@ function createWebApp(options: {
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))
-    app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
+    app.route('/api', createPushRoutes(options.store, options.vapidPublicKey, options.pushService))
+    app.route('/api', createNotificationPreferencesRoutes(options.store))
+    app.route('/api', createNotificationCopyRoutes(configuration.dataDir))
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes({ dataDir: configuration.dataDir }))
     // Path is intentionally NOT `/api/events` — that route is the SSE stream.
@@ -414,6 +431,7 @@ export async function startWebServer(options: {
     jwtSecret: Uint8Array
     store: Store
     vapidPublicKey: string
+    pushService: PushService
     socketEngine: SocketEngine
     corsOrigins?: string[]
     relayMode?: boolean
@@ -428,6 +446,7 @@ export async function startWebServer(options: {
         jwtSecret: options.jwtSecret,
         store: options.store,
         vapidPublicKey: options.vapidPublicKey,
+        pushService: options.pushService,
         corsOrigins: options.corsOrigins,
         embeddedAssetMap,
         relayMode: options.relayMode,

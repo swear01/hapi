@@ -53,7 +53,12 @@ const messageSchema = z.object({
     // Client-provided origin timestamp (epoch ms) — e.g. a Claude transcript
     // entry's own `timestamp`. Only honored for agent messages (no localId);
     // see addMessage in messages.ts.
-    createdAt: z.number().optional()
+    createdAt: z.number().optional(),
+    // Client-provided sort anchor (epoch ms) decoupled from createdAt — a
+    // between-turn drain straggler carries its turn's positionAt so it sorts
+    // before the next user message despite its later createdAt. Stored as
+    // invoked_at; see addMessage in messages.ts.
+    positionAt: z.number().optional()
 })
 
 const updateMetadataSchema = z.object({
@@ -68,7 +73,15 @@ const updateStateSchema = z.object({
     agentState: z.unknown().nullable()
 })
 
-const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
+// Hub-only merge/clear links. CLI update-metadata must not forge or erase them
+// (same strip/restore as supersededBySessionId — see sessionHandlers.test.ts).
+const HUB_OWNED_METADATA_KEYS = [
+    'supersededBySessionId',
+    'opencodeClearOperation',
+    'jobsAcceptedFromSessionIds',
+    'jobsTransferredToSessionId',
+    'jobKeyRedirects',
+] as const
 
 function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
     if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
@@ -109,7 +122,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const { sid, localId, createdAt } = parsed.data
+        const { sid, localId, createdAt, positionAt } = parsed.data
         const raw = parsed.data.message
 
         const content = typeof raw === 'string'
@@ -133,7 +146,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
+        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt, positionAt)
         if (shouldRecordSessionActivity(content)) {
             onSessionActivity?.(sid, msg.createdAt)
         }
@@ -364,7 +377,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         onSessionReady?.(data)
     })
 
-    socket.on('messages-consumed', (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean }) => {
+    socket.on('messages-consumed', (data: {
+        sid: string
+        localIds: string[]
+        clearQueuedThinkingGrace?: boolean
+        steered?: boolean
+    }) => {
         if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
             return
         }
@@ -408,7 +426,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         // Emit only after the DB transaction succeeds. This is an ACK-level
         // batch contract, so preserve its original timestamp even when IDs are
         // heterogeneous, replayed, or unknown.
-        onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
+        onWebappEvent?.({
+            type: 'messages-consumed',
+            sessionId: data.sid,
+            localIds,
+            invokedAt,
+            ...(data.steered === true ? { steered: true } : {})
+        })
     })
 
     socket.on('session-end', (data: SessionEndPayload) => {

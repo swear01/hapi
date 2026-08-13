@@ -1,0 +1,409 @@
+diff --git a/shared/src/modes.ts b/shared/src/modes.ts
+index fc2ac24b8..6e3d1989c 100644
+--- a/shared/src/modes.ts
++++ b/shared/src/modes.ts
+@@ -15,8 +15,8 @@ export const AgentFlavorSchema = z.enum(AGENT_FLAVORS)
+ // excluded: Google sunset the consumer Gemini CLI (2026-06-18) so it can no
+ // longer be launched. It is kept in AGENT_FLAVORS / AgentFlavorSchema above so
+ // existing stored Gemini sessions still validate and remain viewable.
+-export const CREATABLE_AGENT_FLAVORS: readonly AgentFlavor[] = AGENT_FLAVORS.filter(
+-    (flavor) => flavor !== 'gemini'
++export const CREATABLE_AGENT_FLAVORS: readonly Exclude<AgentFlavor, 'gemini'>[] = AGENT_FLAVORS.filter(
++    (flavor): flavor is Exclude<AgentFlavor, 'gemini'> => flavor !== 'gemini'
+ )
+ 
+ export const AGY_PERMISSION_MODES = ['request-review', 'always-proceed'] as const
+diff --git a/web/src/components/NewSession/AgentSelector.test.tsx b/web/src/components/NewSession/AgentSelector.test.tsx
+index fbb2ebba4..34d1dc5e5 100644
+--- a/web/src/components/NewSession/AgentSelector.test.tsx
++++ b/web/src/components/NewSession/AgentSelector.test.tsx
+@@ -11,7 +11,7 @@ import type { AgentType } from './types'
+ 
+ function renderedAgentValues(): string[] {
+     const { container } = render(
+-        <AgentSelector agent={'claude' as AgentType} isDisabled={false} onAgentChange={() => {}} />
++        <AgentSelector agent={'claude' as AgentType} isDisabled={false} onAgentChange={() => {}} visibleAgents={CREATABLE_AGENT_FLAVORS} />
+     )
+     return Array.from(container.querySelectorAll('input[type="radio"]'))
+         .map((el) => (el as HTMLInputElement).value)
+@@ -26,3 +26,15 @@ describe('AgentSelector', () => {
+         expect(renderedAgentValues()).toEqual([...CREATABLE_AGENT_FLAVORS])
+     })
+ })
++
++it('only renders agents enabled in settings', () => {
++    const { container } = render(
++        <AgentSelector
++            agent={'claude' as AgentType}
++            isDisabled={false}
++            onAgentChange={() => {}}
++            visibleAgents={['claude', 'codex']}
++        />
++    )
++    expect(Array.from(container.querySelectorAll('input[type="radio"]')).map((el) => (el as HTMLInputElement).value)).toEqual(['claude', 'codex'])
++})
+diff --git a/web/src/components/NewSession/AgentSelector.tsx b/web/src/components/NewSession/AgentSelector.tsx
+index 3c2839537..906eb0a60 100644
+--- a/web/src/components/NewSession/AgentSelector.tsx
++++ b/web/src/components/NewSession/AgentSelector.tsx
+@@ -1,4 +1,4 @@
+-import { CREATABLE_AGENT_FLAVORS, getFlavorLabel } from '@hapi/protocol'
++import { getFlavorLabel } from '@hapi/protocol'
+ import type { AgentType } from './types'
+ import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+ import { useTranslation } from '@/lib/use-translation'
+@@ -7,6 +7,7 @@ export function AgentSelector(props: {
+     agent: AgentType
+     isDisabled: boolean
+     onAgentChange: (value: AgentType) => void
++    visibleAgents: readonly AgentType[]
+ }) {
+     const { t } = useTranslation()
+ 
+@@ -16,7 +17,7 @@ export function AgentSelector(props: {
+                 {t('newSession.agent')}
+             </label>
+             <div className="flex flex-wrap gap-x-3 gap-y-2">
+-                {CREATABLE_AGENT_FLAVORS.map((agentType) => (
++                {props.visibleAgents.map((agentType) => (
+                     <label
+                         key={agentType}
+                         className="flex items-center gap-1.5 cursor-pointer"
+diff --git a/web/src/components/NewSession/index.test.tsx b/web/src/components/NewSession/index.test.tsx
+index 3a6d46d4d..e439abb5a 100644
+--- a/web/src/components/NewSession/index.test.tsx
++++ b/web/src/components/NewSession/index.test.tsx
+@@ -1,5 +1,6 @@
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
++import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
+ import type { ApiClient } from '@/api/client'
+ import type { Machine } from '@/types/api'
+ import { saveNewSessionFormDraft } from './newSessionFormDraft'
+@@ -787,4 +788,52 @@ describe('NewSession launch preferences', () => {
+             expect(screen.getByTestId('reasoning')).toHaveTextContent('max')
+         })
+     })
++
++    it('falls back when the preferred agent is hidden', async () => {
++        localStorage.setItem('hapi:newSession:agentVisibility:v1', JSON.stringify({ codex: false }))
++        const { container } = render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
++
++        await waitFor(() => expect(container.querySelector<HTMLInputElement>('input[value="agy"]')?.checked).toBe(true))
++    })
++
++    it('normalizes launch state when a restored draft agent is hidden', async () => {
++        localStorage.setItem('hapi:newSession:agentVisibility:v1', JSON.stringify({ codex: false }))
++        saveNewSessionFormDraft({
++            agent: 'codex',
++            model: 'gpt-5.6-terra',
++            cursorSelectedBase: 'auto',
++            machineId: 'machine-1',
++            effort: 'auto',
++            modelReasoningEffort: 'max',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            copilotAgentMode: 'interactive',
++            yoloMode: false,
++            codexFamilyPermissionMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple',
++            worktreeName: ''
++        })
++        mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'fallback-session' })
++
++        const { container } = render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
++
++        await waitFor(() => expect(container.querySelector<HTMLInputElement>('input[value="agy"]')?.checked).toBe(true))
++        fireEvent.click(screen.getByTestId('create'))
++        await waitFor(() => expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
++            agent: 'agy',
++            model: undefined,
++            modelReasoningEffort: undefined
++        })))
++    })
++
++    it('blocks Create when every agent is hidden', async () => {
++        localStorage.setItem(
++            'hapi:newSession:agentVisibility:v1',
++            JSON.stringify(Object.fromEntries(CREATABLE_AGENT_FLAVORS.map((agent) => [agent, false])))
++        )
++        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
++
++        await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
++    })
+ })
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index a825a1142..6f9802765 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -1,7 +1,7 @@
+ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+ import type { ApiClient } from '@/api/client'
+ import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
+-import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
++import { CREATABLE_AGENT_FLAVORS, type CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
+ import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
+@@ -17,6 +17,7 @@ import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggesti
+ import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
+ import { useRecentPaths } from '@/hooks/useRecentPaths'
+ import { useTranslation } from '@/lib/use-translation'
++import { loadCreateAgentVisibility } from '@/lib/createAgentVisibility'
+ import { getCodexModelReasoningEfforts } from '@/lib/codexModelCapabilities'
+ import {
+     buildNewSessionCursorModelCatalog,
+@@ -95,11 +96,16 @@ export function NewSession(props: {
+     const { sessions, refetch: refetchSessions } = useSessions(props.api)
+     const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
+ 
++    const [agentVisibility] = useState(loadCreateAgentVisibility)
+     const [machineId, setMachineId] = useState<string | null>(props.initialMachineId ?? null)
+     const [directory, setDirectory] = useState(props.initialDirectory ?? '')
+     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
+     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
+     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
++    const visibleAgents = useMemo<AgentType[]>(
++        () => CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate]),
++        [agentVisibility]
++    )
+     const [legacyCodexYolo] = useState(
+         () => loadPreferredAgent() === 'codex' && loadPreferredYoloMode()
+     )
+@@ -156,6 +162,15 @@ export function NewSession(props: {
+     const worktreeInputRef = useRef<HTMLInputElement>(null)
+     const preserveRestoredDraftRef = useRef(false)
+ 
++    useEffect(() => {
++        if (!visibleAgents.includes(agent) && visibleAgents[0]) {
++            // A hidden agent must not keep restored-draft launch state: the
++            // fallback behaves like a manual agent switch, so normalize.
++            preserveRestoredDraftRef.current = false
++            setAgent(visibleAgents[0])
++        }
++    }, [agent, visibleAgents])
++
+     useEffect(() => {
+         if (sessionType === 'worktree') {
+             worktreeInputRef.current?.focus()
+@@ -229,31 +244,42 @@ export function NewSession(props: {
+             return
+         }
+         restoredFromBrowseRef.current = true
+-        preserveRestoredDraftRef.current = true
+-        setAgent(draft.agent)
+-        setModel(draft.model)
+-        setCursorSelectedBase(draft.cursorSelectedBase)
+-        setEffort(draft.effort)
+-        setModelReasoningEffort(draft.modelReasoningEffort)
+-        setOpencodeSelectedModel(
+-            draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
+-        )
+-        setAgySelectedModel(
+-            draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
+-        )
+-        setServiceTier(draft.serviceTier)
+-        setCollaborationMode(draft.collaborationMode)
+-        setCopilotAgentMode(draft.copilotAgentMode)
+-        setYoloMode(draft.yoloMode)
+-        setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
+-        setGrokPermissionMode(draft.grokPermissionMode)
+-        setSessionType(draft.sessionType)
+-        setWorktreeName(draft.worktreeName)
++        if (visibleAgents.includes(draft.agent)) {
++            preserveRestoredDraftRef.current = true
++            setAgent(draft.agent)
++            setModel(draft.model)
++            setCursorSelectedBase(draft.cursorSelectedBase)
++            setEffort(draft.effort)
++            setModelReasoningEffort(draft.modelReasoningEffort)
++            setOpencodeSelectedModel(
++                draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
++            )
++            setAgySelectedModel(
++                draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
++            )
++            setServiceTier(draft.serviceTier)
++            setCollaborationMode(draft.collaborationMode)
++            setCopilotAgentMode(draft.copilotAgentMode)
++            setYoloMode(draft.yoloMode)
++            setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
++            setGrokPermissionMode(draft.grokPermissionMode)
++            setSessionType(draft.sessionType)
++            setWorktreeName(draft.worktreeName)
++        } else if (visibleAgents[0]) {
++            // The draft agent is hidden in settings: restore only the
++            // agent-agnostic fields and let the normalization effects pick
++            // defaults for the fallback agent (no stale model/permission state).
++            setAgent(visibleAgents[0])
++            setYoloMode(draft.yoloMode)
++            setSessionType(draft.sessionType)
++            setWorktreeName(draft.worktreeName)
++        }
+         clearNewSessionFormDraft()
+     }, [
+         props.initialDirectory,
+         props.initialMachineId,
+-        machineId
++        machineId,
++        visibleAgents
+     ])
+ 
+     useEffect(() => {
+@@ -1489,7 +1515,8 @@ export function NewSession(props: {
+         && serviceTier === 'fast'
+         && codexModelsState.isLoading
+     const canCreate = Boolean(
+-        machineId
++        visibleAgents.includes(agent)
++        && machineId
+         && trimmedDirectory
+         && !isFormDisabled
+         && !missingWorktreeDirectory
+@@ -1539,6 +1566,7 @@ export function NewSession(props: {
+                 agent={agent}
+                 isDisabled={isFormDisabled}
+                 onAgentChange={handleAgentChange}
++                visibleAgents={visibleAgents}
+             />
+             {agent === 'codex' ? (
+                 <CodexImportActions
+diff --git a/web/src/components/NewSession/preferences.ts b/web/src/components/NewSession/preferences.ts
+index 43415101c..c84ed047c 100644
+--- a/web/src/components/NewSession/preferences.ts
++++ b/web/src/components/NewSession/preferences.ts
+@@ -27,7 +27,7 @@ export type PreferredLaunchSettings = {
+ 
+ // Only launchable flavors are valid defaults; a stale 'gemini' preference
+ // (no longer creatable) falls back to 'claude'.
+-const VALID_AGENTS = CREATABLE_AGENT_FLAVORS
++const VALID_AGENTS: readonly AgentType[] = CREATABLE_AGENT_FLAVORS
+ 
+ export function loadPreferredAgent(): AgentType {
+     try {
+diff --git a/web/src/lib/createAgentVisibility.ts b/web/src/lib/createAgentVisibility.ts
+new file mode 100644
+index 000000000..1d5aa682f
+--- /dev/null
++++ b/web/src/lib/createAgentVisibility.ts
+@@ -0,0 +1,21 @@
++import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
++
++export type CreatableAgentFlavor = typeof CREATABLE_AGENT_FLAVORS[number]
++export type CreateAgentVisibility = Record<CreatableAgentFlavor, boolean>
++
++const STORAGE_KEY = 'hapi:newSession:agentVisibility:v1'
++
++export function loadCreateAgentVisibility(): CreateAgentVisibility {
++    try {
++        const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}')
++        return Object.fromEntries(CREATABLE_AGENT_FLAVORS.map((agent) => [agent, stored?.[agent] !== false])) as CreateAgentVisibility
++    } catch {
++        return Object.fromEntries(CREATABLE_AGENT_FLAVORS.map((agent) => [agent, true])) as CreateAgentVisibility
++    }
++}
++
++export function saveCreateAgentVisibility(visibility: CreateAgentVisibility): void {
++    try {
++        localStorage.setItem(STORAGE_KEY, JSON.stringify(visibility))
++    } catch {}
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 7f7117191..c6635da5a 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -796,6 +796,8 @@ export default {
+   'settings.display.sessionListStatus.standard': 'Standard',
+   'settings.display.sessionListStatus.detailed': 'Detailed',
+   'settings.display.sessionListStatus.detailedDescription': 'Shows why a session stopped: permission, input, background work, new activity, or a scheduled message (clock icon).',
++  'settings.display.createAgents': 'Create agents',
++  'settings.display.createAgents.description': 'Choose which agents appear when creating a session.',
+   'settings.display.sessionHeader': 'Session header',
+   'settings.display.sessionHeader.description': 'Choose which details appear below the session title. Mobile shows the agent plus the highest-priority available detail.',
+   'settings.display.sessionHeader.showLabels': 'Show field labels',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 0b95581b1..9c01acb64 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -795,6 +795,8 @@ export default {
+   'settings.display.sessionListStatus.standard': '标准',
+   'settings.display.sessionListStatus.detailed': '详细',
+   'settings.display.sessionListStatus.detailedDescription': '显示会话停止的原因：权限、输入、后台任务、新活动或定时消息（时钟图标）。',
++  'settings.display.createAgents': '创建 Agent',
++  'settings.display.createAgents.description': '选择创建会话时要显示的 Agent。',
+   'settings.display.sessionHeader': '会话顶部信息',
+   'settings.display.sessionHeader.description': '选择在会话标题下方显示的信息。移动端显示 Agent 类型及优先级最高的一个可用信息。',
+   'settings.display.sessionHeader.showLabels': '显示字段标题',
+diff --git a/web/src/routes/settings/display.tsx b/web/src/routes/settings/display.tsx
+index 11682b9ba..b2dea251d 100644
+--- a/web/src/routes/settings/display.tsx
++++ b/web/src/routes/settings/display.tsx
+@@ -1,5 +1,7 @@
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from '@/lib/use-translation'
++import { CREATABLE_AGENT_FLAVORS, getFlavorLabel } from '@hapi/protocol'
++import { loadCreateAgentVisibility, saveCreateAgentVisibility } from '@/lib/createAgentVisibility'
+ import { getAppearanceOptions, useAppearance } from '@/hooks/useTheme'
+ import { getColorThemeOptions, getColorThemePreview, useColorTheme, type ColorThemePreset } from '@/hooks/useColorTheme'
+ import { getFontScaleOptions, useFontScale } from '@/hooks/useFontScale'
+@@ -139,6 +141,12 @@ export default function SettingsDisplayPage() {
+     const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
+     const { pinInProgressSessions, setPinInProgressSessions } = usePinInProgressSessions()
+     const { preferences: sessionHeaderMetadata, setPreference: setSessionHeaderMetadata } = useSessionHeaderMetadata()
++    const [agentVisibility, setAgentVisibility] = useState(loadCreateAgentVisibility)
++    const setAgentVisible = (agent: typeof CREATABLE_AGENT_FLAVORS[number], visible: boolean) => {
++        const next = { ...agentVisibility, [agent]: visible }
++        setAgentVisibility(next)
++        saveCreateAgentVisibility(next)
++    }
+     const sessionHeaderOptions: ReadonlyArray<{ key: SessionHeaderMetadataKey; labelKey: string }> = [
+         { key: 'showLabels', labelKey: 'settings.display.sessionHeader.showLabels' },
+         { key: 'agent', labelKey: 'settings.display.sessionHeader.agent' },
+@@ -184,6 +192,12 @@ export default function SettingsDisplayPage() {
+                 />
+             </SettingsSection>
+ 
++            <SettingsSection title={t('settings.display.createAgents')} description={t('settings.display.createAgents.description')}>
++                {CREATABLE_AGENT_FLAVORS.map((agent) => (
++                    <SettingsSwitch key={agent} label={getFlavorLabel(agent)} checked={agentVisibility[agent]} onChange={(visible) => setAgentVisible(agent, visible)} />
++                ))}
++            </SettingsSection>
++
+             <SettingsSection title={t('settings.display.sessionHeader')} description={t('settings.display.sessionHeader.description')}>
+                 {sessionHeaderOptions.map((option) => (
+                     <SettingsSwitch
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index 114099b52..03f6d6f28 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -41,7 +41,7 @@ vi.mock('@tanstack/react-router', () => ({
+     useNavigate: () => navigate,
+ }))
+ 
+-vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1 }))
++vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1, CREATABLE_AGENT_FLAVORS: ['claude', 'codex'], getFlavorLabel: (agent: string) => agent }))
+ 
+ vi.mock('@/hooks/useTheme', () => ({
+     useAppearance: () => ({ appearance: 'system', setAppearance }),
+@@ -266,6 +266,20 @@ describe('responsive settings pages', () => {
+         expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+     })
+ 
++    it('persists Create agent visibility across remounts', () => {
++        const first = renderPage(<SettingsDisplayPage />)
++        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
++        expect(screen.getByRole('checkbox', { name: 'codex' })).toBeChecked()
++
++        fireEvent.click(screen.getByRole('checkbox', { name: 'codex' }))
++        expect(JSON.parse(localStorage.getItem('hapi:newSession:agentVisibility:v1') ?? '{}')).toEqual({ claude: true, codex: false })
++        first.unmount()
++
++        renderPage(<SettingsDisplayPage />)
++        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
++        expect(screen.getByRole('checkbox', { name: 'codex' })).not.toBeChecked()
++    })
++
+     it('keeps the session status description visible with its choice group', () => {
+         renderPage(<SettingsDisplayPage />)
+ 

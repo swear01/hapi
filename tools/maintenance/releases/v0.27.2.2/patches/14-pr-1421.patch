@@ -1,0 +1,274 @@
+diff --git a/web/src/components/NewSession/index.test.tsx b/web/src/components/NewSession/index.test.tsx
+index c8ab6ed27..e6dbb3f0e 100644
+--- a/web/src/components/NewSession/index.test.tsx
++++ b/web/src/components/NewSession/index.test.tsx
+@@ -397,7 +397,11 @@ describe('NewSession launch preferences', () => {
+             model: 'gpt-5.6-terra',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'max'
++            modelReasoningEffort: 'max',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+     })
+ 
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index f73b17e26..c5ebf93ab 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -677,6 +677,10 @@ export function NewSession(props: {
+         setCursorSelectedBase(preferred.cursorSelectedBase)
+         setEffort(preferred.effort)
+         setModelReasoningEffort(preferred.modelReasoningEffort)
++        setServiceTier(preferred.serviceTier)
++        setCollaborationMode(preferred.collaborationMode)
++        setGrokPermissionMode(preferred.grokPermissionMode)
++        setSessionType(preferred.sessionType)
+         setOpencodeSelectedModel(
+             agent === 'opencode' && preferred.model !== 'auto' ? preferred.model : null
+         )
+@@ -1327,7 +1331,11 @@ export function NewSession(props: {
+                         : model,
+                 cursorSelectedBase,
+                 effort,
+-                modelReasoningEffort
++                modelReasoningEffort,
++                serviceTier,
++                collaborationMode,
++                grokPermissionMode,
++                sessionType
+             }
+             const resolvedServiceTier = agent === 'codex' && showCodexFastMode
+                 ? serviceTier
+diff --git a/web/src/components/NewSession/preferences.test.ts b/web/src/components/NewSession/preferences.test.ts
+index c85651401..f85cf7272 100644
+--- a/web/src/components/NewSession/preferences.test.ts
++++ b/web/src/components/NewSession/preferences.test.ts
+@@ -46,38 +46,62 @@ describe('NewSession preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            serviceTier: 'fast',
++            collaborationMode: 'plan',
++            grokPermissionMode: 'default',
++            sessionType: 'worktree'
+         })
+         savePreferredLaunchSettings('machine-1', 'claude', {
+             model: 'opus',
+             cursorSelectedBase: 'auto',
+             effort: 'high',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+         savePreferredLaunchSettings('machine-2', 'codex', {
+             model: 'gpt-5.6-terra',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'max'
++            modelReasoningEffort: 'max',
++            serviceTier: 'fast',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+ 
+         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toEqual({
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            serviceTier: 'fast',
++            collaborationMode: 'plan',
++            grokPermissionMode: 'default',
++            sessionType: 'worktree'
+         })
+         expect(loadPreferredLaunchSettings('machine-1', 'claude')).toEqual({
+             model: 'opus',
+             cursorSelectedBase: 'auto',
+             effort: 'high',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+         expect(loadPreferredLaunchSettings('machine-2', 'codex')).toEqual({
+             model: 'gpt-5.6-terra',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'max'
++            modelReasoningEffort: 'max',
++            serviceTier: 'fast',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+     })
+ 
+@@ -103,7 +127,11 @@ describe('NewSession preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+     })
+ 
+@@ -126,12 +154,20 @@ describe('NewSession preferences', () => {
+             model: 'retired-model',
+             cursorSelectedBase: 'auto',
+             effort: 'ultra',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })).toEqual({
+             model: 'auto',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+     })
+ 
+@@ -140,12 +176,20 @@ describe('NewSession preferences', () => {
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            serviceTier: 'fast',
++            collaborationMode: 'plan',
++            grokPermissionMode: 'default',
++            sessionType: 'worktree'
+         })).toEqual({
+             model: 'gpt-5.6-sol',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            serviceTier: 'fast',
++            collaborationMode: 'plan',
++            grokPermissionMode: 'default',
++            sessionType: 'worktree'
+         })
+     })
+ 
+@@ -154,12 +198,20 @@ describe('NewSession preferences', () => {
+             model: 'provider/model',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'xhigh'
++            modelReasoningEffort: 'xhigh',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })).toEqual({
+             model: 'provider/model',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+-            modelReasoningEffort: 'default'
++            modelReasoningEffort: 'default',
++            serviceTier: 'standard',
++            collaborationMode: 'default',
++            grokPermissionMode: 'default',
++            sessionType: 'simple'
+         })
+     })
+ })
+diff --git a/web/src/components/NewSession/preferences.ts b/web/src/components/NewSession/preferences.ts
+index 1ba077274..15a849635 100644
+--- a/web/src/components/NewSession/preferences.ts
++++ b/web/src/components/NewSession/preferences.ts
+@@ -1,11 +1,18 @@
+-import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
++import {
++    CREATABLE_AGENT_FLAVORS,
++    GROK_PERMISSION_MODES,
++    type CodexCollaborationMode,
++    type GrokPermissionMode
++} from '@hapi/protocol'
+ import {
+     CLAUDE_EFFORT_OPTIONS,
+     CODEX_REASONING_EFFORT_OPTIONS,
+     MODEL_OPTIONS,
+     type AgentType,
+     type CodexReasoningEffort,
+-    type LaunchEffort
++    type LaunchEffort,
++    type NewSessionServiceTier,
++    type SessionType
+ } from './types'
+ 
+ const AGENT_STORAGE_KEY = 'hapi:newSession:agent'
+@@ -17,6 +24,10 @@ export type PreferredLaunchSettings = {
+     cursorSelectedBase: string
+     effort: LaunchEffort
+     modelReasoningEffort: CodexReasoningEffort
++    serviceTier?: NewSessionServiceTier
++    collaborationMode?: CodexCollaborationMode
++    grokPermissionMode?: GrokPermissionMode
++    sessionType?: SessionType
+ }
+ 
+ // Only launchable flavors are valid defaults; a stale 'gemini' preference
+@@ -84,7 +95,13 @@ export function loadPreferredLaunchSettings(
+             effort: typeof parsed.effort === 'string' ? parsed.effort : 'auto',
+             modelReasoningEffort: typeof parsed.modelReasoningEffort === 'string'
+                 ? parsed.modelReasoningEffort
+-                : 'default'
++                : 'default',
++            serviceTier: parsed.serviceTier === 'fast' ? 'fast' : 'standard',
++            collaborationMode: parsed.collaborationMode === 'plan' ? 'plan' : 'default',
++            grokPermissionMode: (GROK_PERMISSION_MODES as readonly string[]).includes(parsed.grokPermissionMode ?? '')
++                ? (parsed.grokPermissionMode as GrokPermissionMode)
++                : 'default',
++            sessionType: parsed.sessionType === 'worktree' ? 'worktree' : 'simple'
+         }
+     } catch {
+         return null
+@@ -117,7 +134,7 @@ function resolvePreferredOptionValue(
+ export function resolvePreferredLaunchSettings(
+     agent: AgentType,
+     preferred: PreferredLaunchSettings | null
+-): PreferredLaunchSettings {
++): Required<PreferredLaunchSettings> {
+     const preferredModel = preferred?.model ?? 'auto'
+     const staticModelValues = MODEL_OPTIONS[agent].map((option) => option.value)
+     const model = staticModelValues.length > 0 && agent !== 'codex' && agent !== 'copilot'
+@@ -144,6 +161,12 @@ export function resolvePreferredLaunchSettings(
+         model,
+         cursorSelectedBase: preferred?.cursorSelectedBase ?? 'auto',
+         effort,
+-        modelReasoningEffort
++        modelReasoningEffort,
++        serviceTier: preferred?.serviceTier === 'fast' ? 'fast' : 'standard',
++        collaborationMode: preferred?.collaborationMode === 'plan' ? 'plan' : 'default',
++        grokPermissionMode: (GROK_PERMISSION_MODES as readonly string[]).includes(preferred?.grokPermissionMode ?? '')
++            ? (preferred!.grokPermissionMode as GrokPermissionMode)
++            : 'default',
++        sessionType: preferred?.sessionType === 'worktree' ? 'worktree' : 'simple'
+     }
+ }

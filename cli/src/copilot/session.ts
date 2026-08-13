@@ -103,8 +103,8 @@ export class CopilotSession extends AgentSessionBase<CopilotMode> {
         this.localLaunchFailure = { message, exitReason };
     };
 
-    sendAgentMessage = (message: unknown): void => {
-        this.client.sendAgentMessage(message);
+    sendAgentMessage = (message: unknown, createdAt?: number, positionAt?: number): void => {
+        this.client.sendAgentMessage(message, createdAt, positionAt);
     };
 
     sendUserMessage = (text: string): void => {

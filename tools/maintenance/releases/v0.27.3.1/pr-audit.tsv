@@ -1,0 +1,67 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1530	techotaku39	b5b72457b3184524588008b3492013682db0f5cd	carry	ready	clear	clean	b5b72457b3184524588008b3492013682db0f5cd	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1529	heavygee	7bfdac6394222e4603d1d03b408f3d93ce2f520a	carry	ready	clear	clean	7bfdac6394222e4603d1d03b408f3d93ce2f520a	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1528	7bata	3517c527077d71033ec3782185ca4cf6d280d0f4	defer	merge-unstable	review	review	-	review-large	review	defer: merge-unstable
+pr-1527	7bata	597c28d6bcb5dd2fc8938197d60e5dea9d327821	defer	merge-unstable	review	review	-	review-large	review	defer: merge-unstable
+pr-1525	7bata	85e5ec888140097893bdf30dfe1b101145d2c54e	defer	merge-unstable	review	review	-	review	review	defer: merge-unstable
+pr-1523	techotaku39	8ebecc1a459ca0aa886a51619591312b946d2d97	defer	merge-unstable	review	review	-	review-large	review	defer: merge-unstable
+pr-1517	TimChesko	d6d537ec61fd75574206df5c46effa6fff7f5717	defer	ready	review	review	-	review-large	review	defer: scope requires maintainer acceptance and complete behavior mapping
+pr-1512	techotaku39	2268c6653034ce55fc6aee5909ba3ad1a109558c	defer	ready	review	review	-	review-large	review	defer: scope requires maintainer acceptance and complete behavior mapping
+pr-1511	heavygee	e905d633b9c583b14d4a06bae25d5baea37df701	defer	ready	review	review	-	review-large	review	defer: scope requires maintainer acceptance and complete behavior mapping
+pr-1495	techotaku39	a0de77881531f3df564a42860ddcc992813ff109	carry	ready	clear	clean	a0de77881531f3df564a42860ddcc992813ff109	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1490	techotaku39	df02f89bc3815e5c4fe96156acb82e21757b7b34	carry	ready	clear	clean	df02f89bc3815e5c4fe96156acb82e21757b7b34	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1475	swear01	4591052676fce788a213a44dcc21f0bb256cbfba	carry	merge-dirty	review	findings	4591052676fce788a213a44dcc21f0bb256cbfba	proportional	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=merge-dirty,bot-findings
+pr-1473	heavygee	e819571bd7410575be32c10e0c389fd9e7112d8c	defer	ready	review	review	-	review-huge	review	defer: scope requires maintainer acceptance and complete behavior mapping
+pr-1471	Kryptonzy	bf96cf679f2d568702a509a4ba6ec76f00fd33c0	carry	ready	clear	clean	bf96cf679f2d568702a509a4ba6ec76f00fd33c0	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1469	swear01	c912274f4946d8b6c515aafd750068444c7827e8	carry	ready	review	clean	c912274f4946d8b6c515aafd750068444c7827e8	proportional	accepted-change	owner-authored auto-carry
+pr-1468	swear01	fd2e0775c42463bb122f40b0c7b2c4872a729308	drop	merge-unstable	clear	findings	fd2e0775c42463bb122f40b0c7b2c4872a729308	mismatch	unjustified-change	operator drop: unchanged buggy usage-cost display rejected in v0.27.2.4
+pr-1451	swear01	f489209f15333faf17666cbadfdd6a219a7d6d74	carry	merge-dirty	review	findings	f489209f15333faf17666cbadfdd6a219a7d6d74	proportional	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=merge-dirty,bot-findings
+pr-1447	wu736139669	703c1adef0e967187796d6dcee0a1b0043057c21	carry	ready	clear	clean	703c1adef0e967187796d6dcee0a1b0043057c21	proportional	accepted-change	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1443	wu736139669	75e42cdcfecd633ddeb6663bb1b8e63be9643b18	drop	ready	clear	review	-	mismatch	unjustified-change	drop: superseded by the maintained generic steer/model-error path
+pr-1436	swear01	d2f3f698fcc1c68c5293d6c2fef38b08f531e9f4	carry	ready	review	findings	d2f3f698fcc1c68c5293d6c2fef38b08f531e9f4	proportional	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=bot-findings
+pr-1429	wu736139669	1548315fbc9b48f6b60d68ad957c7151e88d3d12	defer	merge-unstable	review	review	-	review-huge	review	defer: merge-unstable; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-1424	heavygee	eee95c52759d69aea944718abf80074b4fbb6c1b	defer	ready	review	review	-	review-huge	review	defer: scope requires maintainer acceptance and complete behavior mapping; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-1422	techotaku39	5ae02d6caed360298761decc20e1f23db6d880da	carry	ready	clear	clean	5ae02d6caed360298761decc20e1f23db6d880da	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1421	swear01	ed7c7cf5e39907e18aaf34fb86b01f0fd72ddf03	carry	ready	review	findings	ed7c7cf5e39907e18aaf34fb86b01f0fd72ddf03	proportional	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=bot-findings
+pr-1419	swear01	adb0ad029640aeae8dd821d62af7ee790ec95b12	carry	merge-dirty	review	findings	adb0ad029640aeae8dd821d62af7ee790ec95b12	proportional	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=merge-dirty,bot-findings
+pr-1418	swear01	b556e137cf3971b432902b0b88b028715b7337e0	carry	ready	review	findings	b556e137cf3971b432902b0b88b028715b7337e0	proportional	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=bot-findings
+pr-1414	techotaku39	c6717383c1640dc9d683e76fa0497ee5658bd7a0	defer	merge-unstable	review	review	-	review-huge	review	defer: merge-unstable; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-1361	Himehane	6a6d45dfa4ea9b771c3b9219f6332b594743014e	defer	ready	review	review	-	review	review	defer: current-head maintainer/bot/behavior review not fully clear for this release
+pr-1360	wu736139669	7fb80ea97b003a7bd9e07c16a5ccd866718ea6d1	defer	ready	review	review	-	review-huge	review	defer: scope requires maintainer acceptance and complete behavior mapping; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-1351	yin1245	feb70174798df546512ebd9096768c94ddead945	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty
+pr-1309	techotaku39	01a98c4efd4ddcfb0b8278c936ddd346f7e30936	defer	draft	review	review	-	review	review	defer: draft
+pr-1257	hqhq1025	6957978424f74209dca9295699137179282e80ad	defer	ready	review	review	-	review	review	defer: current-head maintainer/bot/behavior review not fully clear for this release
+pr-1242	hqhq1025	2c7a46f98f49a23e638f5188a6960ddc937cade3	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-1212	hqhq1025	93d8678da8535c3a812e166f43961c1c4ff50f92	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty
+pr-1193	mrrnb	999f1d1170d382cc4fd5e5fdf6e0a6ab4a0bf65f	defer	draft	review	review	-	review	review	defer: draft
+pr-1189	tiann	5f949783ad2123d865d758a921681245683f899d	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-1188	tiann	1f23f857e4173a25f969879ef139487ec1c9955e	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-1163	heavygee	71849b493376ae9346b173c4995704d12f4f39b0	defer	draft	review	review	-	review-huge	review	defer: draft
+pr-1158	techotaku39	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	carry	ready	clear	clean	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	proportional	preserve	checks green; current-head HAPI Bot reports no findings; proportional scope; no negative maintainer signal
+pr-1157	techotaku39	b62788b053616a9b2f02b118116a917bec253be9	defer	draft	review	review	-	review	review	defer: draft
+pr-1126	GoldenZqqq	31ce48080df1a62150e9fe7e0a86fde511ef3cc2	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-1099	NPUlrk	91116cd9089107625d95ae2bc99fa615ef87d6a6	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-1093	techotaku39	ee605858e0cfe9546597c3e87d72185ab34e8af3	defer	merge-unstable	review	review	-	review-large	review	defer: merge-unstable; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-1092	zulinliu	4427e6e08b2fed4429c793af2841f7f47fb70bac	defer	merge-dirty	review	review	-	review-huge	review	defer: merge-dirty
+pr-1091	zulinliu	0cf0d70310e9c58c5a41509793260a003822a9b4	defer	merge-dirty	review	review	-	review-huge	review	defer: merge-dirty; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-1059	Arnie97	37deeeba5263ceb402429c069e911eac96eb406e	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-1054	DullJZ	9cbe9b1fa24edec152bb610e0b1049930c723432	defer	merge-unstable	review	review	-	review	review	defer: merge-unstable
+pr-987	heavygee	30a92beaf04227029f9c470afe1fea20e0bd5eaf	defer	ready	review	review	-	review-huge	review	defer: scope requires maintainer acceptance and complete behavior mapping; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-975	KorenKrita	344c6009b53e20829978e44367fa50b5870986fe	defer	merge-dirty	review	review	-	review-huge	review	defer: merge-dirty
+pr-955	swear01	f6a624251cb125182965dc343351c362035d071a	carry	merge-unstable	review	findings	f6a624251cb125182965dc343351c362035d071a	review-large	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=merge-unstable,bot-findings,review-large
+pr-945	heavygee	41d772c1998872cbcd468aee7ec2fa12a3833eae	defer	ready	review	review	-	review-huge	review	defer: scope requires maintainer acceptance and complete behavior mapping
+pr-942	dzshzx	f1f93474f042381818f0d605b1d64b3fb42cb02b	defer	merge-dirty	review	review	-	review-huge	review	defer: merge-dirty
+pr-906	swear01	d652eafdb885d5b2e09ff76461564f3f316b78e1	carry	merge-dirty	review	findings	d652eafdb885d5b2e09ff76461564f3f316b78e1	review-huge	accepted-change	owner-authored auto-carry; PERSONAL_PR_POLICY_EXCEPTION=merge-dirty,bot-findings,review-huge
+pr-847	heavygee	939a9d1e61853e6b3720852f7d902575a94fb8f2	defer	ready	review	review	-	review-huge	review	defer: scope requires maintainer acceptance and complete behavior mapping; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-769	junxin367	60c11607ce3bba734f38b6fcf87be07b32298683	defer	merge-dirty	review	review	-	review-huge	review	defer: merge-dirty; prior v0.27.2.5 resolved overlay remains unchanged under UFR
+pr-663	SpartaGeorge	5dbf6d406a6bb8507dc07598ba2aecc8cd98ee0f	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-658	yrom	f7d8ca3ea0f8ae47245443ce2c0cfec612263e62	defer	ready	review	review	-	review	review	defer: current-head maintainer/bot/behavior review not fully clear for this release
+pr-553	wzxjohn	6e3da463f4fb213afc6a95d3005232e647f39ec6	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty
+pr-536	dsus4wang	1de72788e93c6aae6511a5af8bb05bda631093c0	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty
+pr-535	dsus4wang	abcf3a4bff8b685a70ceeb77008f4f217b43b67c	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-518	duxiaoxiong	72cceea333addd3a8b39948b722750056433d39b	defer	draft	review	review	-	review-huge	review	defer: draft
+pr-490	tehao999	745acf545461ad7f8c615ebd178f3a15df869fb2	defer	draft	review	review	-	review-huge	review	defer: draft
+pr-484	YiwenZhu77	641a01266de65d4944ec5c609a40c717cd41662a	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty
+pr-394	koenzhao	fb5f201ec230e0b7abdc15dcf26483d67a56a1be	defer	merge-dirty	review	review	-	review	review	defer: merge-dirty
+pr-325	MrHeB	c12df55ff52d2544ff40f313b702b24dc0732cf8	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty
+pr-312	just4zeroq	572d489bbd359fe1ca9b4eb96a852804e42e69ac	defer	merge-dirty	review	review	-	review-large	review	defer: merge-dirty

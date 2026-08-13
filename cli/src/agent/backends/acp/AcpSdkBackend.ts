@@ -25,6 +25,7 @@ type AcpPromptUsage = {
 type AcpUsageUpdate = {
     contextTokens: number | undefined;
     contextWindow: number | undefined;
+    tokenUsage: AcpPromptUsage | null;
 };
 
 export type AcpModelDescriptor = {
@@ -78,6 +79,7 @@ export class AcpSdkBackend implements AgentBackend {
     private setModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
     private promptRequestInFlight = false;
+    private activePromptRequests = 0;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -88,8 +90,17 @@ export class AcpSdkBackend implements AgentBackend {
     private agentActivityListener: ((thinking: boolean) => void) | null = null;
     /** Debounce timer for state_update running → thinking (#1502 chatter). */
     private runningThinkingTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Cursor chatters running↔idle ~1–2s; require sustained running before bump. */
+    private static readonly RUNNING_THINKING_DEBOUNCE_MS = 750;
+    private clearRunningThinkingTimer(): void {
+        if (this.runningThinkingTimer) {
+            clearTimeout(this.runningThinkingTimer);
+            this.runningThinkingTimer = null;
+        }
+    }
     private lastForwardedUsageUpdate: AcpUsageUpdate | null = null;
     private sessionUpdateQueue: Promise<void> = Promise.resolve();
+    private betweenTurnDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
     /** Retry configuration for ACP initialization */
     private static readonly INIT_RETRY_OPTIONS = {
@@ -102,8 +113,6 @@ export class AcpSdkBackend implements AgentBackend {
     private static readonly PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 200;
     private static readonly PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 1200;
     private static readonly SESSION_TITLE_REFRESH_DELAYS_MS = [1000, 3000];
-    /** Cursor chatters running↔idle ~1–2s; require sustained running before bump. */
-    private static readonly RUNNING_THINKING_DEBOUNCE_MS = 750;
     // After the initial post-prompt drain, slow-tailing models (DeepSeek,
     // GPT-5.5, etc.) can keep sending agentMessageChunk notifications. We poll
     // drainBuffers() on a short interval so the UI keeps streaming smoothly,
@@ -123,6 +132,14 @@ export class AcpSdkBackend implements AgentBackend {
     private static readonly LATE_FLUSH_INTERVAL_MS = 50;
     private static readonly LATE_FLUSH_QUIET_PERIOD_MS = 250;
     private static readonly LATE_FLUSH_WINDOW_MS = 6000;
+    // A slow-tailing model can emit the final answer text after drainLateBuffers
+    // gave up (its reasoning→answer pause exceeded LATE_FLUSH_QUIET_PERIOD_MS).
+    // Nothing drains the previous turn's handler until the next prompt()
+    // pre-swap drain, so on the web the reply only appeared after the user sent
+    // another message. Debounce-flush on between-turn updates so stragglers
+    // stream to the previous turn's onUpdate promptly; 200ms coalesces a burst
+    // into one segment (preserving the delta-mode internal-event filter).
+    private static readonly BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 200;
 
     constructor(private readonly options: {
         command: string;
@@ -471,10 +488,10 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
-     * Called when ACP reports foreground state / permission for harness wake (#1470 / #1502).
-     * `true` = sustained `running` (debounced), `requires_action`, or permission.
-     * `false` = `state_update` idle (skipped while a HAPI prompt turn is still draining).
-     * Launchers should ignore no-ops when session.thinking already matches.
+     * Called when ACP reports thinking transitions for harness wake (#1470).
+     * `true` = activity / running / permission; `false` = state_update idle.
+     * Usage/title noise does not fire. Launchers should ignore no-ops when
+     * session.thinking already matches.
      */
     setAgentActivityListener(listener: ((thinking: boolean) => void) | null): void {
         this.agentActivityListener = listener;
@@ -551,19 +568,58 @@ export class AcpSdkBackend implements AgentBackend {
             AcpSdkBackend.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS,
             AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
         );
-        await this.sessionUpdateQueue;
-        this.messageHandler?.drainBuffers();
+        // Bounded by the same pre-prompt drain timeout so a sustained async
+        // update stream cannot wedge prompt() before the handler swap.
+        const previousHandler = this.messageHandler;
+        const queueSettled = await this.waitForQueueSettled(
+            AcpSdkBackend.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS
+        );
+        if (queueSettled) {
+            // Normal path: the queue stabilized, so every update captured
+            // against the previous handler has run. Drain it directly.
+            previousHandler?.drainBuffers();
+        } else {
+            // Deadline path: the queue is still being replaced, and
+            // handleSessionUpdate captured previousHandler at enqueue time —
+            // its pending callbacks keep writing into it even after the swap
+            // below. Draining now would emit a partial buffer (splitting a
+            // fragmented delta-mode internal envelope) and the later writes
+            // would still be orphaned. Instead chain a terminal drain after
+            // every callback that captured previousHandler: the swap below is
+            // synchronous, so no new old-handler capture can slip in, and any
+            // update after the swap captures the new handler and chains after
+            // this drain. Order: old callbacks → drain old handler → new
+            // callbacks. Nothing is stranded, nothing is split, prompt() is
+            // not wedged (the settle deadline already elapsed).
+            this.sessionUpdateQueue = this.sessionUpdateQueue
+                .then(() => {
+                    previousHandler?.drainBuffers();
+                })
+                .catch((error) => {
+                    logger.debug(
+                        '[AcpSdkBackend] pre-swap stale handler drain failed:',
+                        error instanceof Error ? error.message : String(error)
+                    );
+                });
+        }
         this.messageHandler = new AcpMessageHandler(onUpdate, {
             textChunkMode: this.options.textChunkMode,
             flavor: this.options.flavor,
         });
-        this.isProcessingMessage = true;
+        this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
         this.promptUsageCallback = onUpdate;
         let stopReason: string | null = null;
         let promptUsage: AcpPromptUsage | null = null;
+        // Set when the final queue-settle wait expires with the queue still
+        // being replaced: draining as if stable would emit turn_complete
+        // while updates enqueued during the prompt (which skipped the
+        // between-turn timer) are still pending. The between-turn drain is
+        // re-armed once the turn clears so the abandoned tail still reaches
+        // this turn's onUpdate instead of stranding until the next prompt.
+        let needsBetweenTurnDrain = false;
 
         try {
             // No timeout for prompt requests - they can run for extended periods
@@ -587,7 +643,10 @@ export class AcpSdkBackend implements AgentBackend {
                 AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
             );
             await this.sessionUpdateQueue;
-            this.messageHandler?.drainBuffers();
+            // Artificial drain: emit the text suffix since the last drain but
+            // keep the cumulative dedupe snapshot as the baseline — a later
+            // straggler snapshot then grows from it instead of re-emitting.
+            this.messageHandler?.drainBuffers({ preserveTextBaseline: true });
             // Block here until the model truly stops streaming straggler
             // chunks (or LATE_FLUSH_WINDOW_MS elapses), so turn_complete and
             // the launcher's ready signal only fire once every chunk has been
@@ -595,33 +654,53 @@ export class AcpSdkBackend implements AgentBackend {
             await this.drainLateBuffers();
             // Late window can enqueue async image registration; drain again
             // before turn_complete so generated_image precedes turn boundary.
-            await this.sessionUpdateQueue;
-            this.messageHandler?.drainBuffers();
+            // waitForQueueSettled() (not a bare queue await) because an update
+            // arriving while this awaits sees isProcessingMessage === true and
+            // scheduleBetweenTurnDrain() returns without re-arming its timer —
+            // a stale-snapshot drain here would strand the late content until
+            // the next prompt.
+            const queueSettled = await this.waitForQueueSettled(AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS);
+            if (queueSettled) {
+                // Artificial drain (see the comment at the earlier drainBuffers
+                // call): keep the cumulative dedupe snapshot as the baseline so a
+                // straggler arriving after turn_complete grows from it instead of
+                // re-emitting the full snapshot.
+                this.messageHandler?.drainBuffers({ preserveTextBaseline: true });
+            } else {
+                // The settle deadline expired with the queue still being
+                // replaced — updates enqueued during the prompt skipped the
+                // between-turn timer, so draining now would emit turn_complete
+                // with the abandoned tail still buffered. Defer to the
+                // between-turn drain re-armed once the turn clears.
+                needsBetweenTurnDrain = true;
+            }
             try {
                 const latestUsageUpdate = this.readLatestUsageUpdate();
-                if (promptUsage) {
+                const finalPromptUsage = promptUsage ?? latestUsageUpdate?.tokenUsage ?? null;
+                if (finalPromptUsage) {
                     onUpdate({
                         type: 'usage',
-                        inputTokens: promptUsage.inputTokens,
-                        outputTokens: promptUsage.outputTokens,
-                        totalTokens: promptUsage.totalTokens,
-                        thoughtTokens: promptUsage.thoughtTokens,
-                        cacheReadTokens: promptUsage.cacheReadTokens,
-                        ...(promptUsage.cacheCreationTokens !== undefined
-                            ? { cacheCreationTokens: promptUsage.cacheCreationTokens }
+                        inputTokens: finalPromptUsage.inputTokens,
+                        outputTokens: finalPromptUsage.outputTokens,
+                        totalTokens: finalPromptUsage.totalTokens,
+                        thoughtTokens: finalPromptUsage.thoughtTokens,
+                        cacheReadTokens: finalPromptUsage.cacheReadTokens,
+                        ...(finalPromptUsage.cacheCreationTokens !== undefined
+                            ? { cacheCreationTokens: finalPromptUsage.cacheCreationTokens }
                             : {}),
                         contextTokens: latestUsageUpdate ? latestUsageUpdate.contextTokens : undefined,
                         contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined
                     });
                 } else if (
                     latestUsageUpdate
-                    && (latestUsageUpdate.contextTokens !== undefined || latestUsageUpdate.contextWindow !== undefined)
+                    && (latestUsageUpdate.contextTokens !== undefined
+                        || latestUsageUpdate.contextWindow !== undefined)
                     && !this.hasForwardedUsage(latestUsageUpdate)
                 ) {
                     // Agent did not return prompt usage (slash-handled turns,
                     // errored turns), but we did see ACP usage updates during
                     // the turn. Emit a context-only usage so the status bar
-                    // reflects the current context size.
+                    // reflects the current context size and cumulative cost.
                     onUpdate({
                         type: 'usage',
                         inputTokens: 0,
@@ -635,8 +714,10 @@ export class AcpSdkBackend implements AgentBackend {
                 }
             } finally {
                 this.promptUsageCallback = null;
-                this.isProcessingMessage = false;
-                this.notifyResponseComplete();
+                this.finishPromptRequest();
+                if (needsBetweenTurnDrain) {
+                    this.scheduleBetweenTurnDrain();
+                }
             }
         }
     }
@@ -647,6 +728,83 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         this.transport.sendNotification('session/cancel', { sessionId });
+    }
+
+    /**
+     * Soft-inject a follow-up `session/prompt` while another prompt is in flight.
+     *
+     * Used for Cursor mid-turn steer (GUI "Send" / next-opportune soft send).
+     * Does **not** cancel the active prompt and does **not** swap message handlers —
+     * `session/update` notifications keep flowing to the in-flight turn's handler.
+     *
+     * Awaits the full concurrent `session/prompt` JSON-RPC response (turn completion
+     * for that inject). Do **not** call this from the hub `SteerQueuedMessage` handler —
+     * that RPC uses a 30s Socket.IO timeout. Use {@link beginSoftSteerPrompt} there.
+     */
+    async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        this.beginPromptRequest();
+        try {
+            await this.transport.sendRequest('session/prompt', {
+                sessionId,
+                prompt: content
+            }, { timeoutMs: Infinity });
+        } finally {
+            this.finishPromptRequest();
+        }
+    }
+
+    /**
+     * Kick off a soft steer without blocking the hub RPC on turn completion.
+     * Separates transport dispatch from prompt completion so callers can commit
+     * queue state only after stdin accepted the request without waiting for the turn.
+     */
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): {
+        dispatched: Promise<void>;
+        completed: Promise<void>;
+    } {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (!this.isProcessingMessage) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        const transport = this.transport;
+        this.beginPromptRequest();
+        const request = transport.sendRequestWithDispatch('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+        const completed = (async () => {
+            try {
+                await request.completed;
+            } finally {
+                try {
+                    await this.waitForSessionUpdateQuiet(
+                        AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
+                        AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
+                    );
+                    this.messageHandler?.drainBuffers();
+                    await this.drainLateBuffers();
+                    this.messageHandler?.drainBuffers();
+                } finally {
+                    this.finishPromptRequest();
+                }
+            }
+        })();
+
+        void completed.catch((error) => {
+            logger.warn('[ACP] soft-steer session/prompt failed', error);
+        });
+
+        return { dispatched: request.dispatched, completed };
     }
 
     async respondToPermission(
@@ -741,6 +899,13 @@ export class AcpSdkBackend implements AgentBackend {
             );
             if (this.messageHandler === null) {
                 this.messageHandler = previousHandler;
+                // A between-turn drain armed before suppression could have
+                // fired while messageHandler was null, where
+                // runBetweenTurnDrain's guards all pass but the drain itself
+                // no-ops on the null handler (and the timer is consumed).
+                // Re-arm so content buffered before suppression still flushes
+                // via the previous turn's onUpdate.
+                this.scheduleBetweenTurnDrain();
             }
         }
     }
@@ -750,7 +915,7 @@ export class AcpSdkBackend implements AgentBackend {
      * Useful for checking if it's safe to perform session operations.
      */
     get processingMessage(): boolean {
-        return this.isProcessingMessage;
+        return this.activePromptRequests > 0;
     }
 
     isPromptRequestInFlight(): boolean {
@@ -768,7 +933,7 @@ export class AcpSdkBackend implements AgentBackend {
      * like session swap or sending task_complete.
      */
     async waitForResponseComplete(): Promise<void> {
-        if (!this.isProcessingMessage) {
+        if (this.activePromptRequests === 0) {
             return;
         }
         return new Promise<void>((resolve) => {
@@ -782,11 +947,15 @@ export class AcpSdkBackend implements AgentBackend {
             clearTimeout(timer);
         }
         this.sessionInfoRefreshTimers.clear();
-        this.clearRunningThinkingTimer();
+        if (this.betweenTurnDrainTimer) {
+            clearTimeout(this.betweenTurnDrainTimer);
+            this.betweenTurnDrainTimer = null;
+        }
         await this.sessionUpdateQueue;
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
+        this.activePromptRequests = 0;
         this.isProcessingMessage = false;
         this.sessionModelsMetadata.clear();
         this.initialAvailableCommands.clear();
@@ -828,6 +997,7 @@ export class AcpSdkBackend implements AgentBackend {
                     error instanceof Error ? error.message : String(error)
                 );
             });
+        this.scheduleBetweenTurnDrain();
     }
 
     private notifyAgentActivity(update: unknown): void {
@@ -869,13 +1039,6 @@ export class AcpSdkBackend implements AgentBackend {
         this.agentActivityListener(true);
     }
 
-    private clearRunningThinkingTimer(): void {
-        if (this.runningThinkingTimer) {
-            clearTimeout(this.runningThinkingTimer);
-            this.runningThinkingTimer = null;
-        }
-    }
-
     private forwardSessionInfoUpdate(sessionId: string | null, update: unknown): void {
         if (!isObject(update) || update.sessionUpdate !== ACP_SESSION_UPDATE_TYPES.sessionInfoUpdate) {
             return;
@@ -892,6 +1055,9 @@ export class AcpSdkBackend implements AgentBackend {
         const sessionUpdate = asString(update.sessionUpdate);
         let contextTokens: number | null = null;
         let contextWindow: number | null = null;
+        const tokenUsage = sessionUpdate === ACP_SESSION_UPDATE_TYPES.stateUpdate
+            ? this.extractUsage(update.usage)
+            : null;
 
         if (sessionUpdate === ACP_SESSION_UPDATE_TYPES.usageUpdate) {
             contextTokens = this.asFiniteNumber(update.used);
@@ -909,13 +1075,15 @@ export class AcpSdkBackend implements AgentBackend {
                 ?? update.context_window
                 ?? update.contextLimit
             );
-        } else {
+        } else if (sessionUpdate !== ACP_SESSION_UPDATE_TYPES.stateUpdate) {
             return;
         }
 
+        const previous = this.latestUsageUpdate
         this.latestUsageUpdate = {
-            contextTokens: contextTokens ?? undefined,
-            contextWindow: contextWindow ?? undefined
+            contextTokens: contextTokens ?? previous?.contextTokens,
+            contextWindow: contextWindow ?? previous?.contextWindow,
+            tokenUsage: tokenUsage ?? previous?.tokenUsage ?? null
         };
         this.forwardUsageUpdate();
     }
@@ -988,7 +1156,108 @@ export class AcpSdkBackend implements AgentBackend {
             const remainingBudget = deadline - Date.now();
             const waitMs = Math.max(1, Math.min(AcpSdkBackend.LATE_FLUSH_INTERVAL_MS, remainingBudget));
             await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
-            this.messageHandler?.drainBuffers();
+            // Artificial drain: emit the suffix since the last poll but keep
+            // the cumulative dedupe snapshot as the baseline for the next
+            // poll, so a growing snapshot streams as suffixes instead of
+            // re-emitting its full text every tick.
+            this.messageHandler?.drainBuffers({ preserveTextBaseline: true });
+        }
+    }
+
+    /**
+     * Flushes text buffered in the previous turn's handler when a session
+     * update arrives while no prompt() is active. drainLateBuffers() exits
+     * once the model is quiet for LATE_FLUSH_QUIET_PERIOD_MS; a slow-tailing
+     * model (e.g. DeepSeek V4 Flash) can pause longer than that between its
+     * reasoning phase and the answer text, so the final chunks can arrive
+     * after the turn resolved. Without this they sit in the handler until the
+     * next prompt() pre-swap drain — the web only shows the reply after the
+     * user sends another message.
+     *
+     * Debounced so a straggler burst coalesces into a single segment;
+     * per-chunk flushing would break the delta-mode internal-event envelope
+     * detection (see AcpMessageHandler.flushText).
+     */
+    private scheduleBetweenTurnDrain(): void {
+        if (this.isProcessingMessage || this.promptRequestInFlight) {
+            return;
+        }
+        if (!this.messageHandler) {
+            return;
+        }
+        // True debounce: every update resets the deadline. A throttled
+        // deadline (first update wins) could fire mid-envelope — the first
+        // fragment of a fragmented delta-mode internal event would then be
+        // flushed alone, fail the reassembly-only isInternalEventJson filter,
+        // and leak as visible session metadata.
+        if (this.betweenTurnDrainTimer) {
+            clearTimeout(this.betweenTurnDrainTimer);
+        }
+        this.betweenTurnDrainTimer = setTimeout(() => {
+            this.betweenTurnDrainTimer = null;
+            void this.runBetweenTurnDrain();
+        }, AcpSdkBackend.BETWEEN_TURN_DRAIN_DEBOUNCE_MS);
+        this.betweenTurnDrainTimer.unref();
+    }
+
+    private async runBetweenTurnDrain(): Promise<void> {
+        if (this.isProcessingMessage || this.promptRequestInFlight) {
+            return;
+        }
+        const queuedUpdates = this.sessionUpdateQueue;
+        await queuedUpdates;
+        // A later update replaced the queue while we waited. It also reset
+        // the debounce timer, so its own drain will flush the newer content.
+        // Draining now would flush a stale buffer snapshot and could split a
+        // fragmented delta-mode internal envelope (first fragment leaks as
+        // visible text).
+        if (queuedUpdates !== this.sessionUpdateQueue) {
+            return;
+        }
+        if (this.isProcessingMessage || this.promptRequestInFlight) {
+            return;
+        }
+        // Artificial drain: this is the previous turn's handler and more
+        // cumulative snapshots may still arrive, so keep the snapshot as the
+        // dedupe baseline and emit only the suffix since the last drain.
+        this.messageHandler?.drainBuffers({ preserveTextBaseline: true });
+    }
+
+    /**
+     * Awaits the session-update queue until it is stable — no update
+     * replaced it while we were awaiting. prompt()'s pre-swap drain must
+     * then see every update that was enqueued: the handler is swapped
+     * immediately after, so a straggler that replaced the queue mid-await
+     * would otherwise be flushed against a stale snapshot (splitting a
+     * fragmented delta-mode internal envelope) or stranded in the old
+     * handler entirely.
+     *
+     * Unlike runBetweenTurnDrain(), this cannot defer to the newer update's
+     * own debounced drain — the pre-swap drain is a required step — so it
+     * loops until the queue reference stops changing or the timeout elapses.
+     * The preceding waitForSessionUpdateQuiet() ensures the model is quiet,
+     * so this loop exits quickly in practice; the deadline bounds the
+     * pathological case of a sustained async update stream (every
+     * handleSessionUpdate replaces the queue) that would otherwise keep the
+     * loop alive forever and wedge prompt() past turn_complete.
+     *
+     * Returns true when the queue settled normally. Returns false only when
+     * the deadline elapsed with the queue still being replaced — the caller
+     * must then treat the pending tail as abandoned rather than drain as if
+     * the queue were stable.
+     */
+    private async waitForQueueSettled(timeoutMs: number): Promise<boolean> {
+        const deadline = Date.now() + timeoutMs;
+        let queuedUpdates = this.sessionUpdateQueue;
+        while (true) {
+            await queuedUpdates;
+            if (queuedUpdates === this.sessionUpdateQueue) {
+                return true;
+            }
+            if (Date.now() >= deadline) {
+                return false;
+            }
+            queuedUpdates = this.sessionUpdateQueue;
         }
     }
 
@@ -1067,6 +1336,19 @@ export class AcpSdkBackend implements AgentBackend {
         return await responsePromise;
     }
 
+    private beginPromptRequest(): void {
+        this.activePromptRequests++;
+        this.isProcessingMessage = true;
+    }
+
+    private finishPromptRequest(): void {
+        this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
+        this.isProcessingMessage = this.activePromptRequests > 0;
+        if (!this.isProcessingMessage) {
+            this.notifyResponseComplete();
+        }
+    }
+
     private notifyResponseComplete(): void {
         const resolvers = this.responseCompleteResolvers;
         this.responseCompleteResolvers = [];
@@ -1105,8 +1387,13 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     private extractPromptUsage(response: unknown): AcpPromptUsage | null {
-        if (!isObject(response) || !isObject(response.usage)) return null;
-        const usage = response.usage;
+        return isObject(response) ? this.extractUsage(response.usage) : null;
+    }
+
+
+    private extractUsage(value: unknown): AcpPromptUsage | null {
+        if (!isObject(value)) return null;
+        const usage = value;
         const inputTokens = this.asFiniteNumber(usage.inputTokens ?? usage.input_tokens);
         const outputTokens = this.asFiniteNumber(usage.outputTokens ?? usage.output_tokens);
         if (inputTokens === null || outputTokens === null) return null;
