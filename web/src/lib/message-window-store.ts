@@ -933,12 +933,15 @@ export async function fetchOlderMessages(
         isLoadingMore: true,
         warning: null
     }))
-    if (installBoundary) {
-        // Install the boundary at REQUEST START, not when the response
-        // applies: while the request is in flight, SSE ingests keep trimming
-        // the tail and could evict the exclusive `before` cursor row (the
-        // window's oldest). Applying the older page afterwards would leave a
-        // permanent unreachable gap between the page and the trimmed window.
+    // Install the boundary at REQUEST START, not when the response applies:
+    // while the request is in flight, SSE ingests keep trimming the tail and
+    // could evict the exclusive `before` cursor row (the window's oldest).
+    // Applying the older page afterwards would leave a permanent unreachable
+    // gap between the page and the trimmed window. Track when WE installed it
+    // (no pre-existing boundary) so the rejection/error exits can restore the
+    // bounded window if the load never completes.
+    const installedProvisionalBoundary = installBoundary && initial.historyBoundaryAt === null
+    if (installedProvisionalBoundary) {
         updateState(sessionId, (previous) => {
             if (previous.olderGeneration !== generation) return previous
             return buildState(previous, {
@@ -988,7 +991,12 @@ export async function fetchOlderMessages(
                 return buildState(previous, {
                     olderGeneration: previous.olderGeneration + 1,
                     isLoadingMore: false,
-                    warning: null
+                    warning: null,
+                    // A rejected apply never delivers the loaded page; restore
+                    // the bounded window if we provisionally installed the
+                    // boundary for this request.
+                    historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
+                    historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq
                 })
             }
             const installBoundaryNow = options.shouldInstallBoundary?.() === true
@@ -1046,7 +1054,11 @@ export async function fetchOlderMessages(
             if (previous.olderGeneration !== generation) return previous
             return buildState(previous, {
                 isLoadingMore: false,
-                warning: loadError.message
+                warning: loadError.message,
+                // A failed request never delivers the loaded page; restore the
+                // bounded window if we provisionally installed the boundary.
+                historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
+                historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq
             })
         })
         return { kind: 'failed', error: loadError }

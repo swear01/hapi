@@ -1459,6 +1459,47 @@ describe('history view and older pagination', () => {
         expect(state.oldestSeq).toBe(1)
     })
 
+    // Regression: a provisional boundary installed for an in-flight outline
+    // load must be removed when the load fails — otherwise the outline stays
+    // open on a running session, every SSE message takes the no-trim branch,
+    // and the window grows without limit.
+    it('clears a provisional boundary when the outline load fails', async () => {
+        const id = sessionId('outline-failed-boundary-clear')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                throw new Error('fixture: forced before-page failure')
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+
+        const outcome = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        expect(outcome.kind).toBe('failed')
+
+        // The provisional boundary is gone: streaming ingests trim back to
+        // the tail cap instead of taking the no-trim branch.
+        for (let seq = 601; seq <= 850; seq += 1) {
+            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
+        }
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
+        expect(state.messages.at(-1)!.seq).toBe(850)
+        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>
