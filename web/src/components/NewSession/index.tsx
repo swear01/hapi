@@ -1727,7 +1727,7 @@ export function NewSession(props: {
                 agent={agent}
                 nativeValue={agent === 'grok' ? grokPermissionMode : codexFamilyPermissionMode}
                 yoloMode={yoloMode}
-                autoPermissionModeSupported={grokModelsState.autoPermissionModeSupported}
+                autoPermissionModeSupported={agent === 'grok' ? grokModelsState.autoPermissionModeSupported : null}
                 isDisabled={isFormDisabled}
                 onNativeChange={(mode) => {
                     if (agent === 'grok') {
