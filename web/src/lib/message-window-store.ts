@@ -915,6 +915,7 @@ export async function fetchOlderMessages(
         shouldInstallBoundary?: () => boolean
     } = {}
 ): Promise<OlderLoadOutcome> {
+    const installBoundary = options.shouldInstallBoundary?.() === true
     const initial = getState(sessionId)
     const before = readPosition(initial.oldestPositionAt, initial.oldestPositionSeq)
     if (initial.isSyncingTail || initial.isLoadingMore) {
@@ -932,6 +933,20 @@ export async function fetchOlderMessages(
         isLoadingMore: true,
         warning: null
     }))
+    if (installBoundary) {
+        // Install the boundary at REQUEST START, not when the response
+        // applies: while the request is in flight, SSE ingests keep trimming
+        // the tail and could evict the exclusive `before` cursor row (the
+        // window's oldest). Applying the older page afterwards would leave a
+        // permanent unreachable gap between the page and the trimmed window.
+        updateState(sessionId, (previous) => {
+            if (previous.olderGeneration !== generation) return previous
+            return buildState(previous, {
+                historyBoundaryAt: before.at,
+                historyBoundarySeq: before.seq
+            })
+        })
+    }
 
     try {
         const response = await api.getMessages(sessionId, {
@@ -976,15 +991,15 @@ export async function fetchOlderMessages(
                     warning: null
                 })
             }
-            const installBoundary = options.shouldInstallBoundary?.() === true
+            const installBoundaryNow = options.shouldInstallBoundary?.() === true
             const merged = mergeIntoWindow(previous, response.messages, {
                 // In history mode keep the oldest side (the loaded pages the
                 // user is browsing); in tail mode keep the whole window while
                 // the history boundary is held so the live tail keeps streaming.
                 mode: previous.viewMode === 'history' ? 'prepend' : 'append',
                 regularLimit: OLDER_LOAD_WINDOW_SIZE,
-                historyBoundaryAt: installBoundary ? before.at : undefined,
-                historyBoundarySeq: installBoundary ? before.seq : undefined
+                historyBoundaryAt: previous.historyBoundaryAt ?? (installBoundaryNow ? before.at : undefined),
+                historyBoundarySeq: previous.historyBoundarySeq ?? (installBoundaryNow ? before.seq : undefined)
             })
             historyVersion = nextHistoryVersion
             return buildState(merged, {
@@ -992,8 +1007,20 @@ export async function fetchOlderMessages(
                 epoch: response.page.epoch,
                 oldestPositionAt: response.page.nextBeforeAt,
                 oldestPositionSeq: response.page.nextBeforeSeq,
-                historyBoundaryAt: installBoundary ? before.at : previous.historyBoundaryAt,
-                historyBoundarySeq: installBoundary ? before.seq : previous.historyBoundarySeq,
+                // The boundary was installed at request start; carry it past
+                // the apply only while the outline is still open. If it
+                // closed while the request was in flight, drop the boundary
+                // here so the window returns to the bounded tail trim.
+                historyBoundaryAt: installBoundaryNow
+                    ? before.at
+                    : installBoundary
+                        ? null
+                        : previous.historyBoundaryAt,
+                historyBoundarySeq: installBoundaryNow
+                    ? before.seq
+                    : installBoundary
+                        ? null
+                        : previous.historyBoundarySeq,
                 isLoadingMore: false,
                 historyVersion,
                 warning: null

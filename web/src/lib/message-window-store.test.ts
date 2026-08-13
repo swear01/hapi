@@ -1383,6 +1383,82 @@ describe('history view and older pagination', () => {
         expect(state.messages.at(-1)!.seq).toBe(401)
     })
 
+    // Regression: the boundary must be installed at REQUEST START, not when
+    // the response applies. While an outline load is in flight, an SSE ingest
+    // could evict the exclusive `before` cursor row (the window's oldest),
+    // and applying the older page afterwards would leave a permanent
+    // unreachable gap between the page and the trimmed window.
+    it('protects the fetch cursor row while the outline request is in flight', async () => {
+        const id = sessionId('outline-inflight-cursor-protected')
+        const all = Array.from({ length: 600 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const pending = deferred<MessagesResponse>()
+        let outlineRequestStarted = false
+        const getMessages = vi.fn(async (_sid: string, query: {
+            limit?: number
+            beforeAt?: number | null
+            beforeSeq?: number | null
+        }) => {
+            if (query.beforeSeq != null || query.beforeAt != null) {
+                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+                const older = all.filter((message) => message.seq! < cursorSeq)
+                const page = older.slice(-200)
+                if (cursorSeq === 201 && !outlineRequestStarted) {
+                    outlineRequestStarted = true
+                    return await pending.promise
+                }
+                return beforeResponse(page, {
+                    epoch: 0,
+                    hasMore: older.length > page.length,
+                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
+                    nextBeforeSeq: page[0]?.seq ?? null
+                })
+            }
+            return latestResponse(all.slice(-200), {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
+                nextBeforeSeq: 401
+            })
+        })
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        // Automatic coverage load (no boundary): window 200 -> 400.
+        const coverage = await fetchOlderMessages(api, id)
+        expect(coverage.kind).toBe('applied')
+        expect(getMessageWindowState(id).messages).toHaveLength(400)
+
+        // Outline "Load earlier" starts; its GET stays pending.
+        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(outlineRequestStarted).toBe(true)
+
+        // An SSE message lands while the request is in flight. Without the
+        // request-start boundary, the tail trim would evict the `before` row
+        // (m-201); with it, the window must stay whole.
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
+        expect(getMessageWindowState(id).messages).toHaveLength(401)
+        expect(getMessageWindowState(id).messages[0]!.seq).toBe(201)
+
+        // The older page applies: no gap, cursor bookends the window.
+        pending.resolve(beforeResponse(all.slice(0, 200), {
+            epoch: 0,
+            hasMore: false,
+            nextBeforeAt: 1,
+            nextBeforeSeq: 1
+        }))
+        const outcome = await loading
+        expect(outcome.kind).toBe('applied')
+        const state = getMessageWindowState(id)
+        for (let index = 1; index < state.messages.length; index += 1) {
+            expect(state.messages[index]!.seq).toBe(state.messages[index - 1]!.seq! + 1)
+        }
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(601)
+        expect(state.oldestSeq).toBe(1)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>
