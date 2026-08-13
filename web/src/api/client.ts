@@ -50,11 +50,12 @@ import type {
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
     HubSettingsResponse,
+    UpdateHubSettingsRequest,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
-import type { CancelMessageResponse } from '@hapi/protocol/schemas'
+import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
 
 export type ProviderCredentialSource = 'env' | 'settings' | 'none'
@@ -540,6 +541,14 @@ export class ApiClient {
         return response as CancelMessageResponse
     }
 
+    async steerMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
+        const response = await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
+            { method: 'POST' }
+        )
+        return response as SteerQueuedMessageResponse
+    }
+
     async abortSession(sessionId: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
             method: 'POST',
@@ -730,7 +739,7 @@ export class ApiClient {
         return await this.request<HubSettingsResponse>('/api/hub-settings')
     }
 
-    async updateHubSettings(settings: HubSettingsResponse): Promise<HubSettingsResponse> {
+    async updateHubSettings(settings: UpdateHubSettingsRequest): Promise<HubSettingsResponse> {
         return await this.request<HubSettingsResponse>('/api/hub-settings', {
             method: 'PUT',
             body: JSON.stringify(settings)
@@ -746,6 +755,13 @@ export class ApiClient {
             timeZone
         })
         return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
+    }
+
+    async restartMachineRunner(machineId: string): Promise<{ message: string }> {
+        return await this.request<{ message: string }>(
+            `/api/machines/${encodeURIComponent(machineId)}/restart-runner`,
+            { method: 'POST', body: '{}' }
+        )
     }
 
     async listMachineDirectory(
