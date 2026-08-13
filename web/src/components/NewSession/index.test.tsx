@@ -836,6 +836,35 @@ describe('NewSession launch preferences', () => {
         })
     })
 
+    it('resets a restored Pi model that left the machine catalog', async () => {
+        savePreferredAgent('pi')
+        mocks.piModels = [
+            { provider: 'openai-codex', modelId: 'gpt-5.6-sol' },
+        ]
+        savePreferredLaunchSettings('machine-1', 'pi', {
+            model: 'openai-codex/stale-model',
+            cursorSelectedBase: 'auto',
+            effort: 'high',
+            modelReasoningEffort: 'default',
+        })
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        await waitFor(() => {
+            expect(screen.getByTestId('model')).toHaveTextContent('auto')
+            expect(screen.getByTestId('launch-effort')).toHaveTextContent('auto')
+        })
+    })
+
     it('shows Pi machine models and thinking-level effort and forwards both on create', async () => {
         savePreferredAgent('pi')
         mocks.piModels = [

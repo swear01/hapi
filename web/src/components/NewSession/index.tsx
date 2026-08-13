@@ -624,6 +624,24 @@ export function NewSession(props: {
         }
     }, [agent, piSelectedModel, effort])
     useEffect(() => {
+        // Reconcile a restored Pi selection with the live machine catalog
+        // (mirrors the Codex/Grok/Copilot validation effects). A model that
+        // left the catalog must not stay in state: the native select would
+        // visually fall back to Default while Create still sends the stale id.
+        if (
+            agent !== 'pi'
+            || piModelsState.isLoading
+            || piModelsState.error
+            || model === 'auto'
+        ) {
+            return
+        }
+        if (!piModelOptions.some((option) => option.value === model)) {
+            setModel('auto')
+            setEffort('auto')
+        }
+    }, [agent, model, piModelOptions, piModelsState.error, piModelsState.isLoading])
+    useEffect(() => {
         if (preserveRestoredDraftRef.current) {
             return
         }
@@ -1530,6 +1548,9 @@ export function NewSession(props: {
                 deferredDirectoryExists === undefined
                 || (deferredDirectoryExists === true && copilotModelsState.isLoading)
             ))
+        || (agent === 'pi'
+            && model !== 'auto'
+            && piModelsState.isLoading)
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
         && codexModelsState.isLoading
