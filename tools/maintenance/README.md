@@ -26,6 +26,8 @@ Use `-` for the source commit of a newly generated release patch that is not rep
 
 PR #1320 (Antigravity) is excluded from future maintained releases. Record `pr-1320` and its follow-up patches as `drop`; `sync-from-upstream.sh` rejects attempts to carry or regenerate that upstream ref. If an official upstream base later contains it, stop for an explicit operator decision instead of silently inheriting or reverting it.
 
+Temporary exclusion (operator ruling 2026-08-13): PR #1091 (managed agent API profiles) must be recorded as `drop` in the next release ledger until its session model-picker grouping is fixed. The carried overlay splits the native model list into separate `Native`/`Current` groups in session settings (`mergeModelOptions()` inserts the in-use model as a `Current` entry when it is missing from the fetched catalog). Operator comment posted on the PR 2026-08-13. Re-evaluate once the upstream PR changes or the grouping is fixed; the pending fix is to flatten the in-session picker only (New Session menu untouched).
+
 ## Nightly PR gate
 
 The target is official merge quality with a shorter waiting period. Aggressive timing does not lower the quality or product-direction bar.
