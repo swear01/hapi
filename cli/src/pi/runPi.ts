@@ -414,7 +414,11 @@ export async function runPi(opts: {
     // prompt pump from dispatching the next FIFO item Pi would reject
     // ("Cannot submit a prompt while compaction is in progress").
     let piSpecialCommandInFlight = false;
-    let activeSpecialCommand: PiSpecialCommand | null = null;
+    // Tracks a dequeued /compact through the gap between queue dispatch and
+    // the compact RPC actually being issued (the runtime-mutation lock can
+    // be held by an earlier mutation). Abort uses it to cancel a compact
+    // that has not started yet, or to interrupt one that has.
+    let activeCompact: { rpcStarted: boolean; cancelled: boolean } | null = null;
     let activePromptLocalId: string | undefined;
     let historyPumpDeferred = false;
     let agentLifecycleStarted = false;
@@ -531,7 +535,9 @@ export async function runPi(opts: {
             // Slash commands share the prompt FIFO so dispatch order matches
             // arrival order; execute out-of-band while the pump stays blocked.
             piSpecialCommandInFlight = true;
-            activeSpecialCommand = dequeued.command;
+            if (dequeued.command.type === 'compact') {
+                activeCompact = { rpcStarted: false, cancelled: false };
+            }
             // Special commands are executed by HAPI itself and are never
             // delivered to Pi as prompts. Consume the queue row the moment
             // dispatch starts: deferring consumption until the command
@@ -562,7 +568,7 @@ export async function runPi(opts: {
                 })
                 .finally(() => {
                     piSpecialCommandInFlight = false;
-                    activeSpecialCommand = null;
+                    activeCompact = null;
                     pumpPromptQueue();
                 });
             return;
@@ -994,11 +1000,27 @@ export async function runPi(opts: {
                 piSession.updateThinkingState(true)
                 try {
                     const data = await piSession.runRuntimeMutation(async () => {
-                        return await sendPiRpcAndWait(piSession, transport, {
-                            type: 'compact',
-                            ...(command.instructions ? { customInstructions: command.instructions } : {}),
-                        }, PI_COMPACT_TIMEOUT_MS);
+                        // Abort can land while this compact is still queued on
+                        // the runtime-mutation lock; skip it once the lock
+                        // arrives instead of starting a compaction the user
+                        // already cancelled.
+                        const state = activeCompact;
+                        if (state?.cancelled) return null;
+                        if (state) state.rpcStarted = true;
+                        try {
+                            return await sendPiRpcAndWait(piSession, transport, {
+                                type: 'compact',
+                                ...(command.instructions ? { customInstructions: command.instructions } : {}),
+                            }, PI_COMPACT_TIMEOUT_MS);
+                        } finally {
+                            if (state) state.rpcStarted = false;
+                        }
                     }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
+                    if (data === null) {
+                        // Cancelled by Abort before the RPC was issued;
+                        // nothing ran, so there is nothing to report.
+                        return;
+                    }
                     // Pi emits compaction_start/compaction_end lifecycle events
                     // which surface as "📦 Compaction …" status messages. The
                     // summary itself is a structured event so the web chat can
@@ -1192,15 +1214,21 @@ export async function runPi(opts: {
         // waiting on the lease would fail closed and tear down the session.
         // Interrupt the compaction directly: Pi's abort RPC cancels its
         // compaction AbortController, and Pi reports the cancellation through
-        // the compaction_end lifecycle event.
-        if (piSpecialCommandInFlight && activeSpecialCommand?.type === 'compact') {
+        // the compaction_end lifecycle event. If the compact RPC has not been
+        // issued yet (still queued on the mutation lock), cancel it in place
+        // instead so it never starts.
+        if (piSpecialCommandInFlight && activeCompact) {
             abortInFlight = true;
-            abortPromise = sendPiRpcAndWait(piSession, transport, { type: 'abort' }, PI_ABORT_OPERATION_TIMEOUT_MS)
-                .then(() => ({ success: true } as const))
-                .finally(() => {
-                    abortInFlight = false;
-                    abortPromise = null;
-                });
+            const interrupted = activeCompact.rpcStarted
+                ? sendPiRpcAndWait(piSession, transport, { type: 'abort' }, PI_ABORT_OPERATION_TIMEOUT_MS).then(() => ({ success: true } as const))
+                : (() => {
+                    activeCompact.cancelled = true;
+                    return Promise.resolve({ success: true } as const);
+                })();
+            abortPromise = interrupted.finally(() => {
+                abortInFlight = false;
+                abortPromise = null;
+            });
             return await abortPromise;
         }
         piSession.assertNoHistoryTransaction('abort Pi');

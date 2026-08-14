@@ -1605,6 +1605,49 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('cancels a /compact still queued on the runtime-mutation lock when Abort lands first', async () => {
+        const { running, onUserMessage } = await startReadySession();
+
+        // Hold the runtime-mutation lock open so the compact RPC cannot be
+        // issued before Abort arrives.
+        const { PiSession } = await import('./session');
+        const realRunRuntimeMutation = PiSession.prototype.runRuntimeMutation;
+        let gate: Promise<void> | null = null;
+        let releaseGate!: () => void;
+        const spy = vi.spyOn(PiSession.prototype, 'runRuntimeMutation').mockImplementation(async function (this: unknown, op, opts) {
+            if (gate) await gate;
+            return realRunRuntimeMutation.call(this, op, opts);
+        });
+        try {
+            gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+            onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'prestart-id');
+            await vi.waitFor(() => expect(spy).toHaveBeenCalled());
+
+            const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+            await abort({});
+
+            // No abort RPC may be sent: the compact RPC never started, so
+            // there is nothing on Pi's side to interrupt.
+            expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'abort' }));
+            expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+
+            // Release the lock: the compact RPC must be skipped entirely and
+            // the row still consumed.
+            releaseGate();
+            await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['prestart-id'], undefined));
+            expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+            expect(harness.cleanupCount).toBe(0);
+            expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+                message: expect.stringContaining('Compaction'),
+            }));
+        } finally {
+            spy.mockRestore();
+        }
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('fails the session when compaction times out with a queued prompt', async () => {
         const { running, onUserMessage } = await startReadySession();
         // Fake timers must be installed before the compact RPC is issued so
