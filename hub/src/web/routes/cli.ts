@@ -178,12 +178,12 @@ export function createCliRoutes(
                 parsed.data.modelReasoningEffort,
                 parsed.data.id
             )
-            const dataDir = getConfiguration().dataDir
-            const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
-            const sessionSummaryLocale = await readNamespaceLocale(dataDir, namespace)
+            const resolvedDataDir = dataDir ?? getConfiguration().dataDir
+            const sessionSummaryContract = await readSessionSummaryContractEnabled(resolvedDataDir)
+            const sessionSummaryLocale = await readNamespaceLocale(resolvedDataDir, namespace)
             // Owner-only hub setting — never enable auto-bridge for tenant namespaces.
             const autoBridgeTransientModelErrors = namespace === 'default'
-                ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+                ? await readAutoBridgeTransientModelErrorsEnabled(resolvedDataDir)
                 : false
             return c.json({ session, sessionSummaryContract, sessionSummaryLocale, autoBridgeTransientModelErrors })
         } catch (error) {
@@ -302,11 +302,11 @@ export function createCliRoutes(
         if (!resolved.ok) {
             return c.json({ error: resolved.error }, resolved.status)
         }
-        const dataDir = getConfiguration().dataDir
-        const sessionSummaryContract = await readSessionSummaryContractEnabled(dataDir)
-        const sessionSummaryLocale = await readNamespaceLocale(dataDir, namespace)
+        const resolvedDataDir = dataDir ?? getConfiguration().dataDir
+        const sessionSummaryContract = await readSessionSummaryContractEnabled(resolvedDataDir)
+        const sessionSummaryLocale = await readNamespaceLocale(resolvedDataDir, namespace)
         const autoBridgeTransientModelErrors = namespace === 'default'
-            ? await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+            ? await readAutoBridgeTransientModelErrorsEnabled(resolvedDataDir)
             : false
         return c.json({
             session: resolved.session,
