@@ -1006,6 +1006,12 @@ export async function runPi(opts: {
                 // the session idle while compaction and any queued prompts
                 // are still pending.
                 piSession.updateThinkingState(true)
+                // Interrupting a turn with /compact must retire pending
+                // extension UI requests exactly like the Abort path does;
+                // editor requests have no timeout, so a stale input/permission
+                // card would otherwise stick in AgentState.requests and the
+                // next answer could be routed to the aborted turn.
+                transportEvents?.cancelPendingExtensionUi('Pi prompt compacted', { sendResponse: true });
                 try {
                     const data = await piSession.runRuntimeMutation(async () => {
                         // Abort can land while this compact is still queued on

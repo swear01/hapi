@@ -19,6 +19,8 @@ const harness = vi.hoisted(() => ({
         onCancelQueuedMessage: vi.fn(),
         emitMessagesConsumed: vi.fn(),
         sendSessionEvent: vi.fn(),
+        sendAgentMessage: vi.fn(),
+        updateAgentState: vi.fn(),
         updateMetadata: vi.fn(),
         getMetadata: vi.fn(() => null),
         emitSessionReady: vi.fn(),
@@ -1643,6 +1645,27 @@ describe('Pi built-in slash commands', () => {
         } finally {
             spy.mockRestore();
         }
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('retires pending extension UI requests when /compact interrupts a streaming turn', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: true },
+        });
+        harness.onEvent!({ type: 'extension_ui_request', id: 'ui-blocking', method: 'input', title: 'Need input' });
+
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'ui-compact-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
+
+        // The stale input card must be cancelled and removed from agent state
+        // exactly like the Abort path does, so the web is not stuck on it.
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'extension_ui_response', id: 'ui-blocking', cancelled: true,
+        })));
 
         harness.onError?.(new Error('finish test'));
         await running;
