@@ -258,6 +258,54 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(vertexRow.querySelector('span')!.className).toContain(selectedClass)
     })
 
+    it('does not show provider-less model rows when the Pi catalog is empty', () => {
+        renderComposer('pi', {
+            model: 'gemini-2.5-pro',
+            piModels: [],
+            piSelectedModel: null,
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+        // The sheet must not fall back to the generic synthesized model rows:
+        // selecting one would post a bare model id the Pi runner cannot
+        // resolve to a provider (runPi would guess the first cached one).
+        expect(screen.queryByText('Model')).toBeNull()
+        expect(screen.queryByText('Default')).toBeNull()
+    })
+
+    it('clears Cursor variant drill-down when the sheet is closed through the value button', () => {
+        renderComposer('cursor', {
+            model: 'composer-2.5-fast',
+            selectedModelBase: 'composer-2.5',
+            availableModelOptions: [
+                { value: 'composer-2.5', label: 'Composer 2.5' },
+                { value: 'composer-2.5-fast', label: 'Composer 2.5 Fast' },
+                { value: 'composer-2.5-mini', label: 'Composer 2.5 Mini' },
+            ],
+            resolveModelVariantsForBase: (base) => base === 'composer-2.5'
+                ? [
+                    { value: 'composer-2.5-fast', label: 'Composer 2.5 Fast' },
+                    { value: 'composer-2.5-mini', label: 'Composer 2.5 Mini' },
+                ]
+                : [],
+        })
+        // Open from the value button (label resolves to the selected base).
+        const valueButton = screen.getByRole('button', { name: 'Composer 2.5' })
+        fireEvent.click(valueButton)
+        // Drill into the multi-variant base row: the Model section is replaced
+        // by the variant sub-list with a back control.
+        const baseRow = screen.getAllByRole('button', { name: 'Composer 2.5' })
+            .find((btn) => btn.className.includes('w-full'))!
+        fireEvent.click(baseRow)
+        expect(screen.queryByText('Model')).toBeNull()
+        expect(screen.getByText('← Models')).toBeTruthy()
+        // Close and reopen through the value button: drill-down must reset to
+        // the base model list (same behavior as the gear toggle).
+        fireEvent.click(valueButton)
+        fireEvent.click(valueButton)
+        expect(screen.queryByText('← Models')).toBeNull()
+        expect(screen.getByText('Model')).toBeTruthy()
+    })
+
     it('clears the Pi thinking level when the selected effort row is clicked again', () => {
         const effortChanges: Array<string | null> = []
         renderComposer('pi', {

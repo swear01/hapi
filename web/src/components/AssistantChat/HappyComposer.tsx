@@ -1540,7 +1540,12 @@ export function HappyComposer(props: {
     const showCollaborationSettings = Boolean(onCollaborationModeChange && collaborationModeOptions.length > 0)
     const showCopilotAgentModeSettings = Boolean(onCopilotAgentModeChange && copilotAgentModeOptions.length > 0)
     const showPermissionSettings = Boolean(onPermissionModeChange && permissionModeOptions.length > 0)
-    const showModelSettings = Boolean(onModelChange && supportsModelChange(agentFlavor) && (piModels && piModels.length > 0 || modelOptions.length > 0))
+    const showModelSettings = agentFlavor === 'pi'
+        // Pi models only come from the dynamic piModels catalog; never fall
+        // back to the generic synthesized modelOptions rows (they would post a
+        // bare model id the Pi runner cannot resolve to a provider).
+        ? Boolean(onModelChange && piModelGroups)
+        : Boolean(onModelChange && supportsModelChange(agentFlavor) && modelOptions.length > 0)
         && !cursorVariantDrillDownActive
     const showModelEffortSettings = cursorVariantDrillDownActive
         ? Boolean((onModelEffortChange ?? onModelChange) && visibleModelEffortOptions && visibleModelEffortOptions.length > 0)
@@ -1614,15 +1619,13 @@ export function HappyComposer(props: {
 
     const handleModelValueToggle = useCallback(() => {
         if (modelEffortControlsDisabled) return
-        setShowSettings((open) => !open)
-        haptic('light')
-    }, [modelEffortControlsDisabled, haptic])
+        handleSettingsToggle()
+    }, [modelEffortControlsDisabled, handleSettingsToggle])
 
     const handleEffortValueToggle = useCallback(() => {
         if (modelEffortControlsDisabled) return
-        setShowSettings((open) => !open)
-        haptic('light')
-    }, [modelEffortControlsDisabled, haptic])
+        handleSettingsToggle()
+    }, [modelEffortControlsDisabled, handleSettingsToggle])
 
     const overlayPositionClass = isExpanded
         ? 'absolute z-10 bottom-12 mb-2'
@@ -1639,8 +1642,8 @@ export function HappyComposer(props: {
                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
                                     {t('misc.model')}
                                 </div>
-                                {piModelGroups ? (
-                                    piModelGroups.map((group) => (
+                                {agentFlavor === 'pi'
+                                    ? piModelGroups?.map((group) => (
                                         <div key={group.provider}>
                                             <div className="px-3 pt-2 pb-0.5 text-xs font-medium text-[var(--app-hint)]">
                                                 {group.label}
@@ -1682,8 +1685,7 @@ export function HappyComposer(props: {
                                             })}
                                         </div>
                                     ))
-                                ) : (
-                                    modelOptions.map((option) => {
+                                    : modelOptions.map((option) => {
                                         const isSelected = selectedModelBase !== undefined
                                             ? selectedModelBase === option.value
                                             : model === option.value
@@ -1722,8 +1724,7 @@ export function HappyComposer(props: {
                                             </span>
                                         </button>
                                         )
-                                    })
-                                )}
+                                    })}
                             </div>
                         ) : null}
 
