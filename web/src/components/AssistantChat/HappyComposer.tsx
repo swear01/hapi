@@ -2019,6 +2019,7 @@ export function HappyComposer(props: {
         showSettings,
         agentFlavor,
         piModels,
+        piSelectedModel,
         selectedPiModel,
         showCollaborationSettings,
         showCopilotAgentModeSettings,
