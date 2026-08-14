@@ -12,11 +12,8 @@ import {
     notifyResolvedSession,
     VOICE_SEND_FAILED_MESSAGE,
     type DictationPendingSendOptions,
+    type DeliverVoiceSendResult,
 } from './voiceSend'
-
-// Re-exported for existing importers; the dictation hooks share these via
-// voiceSend.ts and must never import from each other.
-export { appendTranscript, type DictationPendingSendOptions, draftUnchanged } from './voiceSend'
 
 
 function preferredMimeType(): string | undefined {
@@ -177,38 +174,59 @@ export function useDictation(config: {
                             const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                             if (finalMessage.trim()) {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
-                                const result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
-                                if (!result.delivered) {
-                                    // Surface the failure while the source component is still
-                                    // mounted, then navigate to the resumed session. The text is
-                                    // restored into the mounted composer only when the transcript
-                                    // was recovered under the mounted session (non-resumed,
-                                    // same-id resume, or the cross-id fallback): empty composer
-                                    // gets the full message, in-flight operator text gets just
-                                    // the transcribed delta appended.
-                                    if (mountedRef.current) {
-                                        if (result.recoveredSessionId === pendingSend.sessionId) {
-                                            const current = config.getCurrentText()
-                                            config.onTextChange(current.trim()
-                                                ? appendTranscript(current, transcribedText)
-                                                : finalMessage)
+                                // Defensive net mirroring the realtime hook: an
+                                // unexpected rejection from deliverVoiceSend (whose
+                                // known failure paths are all contained) must still
+                                // surface a send error with the transcript preserved
+                                // instead of falling into the transcription-error
+                                // path, which would drop the transcribed delta.
+                                let result: DeliverVoiceSendResult
+                                try {
+                                    result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
+                                    if (!result.delivered) {
+                                        // Surface the failure while the source component is still
+                                        // mounted, then navigate to the resumed session. The text is
+                                        // restored into the mounted composer only when the transcript
+                                        // was recovered under the mounted session (non-resumed,
+                                        // same-id resume, or the cross-id fallback): empty composer
+                                        // gets the full message, in-flight operator text gets just
+                                        // the transcribed delta appended.
+                                        if (mountedRef.current) {
+                                            if (result.recoveredSessionId === pendingSend.sessionId) {
+                                                const current = config.getCurrentText()
+                                                config.onTextChange(current.trim()
+                                                    ? appendTranscript(current, transcribedText)
+                                                    : finalMessage)
+                                            }
+                                            setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
+                                            setStatus('error')
                                         }
-                                        setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
+                                        await notifyResolvedSession(
+                                            pendingSend,
+                                            result.resumed && result.recoveredSessionId === result.targetSessionId,
+                                            result.targetSessionId,
+                                        )
+                                        return
+                                    }
+                                    if (result.resumed && !result.notified && mountedRef.current) {
+                                        // The message was delivered, but the operator was not
+                                        // navigated to the resumed session; surface that so it is
+                                        // not silent.
+                                        setError('Message sent, but opening the resumed session failed')
+                                        setStatus('error')
+                                        return
+                                    }
+                                } catch (error) {
+                                    // Unexpected rejection before/around the send: the
+                                    // transcript was not recovered by deliverVoiceSend, so
+                                    // restore it and surface the send failure.
+                                    if (mountedRef.current) {
+                                        if (!config.getCurrentText().trim()) {
+                                            config.onTextChange(finalMessage)
+                                        }
+                                        setError(error instanceof Error ? error.message : VOICE_SEND_FAILED_MESSAGE)
                                         setStatus('error')
                                     }
-                                    await notifyResolvedSession(
-                                        pendingSend,
-                                        result.resumed && result.recoveredSessionId === result.targetSessionId,
-                                        result.targetSessionId,
-                                    )
-                                    return
-                                }
-                                if (result.resumed && !result.notified && mountedRef.current) {
-                                    // The message was delivered, but the operator was not
-                                    // navigated to the resumed session; surface that so it is
-                                    // not silent.
-                                    setError('Message sent, but opening the resumed session failed')
-                                    setStatus('error')
                                     return
                                 }
                             }

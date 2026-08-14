@@ -48,7 +48,15 @@ export type DictationPendingSendOptions = {
     onSessionResolved?: (sessionId: string) => void | Promise<void>
 }
 
-/** True when the persisted draft for `sessionId` still equals `baseline`. */
+/**
+ * True when the persisted draft for `sessionId` still equals `baseline`.
+ *
+ * An empty current draft always counts as unchanged (even when the
+ * baseline was non-empty): the never-lose-the-transcript trade-off means
+ * recovery may write into a draft the operator deliberately emptied
+ * while the send was in flight — losing a transcript is worse than
+ * resurrecting text.
+ */
 export function draftUnchanged(sessionId: string, baseline: string): boolean {
     const cur = getDraft(sessionId)
     return cur === '' || cur === baseline
@@ -109,8 +117,12 @@ export type DeliverVoiceSendResult = {
      * draft was not ours to touch). Equals `targetSessionId` on success.
      */
     recoveredSessionId: string
-    /** False when a post-delivery navigation/seed callback rejected. */
-    notified: boolean
+    /**
+     * Set on success only: `false` when the post-delivery navigation/seed
+     * callback rejected. On failure the caller navigates itself via
+     * notifyResolvedSession after surfacing the error.
+     */
+    notified?: boolean
 }
 
 /** Shared fallback message for voice direct-send failures. */
@@ -176,28 +188,36 @@ export async function deliverVoiceSend(args: {
         // session instead of losing it. Navigation is NOT fired here: the
         // caller surfaces the failure first (while the source component is
         // still mounted) and then navigates via notifyResolvedSession, so
-        // a post-resume failure is never silent.
+        // a post-resume failure is never silent. Recovery is wrapped so a
+        // storage failure cannot escape as an unexpected rejection with
+        // the transcript unrecovered; the caller's own restore path then
+        // still puts the text back into the composer.
         const recoverySessionId = targetSessionId
         let recoveredSessionId: string
-        if (recoverySessionId === args.pendingSend.sessionId) {
-            // Same-id (or unresolved): the baseline is the pre-recording
-            // draft, which the send consumed.
-            recoverDraft(recoverySessionId, recoveryDraftAtStart, args.finalMessage, args.transcriptDelta)
-            recoveredSessionId = recoverySessionId
-        } else if (recoveryDraftAtStart === '' && draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
-            // Cross-id: only the empty-at-resolve target draft is ours to
-            // write — a non-empty target baseline is the operator's own
-            // text in the resumed session and must not be overwritten.
-            saveDraft(recoverySessionId, args.finalMessage)
-            recoveredSessionId = recoverySessionId
-        } else {
-            // The target draft moved in flight (or was never empty): fall
-            // back to the source id so the transcript is never lost (the
-            // source draft is preserved on failure anyway).
-            recoverDraft(args.pendingSend.sessionId, args.pendingSend.draftAtStart, args.finalMessage, args.transcriptDelta)
+        try {
+            if (recoverySessionId === args.pendingSend.sessionId) {
+                // Same-id (or unresolved): the baseline is the pre-recording
+                // draft, which the send consumed.
+                recoverDraft(recoverySessionId, recoveryDraftAtStart, args.finalMessage, args.transcriptDelta)
+                recoveredSessionId = recoverySessionId
+            } else if (recoveryDraftAtStart === '' && draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
+                // Cross-id: only the empty-at-resolve target draft is ours to
+                // write — a non-empty target baseline is the operator's own
+                // text in the resumed session and must not be overwritten.
+                saveDraft(recoverySessionId, args.finalMessage)
+                recoveredSessionId = recoverySessionId
+            } else {
+                // The target draft moved in flight (or was never empty): fall
+                // back to the source id so the transcript is never lost (the
+                // source draft is preserved on failure anyway).
+                recoverDraft(args.pendingSend.sessionId, args.pendingSend.draftAtStart, args.finalMessage, args.transcriptDelta)
+                recoveredSessionId = args.pendingSend.sessionId
+            }
+        } catch (recoveryError) {
+            console.warn('Voice send: draft recovery failed:', recoveryError)
             recoveredSessionId = args.pendingSend.sessionId
         }
-        return { delivered: false, error: sendError, resumed, targetSessionId, recoveredSessionId, notified: true }
+        return { delivered: false, error: sendError, resumed, targetSessionId, recoveredSessionId }
     }
     // Draft cleanup runs BEFORE the notify: the onSessionResolved callback
     // may itself seed/navigate the target session (and write drafts), so a

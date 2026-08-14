@@ -3,7 +3,8 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import { getDraft, saveDraft } from '@/lib/composer-drafts'
-import { appendTranscript, useDictation } from './useDictation'
+import { appendTranscript } from './voiceSend'
+import { useDictation } from './useDictation'
 
 describe('appendTranscript', () => {
     it('preserves the draft and adds one separator', () => {
