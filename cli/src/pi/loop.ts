@@ -326,7 +326,12 @@ function handleResponse(
                                     onStartupFailure?.(new Error(`Pi startup model outcome is indeterminate: ${error.message}`));
                                     return;
                                 }
-                                logger.debug(`[pi] Startup model set_model rejected, keeping Pi default: ${error instanceof Error ? error.message : String(error)}`);
+                                const detail = error instanceof Error ? error.message : String(error);
+                                logger.debug(`[pi] Startup model set_model rejected, keeping Pi default: ${detail}`);
+                                session.sendSessionEvent({
+                                    type: 'message',
+                                    message: `⚠️ Startup model switch failed: ${detail}`,
+                                });
                             }
                         })();
                     } else {

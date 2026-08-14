@@ -1572,6 +1572,39 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('aborts an in-flight /compact directly instead of waiting on the mutation lease', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'abortable-id');
+
+        const compact = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+
+        // The Abort action must interrupt the compaction via the abort RPC —
+        // waiting for the runtime-mutation lease would exceed the 25s abort
+        // deadline while compaction may run for up to 120s.
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'abort' })));
+        const abortRpc = harness.sent.find((item) => (item as { type?: string }).type === 'abort') as { id: string };
+        harness.onEvent!({ type: 'response', id: abortRpc.id, command: 'abort', success: true });
+        await abortPromise;
+        expect(harness.cleanupCount).toBe(0);
+
+        // Pi reports the cancellation through its lifecycle event; the RPC
+        // error is the same cancellation and must not double-report a failure.
+        harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: false, error: 'Compaction cancelled' });
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['abortable-id'], undefined));
+        expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('Compaction failed'),
+        }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('fails the session when compaction times out with a queued prompt', async () => {
         const { running, onUserMessage } = await startReadySession();
         // Fake timers must be installed before the compact RPC is issued so

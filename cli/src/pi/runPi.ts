@@ -414,6 +414,7 @@ export async function runPi(opts: {
     // prompt pump from dispatching the next FIFO item Pi would reject
     // ("Cannot submit a prompt while compaction is in progress").
     let piSpecialCommandInFlight = false;
+    let activeSpecialCommand: PiSpecialCommand | null = null;
     let activePromptLocalId: string | undefined;
     let historyPumpDeferred = false;
     let agentLifecycleStarted = false;
@@ -530,6 +531,7 @@ export async function runPi(opts: {
             // Slash commands share the prompt FIFO so dispatch order matches
             // arrival order; execute out-of-band while the pump stays blocked.
             piSpecialCommandInFlight = true;
+            activeSpecialCommand = dequeued.command;
             // Special commands are executed by HAPI itself and are never
             // delivered to Pi as prompts. Consume the queue row the moment
             // dispatch starts: deferring consumption until the command
@@ -560,6 +562,7 @@ export async function runPi(opts: {
                 })
                 .finally(() => {
                     piSpecialCommandInFlight = false;
+                    activeSpecialCommand = null;
                     pumpPromptQueue();
                 });
             return;
@@ -1030,7 +1033,15 @@ export async function runPi(opts: {
                         failNativeStartup(new Error(`Pi compaction outcome is indeterminate: ${error.message}`));
                         return;
                     }
-                    sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
+                    const detail = errorDetail(error);
+                    if (/cancell?ed/i.test(detail)) {
+                        // Interrupted by the Abort action: Pi already emitted
+                        // the compaction_end(aborted) lifecycle event
+                        // ("📦 Compaction canceled"), so do not double-report
+                        // the same cancellation as a failure.
+                        return;
+                    }
+                    sendEvent(`⚠️ Compaction failed: ${detail}`);
                 } finally {
                     piSession.updateThinkingState(false)
                 }
@@ -1176,6 +1187,22 @@ export async function runPi(opts: {
     let abortPromise: Promise<{ success: true }> | null = null;
     apiSession.rpcHandlerManager.registerHandler(RPC_METHODS.Abort, async () => {
         if (abortPromise) return await abortPromise;
+        // /compact owns the runtime-mutation lease for up to
+        // PI_COMPACT_TIMEOUT_MS (120s), far beyond the 25s abort deadline —
+        // waiting on the lease would fail closed and tear down the session.
+        // Interrupt the compaction directly: Pi's abort RPC cancels its
+        // compaction AbortController, and Pi reports the cancellation through
+        // the compaction_end lifecycle event.
+        if (piSpecialCommandInFlight && activeSpecialCommand?.type === 'compact') {
+            abortInFlight = true;
+            abortPromise = sendPiRpcAndWait(piSession, transport, { type: 'abort' }, PI_ABORT_OPERATION_TIMEOUT_MS)
+                .then(() => ({ success: true } as const))
+                .finally(() => {
+                    abortInFlight = false;
+                    abortPromise = null;
+                });
+            return await abortPromise;
+        }
         piSession.assertNoHistoryTransaction('abort Pi');
         const deadlineAt = Date.now() + PI_ABORT_OPERATION_TIMEOUT_MS;
         abortInFlight = true;
