@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { useTranslation } from '@/lib/use-translation'
 import { HoverTooltip } from '@/components/HoverTooltip'
 import { safeCopyToClipboard } from '@/lib/clipboard'
@@ -169,6 +169,12 @@ function TrashIcon(props: { className?: string }) {
     )
 }
 
+type MenuPosition = {
+    top: number
+    left: number
+    transformOrigin: string
+}
+
 export function SessionActionMenu(props: SessionActionMenuProps) {
     const { t } = useTranslation()
     const { haptic } = usePlatform()
@@ -193,7 +199,8 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         anchorPoint,
         menuId
     } = props
-    const { menuRef, menuStyle } = useAnchoredMenu({ isOpen, onClose, anchorPoint })
+    const menuRef = useRef<HTMLDivElement | null>(null)
+    const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
     const internalId = useId()
     const resolvedMenuId = menuId ?? `session-action-menu-${internalId}`
     const headingId = `${resolvedMenuId}-heading`
