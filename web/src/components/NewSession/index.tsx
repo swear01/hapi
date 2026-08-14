@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
-import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
+import { getPermissionModesForFlavor, type CodexCollaborationMode, type GrokPermissionMode, type PermissionMode, type CopilotAgentMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
@@ -1781,6 +1781,16 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onChange={setServiceTier}
             />
+<<<<<<< HEAD
+=======
+            {agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) && getPermissionModesForFlavor(agent).length > 0 ? (
+                <YoloToggle
+                    yoloMode={yoloMode}
+                    isDisabled={isFormDisabled}
+                    onToggle={setYoloMode}
+                />
+            ) : null}
+>>>>>>> 05ecf448 (docs(dsh): DeepSeek Harness guide + agent matrix; hide Yolo for dsh)
 
             {(error ?? spawnError) ? (
                 <div className="px-3 py-2 text-sm text-red-600">
