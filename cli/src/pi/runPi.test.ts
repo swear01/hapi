@@ -1337,7 +1337,7 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
-    it('intercepts /compact even when delivered as a steer while streaming', async () => {
+    it('queues /compact in FIFO order even when delivered as a steer while streaming', async () => {
         const { running, onUserMessage } = await startReadySession();
         harness.onEvent!({
             type: 'response', command: 'get_state', success: true,
@@ -1349,6 +1349,16 @@ describe('Pi built-in slash commands', () => {
             meta: { deliveryMode: 'steer' },
         }, 'steer-compact-id');
 
+        // While the turn is streaming the command stays queued — no compact RPC
+        // and no native steer into the active turn.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'steer' }));
+
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
+        });
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
         const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string; customInstructions?: string };
         expect(compact.customInstructions).toBeUndefined();
@@ -1356,6 +1366,44 @@ describe('Pi built-in slash commands', () => {
 
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: {} });
         await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['steer-compact-id'], { clearQueuedThinkingGrace: true }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('dispatches a prompt queued before /compact ahead of the command (FIFO)', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: true },
+        });
+        onUserMessage({ role: 'user', content: { type: 'text', text: 'queued prompt B' } }, 'b-id');
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'compact-after-b-id');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+
+        // Turn settles: prompt B is dispatched first; /compact must wait.
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
+        });
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'prompt', message: 'queued prompt B',
+        })));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+
+        // Settle prompt B, then the queued /compact executes. The lifecycle
+        // fallback reads the append log before retiring the entry.
+        const promptB = harness.sent.find((item) => (item as { type?: string }).type === 'prompt') as { id: string };
+        vi.useFakeTimers();
+        harness.onEvent!({ type: 'response', id: promptB.id, command: 'prompt', success: true });
+        await vi.advanceTimersByTimeAsync(1_100);
+        const appendSync = harness.sent.filter((item) => (item as { type?: string }).type === 'get_entries').at(-1) as { id: string };
+        harness.onEvent!({ type: 'response', id: appendSync.id, command: 'get_entries', success: true, data: { entries: [], leafId: null } });
+        await vi.advanceTimersByTimeAsync(10);
+        vi.useRealTimers();
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' }));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -1492,6 +1540,39 @@ describe('Pi built-in slash commands', () => {
         const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string };
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: { summary: 'done' } });
         await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['in-flight-id'], { clearQueuedThinkingGrace: true }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('refuses ambiguous bare model IDs shared across providers and accepts qualified ones', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        harness.onEvent!({ type: 'response', command: 'get_available_models', success: true, data: {
+            models: [
+                { id: 'gpt-5.2', provider: 'openai' },
+                { id: 'gpt-5.2', provider: 'azure' },
+            ],
+        } });
+        await vi.waitFor(() => expect(harness.session.updateMetadata).toHaveBeenCalled());
+
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/model gpt-5.2' } }, 'ambig-id');
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: '⚠️ Ambiguous model: gpt-5.2. Use openai/gpt-5.2, azure/gpt-5.2.',
+        })));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'set_model' }));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['ambig-id'], { clearQueuedThinkingGrace: true }));
+
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/model azure/gpt-5.2' } }, 'qualified-id');
+        const setModel = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_model') as { id: string; provider?: string; modelId?: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        expect(setModel).toMatchObject({ provider: 'azure', modelId: 'gpt-5.2' });
+        harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true });
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: 'Model switched to azure/gpt-5.2',
+        })));
 
         harness.onError?.(new Error('finish test'));
         await running;

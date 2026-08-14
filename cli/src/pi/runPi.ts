@@ -12,10 +12,10 @@ import { parsePiModels, parsePiCommands, PiRpcTimeoutError, sendPiRpcAndWait, wi
 import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
 import type { PiImageContent, PiThinkingLevel } from './types';
 import { parsePiSpecialCommand, type PiSpecialCommand } from './specialCommands';
-import { PiPromptQueue, type PiPreparedPrompt } from './promptQueue';
+import { PiPromptQueue, isPiSpecialQueued, type PiPreparedPrompt } from './promptQueue';
 import { PiSteerDispatcher } from './steerDispatcher';
 import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
-import type { ListPiModelsResponse, PiCommandSummary, SlashCommand, SlashCommandsResponse } from '@hapi/protocol/apiTypes';
+import type { ListPiModelsResponse, PiCommandSummary, PiModelSummary, SlashCommand, SlashCommandsResponse } from '@hapi/protocol/apiTypes';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import type { ListSkillsResponse, SkillSummary } from '@/modules/common/skills';
 import type { AttachmentMetadata } from '@/api/types';
@@ -408,12 +408,12 @@ export async function runPi(opts: {
     let preparationChain = Promise.resolve();
     let promptCommandInFlight = false;
     let abortInFlight = false;
-    // Set while a manual /compact RPC is outstanding. Pi's compact() aborts
-    // any active stream itself, so piIsStreaming/promptCommandInFlight can go
-    // false mid-compaction; this flag keeps the prompt pump from sending a
-    // prompt Pi would reject ("Cannot submit a prompt while compaction is in
-    // progress").
-    let piCompactInFlight = false;
+    // Set while a queued Pi special command (e.g. /compact) is executing. Pi's
+    // compact() aborts any active stream itself, so piIsStreaming/
+    // promptCommandInFlight can go false mid-compaction; this flag keeps the
+    // prompt pump from dispatching the next FIFO item Pi would reject
+    // ("Cannot submit a prompt while compaction is in progress").
+    let piSpecialCommandInFlight = false;
     let activePromptLocalId: string | undefined;
     let historyPumpDeferred = false;
     let agentLifecycleStarted = false;
@@ -511,13 +511,27 @@ export async function runPi(opts: {
             || piSession.piIsStreaming
             || promptCommandInFlight
             || abortInFlight
-            || piCompactInFlight
+            || piSpecialCommandInFlight
             // Earlier steers can fall back only after async preparation/runtime
             // lock wait. Do not let a later normal prompt overtake that result.
             || steerDispatcher?.hasPending
         ) return;
         const next = promptQueue.dequeue();
         if (!next) return;
+        if (isPiSpecialQueued(next)) {
+            // Slash commands share the prompt FIFO so dispatch order matches
+            // arrival order; execute out-of-band while the pump stays blocked.
+            piSpecialCommandInFlight = true;
+            const finish = (): void => {
+                piSpecialCommandInFlight = false;
+                if (next.localId) {
+                    piSession.emitMessagesConsumed([next.localId], { clearQueuedThinkingGrace: true });
+                }
+                pumpPromptQueue();
+            };
+            void handlePiSpecialCommand(next.command).finally(finish);
+            return;
+        }
         setPromptCommandInFlight(true);
         activePromptLocalId = next.localId;
         agentLifecycleStarted = false;
@@ -638,6 +652,12 @@ export async function runPi(opts: {
         const entry = promptQueue.removeByLocalId(localId);
         if (!entry) {
             return { steered: false, error: 'Message not found or already dispatched' };
+        }
+        // Slash commands are not steerable prompts: restoring them into the FIFO
+        // lets the pump execute them in arrival order once the turn settles.
+        if (isPiSpecialQueued(entry)) {
+            promptQueue.enqueue(entry);
+            return { steered: false, error: 'Slash commands cannot be steered' };
         }
         // Only steer into a live Pi generation. Otherwise restore the entry to
         // its FIFO position (enqueue re-orders by outboundSequence) and let the
@@ -853,20 +873,6 @@ export async function runPi(opts: {
         };
         const errorDetail = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-        // RPC-backed commands need the transport wired and the history baseline
-        // established. Prompts are buffered until ready via runWhenReady, so
-        // defer the same way instead of racing the readiness transition (the
-        // ready queue drains FIFO on markReady, preserving arrival order).
-        if (command.type === 'compact' || command.type === 'session' || command.type === 'model') {
-            await new Promise<void>((resolve) => {
-                if (piSession.isReady) {
-                    resolve();
-                    return;
-                }
-                piSession.runWhenReady(resolve);
-            });
-        }
-
         switch (command.type) {
             case 'help':
                 sendEvent(PI_HELP_TEXT);
@@ -889,8 +895,17 @@ export async function runPi(opts: {
                     sendEvent(`Current model: ${piSession.currentModel ?? 'unset'}.\nAvailable: ${available || 'unknown — use /model <modelId>'}`);
                     return;
                 }
-                const match = piSession.cachedPiModels.find((model) => model.modelId === command.modelId)
-                    ?? piSession.cachedPiModels.find((model) => `${model.provider}/${model.modelId}` === command.modelId);
+                // The catalog is provider-qualified; prefer an exact
+                // provider/modelId match and refuse bare IDs shared by more
+                // than one provider instead of silently picking the first.
+                const qualified = (model: PiModelSummary): string => `${model.provider}/${model.modelId}`;
+                const exact = piSession.cachedPiModels.find((model) => qualified(model) === command.modelId);
+                const bare = piSession.cachedPiModels.filter((model) => model.modelId === command.modelId);
+                if (!exact && bare.length > 1) {
+                    sendEvent(`⚠️ Ambiguous model: ${command.modelId}. Use ${bare.map(qualified).join(', ')}.`);
+                    return;
+                }
+                const match = exact ?? bare[0];
                 if (!match) {
                     sendEvent(`⚠️ Unknown model: ${command.modelId}. Use /model to list available models.`);
                     return;
@@ -917,7 +932,6 @@ export async function runPi(opts: {
                 return;
             }
             case 'compact': {
-                piCompactInFlight = true;
                 try {
                     const data = await piSession.runRuntimeMutation(async () => {
                         return await sendPiRpcAndWait(piSession, transport, {
@@ -948,9 +962,6 @@ export async function runPi(opts: {
                         return;
                     }
                     sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
-                } finally {
-                    piCompactInFlight = false;
-                    if (!cleanupInitiated) pumpPromptQueue();
                 }
                 return;
             }
@@ -979,21 +990,22 @@ export async function runPi(opts: {
 
             const specialCommand = parsePiSpecialCommand(message.content.text);
             if (specialCommand) {
-                // Release the cancellation reservation before executing: a
-                // cancel that lands while the command runs (startup wait or the
-                // long compact RPC) must not be acknowledged, or the hub would
-                // delete the queued row while the command still executes.
+                // Enter the same FIFO as prompts so dispatch order matches
+                // arrival order (a /compact typed after a queued prompt never
+                // jumps it). Release the cancellation reservation first: a
+                // cancel that lands while the queued command is being dispatched
+                // or executing is handled by the queue itself (cancelByLocalId)
+                // and must not be acknowledged via preparingLocalIds.
                 if (localId) {
                     preparingLocalIds.delete(localId);
-                    if (cancelledWhilePreparing.delete(localId)) return;
                 }
-                try {
-                    await handlePiSpecialCommand(specialCommand);
-                } finally {
-                    if (localId) {
-                        piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
-                    }
-                }
+                promptQueue.enqueue({
+                    kind: 'special',
+                    command: specialCommand,
+                    outboundSequence,
+                    ...(localId ? { localId } : {}),
+                });
+                pumpPromptQueue();
                 return;
             }
 
