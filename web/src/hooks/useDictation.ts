@@ -145,9 +145,7 @@ export async function deliverVoiceSend(args: {
         // so the operator can retry from the live session (and is
         // navigated there via onSessionResolved) instead of leaving it
         // under the archived source id.
-        const recoverySessionId = targetSessionId !== args.pendingSend.sessionId
-            ? targetSessionId
-            : args.pendingSend.sessionId
+        const recoverySessionId = targetSessionId
         if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
             saveDraft(recoverySessionId, args.finalMessage)
         }

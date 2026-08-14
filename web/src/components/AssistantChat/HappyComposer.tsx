@@ -538,7 +538,18 @@ export function HappyComposer(props: {
         } else {
             await dictation.toggle()
         }
-    }, [active, api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
+    }, [
+        active,
+        api,
+        attachments.length,
+        dictation,
+        dictationActive,
+        props.pendingSchedule,
+        props.scratchlistMode,
+        props.sessionId,
+        props.resolveSessionIdForVoice,
+        props.onVoiceSessionResolved,
+    ])
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)
