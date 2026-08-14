@@ -854,6 +854,7 @@ describe('useDictation', () => {
             transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })),
             sendMessage: vi.fn(async () => { throw new Error('Send failed') })
         }
+        const onTextChange = vi.fn()
         const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-B-resumed', resumed: true }))
         const onSessionResolved = vi.fn()
         const { result } = renderHook(() => useDictation({
@@ -861,7 +862,7 @@ describe('useDictation', () => {
             provider: 'openai',
             mode: 'standard',
             getCurrentText: () => '',
-            onTextChange: vi.fn()
+            onTextChange
         }))
 
         await act(() => result.current.toggle())
@@ -876,9 +877,13 @@ describe('useDictation', () => {
         // Retryable transcript lives under the live resumed id, and navigation
         // still happens so the operator lands on the session they can retry in.
         expect(getDraft('session-B-resumed')).toBe('initial text voice payload')
-        // The superseded source composer's pre-recording draft is dropped even
-        // on failure (mirrors the success path).
-        expect(getDraft('session-B')).toBe('')
+        // The archived source composer's draft is preserved on failure: the
+        // recovery may not have landed and navigation may not succeed, so
+        // clearing it could lose the transcript entirely.
+        expect(getDraft('session-B')).toBe('pre-recording draft')
+        // For a resumed send the text is NOT written back into the still-
+        // mounted archived composer (it lives in the resumed session's draft).
+        expect(onTextChange).not.toHaveBeenCalled()
         expect(onSessionResolved).toHaveBeenCalledWith('session-B-resumed')
     })
 
