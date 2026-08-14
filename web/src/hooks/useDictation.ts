@@ -38,8 +38,11 @@ export type DictationPendingSendOptions = {
      *
      * Invariant: `resumed` must be `true` whenever the target session was
      * transitioned to live and must be seeded/navigated — including
-     * same-id resumes — because recovery and navigation decisions key off
-     * this flag.
+     * same-id resumes — because navigation decisions key off this flag.
+     * Draft snapshot/recovery key off the session id actually changing;
+     * a resolver that swaps the id must therefore also report
+     * `resumed: true` so the operator is navigated to the recovered
+     * session after a failure.
      */
     resolveSessionId?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
     /**
@@ -129,19 +132,22 @@ export async function deliverVoiceSend(args: {
             // Snapshot the resolved session's draft BEFORE the send: the
             // catch compares against this to avoid clobbering text the
             // operator typed into the resolved composer while the request
-            // was in flight. Keyed on the id actually changing so a resolver
-            // that swaps the id without reporting `resumed` still gets a
-            // correct snapshot.
+            // was in flight. Snapshot and recovery key off the id actually
+            // changing so a resolver that swaps the id without reporting
+            // `resumed` still gets a correct baseline (message loss would
+            // otherwise be silent).
             if (targetSessionId !== args.pendingSend.sessionId) recoveryDraftAtStart = getDraft(targetSessionId)
         }
         await args.sendMsg(targetSessionId, args.finalMessage, args.pendingSend.deliveryMode)
     } catch (sendError) {
         // After a resume the source session is superseded: recover the
-        // retryable transcript under the LIVE resumed id so the operator
-        // can retry from the resumed session (and is navigated there via
-        // onSessionResolved) instead of leaving it under the archived
-        // source id.
-        const recoverySessionId = resumed ? targetSessionId : args.pendingSend.sessionId
+        // retryable transcript under the id the message actually targeted
+        // so the operator can retry from the live session (and is
+        // navigated there via onSessionResolved) instead of leaving it
+        // under the archived source id.
+        const recoverySessionId = targetSessionId !== args.pendingSend.sessionId
+            ? targetSessionId
+            : args.pendingSend.sessionId
         if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
             saveDraft(recoverySessionId, args.finalMessage)
         }
@@ -151,16 +157,17 @@ export async function deliverVoiceSend(args: {
     // Notification is a side effect of an already-delivered send: it runs
     // outside the send try/catch so a throw from navigation/cache updates
     // cannot be misread as a send failure (which would re-insert the
-    // delivered text as a retryable draft).
+    // delivered text as a retryable draft). Navigation keys off `resumed`
+    // (also covers same-id resumes, where the id never changes).
     await notifyResolvedSession(args.pendingSend, resumed, targetSessionId)
     if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
         clearDraft(targetSessionId)
     }
-    // A resume supersedes the source composer too; drop its pre-recording
-    // draft so reopening the archived session does not resurrect stale
-    // text (mirrors clearDraftsAfterSend). Keyed on `resumed` (which also
-    // covers same-id resumes) to match the failure-path recovery.
-    if (resumed && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
+    // A cross-id resume supersedes the source composer too; drop its
+    // pre-recording draft so reopening the archived session does not
+    // resurrect stale text (mirrors clearDraftsAfterSend).
+    if (targetSessionId !== args.pendingSend.sessionId
+        && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
         clearDraft(args.pendingSend.sessionId)
     }
     return { delivered: true, resumed, targetSessionId }

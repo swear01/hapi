@@ -520,12 +520,14 @@ export function HappyComposer(props: {
         }
         const targetSessionId = props.sessionId ?? ''
         const initialText = api.composer().getState().text
-        api.composer().setText('')
         // Same gate as handleSend's direct-send branch: without an active
         // session or a session resolver, direct-sending to an inactive
         // session would be rejected by the hub (409 `session_inactive`), so
-        // fall back to a plain stop + transcribe instead.
+        // fall back to a plain stop + transcribe instead. The composer is
+        // only cleared once the direct-send branch is confirmed, so the
+        // fallback keeps the user's typed text and appends the transcript.
         if (targetSessionId && (active || props.resolveSessionIdForVoice !== undefined)) {
+            api.composer().setText('')
             await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
                 // Inactive sessions cannot accept a message POST until they
                 // are resumed (hub returns 409 `session_inactive`), so the
