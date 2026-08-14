@@ -33,13 +33,16 @@ if [[ " $PROD_HOSTS " == *" $HOST "* ]]; then
   echo "WARNING: running on production host '$HOST' with HAPI_SMOKE_FORCE=1." >&2
 fi
 
+# Processes this harness owns (hub + source runner started via bun).
+SMOKE_PATTERN="bun (hub/src/index.ts|cli/src/index.ts) runner start-sync"
+
 # Must run from the repo root (script lives under tools/maintenance/).
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 [ -f package.json ] || { echo "ERROR: not a hapi repo root: $REPO_ROOT" >&2; exit 1; }
 
 # ── Stray-process check: refuse if a previous run left hub/runner behind ───
-STRAYS="$(pgrep -f "bun (hub/src/index.ts|cli/src/index.ts) runner start-sync" || true)"
+STRAYS="$(pgrep -f "$SMOKE_PATTERN" || true)"
 if [ -n "$STRAYS" ]; then
   echo "ERROR: leftover smoke hub/runner processes from a previous run:" >&2
   ps -o pid,etime,cmd -p $STRAYS >&2
@@ -61,10 +64,11 @@ RUNNER_PID=""
 
 cleanup() {
   trap - EXIT INT TERM HUP
-  [ -n "$RUNNER_PID" ] && kill "$RUNNER_PID" 2>/dev/null || true
-  [ -n "$HUB_PID" ] && kill "$HUB_PID" 2>/dev/null || true
-  sleep 1
-  pkill -f "^$BUN_BIN (hub/src/index.ts|cli/src/index.ts) runner start-sync" 2>/dev/null || true
+  # Graceful first; the source runner may defer SIGTERM while shutting down.
+  kill "$RUNNER_PID" "$HUB_PID" 2>/dev/null || true
+  sleep 2
+  # Hard-kill stragglers so no orphan survives the harness.
+  pkill -KILL -f "$SMOKE_PATTERN" 2>/dev/null || true
   rm -rf "$TEST_HOME"
   echo
   echo "smoke harness stopped; cleaned $TEST_HOME"
