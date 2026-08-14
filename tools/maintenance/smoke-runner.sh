@@ -49,6 +49,7 @@ fi
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 BUN_BIN="${BUN_BIN:-$(command -v bun || true)}"
+if [ -z "$BUN_BIN" ] && [ -x "$HOME/.bun/bin/bun" ]; then BUN_BIN="$HOME/.bun/bin/bun"; fi
 [ -n "$BUN_BIN" ] || { echo "ERROR: bun not found (install it or set BUN_BIN)" >&2; exit 1; }
 
 TEST_HOME="$(mktemp -d /tmp/hapi-smoke.XXXXXX)"
