@@ -1660,6 +1660,28 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('cancels a slash command canceled while command discovery is pending', async () => {
+        const { running, onUserMessage } = await startReadySession([]);
+        const onCancelQueuedMessage = harness.session.onCancelQueuedMessage.mock.calls.at(-1)![0] as (localId: string) => boolean;
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'discover-cancel-id');
+
+        // Discovery RPC is in flight (empty cache is not cached).
+        await vi.waitFor(() => expect(harness.sent.filter((item) => (item as { type?: string }).type === 'get_commands').length).toBeGreaterThan(1));
+        // Cancel while discovery is pending is acknowledged (reservation held)...
+        expect(onCancelQueuedMessage('discover-cancel-id')).toBe(true);
+
+        // ...and must still win once discovery resolves: no compact RPC, no
+        // consumption (the hub deletes the row instead).
+        const pending = harness.sent.filter((item) => (item as { type?: string }).type === 'get_commands').at(-1) as { id: string };
+        harness.onEvent!({ type: 'response', id: pending.id, command: 'get_commands', success: true, data: { commands: [{ name: 'ext', description: 'Ext', source: 'extension' }] } });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+        expect(harness.session.emitMessagesConsumed).not.toHaveBeenCalledWith(['discover-cancel-id'], expect.anything());
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('treats reserved-name path prefixes as ordinary prompts', async () => {
         const { running, onUserMessage } = await startReadySession();
         onUserMessage({ role: 'user', content: { type: 'text', text: '/compact.md notes' } }, 'path-id');

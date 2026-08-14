@@ -1004,6 +1004,12 @@ export async function runPi(opts: {
             const discovered = name
                 ? await getPiCommands()
                 : piSession.cachedPiCommands;
+            // Discovery can take an RPC round-trip; a cancel acknowledged during
+            // that window must still win over the command.
+            if (localId && cancelledWhilePreparing.delete(localId)) {
+                preparingLocalIds.delete(localId);
+                return;
+            }
             const isCustomCommand = Boolean(name && discovered.some((item) => item.name.toLowerCase() === name.toLowerCase()));
             const specialCommand = isCustomCommand
                 ? null
