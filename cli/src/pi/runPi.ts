@@ -896,17 +896,21 @@ export async function runPi(opts: {
                 return;
             }
             case 'model': {
+                const qualified = (model: PiModelSummary): string => `${model.provider}/${model.modelId}`;
                 if (!command.modelId) {
-                    const available = piSession.cachedPiModels
-                        .map((model) => model.modelId)
-                        .join(', ');
-                    sendEvent(`Current model: ${piSession.currentModel ?? 'unset'}.\nAvailable: ${available || 'unknown — use /model <modelId>'}`);
+                    // List qualified selectors: duplicate bare IDs across
+                    // providers are rejected by the switch path, so every
+                    // listed entry must be copy-paste usable.
+                    const current = piSession.currentModel && piSession.currentProvider
+                        ? qualified({ provider: piSession.currentProvider, modelId: piSession.currentModel })
+                        : piSession.currentModel ?? 'unset';
+                    const available = piSession.cachedPiModels.map(qualified).join(', ');
+                    sendEvent(`Current model: ${current}.\nAvailable: ${available || 'unknown — use /model <modelId>'}`);
                     return;
                 }
                 // The catalog is provider-qualified; prefer an exact
                 // provider/modelId match and refuse bare IDs shared by more
                 // than one provider instead of silently picking the first.
-                const qualified = (model: PiModelSummary): string => `${model.provider}/${model.modelId}`;
                 const exact = piSession.cachedPiModels.find((model) => qualified(model) === command.modelId);
                 const bare = piSession.cachedPiModels.filter((model) => model.modelId === command.modelId);
                 if (!exact && bare.length > 1) {

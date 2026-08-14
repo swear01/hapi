@@ -1444,6 +1444,9 @@ describe('Pi built-in slash commands', () => {
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: '⚠️ Compaction failed: no model selected',
         })));
+        // The raw Pi error must not be emitted a second time by the common
+        // response handler (compact owns its failure reporting).
+        expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith({ type: 'message', message: 'no model selected' });
         await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['fail-id'], { clearQueuedThinkingGrace: true }));
 
         harness.onError?.(new Error('finish test'));
@@ -1496,7 +1499,7 @@ describe('Pi built-in slash commands', () => {
 
         onUserMessage({ role: 'user', content: { type: 'text', text: '/model' } }, 'list-id');
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: expect.stringContaining('Available: gpt-5.2, gpt-4.1'),
+            message: expect.stringContaining('Available: openai/gpt-5.2, openai/gpt-4.1'),
         })));
         await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['list-id'], { clearQueuedThinkingGrace: true }));
 
@@ -1576,6 +1579,11 @@ describe('Pi built-in slash commands', () => {
         } });
         await vi.waitFor(() => expect(harness.session.updateMetadata).toHaveBeenCalled());
 
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/model' } }, 'list-ambig-id');
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('Available: openai/gpt-5.2, azure/gpt-5.2'),
+        })));
+
         onUserMessage({ role: 'user', content: { type: 'text', text: '/model gpt-5.2' } }, 'ambig-id');
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: '⚠️ Ambiguous model: gpt-5.2. Use openai/gpt-5.2, azure/gpt-5.2.',
@@ -1594,6 +1602,29 @@ describe('Pi built-in slash commands', () => {
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: 'Model switched to azure/gpt-5.2',
         })));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('reports a rejected model switch once, without the raw Pi error', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        harness.onEvent!({ type: 'response', command: 'get_available_models', success: true, data: {
+            models: [{ id: 'gpt-5.2', provider: 'openai' }],
+        } });
+        await vi.waitFor(() => expect(harness.session.updateMetadata).toHaveBeenCalled());
+
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/model gpt-5.2' } }, 'reject-id');
+        const setModel = await vi.waitFor(() => {
+            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_model') as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: false, error: 'model rejected' });
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: '⚠️ Model switch failed: model rejected',
+        })));
+        expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith({ type: 'message', message: 'model rejected' });
 
         harness.onError?.(new Error('finish test'));
         await running;
