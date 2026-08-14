@@ -560,7 +560,6 @@ export function HappyComposer(props: {
             await dictation.toggle()
         }
     }, [
-        active,
         api,
         attachments.length,
         canDirectSendSession,
@@ -569,7 +568,6 @@ export function HappyComposer(props: {
         props.pendingSchedule,
         props.scratchlistMode,
         props.sessionId,
-        props.resolveSessionIdForVoice,
         sendVoiceDirect,
     ])
 
@@ -1349,12 +1347,10 @@ export function HappyComposer(props: {
         handleDictationToggle,
         dictation.toggle,
         props.sessionId,
-        props.resolveSessionIdForVoice,
         canDirectSendSession,
         sendVoiceDirect,
         props.agentFlavor,
         props.thinking,
-        active,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {

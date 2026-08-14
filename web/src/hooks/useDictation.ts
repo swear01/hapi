@@ -50,7 +50,10 @@ export type DictationPendingSendOptions = {
      * so the caller can navigate/seed the resumed session. Fires after a
      * successful delivery and also after a failed post-resume send (so the
      * operator lands on the resumed session to retry from the recovered
-     * draft). Never fires when the session was not resumed.
+     * draft). Never fires when the session was not resumed, and the
+     * navigation is suppressed when the failed transcript could not be
+     * recovered under the resumed session (the error and recovered text
+     * then stay visible on the session the operator is already on).
      */
     onSessionResolved?: (sessionId: string) => void | Promise<void>
 }
@@ -388,7 +391,11 @@ export function useDictation(config: {
                                         setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
                                         setStatus('error')
                                     }
-                                    await notifyResolvedSession(pendingSend, result.resumed, result.targetSessionId)
+                                    await notifyResolvedSession(
+                                        pendingSend,
+                                        result.resumed && result.recoveredSessionId === result.targetSessionId,
+                                        result.targetSessionId,
+                                    )
                                     return
                                 }
                             }

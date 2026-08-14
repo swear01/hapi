@@ -92,7 +92,11 @@ export function useRealtimeDictation(config: {
                             setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
                             setStatus('error')
                         }
-                        await notifyResolvedSession(pendingSend, result.resumed, result.targetSessionId)
+                        await notifyResolvedSession(
+                            pendingSend,
+                            result.resumed && result.recoveredSessionId === result.targetSessionId,
+                            result.targetSessionId,
+                        )
                         return
                     }
                 }

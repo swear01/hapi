@@ -1016,6 +1016,7 @@ describe('useDictation', () => {
             sendMessage: vi.fn(async () => { throw new Error('Send failed') })
         }
         const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-H-resumed', resumed: true }))
+        const onSessionResolved = vi.fn()
         const { result } = renderHook(() => useDictation({
             api: api as unknown as ApiClient,
             provider: 'openai',
@@ -1025,7 +1026,10 @@ describe('useDictation', () => {
         }))
 
         await act(() => result.current.toggle())
-        await act(() => result.current.stopAndSend('session-H', 'initial text', undefined, { resolveSessionId }))
+        await act(() => result.current.stopAndSend('session-H', 'initial text', undefined, {
+            resolveSessionId,
+            onSessionResolved
+        }))
 
         await waitFor(() => {
             expect(result.current.status).toBe('error')
@@ -1034,6 +1038,10 @@ describe('useDictation', () => {
         // overwrite; the transcript falls back to the source id instead.
         expect(getDraft('session-H-resumed')).toBe('operator own text')
         expect(getDraft('session-H')).toBe('initial text voice payload')
+        // Navigation is suppressed when the transcript could not be
+        // recovered under the resumed session: the error and the recovered
+        // text stay visible on the session the operator is already on.
+        expect(onSessionResolved).not.toHaveBeenCalled()
     })
 
     it('clears both source and resumed drafts after a resumed send succeeds', async () => {
