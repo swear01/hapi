@@ -145,21 +145,30 @@ export async function deliverVoiceSend(args: {
         await args.sendMsg(targetSessionId, args.finalMessage, args.pendingSend.deliveryMode)
     } catch (sendError) {
         // After a resume the source session is superseded: recover the
-        // retryable transcript under the id the message actually targeted
-        // so the operator can retry from the live session instead of
-        // leaving it under the archived source id. Navigation is NOT fired
-        // here: the caller surfaces the failure first (while the source
-        // component is still mounted) and then navigates via
-        // notifyResolvedSession, so a post-resume failure is never silent.
+        // retryable transcript so the operator can retry from the live
+        // session instead of losing it. Navigation is NOT fired here: the
+        // caller surfaces the failure first (while the source component is
+        // still mounted) and then navigates via notifyResolvedSession, so
+        // a post-resume failure is never silent.
         const recoverySessionId = targetSessionId
-        if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
+        if (recoverySessionId === args.pendingSend.sessionId) {
+            // Same-id (or unresolved): the baseline is the pre-recording
+            // draft, which the send consumed — overwrite it if it has not
+            // moved, otherwise merge so the transcript is never lost.
+            if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
+                saveDraft(recoverySessionId, args.finalMessage)
+            } else {
+                saveDraft(recoverySessionId, appendTranscript(getDraft(recoverySessionId), args.finalMessage))
+            }
+        } else if (recoveryDraftAtStart === '' && draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
+            // Cross-id: only the empty-at-resolve target draft is ours to
+            // write — a non-empty target baseline is the operator's own
+            // text in the resumed session and must not be overwritten.
             saveDraft(recoverySessionId, args.finalMessage)
-        } else if (recoverySessionId !== args.pendingSend.sessionId
-            && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
-            // The resolved session's draft moved while the request was in
-            // flight — do not clobber it. Fall back to the source id so the
-            // transcript is never lost (the source draft is preserved on
-            // failure anyway).
+        } else if (draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
+            // The target draft moved in flight (or was never empty): fall
+            // back to the source id so the transcript is never lost (the
+            // source draft is preserved on failure anyway).
             saveDraft(args.pendingSend.sessionId, args.finalMessage)
         }
         return { delivered: false, error: sendError, resumed, targetSessionId }
@@ -169,7 +178,14 @@ export async function deliverVoiceSend(args: {
     // post-notify unchanged-check could either skip the cleanup or wipe a
     // freshly seeded draft. The delivery outcome no longer depends on the
     // draft store.
-    if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+    if (targetSessionId === args.pendingSend.sessionId) {
+        // Same-id: the pre-recording draft was consumed by the delivery.
+        if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+            clearDraft(targetSessionId)
+        }
+    } else if (recoveryDraftAtStart === '' && draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+        // Cross-id: only clear a target draft that was empty at resolve
+        // time — a non-empty baseline is the operator's own text.
         clearDraft(targetSessionId)
     }
     // A cross-id resume supersedes the source composer too; drop its

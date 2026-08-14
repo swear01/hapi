@@ -539,6 +539,12 @@ export function HappyComposer(props: {
         }
     }, [api, dictation, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
 
+    // Direct voice send is eligible when the session is live or a session
+    // resolver (inactive-session resume) is available; otherwise sending
+    // would be rejected by the hub with 409 `session_inactive`. Shared by
+    // handleDictationSend and handleSend so the two gates cannot drift.
+    const canDirectSendSession = active || props.resolveSessionIdForVoice !== undefined
+
     const handleDictationSend = useCallback(async () => {
         if (!dictationActive || dictation.status !== 'connected') return
         if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
@@ -553,7 +559,7 @@ export function HappyComposer(props: {
         // fall back to a plain stop + transcribe instead. The composer is
         // only cleared once the direct-send branch is confirmed, so the
         // fallback keeps the user's typed text and appends the transcript.
-        if (targetSessionId && (active || props.resolveSessionIdForVoice !== undefined)) {
+        if (targetSessionId && canDirectSendSession) {
             await sendVoiceDirect(targetSessionId, initialText)
         } else {
             await dictation.toggle()
@@ -1203,7 +1209,7 @@ export function HappyComposer(props: {
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
         if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
             const canDirectSend = dictation.status === 'connected'
-                && (active || props.resolveSessionIdForVoice !== undefined)
+                && canDirectSendSession
                 && attachments.length === 0
                 && pendingSchedule == null
                 && !props.scratchlistMode

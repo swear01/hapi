@@ -987,6 +987,55 @@ describe('useDictation', () => {
         expect(result.current.status).toBe('disconnected')
     })
 
+    it('never overwrites a non-empty resolved-session draft on failure', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        // The operator already has their own text in the resumed session.
+        saveDraft('session-H-resumed', 'operator own text')
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })),
+            sendMessage: vi.fn(async () => { throw new Error('Send failed') })
+        }
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-H-resumed', resumed: true }))
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn()
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-H', 'initial text', undefined, { resolveSessionId }))
+
+        await waitFor(() => {
+            expect(result.current.status).toBe('error')
+        })
+        // The resolved session's pre-existing draft is not ours to
+        // overwrite; the transcript falls back to the source id instead.
+        expect(getDraft('session-H-resumed')).toBe('operator own text')
+        expect(getDraft('session-H')).toBe('initial text voice payload')
+    })
+
     it('clears both source and resumed drafts after a resumed send succeeds', async () => {
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
