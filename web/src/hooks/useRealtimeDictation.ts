@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, draftUnchanged, notifyResolvedSession, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -79,6 +79,7 @@ export function useRealtimeDictation(config: {
                 // voice send runs the same resume step as the text pipeline.
                 let targetSessionId = pendingSend.sessionId
                 let resumed = false
+                let delivered = false
                 let recoveryDraftAtStart = pendingSend.draftAtStart
                 try {
                     if (pendingSend.options.resolveSessionId) {
@@ -92,13 +93,7 @@ export function useRealtimeDictation(config: {
                         if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
                     }
                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
-                    if (resumed) {
-                        pendingSend.options.onSessionResolved?.(targetSessionId)
-                    }
-                    const cur = getDraft(targetSessionId)
-                    if (cur === '' || cur === recoveryDraftAtStart) {
-                        clearDraft(targetSessionId)
-                    }
+                    delivered = true
                 } catch (sendError) {
                     // After a resume the source session is superseded: recover the
                     // retryable transcript under the LIVE resumed id so the operator
@@ -106,13 +101,10 @@ export function useRealtimeDictation(config: {
                     // onSessionResolved) instead of leaving it under the archived
                     // source id.
                     const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
-                    const cur = getDraft(recoverySessionId)
-                    if (cur === '' || cur === recoveryDraftAtStart) {
+                    if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
                         saveDraft(recoverySessionId, finalMessage)
                     }
-                    if (resumed) {
-                        pendingSend.options.onSessionResolved?.(recoverySessionId)
-                    }
+                    notifyResolvedSession(pendingSend, resumed, recoverySessionId)
                     if (mountedRef.current) {
                         if (!config.getCurrentText?.().trim()) {
                             onFinalTranscriptRef.current(finalMessage)
@@ -121,6 +113,22 @@ export function useRealtimeDictation(config: {
                         setStatus('error')
                         return
                     }
+                }
+                if (!delivered) return
+                // Notification is a side effect of an already-delivered send: it
+                // runs outside the send try/catch so a throw from navigation/cache
+                // updates cannot be misread as a send failure (which would
+                // re-insert the delivered text as a retryable draft).
+                notifyResolvedSession(pendingSend, resumed, targetSessionId)
+                if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+                    clearDraft(targetSessionId)
+                }
+                // A resume supersedes the source composer too; drop its
+                // pre-recording draft so reopening the archived session does not
+                // resurrect stale text (mirrors clearDraftsAfterSend).
+                if (targetSessionId !== pendingSend.sessionId
+                    && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                    clearDraft(pendingSend.sessionId)
                 }
             }
         } else if (mountedRef.current) {

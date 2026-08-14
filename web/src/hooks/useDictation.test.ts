@@ -877,4 +877,53 @@ describe('useDictation', () => {
         expect(getDraft('session-B-resumed')).toBe('initial text voice payload')
         expect(onSessionResolved).toHaveBeenCalledWith('session-B-resumed')
     })
+
+    it('clears both source and resumed drafts after a resumed send succeeds', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        saveDraft('session-D', 'pre-recording draft')
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })),
+            sendMessage: vi.fn(async () => {})
+        }
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-D-resumed', resumed: true }))
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => 'initial text',
+            onTextChange: vi.fn()
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-D', 'initial text', undefined, { resolveSessionId }))
+
+        await waitFor(() => {
+            expect(api.sendMessage).toHaveBeenCalledWith('session-D-resumed', 'initial text voice payload', null, undefined, undefined, undefined)
+        })
+        // The archived source composer is superseded: its stale draft must not
+        // resurrect when the archived session is reopened (mirrors
+        // clearDraftsAfterSend).
+        expect(getDraft('session-D')).toBe('')
+        expect(getDraft('session-D-resumed')).toBe('')
+    })
 })

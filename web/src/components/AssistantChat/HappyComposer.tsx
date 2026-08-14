@@ -356,9 +356,11 @@ export function HappyComposer(props: {
      */
     resolveSessionIdForVoice?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
     /**
-     * Called when the voice direct-send resumed an inactive session and
-     * the message was delivered to the resumed session id, so the caller
-     * can navigate/seed the live session (mirrors `onSessionResolved`).
+     * Called when the voice direct-send resumed an inactive session, so the
+     * caller can navigate/seed the resumed session (mirrors
+     * `onSessionResolved`). Fires after a successful delivery and also
+     * after a failed post-resume send, so the operator lands on the
+     * resumed session to retry from the recovered draft.
      */
     onVoiceSessionResolved?: (sessionId: string) => void
     // Schedule props (lifted from internal state when provided)
@@ -1313,6 +1315,8 @@ export function HappyComposer(props: {
         dictation.toggle,
         dictation.stopAndSend,
         props.sessionId,
+        props.resolveSessionIdForVoice,
+        props.onVoiceSessionResolved,
         props.agentFlavor,
         props.thinking,
         active,

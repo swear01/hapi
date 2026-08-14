@@ -35,14 +35,42 @@ export type DictationPendingSendOptions = {
      * Maps the target session id to the id the message should actually be
      * sent to (e.g. the resumed session id for an inactive session).
      * Invoked right before the message send. May throw to abort the send.
+     *
+     * Invariant: `resumed` must be `true` whenever the target session was
+     * transitioned to live and must be seeded/navigated — including
+     * same-id resumes — because recovery and navigation decisions key off
+     * this flag.
      */
     resolveSessionId?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
     /**
      * Called when `resolveSessionId` resumed the session into a live one,
-     * so the caller can navigate/seed the resumed session. Fires only
-     * after the message was delivered successfully.
+     * so the caller can navigate/seed the resumed session. Fires after a
+     * successful delivery and also after a failed post-resume send (so the
+     * operator lands on the resumed session to retry from the recovered
+     * draft). Never fires when the session was not resumed.
      */
     onSessionResolved?: (sessionId: string) => void
+}
+
+/** True when the persisted draft for `sessionId` still equals `baseline`. */
+export function draftUnchanged(sessionId: string, baseline: string): boolean {
+    const cur = getDraft(sessionId)
+    return cur === '' || cur === baseline
+}
+
+export function notifyResolvedSession(
+    pendingSend: { options: DictationPendingSendOptions },
+    resumed: boolean,
+    sessionId: string,
+): void {
+    if (!resumed) return
+    try {
+        pendingSend.options.onSessionResolved?.(sessionId)
+    } catch {
+        // Navigation/seed is a side effect of an already-decided send
+        // outcome; a throw from it must not corrupt recovery or the
+        // delivered state.
+    }
 }
 
 function preferredMimeType(): string | undefined {
@@ -159,11 +187,6 @@ export function useDictation(config: {
 
                     if (!mountedRef.current && !pendingSend) return
 
-                    const draftUnchanged = (sid: string, baseline: string) => {
-                        const cur = getDraft(sid)
-                        return cur === '' || cur === baseline
-                    }
-
                     if (!blob.size) {
                         transcribingRef.current = false
                         if (pendingSend && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
@@ -207,6 +230,7 @@ export function useDictation(config: {
                                 // voice send runs the same resume step as the text pipeline.
                                 let targetSessionId = pendingSend.sessionId
                                 let resumed = false
+                                let delivered = false
                                 let recoveryDraftAtStart = pendingSend.draftAtStart
                                 try {
                                     if (pendingSend.options.resolveSessionId) {
@@ -220,12 +244,7 @@ export function useDictation(config: {
                                         if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
                                     }
                                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
-                                    if (resumed) {
-                                        pendingSend.options.onSessionResolved?.(targetSessionId)
-                                    }
-                                    if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
-                                        clearDraft(targetSessionId)
-                                    }
+                                    delivered = true
                                 } catch (sendError) {
                                     // After a resume the source session is superseded: recover the
                                     // retryable transcript under the LIVE resumed id so the operator
@@ -236,9 +255,7 @@ export function useDictation(config: {
                                     if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
                                         saveDraft(recoverySessionId, finalMessage)
                                     }
-                                    if (resumed) {
-                                        pendingSend.options.onSessionResolved?.(recoverySessionId)
-                                    }
+                                    notifyResolvedSession(pendingSend, resumed, recoverySessionId)
                                     if (mountedRef.current) {
                                         if (!config.getCurrentText().trim()) {
                                             config.onTextChange(finalMessage)
@@ -247,6 +264,22 @@ export function useDictation(config: {
                                         setStatus('error')
                                         return
                                     }
+                                }
+                                if (!delivered) return
+                                // Notification is a side effect of an already-delivered send: it
+                                // runs outside the send try/catch so a throw from navigation/cache
+                                // updates cannot be misread as a send failure (which would
+                                // re-insert the delivered text as a retryable draft).
+                                notifyResolvedSession(pendingSend, resumed, targetSessionId)
+                                if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+                                    clearDraft(targetSessionId)
+                                }
+                                // A resume supersedes the source composer too; drop its
+                                // pre-recording draft so reopening the archived session does not
+                                // resurrect stale text (mirrors clearDraftsAfterSend).
+                                if (targetSessionId !== pendingSend.sessionId
+                                    && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                    clearDraft(pendingSend.sessionId)
                                 }
                             }
                         } else if (mountedRef.current) {
