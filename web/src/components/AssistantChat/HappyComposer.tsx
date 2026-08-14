@@ -1589,9 +1589,12 @@ export function HappyComposer(props: {
         if (isNarrowViewport) return undefined
         if (!onModelChange || !supportsModelChange(agentFlavor)) return undefined
         // Pi models come from the dynamic piModels catalog; show the
-        // provider-qualified selection name (fall back to the session wire id).
+        // provider-qualified selection name. No button until the catalog
+        // resolves: a bare session model id has no provider and the sheet
+        // would have no Model section to open anyway.
         if (agentFlavor === 'pi') {
-            return selectedPiModel?.name ?? selectedPiModel?.modelId ?? model ?? undefined
+            if (!selectedPiModel) return undefined
+            return selectedPiModel.name ?? selectedPiModel.modelId
         }
         if (modelOptions.length === 0) return undefined
         const rawKey = selectedModelBase !== undefined ? selectedModelBase : model

@@ -316,7 +316,10 @@ describe('HappyComposer generic model/effort value buttons', () => {
         })
         // With no resolved catalog entry there is no capability map, so no
         // effort value button and no gear that could open an effort sheet
-        // (the old dedicated control was disabled in this state too).
+        // (the old dedicated control was disabled in this state too). The
+        // model value button must not render either: a bare session id has no
+        // provider and the sheet has no Model section to open.
+        expect(screen.queryByRole('button', { name: 'gemini-2.5-pro' })).toBeNull()
         expect(screen.queryByRole('button', { name: 'High' })).toBeNull()
         expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
     })
