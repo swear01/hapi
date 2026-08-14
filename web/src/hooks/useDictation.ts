@@ -180,10 +180,14 @@ export async function deliverVoiceSend(args: {
         } else {
             // The target draft moved in flight (or was never empty): fall
             // back to the source id so the transcript is never lost (the
-            // source draft is preserved on failure anyway). The caller
-            // restores the text into the still-mounted source composer in
-            // this case.
-            saveDraft(args.pendingSend.sessionId, args.finalMessage)
+            // source draft is preserved on failure anyway). Overwrite only
+            // the unmoved pre-recording baseline; merge when the operator
+            // typed in the source composer while the request was in flight.
+            if (draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
+                saveDraft(args.pendingSend.sessionId, args.finalMessage)
+            } else {
+                saveDraft(args.pendingSend.sessionId, appendTranscript(getDraft(args.pendingSend.sessionId), args.finalMessage))
+            }
             recoveredSessionId = args.pendingSend.sessionId
         }
         return { delivered: false, error: sendError, resumed, targetSessionId, recoveredSessionId }

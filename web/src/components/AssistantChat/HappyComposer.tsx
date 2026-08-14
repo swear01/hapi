@@ -522,21 +522,16 @@ export function HappyComposer(props: {
      */
     const sendVoiceDirect = useCallback(async (targetSessionId: string, initialText: string) => {
         api.composer().setText('')
-        try {
-            await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
-                // Inactive sessions cannot accept a message POST until they
-                // are resumed (hub returns 409 `session_inactive`), so the
-                // voice send runs the same resume step as the text pipeline.
-                resolveSessionId: props.resolveSessionIdForVoice,
-                onSessionResolved: props.onVoiceSessionResolved,
-            })
-        } catch (error) {
-            // stopAndSend only arms the pending-send ref and stops the
-            // recorder; an unexpected rejection here (before the hook's own
-            // failure paths engage) must not eat the user's draft.
-            api.composer().setText(initialText)
-            throw error
-        }
+        // The dictation hooks' failure paths (empty-audio, transcription
+        // error, post-resume send failure) own recovery of the captured
+        // text, so no local net is needed here.
+        await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
+            // Inactive sessions cannot accept a message POST until they
+            // are resumed (hub returns 409 `session_inactive`), so the
+            // voice send runs the same resume step as the text pipeline.
+            resolveSessionId: props.resolveSessionIdForVoice,
+            onSessionResolved: props.onVoiceSessionResolved,
+        })
     }, [api, dictation, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
 
     // Direct voice send is eligible when the session is live or a session
@@ -568,6 +563,7 @@ export function HappyComposer(props: {
         active,
         api,
         attachments.length,
+        canDirectSendSession,
         dictation,
         dictationActive,
         props.pendingSchedule,
@@ -1354,6 +1350,7 @@ export function HappyComposer(props: {
         dictation.toggle,
         props.sessionId,
         props.resolveSessionIdForVoice,
+        canDirectSendSession,
         sendVoiceDirect,
         props.agentFlavor,
         props.thinking,
