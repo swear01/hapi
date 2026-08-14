@@ -154,6 +154,13 @@ export async function deliverVoiceSend(args: {
         const recoverySessionId = targetSessionId
         if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
             saveDraft(recoverySessionId, args.finalMessage)
+        } else if (recoverySessionId !== args.pendingSend.sessionId
+            && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
+            // The resolved session's draft moved while the request was in
+            // flight — do not clobber it. Fall back to the source id so the
+            // transcript is never lost (the source draft is preserved on
+            // failure anyway).
+            saveDraft(args.pendingSend.sessionId, args.finalMessage)
         }
         return { delivered: false, error: sendError, resumed, targetSessionId }
     }

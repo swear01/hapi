@@ -522,13 +522,21 @@ export function HappyComposer(props: {
      */
     const sendVoiceDirect = useCallback(async (targetSessionId: string, initialText: string) => {
         api.composer().setText('')
-        await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
-            // Inactive sessions cannot accept a message POST until they
-            // are resumed (hub returns 409 `session_inactive`), so the
-            // voice send runs the same resume step as the text pipeline.
-            resolveSessionId: props.resolveSessionIdForVoice,
-            onSessionResolved: props.onVoiceSessionResolved,
-        })
+        try {
+            await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
+                // Inactive sessions cannot accept a message POST until they
+                // are resumed (hub returns 409 `session_inactive`), so the
+                // voice send runs the same resume step as the text pipeline.
+                resolveSessionId: props.resolveSessionIdForVoice,
+                onSessionResolved: props.onVoiceSessionResolved,
+            })
+        } catch (error) {
+            // stopAndSend only arms the pending-send ref and stops the
+            // recorder; an unexpected rejection here (before the hook's own
+            // failure paths engage) must not eat the user's draft.
+            api.composer().setText(initialText)
+            throw error
+        }
     }, [api, dictation, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
 
     const handleDictationSend = useCallback(async () => {
@@ -1338,7 +1346,6 @@ export function HappyComposer(props: {
         dictation.status,
         handleDictationToggle,
         dictation.toggle,
-        dictation.stopAndSend,
         props.sessionId,
         props.resolveSessionIdForVoice,
         sendVoiceDirect,

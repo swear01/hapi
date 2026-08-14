@@ -70,9 +70,10 @@ export function useRealtimeDictation(config: {
         const pendingSend = sendOnFinishRef.current
         sendOnFinishRef.current = null
         updatePartial('')
+        let finalMessage = ''
         try {
             if (pendingSend) {
-                const finalMessage = appendTranscript(pendingSend.initialText, text)
+                finalMessage = appendTranscript(pendingSend.initialText, text)
                 if (finalMessage.trim()) {
                     const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                     const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
@@ -98,7 +99,6 @@ export function useRealtimeDictation(config: {
                 }
             } else if (mountedRef.current) {
                 onFinalTranscriptRef.current(text)
-                setStatus('disconnected')
             }
             if (mountedRef.current) {
                 setStatus('disconnected')
@@ -107,8 +107,11 @@ export function useRealtimeDictation(config: {
             // deliverVoiceSend handles the known failure paths; this is a
             // defensive net so an unexpected rejection (finish is invoked
             // without await by the realtime callbacks) still surfaces as a
-            // visible error instead of an unhandled rejection.
+            // visible error instead of an unhandled rejection. The
+            // transcript is restored so an unexpected failure never drops
+            // the user's input silently.
             if (mountedRef.current) {
+                onFinalTranscriptRef.current(finalMessage || text)
                 setError(error instanceof Error ? error.message : 'Failed to send message')
                 setStatus('error')
             }
