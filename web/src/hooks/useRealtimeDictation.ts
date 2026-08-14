@@ -70,30 +70,43 @@ export function useRealtimeDictation(config: {
         const pendingSend = sendOnFinishRef.current
         sendOnFinishRef.current = null
         updatePartial('')
-        if (pendingSend) {
-            const finalMessage = appendTranscript(pendingSend.initialText, text)
-            if (finalMessage.trim()) {
-                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
-                const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
-                if (!result.delivered && mountedRef.current) {
-                    // For a resumed send the retryable text lives in the resumed
-                    // session's draft store; do not also write it into the still-
-                    // mounted archived composer, whose draft must stay untouched
-                    // for the reload-safe recovery in deliverVoiceSend.
-                    if (!result.resumed && !config.getCurrentText?.().trim()) {
-                        onFinalTranscriptRef.current(finalMessage)
+        try {
+            if (pendingSend) {
+                const finalMessage = appendTranscript(pendingSend.initialText, text)
+                if (finalMessage.trim()) {
+                    const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                    const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
+                    if (!result.delivered && mountedRef.current) {
+                        // For a cross-id resumed send the retryable text lives in the
+                        // resumed session's draft store; do not also write it into the
+                        // still-mounted archived composer. For a non-resumed or same-id
+                        // resumed send the mounted composer IS the recovery target (a
+                        // same-id resume does not remount), so restore the text there.
+                        if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
+                            && !config.getCurrentText?.().trim()) {
+                            onFinalTranscriptRef.current(finalMessage)
+                        }
+                        setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
+                        setStatus('error')
+                        return
                     }
-                    setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
-                    setStatus('error')
-                    return
                 }
+            } else if (mountedRef.current) {
+                onFinalTranscriptRef.current(text)
+                setStatus('disconnected')
             }
-        } else if (mountedRef.current) {
-            onFinalTranscriptRef.current(text)
-            setStatus('disconnected')
-        }
-        if (mountedRef.current) {
-            setStatus('disconnected')
+            if (mountedRef.current) {
+                setStatus('disconnected')
+            }
+        } catch (error) {
+            // deliverVoiceSend handles the known failure paths; this is a
+            // defensive net so an unexpected rejection (finish is invoked
+            // without await by the realtime callbacks) still surfaces as a
+            // visible error instead of an unhandled rejection.
+            if (mountedRef.current) {
+                setError(error instanceof Error ? error.message : 'Failed to send message')
+                setStatus('error')
+            }
         }
     }, [config.api, config.getCurrentText, config.sendMessage, updatePartial])
 

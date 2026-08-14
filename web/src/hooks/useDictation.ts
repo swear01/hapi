@@ -128,14 +128,18 @@ export async function deliverVoiceSend(args: {
         if (args.pendingSend.options.resolveSessionId) {
             const resolved = await args.pendingSend.options.resolveSessionId(args.pendingSend.sessionId)
             targetSessionId = resolved.sessionId
-            resumed = resolved.resumed
+            // Derive the resume flag from the id actually changing so a
+            // resolver that swaps the id without reporting `resumed` still
+            // navigates/recoveries correctly. A resolver failure (e.g.
+            // resume unavailable) throws here: the catch below then
+            // recovers under the unchanged source id — the only id the
+            // operator knows — and the thrown error (which carries the
+            // resume-specific message) is surfaced by the caller.
+            resumed = resolved.resumed || targetSessionId !== args.pendingSend.sessionId
             // Snapshot the resolved session's draft BEFORE the send: the
             // catch compares against this to avoid clobbering text the
             // operator typed into the resolved composer while the request
-            // was in flight. Snapshot and recovery key off the id actually
-            // changing so a resolver that swaps the id without reporting
-            // `resumed` still gets a correct baseline (message loss would
-            // otherwise be silent).
+            // was in flight.
             if (targetSessionId !== args.pendingSend.sessionId) recoveryDraftAtStart = getDraft(targetSessionId)
         }
         await args.sendMsg(targetSessionId, args.finalMessage, args.pendingSend.deliveryMode)
@@ -325,11 +329,13 @@ export function useDictation(config: {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                                 const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
                                 if (!result.delivered && mountedRef.current) {
-                                    // For a resumed send the retryable text lives in the resumed
-                                    // session's draft store; do not also write it into the still-
-                                    // mounted archived composer, whose draft must stay untouched
-                                    // for the reload-safe recovery in deliverVoiceSend.
-                                    if (!result.resumed && !config.getCurrentText().trim()) {
+                                    // For a cross-id resumed send the retryable text lives in the
+                                    // resumed session's draft store; do not also write it into the
+                                    // still-mounted archived composer. For a non-resumed or same-id
+                                    // resumed send the mounted composer IS the recovery target (a
+                                    // same-id resume does not remount), so restore the text there.
+                                    if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
+                                        && !config.getCurrentText().trim()) {
                                         config.onTextChange(finalMessage)
                                     }
                                     setError(result.error instanceof Error ? result.error.message : 'Failed to send message')

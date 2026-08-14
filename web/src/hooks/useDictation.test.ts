@@ -887,6 +887,106 @@ describe('useDictation', () => {
         expect(onSessionResolved).toHaveBeenCalledWith('session-B-resumed')
     })
 
+    it('restores the transcript into the composer for a same-id resumed failure', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        let currentText = ''
+        const onTextChange = vi.fn((val: string) => { currentText = val })
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })),
+            sendMessage: vi.fn(async () => { throw new Error('Send failed') })
+        }
+        // Same-id resume: the mounted composer IS the recovery target (a
+        // same-id resume does not remount), so the text must be restored.
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-F', resumed: true }))
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => currentText,
+            onTextChange
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-F', 'initial text', undefined, { resolveSessionId }))
+
+        await waitFor(() => {
+            expect(result.current.status).toBe('error')
+            expect(onTextChange).toHaveBeenCalledWith('initial text voice payload')
+        })
+        expect(getDraft('session-F')).toBe('initial text voice payload')
+    })
+
+    it('derives resumed from an id change even when the resolver reports false', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) }
+        })
+
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })),
+            sendMessage: vi.fn(async () => {})
+        }
+        const onSessionResolved = vi.fn()
+        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-G-resumed', resumed: false }))
+        const { result } = renderHook(() => useDictation({
+            api: api as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => 'initial text',
+            onTextChange: vi.fn()
+        }))
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-G', 'initial text', undefined, {
+            resolveSessionId,
+            onSessionResolved
+        }))
+
+        await waitFor(() => {
+            expect(api.sendMessage).toHaveBeenCalledWith('session-G-resumed', 'initial text voice payload', null, undefined, undefined, undefined)
+        })
+        // The id swap is a resume even if the resolver forgot to say so:
+        // navigation happens and the superseded source draft is dropped.
+        expect(onSessionResolved).toHaveBeenCalledWith('session-G-resumed')
+        expect(result.current.status).toBe('disconnected')
+    })
+
     it('clears both source and resumed drafts after a resumed send succeeds', async () => {
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,

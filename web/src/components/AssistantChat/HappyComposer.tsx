@@ -512,6 +512,25 @@ export function HappyComposer(props: {
         await dictation.toggle()
     }, [dictation])
 
+    /**
+     * Direct voice send with inactive-session resume (see
+     * `resolveSessionIdForVoice`): clears the composer and hands the
+     * captured text to the dictation hooks, which deliver after
+     * transcription completes (surviving unmount) and recover the text on
+     * failure. Shared by the voice-Send button and handleSend's
+     * direct-send branch so the resume options stay in sync.
+     */
+    const sendVoiceDirect = useCallback(async (targetSessionId: string, initialText: string) => {
+        api.composer().setText('')
+        await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
+            // Inactive sessions cannot accept a message POST until they
+            // are resumed (hub returns 409 `session_inactive`), so the
+            // voice send runs the same resume step as the text pipeline.
+            resolveSessionId: props.resolveSessionIdForVoice,
+            onSessionResolved: props.onVoiceSessionResolved,
+        })
+    }, [api, dictation, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
+
     const handleDictationSend = useCallback(async () => {
         if (!dictationActive || dictation.status !== 'connected') return
         if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
@@ -527,14 +546,7 @@ export function HappyComposer(props: {
         // only cleared once the direct-send branch is confirmed, so the
         // fallback keeps the user's typed text and appends the transcript.
         if (targetSessionId && (active || props.resolveSessionIdForVoice !== undefined)) {
-            api.composer().setText('')
-            await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
-                // Inactive sessions cannot accept a message POST until they
-                // are resumed (hub returns 409 `session_inactive`), so the
-                // voice send runs the same resume step as the text pipeline.
-                resolveSessionId: props.resolveSessionIdForVoice,
-                onSessionResolved: props.onVoiceSessionResolved,
-            })
+            await sendVoiceDirect(targetSessionId, initialText)
         } else {
             await dictation.toggle()
         }
@@ -548,7 +560,7 @@ export function HappyComposer(props: {
         props.scratchlistMode,
         props.sessionId,
         props.resolveSessionIdForVoice,
-        props.onVoiceSessionResolved,
+        sendVoiceDirect,
     ])
 
     const effectiveVoiceToggle = dictationActive
@@ -1192,12 +1204,8 @@ export function HappyComposer(props: {
                 richInputRef.current?.flushSerializedText()
                 const targetSessionId = props.sessionId ?? ''
                 const initialText = api.composer().getState().text
-                api.composer().setText('')
-                if (targetSessionId && dictation.stopAndSend) {
-                    await dictation.stopAndSend(targetSessionId, initialText, undefined, {
-                        resolveSessionId: props.resolveSessionIdForVoice,
-                        onSessionResolved: props.onVoiceSessionResolved,
-                    })
+                if (targetSessionId) {
+                    await sendVoiceDirect(targetSessionId, initialText)
                 } else {
                     await dictation.toggle()
                 }
@@ -1332,8 +1340,7 @@ export function HappyComposer(props: {
         dictation.toggle,
         dictation.stopAndSend,
         props.sessionId,
-        props.resolveSessionIdForVoice,
-        props.onVoiceSessionResolved,
+        sendVoiceDirect,
         props.agentFlavor,
         props.thinking,
         active,
