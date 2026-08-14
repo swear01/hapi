@@ -29,6 +29,13 @@ describe('parsePiSpecialCommand', () => {
         expect(parsePiSpecialCommand('/tree some entry')).toEqual({ type: 'unsupported', name: 'tree' });
     });
 
+    it('requires a command-token boundary (no path-like prefixes)', () => {
+        expect(parsePiSpecialCommand('/compact.md notes')).toBeNull();
+        expect(parsePiSpecialCommand('/compact/notes')).toBeNull();
+        expect(parsePiSpecialCommand('/model/config.json')).toBeNull();
+        expect(parsePiSpecialCommand('/session-settings')).toBeNull();
+    });
+
     it('leaves extension commands, skills, templates, and prose untouched', () => {
         expect(parsePiSpecialCommand('/my-extension arg')).toBeNull();
         expect(parsePiSpecialCommand('/skill:brave-search latest news')).toBeNull();

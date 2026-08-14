@@ -1272,7 +1272,10 @@ describe('Pi built-in slash commands', () => {
         });
     });
 
-    async function startReadySession(): Promise<{
+    async function startReadySession(commands: Array<Record<string, unknown>> = [
+        { name: 'test-extension', description: 'Test extension', source: 'extension' },
+        { name: 'skill:brave-search', description: 'Search the web', source: 'skill' },
+    ]): Promise<{
         running: Promise<void>;
         onUserMessage: (message: {
             role: 'user';
@@ -1287,6 +1290,10 @@ describe('Pi built-in slash commands', () => {
             data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
         });
         await completeHistoryInitialization();
+        // Warm the command cache: slash-message handling consults discovered
+        // commands to decide extension-vs-builtin precedence.
+        const getCommands = harness.sent.find((item) => (item as { type?: string }).type === 'get_commands') as { id: string };
+        harness.onEvent!({ type: 'response', id: getCommands.id, command: 'get_commands', success: true, data: { commands } });
         const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (message: {
             role: 'user';
             content: { type: 'text'; text: string };
@@ -1337,7 +1344,7 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
-    it('queues /compact in FIFO order even when delivered as a steer while streaming', async () => {
+    it('dispatches a head-of-line /compact even when delivered as a steer while streaming', async () => {
         const { running, onUserMessage } = await startReadySession();
         harness.onEvent!({
             type: 'response', command: 'get_state', success: true,
@@ -1349,16 +1356,9 @@ describe('Pi built-in slash commands', () => {
             meta: { deliveryMode: 'steer' },
         }, 'steer-compact-id');
 
-        // While the turn is streaming the command stays queued — no compact RPC
-        // and no native steer into the active turn.
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
-        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'steer' }));
-
-        harness.onEvent!({
-            type: 'response', command: 'get_state', success: true,
-            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
-        });
+        // /compact stays interruptible while streaming: Pi's compact() aborts
+        // the active generation itself, and the command must never degrade to
+        // a native steer.
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
         const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string; customInstructions?: string };
         expect(compact.customInstructions).toBeUndefined();
@@ -1366,6 +1366,27 @@ describe('Pi built-in slash commands', () => {
 
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: {} });
         await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['steer-compact-id'], { clearQueuedThinkingGrace: true }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('keeps non-compact commands queued while streaming (FIFO head rule)', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: true },
+        });
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/session' } }, 'session-id');
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'get_session_stats' }));
+
+        harness.onEvent!({
+            type: 'response', command: 'get_state', success: true,
+            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
+        });
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'get_session_stats' })));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -1612,21 +1633,40 @@ describe('Pi built-in slash commands', () => {
         const { running } = await startReadySession();
         const slashHandler = harness.rpcHandlers.get(RPC_METHODS.ListSlashCommands)!;
 
-        await vi.waitFor(() => expect(harness.sent.some((item) => (item as { type?: string }).type === 'get_commands')).toBe(true));
-        const getCommands = harness.sent.find((item) => (item as { type?: string }).type === 'get_commands') as { id: string };
-        harness.onEvent!({ type: 'response', id: getCommands.id, command: 'get_commands', success: true, data: {
-            commands: [
-                { name: 'session-name', description: 'Rename session', source: 'extension' },
-                { name: 'fix-tests', description: 'Fix tests', source: 'prompt' },
-                { name: 'skill:brave-search', description: 'Search the web', source: 'skill' },
-            ],
-        } });
-
         const result = await slashHandler({ agent: 'pi' });
         const names = (result as { commands: Array<{ name: string }> }).commands.map((command) => command.name);
-        expect(names).toEqual(expect.arrayContaining(['compact', 'session', 'model', 'help', 'session-name', 'fix-tests']));
+        expect(names).toEqual(expect.arrayContaining(['compact', 'session', 'model', 'help', 'test-extension']));
         // Skills stay out of slash completion; they surface via $ instead.
         expect(names).not.toContain('skill:brave-search');
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('lets a discovered extension named compact override the builtin', async () => {
+        const { running, onUserMessage } = await startReadySession([
+            { name: 'compact', description: 'Custom compact', source: 'extension' },
+        ]);
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'ext-compact-id');
+
+        // The menu lists the extension over the builtin, so the message must
+        // reach Pi as an ordinary prompt instead of the HAPI compact RPC.
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'prompt', message: '/compact',
+        })));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
+    it('treats reserved-name path prefixes as ordinary prompts', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact.md notes' } }, 'path-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
+            type: 'prompt', message: '/compact.md notes',
+        })));
+        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
 
         harness.onError?.(new Error('finish test'));
         await running;

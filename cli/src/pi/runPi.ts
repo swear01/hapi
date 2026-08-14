@@ -11,7 +11,7 @@ import { PiConversationHistory, PiHistoryRestoreError } from './conversationHist
 import { parsePiModels, parsePiCommands, PiRpcTimeoutError, sendPiRpcAndWait, wireTransportEvents } from './loop';
 import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
 import type { PiImageContent, PiThinkingLevel } from './types';
-import { parsePiSpecialCommand, type PiSpecialCommand } from './specialCommands';
+import { parsePiSpecialCommand, parseLeadingSlashName, type PiSpecialCommand } from './specialCommands';
 import { PiPromptQueue, isPiSpecialQueued, type PiPreparedPrompt } from './promptQueue';
 import { PiSteerDispatcher } from './steerDispatcher';
 import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
@@ -508,40 +508,48 @@ export async function runPi(opts: {
         }
         if (
             !piSession.isReady
-            || piSession.piIsStreaming
-            || promptCommandInFlight
             || abortInFlight
             || piSpecialCommandInFlight
             // Earlier steers can fall back only after async preparation/runtime
             // lock wait. Do not let a later normal prompt overtake that result.
             || steerDispatcher?.hasPending
         ) return;
-        const next = promptQueue.dequeue();
-        if (!next) return;
-        if (isPiSpecialQueued(next)) {
+        // A head-of-line /compact stays interruptible while Pi is streaming:
+        // Pi's compact() aborts the active generation itself, so a long or
+        // stuck turn can still be compacted from HAPI. Every other item waits
+        // for the stream to settle (FIFO order preserved).
+        const next = promptQueue.peek();
+        const canInterrupt = next !== undefined
+            && isPiSpecialQueued(next)
+            && next.command.type === 'compact'
+            && piSession.piIsStreaming;
+        if (!canInterrupt && (piSession.piIsStreaming || promptCommandInFlight)) return;
+        const dequeued = promptQueue.dequeue();
+        if (!dequeued) return;
+        if (isPiSpecialQueued(dequeued)) {
             // Slash commands share the prompt FIFO so dispatch order matches
             // arrival order; execute out-of-band while the pump stays blocked.
             piSpecialCommandInFlight = true;
             const finish = (): void => {
                 piSpecialCommandInFlight = false;
-                if (next.localId) {
-                    piSession.emitMessagesConsumed([next.localId], { clearQueuedThinkingGrace: true });
+                if (dequeued.localId) {
+                    piSession.emitMessagesConsumed([dequeued.localId], { clearQueuedThinkingGrace: true });
                 }
                 pumpPromptQueue();
             };
-            void handlePiSpecialCommand(next.command).finally(finish);
+            void handlePiSpecialCommand(dequeued.command).finally(finish);
             return;
         }
         setPromptCommandInFlight(true);
-        activePromptLocalId = next.localId;
+        activePromptLocalId = dequeued.localId;
         agentLifecycleStarted = false;
         const promptId = randomUUID();
         transportEvents?.beginPromptLifecycle(promptId);
-        if (next.localId) {
-            conversationHistory.registerUserEntry(next.localId);
-            pendingLocalIds.push(next.localId);
+        if (dequeued.localId) {
+            conversationHistory.registerUserEntry(dequeued.localId);
+            pendingLocalIds.push(dequeued.localId);
         }
-        transport.send({ id: promptId, type: 'prompt', message: next.message, ...(next.images.length > 0 ? { images: next.images } : {}) });
+        transport.send({ id: promptId, type: 'prompt', message: dequeued.message, ...(dequeued.images.length > 0 ? { images: dequeued.images } : {}) });
     };
 
     transportEvents = wireTransportEvents(transport, piSession, pendingLocalIds, {
@@ -988,7 +996,18 @@ export async function runPi(opts: {
                 return;
             }
 
-            const specialCommand = parsePiSpecialCommand(message.content.text);
+            const name = parseLeadingSlashName(message.content.text);
+            // Discovered extension commands / prompt templates win over HAPI
+            // builtins: the menu already lets them override same-name entries,
+            // so a user extension named "compact" must keep executing instead
+            // of being swallowed by the builtin interception.
+            const discovered = name
+                ? await getPiCommands()
+                : piSession.cachedPiCommands;
+            const isCustomCommand = Boolean(name && discovered.some((item) => item.name.toLowerCase() === name.toLowerCase()));
+            const specialCommand = isCustomCommand
+                ? null
+                : parsePiSpecialCommand(message.content.text);
             if (specialCommand) {
                 // Enter the same FIFO as prompts so dispatch order matches
                 // arrival order (a /compact typed after a queued prompt never
