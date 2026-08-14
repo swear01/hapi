@@ -1726,6 +1726,12 @@ describe('Pi built-in slash commands', () => {
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: 'Model switched to azure/gpt-5.2',
         })));
+        // The web picker prefers piSelectedModel metadata, so a
+        // provider-qualified switch must persist it (a bare keepalive model
+        // cannot represent the provider dimension).
+        await vi.waitFor(() => expect(harness.session.updateMetadata).toHaveBeenCalledWith(expect.any(Function)));
+        const metadataUpdater = harness.session.updateMetadata.mock.calls.at(-1)![0] as (meta: Record<string, unknown>) => Record<string, unknown>;
+        expect(metadataUpdater({})).toEqual({ piSelectedModel: { provider: 'azure', modelId: 'gpt-5.2' } });
 
         harness.onError?.(new Error('finish test'));
         await running;

@@ -979,6 +979,14 @@ export async function runPi(opts: {
                         });
                         piSession.currentModel = match.modelId;
                         piSession.currentProvider = match.provider;
+                        // The web picker prefers piSelectedModel metadata for
+                        // selection, context-window resolution, and effort
+                        // options; a bare keepalive model is not enough to
+                        // reflect a provider-qualified switch.
+                        piSession.updateMetadata((meta) => ({
+                            ...meta,
+                            piSelectedModel: { provider: match.provider, modelId: match.modelId },
+                        }));
                         piSession.pushKeepAlive();
                     }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
                     sendEvent(`Model switched to ${command.modelId}`);
