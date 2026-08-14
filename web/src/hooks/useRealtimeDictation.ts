@@ -104,7 +104,15 @@ export function useRealtimeDictation(config: {
                     if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
                         saveDraft(recoverySessionId, finalMessage)
                     }
-                    notifyResolvedSession(pendingSend, resumed, recoverySessionId)
+                    // The resumed session supersedes the source composer even on
+                    // failure: drop the source's pre-recording draft (the retryable
+                    // text lives on under the resumed id).
+                    if (resumed
+                        && targetSessionId !== pendingSend.sessionId
+                        && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                        clearDraft(pendingSend.sessionId)
+                    }
+                    await notifyResolvedSession(pendingSend, resumed, recoverySessionId)
                     if (mountedRef.current) {
                         if (!config.getCurrentText?.().trim()) {
                             onFinalTranscriptRef.current(finalMessage)
@@ -119,7 +127,7 @@ export function useRealtimeDictation(config: {
                 // runs outside the send try/catch so a throw from navigation/cache
                 // updates cannot be misread as a send failure (which would
                 // re-insert the delivered text as a retryable draft).
-                notifyResolvedSession(pendingSend, resumed, targetSessionId)
+                await notifyResolvedSession(pendingSend, resumed, targetSessionId)
                 if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
                     clearDraft(targetSessionId)
                 }

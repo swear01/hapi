@@ -849,6 +849,7 @@ describe('useDictation', () => {
         }
         vi.stubGlobal('MediaRecorder', MockMediaRecorder)
 
+        saveDraft('session-B', 'pre-recording draft')
         const api = {
             transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })),
             sendMessage: vi.fn(async () => { throw new Error('Send failed') })
@@ -875,6 +876,9 @@ describe('useDictation', () => {
         // Retryable transcript lives under the live resumed id, and navigation
         // still happens so the operator lands on the session they can retry in.
         expect(getDraft('session-B-resumed')).toBe('initial text voice payload')
+        // The superseded source composer's pre-recording draft is dropped even
+        // on failure (mirrors the success path).
+        expect(getDraft('session-B')).toBe('')
         expect(onSessionResolved).toHaveBeenCalledWith('session-B-resumed')
     })
 

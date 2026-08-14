@@ -49,7 +49,7 @@ export type DictationPendingSendOptions = {
      * operator lands on the resumed session to retry from the recovered
      * draft). Never fires when the session was not resumed.
      */
-    onSessionResolved?: (sessionId: string) => void
+    onSessionResolved?: (sessionId: string) => void | Promise<void>
 }
 
 /** True when the persisted draft for `sessionId` still equals `baseline`. */
@@ -58,14 +58,16 @@ export function draftUnchanged(sessionId: string, baseline: string): boolean {
     return cur === '' || cur === baseline
 }
 
-export function notifyResolvedSession(
+export async function notifyResolvedSession(
     pendingSend: { options: DictationPendingSendOptions },
     resumed: boolean,
     sessionId: string,
-): void {
+): Promise<void> {
     if (!resumed) return
     try {
-        pendingSend.options.onSessionResolved?.(sessionId)
+        // Callers may pass an async callback; await it so a rejection is
+        // caught here instead of surfacing as an unhandled rejection.
+        await pendingSend.options.onSessionResolved?.(sessionId)
     } catch {
         // Navigation/seed is a side effect of an already-decided send
         // outcome; a throw from it must not corrupt recovery or the
@@ -255,7 +257,15 @@ export function useDictation(config: {
                                     if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
                                         saveDraft(recoverySessionId, finalMessage)
                                     }
-                                    notifyResolvedSession(pendingSend, resumed, recoverySessionId)
+                                    // The resumed session supersedes the source composer even on
+                                    // failure: drop the source's pre-recording draft (the retryable
+                                    // text lives on under the resumed id).
+                                    if (resumed
+                                        && targetSessionId !== pendingSend.sessionId
+                                        && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                        clearDraft(pendingSend.sessionId)
+                                    }
+                                    await notifyResolvedSession(pendingSend, resumed, recoverySessionId)
                                     if (mountedRef.current) {
                                         if (!config.getCurrentText().trim()) {
                                             config.onTextChange(finalMessage)
@@ -270,7 +280,7 @@ export function useDictation(config: {
                                 // runs outside the send try/catch so a throw from navigation/cache
                                 // updates cannot be misread as a send failure (which would
                                 // re-insert the delivered text as a retryable draft).
-                                notifyResolvedSession(pendingSend, resumed, targetSessionId)
+                                await notifyResolvedSession(pendingSend, resumed, targetSessionId)
                                 if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
                                     clearDraft(targetSessionId)
                                 }
