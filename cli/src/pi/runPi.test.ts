@@ -1317,6 +1317,10 @@ describe('Pi built-in slash commands', () => {
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
             type: 'compact', customInstructions: 'focus on the API design',
         })));
+        // The /compact row is consumed at dispatch: slash commands are
+        // executed by HAPI and never delivered to Pi as prompts, so they must
+        // not linger in the web queued bar for the duration of the command.
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['compact-id'], { clearQueuedThinkingGrace: true }));
         // While the compact RPC is outstanding, the FIFO must not release the
         // following prompt — Pi rejects prompts during compaction.
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
@@ -1327,15 +1331,12 @@ describe('Pi built-in slash commands', () => {
             data: { summary: 'API design focused summary', tokensBefore: 1000, estimatedTokensAfter: 120 },
         });
 
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['compact-id'], { clearQueuedThinkingGrace: true }));
-        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: '📦 Compaction completed (tokens: 1000 → 120)',
-        }));
-        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+        })));
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: '📦 Compaction summary:\nAPI design focused summary',
-        }));
-
-        // The queued prompt may only flow once compaction completed.
+        })));
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
             type: 'prompt', message: 'continue after compaction',
         })));
@@ -1439,12 +1440,15 @@ describe('Pi built-in slash commands', () => {
             expect(found).toBeDefined();
             return found!;
         });
+        // Consumption happens at dispatch, before the command outcome is
+        // known: a failing /compact still leaves the queue immediately and
+        // surfaces its failure through the ⚠️ event message instead.
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['fail-id'], { clearQueuedThinkingGrace: true }));
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: false, error: 'no model selected' });
 
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
             message: '⚠️ Compaction failed: no model selected',
         })));
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['fail-id'], { clearQueuedThinkingGrace: true }));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -1552,9 +1556,10 @@ describe('Pi built-in slash commands', () => {
 
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
 
-        // The reservation is released before execution starts, so a cancel that
-        // lands while the compact RPC is in flight is not acknowledged — the
-        // hub keeps the queued row instead of deleting it mid-execution.
+        // The row is consumed at dispatch (the command executes out-of-band
+        // and is never delivered to Pi), so a cancel that lands while the
+        // compact RPC is in flight is not acknowledged — the entry is already
+        // gone from the queue.
         const onCancelQueuedMessage = harness.session.onCancelQueuedMessage.mock.calls.at(-1)![0] as (localId: string) => boolean;
         expect(onCancelQueuedMessage('in-flight-id')).toBe(false);
 
