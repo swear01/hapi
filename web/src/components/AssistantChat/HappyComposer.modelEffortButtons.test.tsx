@@ -264,10 +264,11 @@ describe('HappyComposer generic model/effort value buttons', () => {
             piModels: [],
             piSelectedModel: null,
         })
-        fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
-        // The sheet must not fall back to the generic synthesized model rows:
-        // selecting one would post a bare model id the Pi runner cannot
-        // resolve to a provider (runPi would guess the first cached one).
+        // Without a resolved catalog there are no model or effort settings at
+        // all: the gear is hidden and no provider-less fallback rows can be
+        // reached (selecting one would post a bare model id the Pi runner
+        // cannot resolve to a provider).
+        expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
         expect(screen.queryByText('Model')).toBeNull()
         expect(screen.queryByText('Default')).toBeNull()
     })
@@ -304,6 +305,20 @@ describe('HappyComposer generic model/effort value buttons', () => {
         fireEvent.click(valueButton)
         expect(screen.queryByText('← Models')).toBeNull()
         expect(screen.getByText('Model')).toBeTruthy()
+    })
+
+    it('exposes no effort action while the Pi catalog is unresolved mid-turn', () => {
+        runtime.snapshot.thread.isDisabled = true
+        renderComposer('pi', {
+            model: 'gemini-2.5-pro',
+            piModels: [],
+            piSelectedModel: null,
+        })
+        // With no resolved catalog entry there is no capability map, so no
+        // effort value button and no gear that could open an effort sheet
+        // (the old dedicated control was disabled in this state too).
+        expect(screen.queryByRole('button', { name: 'High' })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
     })
 
     it('clears the Pi thinking level when the selected effort row is clicked again', () => {

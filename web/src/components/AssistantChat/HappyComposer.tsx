@@ -1555,9 +1555,12 @@ export function HappyComposer(props: {
             && modelEffortOptions.length > 1
         )
     const showModelReasoningEffortSettings = Boolean(onModelReasoningEffortChange && codexReasoningEffortOptions.length > 0)
-    // For Pi: hide effort when selected model explicitly has reasoning: false
-    const piEffortHidden = piModels && selectedPiModel && selectedPiModel.reasoning === false
-    const showEffortSettings = Boolean(onEffortChange && supportsEffort(agentFlavor) && !piEffortHidden)
+    // For Pi: hide effort while the selected model is unresolved (catalog
+    // still loading/failed) or explicitly has reasoning: false — the generic
+    // fallback levels would mutate a set_thinking_level the model may reject.
+    const piEffortUnavailable = agentFlavor === 'pi'
+        && (!selectedPiModel || selectedPiModel.reasoning === false)
+    const showEffortSettings = Boolean(onEffortChange && supportsEffort(agentFlavor) && !piEffortUnavailable)
     const showFastModeSettings = Boolean(onServiceTierChange)
     const showModelAreaSettings = showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings
     const showOtherSettings = showFastModeSettings || showCollaborationSettings || showCopilotAgentModeSettings
@@ -1602,10 +1605,10 @@ export function HappyComposer(props: {
     const effortValueLabel = useMemo(() => {
         if (isNarrowViewport) return undefined
         if (!onEffortChange || !supportsEffort(agentFlavor)) return undefined
-        // Pi: non-reasoning models have no effort control; otherwise resolve the
-        // effective thinking level the same way the old dedicated button did.
+        // Pi: without a resolved catalog entry there is no capability map to
+        // derive levels from; hide the button until the selected model is known.
         if (agentFlavor === 'pi') {
-            if (selectedPiModel?.reasoning === false) return undefined
+            if (!selectedPiModel || selectedPiModel.reasoning === false) return undefined
             const effectiveLevel = effort && isThinkingLevelSupported(effort, selectedPiModel?.thinkingLevelMap)
                 ? effort
                 : getHighestThinkingLevel(selectedPiModel?.thinkingLevelMap)
