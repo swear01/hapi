@@ -120,7 +120,6 @@ describe('FilePage markdown preview', () => {
         })
     })
 
-<<<<<<< HEAD
     it('collapses long preview errors until clicked', async () => {
         const tail = 'FULL ERROR TAIL'
         const longError = `Command failed: git diff --no-ext-diff -- TASKS.md ${'diagnostic '.repeat(30)}${tail}`
@@ -140,6 +139,7 @@ describe('FilePage markdown preview', () => {
         fireEvent.click(errorToggle)
         expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
         expect(errorToggle).not.toHaveTextContent(tail)
+    })
 
     it('preserves the file preview scroll position across route remounts', async () => {
         const firstRender = renderWithProviders()
