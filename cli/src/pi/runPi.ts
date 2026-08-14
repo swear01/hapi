@@ -9,10 +9,12 @@ import { PiTransport } from './piTransport';
 import { PiSession } from './session';
 import { PiConversationHistory, PiHistoryRestoreError } from './conversationHistory';
 import { parsePiModels, parsePiCommands, PiRpcTimeoutError, sendPiRpcAndWait, wireTransportEvents } from './loop';
-import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema } from './schemas';
+import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
 import type { PiImageContent, PiThinkingLevel } from './types';
+import { parsePiSpecialCommand, type PiSpecialCommand } from './specialCommands';
 import { PiPromptQueue, type PiPreparedPrompt } from './promptQueue';
 import { PiSteerDispatcher } from './steerDispatcher';
+import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
 import type { ListPiModelsResponse, PiCommandSummary, SlashCommand, SlashCommandsResponse } from '@hapi/protocol/apiTypes';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import type { ListSkillsResponse, SkillSummary } from '@/modules/common/skills';
@@ -26,6 +28,44 @@ import { isAuthorizedUploadFile, isPathWithinUploadDir, type UploadFileIdentity 
 // but healthy startup still flips ready via get_state first (issue #1143).
 const PI_READY_FALLBACK_MS = 30_000;
 const PI_ABORT_OPERATION_TIMEOUT_MS = 25_000;
+// Manual compaction runs an LLM summarization pass; give it a generous window
+// far above the 10s default Pi RPC timeout.
+const PI_COMPACT_TIMEOUT_MS = 120_000;
+
+const PI_HELP_TEXT = [
+    'Supported HAPI Pi commands:',
+    '/compact [instructions] — compress conversation history to save context',
+    '/session — show session stats (tokens, cost, context usage)',
+    '/model [modelId] — show or switch the active model',
+    '/help — show this message',
+].join('\n');
+
+function formatPiSessionStatsMessage(stats: {
+    totalMessages?: number;
+    tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
+    cost?: number;
+    contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number };
+}): string {
+    const lines: string[] = ['📊 Pi session stats'];
+    if (stats.totalMessages !== undefined) lines.push(`Messages: ${stats.totalMessages}`);
+    const tokens = stats.tokens;
+    if (tokens && tokens.total !== undefined) {
+        const parts = [`total ${tokens.total}`];
+        if (tokens.input !== undefined) parts.push(`in ${tokens.input}`);
+        if (tokens.output !== undefined) parts.push(`out ${tokens.output}`);
+        if (tokens.cacheRead !== undefined) parts.push(`cacheR ${tokens.cacheRead}`);
+        if (tokens.cacheWrite !== undefined) parts.push(`cacheW ${tokens.cacheWrite}`);
+        lines.push(`Tokens: ${parts.join(' · ')}`);
+    }
+    if (stats.cost !== undefined) lines.push(`Cost: $${stats.cost.toFixed(4)}`);
+    const usage = stats.contextUsage;
+    if (usage && usage.tokens !== null && usage.tokens !== undefined) {
+        const window = usage.contextWindow ? ` / ${usage.contextWindow}` : '';
+        const percent = usage.percent !== undefined && usage.percent !== null ? ` (${usage.percent}%)` : '';
+        lines.push(`Context: ${usage.tokens}${window} tokens${percent}`);
+    }
+    return lines.join('\n');
+}
 
 function isPiNoActiveAbortError(detail: string): boolean {
     return /no active|nothing.*abort/i.test(detail);
@@ -368,6 +408,12 @@ export async function runPi(opts: {
     let preparationChain = Promise.resolve();
     let promptCommandInFlight = false;
     let abortInFlight = false;
+    // Set while a manual /compact RPC is outstanding. Pi's compact() aborts
+    // any active stream itself, so piIsStreaming/promptCommandInFlight can go
+    // false mid-compaction; this flag keeps the prompt pump from sending a
+    // prompt Pi would reject ("Cannot submit a prompt while compaction is in
+    // progress").
+    let piCompactInFlight = false;
     let activePromptLocalId: string | undefined;
     let historyPumpDeferred = false;
     let agentLifecycleStarted = false;
@@ -465,6 +511,7 @@ export async function runPi(opts: {
             || piSession.piIsStreaming
             || promptCommandInFlight
             || abortInFlight
+            || piCompactInFlight
             // Earlier steers can fall back only after async preparation/runtime
             // lock wait. Do not let a later normal prompt overtake that result.
             || steerDispatcher?.hasPending
@@ -778,7 +825,11 @@ export async function runPi(opts: {
             const { slashCommands } = buildPiCommandInventory(await getPiCommands());
             return {
                 success: true,
-                commands: slashCommands,
+                // Pi's get_commands only reports extension commands, prompt
+                // templates, and skills — never its TUI builtins. Merge the
+                // HAPI-side builtin list (the subset translatable to Pi RPC)
+                // so the web / menu exposes /compact, /session, /model, /help.
+                commands: mergeSlashCommands([...getBuiltinSlashCommands('pi'), ...slashCommands]),
             };
         }
     );
@@ -791,7 +842,124 @@ export async function runPi(opts: {
         }
     );
 
-    // --- User message handler ---
+    // --- Pi built-in slash commands ---
+    // pi only runs as `pi --mode rpc` over piped stdio, so TUI slash commands
+    // typed in web would otherwise fall through to the LLM as plain text and
+    // silently do nothing. Intercept the subset HAPI can translate to Pi RPC
+    // (compact/session/model/help) and make terminal-only commands explicit.
+    const handlePiSpecialCommand = async (command: PiSpecialCommand): Promise<void> => {
+        const sendEvent = (message: string): void => {
+            piSession.sendSessionEvent({ type: 'message', message });
+        };
+        const errorDetail = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+        // RPC-backed commands need the transport wired and the history baseline
+        // established. Prompts are buffered until ready via runWhenReady, so
+        // defer the same way instead of racing the readiness transition (the
+        // ready queue drains FIFO on markReady, preserving arrival order).
+        if (command.type === 'compact' || command.type === 'session' || command.type === 'model') {
+            await new Promise<void>((resolve) => {
+                if (piSession.isReady) {
+                    resolve();
+                    return;
+                }
+                piSession.runWhenReady(resolve);
+            });
+        }
+
+        switch (command.type) {
+            case 'help':
+                sendEvent(PI_HELP_TEXT);
+                return;
+            case 'session': {
+                try {
+                    const data = await sendPiRpcAndWait(piSession, transport, { type: 'get_session_stats' });
+                    const parsed = PiFullSessionStatsSchema.safeParse(data);
+                    sendEvent(formatPiSessionStatsMessage(parsed.success ? parsed.data : {}));
+                } catch (error) {
+                    sendEvent(`⚠️ Could not read Pi session stats: ${errorDetail(error)}`);
+                }
+                return;
+            }
+            case 'model': {
+                if (!command.modelId) {
+                    const available = piSession.cachedPiModels
+                        .map((model) => model.modelId)
+                        .join(', ');
+                    sendEvent(`Current model: ${piSession.currentModel ?? 'unset'}.\nAvailable: ${available || 'unknown — use /model <modelId>'}`);
+                    return;
+                }
+                const match = piSession.cachedPiModels.find((model) => model.modelId === command.modelId)
+                    ?? piSession.cachedPiModels.find((model) => `${model.provider}/${model.modelId}` === command.modelId);
+                if (!match) {
+                    sendEvent(`⚠️ Unknown model: ${command.modelId}. Use /model to list available models.`);
+                    return;
+                }
+                try {
+                    await piSession.runRuntimeMutation(async () => {
+                        await sendPiRpcAndWait(piSession, transport, {
+                            type: 'set_model',
+                            provider: match.provider,
+                            modelId: match.modelId,
+                        });
+                        piSession.currentModel = match.modelId;
+                        piSession.currentProvider = match.provider;
+                        piSession.pushKeepAlive();
+                    }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
+                    sendEvent(`Model switched to ${command.modelId}`);
+                } catch (error) {
+                    if (error instanceof PiRpcTimeoutError) {
+                        failNativeStartup(new Error(`Pi model switch outcome is indeterminate: ${error.message}`));
+                    } else {
+                        sendEvent(`⚠️ Model switch failed: ${errorDetail(error)}`);
+                    }
+                }
+                return;
+            }
+            case 'compact': {
+                piCompactInFlight = true;
+                try {
+                    const data = await piSession.runRuntimeMutation(async () => {
+                        return await sendPiRpcAndWait(piSession, transport, {
+                            type: 'compact',
+                            ...(command.instructions ? { customInstructions: command.instructions } : {}),
+                        }, PI_COMPACT_TIMEOUT_MS);
+                    }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
+                    // Pi emits compaction_start/compaction_end lifecycle events
+                    // which surface as "📦 Compaction …" status messages; add
+                    // the actual summary and token delta on top.
+                    const parsed = PiCompactResultSchema.safeParse(data);
+                    const result = parsed.success ? parsed.data : {};
+                    const delta: string[] = [];
+                    if (result.tokensBefore !== undefined) delta.push(String(result.tokensBefore));
+                    delta.push('→');
+                    if (result.estimatedTokensAfter !== undefined) delta.push(String(result.estimatedTokensAfter));
+                    else delta.push('?');
+                    sendEvent(`📦 Compaction completed (tokens: ${delta.join(' ')})`);
+                    if (result.summary) sendEvent(`📦 Compaction summary:\n${result.summary}`);
+                } catch (error) {
+                    if (error instanceof PiRpcTimeoutError) {
+                        // Outcome is unknown but Pi's own compaction lifecycle
+                        // events still report completion/failure; the pump stays
+                        // blocked while compaction is genuinely running, and a
+                        // prompt sent into a stuck compaction is rejected by Pi
+                        // with a visible error. Do not poison the session.
+                        sendEvent(`⚠️ Compaction timed out — outcome unknown. If it is still running, prompts may be rejected until it finishes.`);
+                    } else {
+                        sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
+                    }
+                } finally {
+                    piCompactInFlight = false;
+                    pumpPromptQueue();
+                }
+                return;
+            }
+            case 'unsupported':
+                sendEvent(`⚠️ /${command.name} is a Pi terminal-only command and cannot run from HAPI web. Supported here: /compact, /session, /model, /help.`);
+                return;
+        }
+    };
+
     // Preparation reads image files asynchronously. A single promise chain keeps
     // attachment completion order identical to user-message arrival order.
     apiSession.onUserMessage((message, localId) => {
@@ -808,6 +976,20 @@ export async function runPi(opts: {
                 preparingLocalIds.delete(localId);
                 return;
             }
+
+            const specialCommand = parsePiSpecialCommand(message.content.text);
+            if (specialCommand) {
+                try {
+                    await handlePiSpecialCommand(specialCommand);
+                } finally {
+                    if (localId) {
+                        preparingLocalIds.delete(localId);
+                        piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+                    }
+                }
+                return;
+            }
+
             const prepared = await preparePiUserMessage(
                 message.content.text,
                 message.content.attachments,
