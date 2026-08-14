@@ -521,7 +521,11 @@ export function HappyComposer(props: {
         const targetSessionId = props.sessionId ?? ''
         const initialText = api.composer().getState().text
         api.composer().setText('')
-        if (targetSessionId) {
+        // Same gate as handleSend's direct-send branch: without an active
+        // session or a session resolver, direct-sending to an inactive
+        // session would be rejected by the hub (409 `session_inactive`), so
+        // fall back to a plain stop + transcribe instead.
+        if (targetSessionId && (active || props.resolveSessionIdForVoice !== undefined)) {
             await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
                 // Inactive sessions cannot accept a message POST until they
                 // are resumed (hub returns 409 `session_inactive`), so the
@@ -532,7 +536,7 @@ export function HappyComposer(props: {
         } else {
             await dictation.toggle()
         }
-    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
+    }, [active, api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)

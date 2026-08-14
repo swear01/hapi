@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, draftUnchanged, notifyResolvedSession, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, deliverVoiceSend, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -74,70 +74,18 @@ export function useRealtimeDictation(config: {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
             if (finalMessage.trim()) {
                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
-                // Inactive sessions cannot accept a message POST until they
-                // are resumed (hub returns 409 `session_inactive`), so the
-                // voice send runs the same resume step as the text pipeline.
-                let targetSessionId = pendingSend.sessionId
-                let resumed = false
-                let delivered = false
-                let recoveryDraftAtStart = pendingSend.draftAtStart
-                try {
-                    if (pendingSend.options.resolveSessionId) {
-                        const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
-                        targetSessionId = resolved.sessionId
-                        resumed = resolved.resumed
-                        // Snapshot the resumed session's draft BEFORE the send: the
-                        // catch compares against this to avoid clobbering text the
-                        // operator typed into the resumed composer while the request
-                        // was in flight.
-                        if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
+                const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
+                if (!result.delivered && mountedRef.current) {
+                    // For a resumed send the retryable text lives in the resumed
+                    // session's draft store; do not also write it into the still-
+                    // mounted archived composer, whose draft must stay untouched
+                    // for the reload-safe recovery in deliverVoiceSend.
+                    if (!result.resumed && !config.getCurrentText?.().trim()) {
+                        onFinalTranscriptRef.current(finalMessage)
                     }
-                    await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
-                    delivered = true
-                } catch (sendError) {
-                    // After a resume the source session is superseded: recover the
-                    // retryable transcript under the LIVE resumed id so the operator
-                    // can retry from the resumed session (and is navigated there via
-                    // onSessionResolved) instead of leaving it under the archived
-                    // source id.
-                    const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
-                    if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
-                        saveDraft(recoverySessionId, finalMessage)
-                    }
-                    // Keep the source draft on failure: the recovery save above may
-                    // have been skipped (resumed composer changed in flight) and the
-                    // operator may not actually land on the resumed session, so
-                    // clearing the source would risk losing the transcript entirely.
-                    // Only the success path drops it (superseded by the merge).
-                    await notifyResolvedSession(pendingSend, resumed, recoverySessionId)
-                    if (mountedRef.current) {
-                        // For a resumed send the retryable text lives in the resumed
-                        // session's draft store; do not also write it into the still-
-                        // mounted archived composer, whose draft must stay untouched
-                        // for the reload-safe recovery above.
-                        if (!resumed && !config.getCurrentText?.().trim()) {
-                            onFinalTranscriptRef.current(finalMessage)
-                        }
-                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
-                        setStatus('error')
-                        return
-                    }
-                }
-                if (!delivered) return
-                // Notification is a side effect of an already-delivered send: it
-                // runs outside the send try/catch so a throw from navigation/cache
-                // updates cannot be misread as a send failure (which would
-                // re-insert the delivered text as a retryable draft).
-                await notifyResolvedSession(pendingSend, resumed, targetSessionId)
-                if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
-                    clearDraft(targetSessionId)
-                }
-                // A resume supersedes the source composer too; drop its
-                // pre-recording draft so reopening the archived session does not
-                // resurrect stale text (mirrors clearDraftsAfterSend).
-                if (targetSessionId !== pendingSend.sessionId
-                    && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                    clearDraft(pendingSend.sessionId)
+                    setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
+                    setStatus('error')
+                    return
                 }
             }
         } else if (mountedRef.current) {
