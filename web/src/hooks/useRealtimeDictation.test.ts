@@ -212,8 +212,11 @@ describe('useRealtimeDictation', () => {
         await waitFor(() => {
             expect(result.current.status).toBe('error')
             expect(result.current.error).toBe('boom')
-            // The transcript is restored so the input is never dropped.
-            expect(onFinalTranscript).toHaveBeenCalledWith('initial text spoken words')
         })
+        // finalMessage already existed when the unexpected rejection hit, so
+        // the recovery paths owned the outcome (the draft was saved) and the
+        // catch must not restore again (which could invite a duplicate send).
+        expect(onFinalTranscript).not.toHaveBeenCalled()
+        expect(getDraft('session-K')).toBe('initial text spoken words')
     })
 })

@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, deliverVoiceSend, notifyResolvedSession, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, deliverVoiceSend, notifyResolvedSession, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './voiceSend'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -82,12 +82,17 @@ export function useRealtimeDictation(config: {
                         // mounted, then navigate to the resumed session. The text is
                         // restored into the mounted composer only when the transcript
                         // was recovered under the mounted session (non-resumed,
-                        // same-id resume, or the cross-id fallback); a cross-id
-                        // recovery lives in the target's own draft store.
+                        // same-id resume, or the cross-id fallback): empty composer
+                        // gets the full message, in-flight operator text gets just
+                        // the transcribed delta appended.
                         if (mountedRef.current) {
-                            if (result.recoveredSessionId === pendingSend.sessionId
-                                && !config.getCurrentText?.().trim()) {
-                                onFinalTranscriptRef.current(finalMessage)
+                            if (result.recoveredSessionId === pendingSend.sessionId) {
+                                const current = config.getCurrentText?.().trim()
+                                if (current) {
+                                    onFinalTranscriptRef.current(text)
+                                } else {
+                                    onFinalTranscriptRef.current(finalMessage)
+                                }
                             }
                             setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
                             setStatus('error')
@@ -97,6 +102,14 @@ export function useRealtimeDictation(config: {
                             result.resumed && result.recoveredSessionId === result.targetSessionId,
                             result.targetSessionId,
                         )
+                        return
+                    }
+                    if (result.resumed && !result.notified && mountedRef.current) {
+                        // The message was delivered, but the operator was not
+                        // navigated to the resumed session; surface that so it is
+                        // not silent.
+                        setError('Message sent, but opening the resumed session failed')
+                        setStatus('error')
                         return
                     }
                 }
@@ -111,10 +124,14 @@ export function useRealtimeDictation(config: {
             // defensive net so an unexpected rejection (finish is invoked
             // without await by the realtime callbacks) still surfaces as a
             // visible error instead of an unhandled rejection. The
-            // transcript is restored so an unexpected failure never drops
-            // the user's input silently.
+            // transcript is restored only when no final message existed
+            // yet (the send could not have been attempted); once
+            // finalMessage exists the recovery paths already handled it,
+            // and restoring again could invite a duplicate send.
             if (mountedRef.current) {
-                onFinalTranscriptRef.current(finalMessage || text)
+                if (!finalMessage.trim()) {
+                    onFinalTranscriptRef.current(text)
+                }
                 setError(error instanceof Error ? error.message : VOICE_SEND_FAILED_MESSAGE)
                 setStatus('error')
             }
