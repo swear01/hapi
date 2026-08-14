@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript } from './useDictation'
+import { appendTranscript, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -58,7 +58,13 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+    const sendOnFinishRef = useRef<{
+        sessionId: string
+        initialText: string
+        draftAtStart: string
+        deliveryMode?: MessageDeliveryMode
+        options: DictationPendingSendOptions
+    } | null>(null)
 
     const finish = useCallback(async (text: string) => {
         const pendingSend = sendOnFinishRef.current
@@ -68,16 +74,44 @@ export function useRealtimeDictation(config: {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
             if (finalMessage.trim()) {
                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                // Inactive sessions cannot accept a message POST until they
+                // are resumed (hub returns 409 `session_inactive`), so the
+                // voice send runs the same resume step as the text pipeline.
+                let targetSessionId = pendingSend.sessionId
+                let resumed = false
+                let recoveryDraftAtStart = pendingSend.draftAtStart
                 try {
-                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
-                    const cur = getDraft(pendingSend.sessionId)
-                    if (cur === '' || cur === pendingSend.draftAtStart) {
-                        clearDraft(pendingSend.sessionId)
+                    if (pendingSend.options.resolveSessionId) {
+                        const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
+                        targetSessionId = resolved.sessionId
+                        resumed = resolved.resumed
+                        // Snapshot the resumed session's draft BEFORE the send: the
+                        // catch compares against this to avoid clobbering text the
+                        // operator typed into the resumed composer while the request
+                        // was in flight.
+                        if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
+                    }
+                    await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
+                    if (resumed) {
+                        pendingSend.options.onSessionResolved?.(targetSessionId)
+                    }
+                    const cur = getDraft(targetSessionId)
+                    if (cur === '' || cur === recoveryDraftAtStart) {
+                        clearDraft(targetSessionId)
                     }
                 } catch (sendError) {
-                    const cur = getDraft(pendingSend.sessionId)
-                    if (cur === '' || cur === pendingSend.draftAtStart) {
-                        saveDraft(pendingSend.sessionId, finalMessage)
+                    // After a resume the source session is superseded: recover the
+                    // retryable transcript under the LIVE resumed id so the operator
+                    // can retry from the resumed session (and is navigated there via
+                    // onSessionResolved) instead of leaving it under the archived
+                    // source id.
+                    const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
+                    const cur = getDraft(recoverySessionId)
+                    if (cur === '' || cur === recoveryDraftAtStart) {
+                        saveDraft(recoverySessionId, finalMessage)
+                    }
+                    if (resumed) {
+                        pendingSend.options.onSessionResolved?.(recoverySessionId)
                     }
                     if (mountedRef.current) {
                         if (!config.getCurrentText?.().trim()) {
@@ -276,8 +310,19 @@ export function useRealtimeDictation(config: {
         }
     }, [elevenLabs, fail])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
-        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), deliveryMode }
+    const stopAndSend = useCallback(async (
+        targetSessionId: string,
+        initialText?: string,
+        deliveryMode?: MessageDeliveryMode,
+        options: DictationPendingSendOptions = {},
+    ) => {
+        sendOnFinishRef.current = {
+            sessionId: targetSessionId,
+            initialText: initialText ?? '',
+            draftAtStart: getDraft(targetSessionId),
+            deliveryMode,
+            options
+        }
         await stop()
     }, [stop])
 

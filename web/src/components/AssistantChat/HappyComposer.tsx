@@ -344,6 +344,23 @@ export function HappyComposer(props: {
     onVoiceToggle?: () => void
     onVoiceMicToggle?: () => void
     voiceTranscriptionApi?: ApiClient
+    /**
+     * Resolves the target session for a voice dictation direct-send (same
+     * contract as `useSendMessage`'s `resolveSessionId`): an inactive
+     * session must be resumed before the message POST, otherwise the hub
+     * rejects it with 409 `session_inactive`. Captured at send time and
+     * applied after transcription completes, so the send survives
+     * navigation while the recording is being processed. When provided,
+     * direct voice sends are allowed on inactive sessions (they resume
+     * first instead of being downgraded to a plain stop).
+     */
+    resolveSessionIdForVoice?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    /**
+     * Called when the voice direct-send resumed an inactive session and
+     * the message was delivered to the resumed session id, so the caller
+     * can navigate/seed the live session (mirrors `onSessionResolved`).
+     */
+    onVoiceSessionResolved?: (sessionId: string) => void
     // Schedule props (lifted from internal state when provided)
     pendingSchedule?: PendingSchedule | null
     onSchedule?: (pending: PendingSchedule) => void
@@ -503,11 +520,17 @@ export function HappyComposer(props: {
         const initialText = api.composer().getState().text
         api.composer().setText('')
         if (targetSessionId) {
-            await dictation.stopAndSend?.(targetSessionId, initialText)
+            await dictation.stopAndSend?.(targetSessionId, initialText, undefined, {
+                // Inactive sessions cannot accept a message POST until they
+                // are resumed (hub returns 409 `session_inactive`), so the
+                // voice send runs the same resume step as the text pipeline.
+                resolveSessionId: props.resolveSessionIdForVoice,
+                onSessionResolved: props.onVoiceSessionResolved,
+            })
         } else {
             await dictation.toggle()
         }
-    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
+    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
 
     const effectiveVoiceToggle = dictationActive
         ? (dictation.supported ? handleDictationToggle : undefined)
@@ -1141,7 +1164,7 @@ export function HappyComposer(props: {
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
         if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
             const canDirectSend = dictation.status === 'connected'
-                && active
+                && (active || props.resolveSessionIdForVoice !== undefined)
                 && attachments.length === 0
                 && pendingSchedule == null
                 && !props.scratchlistMode
@@ -1152,7 +1175,10 @@ export function HappyComposer(props: {
                 const initialText = api.composer().getState().text
                 api.composer().setText('')
                 if (targetSessionId && dictation.stopAndSend) {
-                    await dictation.stopAndSend(targetSessionId, initialText)
+                    await dictation.stopAndSend(targetSessionId, initialText, undefined, {
+                        resolveSessionId: props.resolveSessionIdForVoice,
+                        onSessionResolved: props.onVoiceSessionResolved,
+                    })
                 } else {
                     await dictation.toggle()
                 }

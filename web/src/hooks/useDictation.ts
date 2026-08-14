@@ -19,6 +19,32 @@ function recordingExtension(mimeType: string): string {
     return 'webm'
 }
 
+/**
+ * Optional session resolution for a `stopAndSend` voice send.
+ *
+ * Mirrors the text-send pipeline's `resolveSessionId` contract
+ * (`useSendMessage`): an inactive session must be resumed via
+ * `api.resumeSession` before the message POST, because the hub rejects
+ * messages to inactive sessions with 409 `session_inactive`. The
+ * dictation hooks send after transcription completes (possibly after the
+ * composer unmounted), so the resolver is captured at call time and
+ * applied at send time.
+ */
+export type DictationPendingSendOptions = {
+    /**
+     * Maps the target session id to the id the message should actually be
+     * sent to (e.g. the resumed session id for an inactive session).
+     * Invoked right before the message send. May throw to abort the send.
+     */
+    resolveSessionId?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    /**
+     * Called when `resolveSessionId` resumed the session into a live one,
+     * so the caller can navigate/seed the resumed session. Fires only
+     * after the message was delivered successfully.
+     */
+    onSessionResolved?: (sessionId: string) => void
+}
+
 function preferredMimeType(): string | undefined {
     if (typeof MediaRecorder.isTypeSupported !== 'function') return undefined
     return [
@@ -65,7 +91,13 @@ export function useDictation(config: {
     const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+    const sendOnFinishRef = useRef<{
+        sessionId: string
+        initialText: string
+        draftAtStart: string
+        deliveryMode?: MessageDeliveryMode
+        options: DictationPendingSendOptions
+    } | null>(null)
 
     const stopTracks = useCallback(() => {
         if (mediaStreamRef.current) {
@@ -170,14 +202,42 @@ export function useDictation(config: {
                             const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                             if (finalMessage.trim()) {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                                // Inactive sessions cannot accept a message POST until they
+                                // are resumed (hub returns 409 `session_inactive`), so the
+                                // voice send runs the same resume step as the text pipeline.
+                                let targetSessionId = pendingSend.sessionId
+                                let resumed = false
+                                let recoveryDraftAtStart = pendingSend.draftAtStart
                                 try {
-                                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
-                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                                        clearDraft(pendingSend.sessionId)
+                                    if (pendingSend.options.resolveSessionId) {
+                                        const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
+                                        targetSessionId = resolved.sessionId
+                                        resumed = resolved.resumed
+                                        // Snapshot the resumed session's draft BEFORE the send: the
+                                        // catch compares against this to avoid clobbering text the
+                                        // operator typed into the resumed composer while the request
+                                        // was in flight.
+                                        if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
+                                    }
+                                    await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
+                                    if (resumed) {
+                                        pendingSend.options.onSessionResolved?.(targetSessionId)
+                                    }
+                                    if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+                                        clearDraft(targetSessionId)
                                     }
                                 } catch (sendError) {
-                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                                        saveDraft(pendingSend.sessionId, finalMessage)
+                                    // After a resume the source session is superseded: recover the
+                                    // retryable transcript under the LIVE resumed id so the operator
+                                    // can retry from the resumed session (and is navigated there via
+                                    // onSessionResolved) instead of leaving it under the archived
+                                    // source id.
+                                    const recoverySessionId = resumed ? targetSessionId : pendingSend.sessionId
+                                    if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
+                                        saveDraft(recoverySessionId, finalMessage)
+                                    }
+                                    if (resumed) {
+                                        pendingSend.options.onSessionResolved?.(recoverySessionId)
                                     }
                                     if (mountedRef.current) {
                                         if (!config.getCurrentText().trim()) {
@@ -233,12 +293,18 @@ export function useDictation(config: {
         }
     }, [stopTracks])
 
-    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
+    const stopAndSend = useCallback(async (
+        targetSessionId: string,
+        initialText?: string,
+        deliveryMode?: MessageDeliveryMode,
+        options: DictationPendingSendOptions = {},
+    ) => {
         sendOnFinishRef.current = {
             sessionId: targetSessionId,
             initialText: initialText ?? config.getCurrentText(),
             draftAtStart: getDraft(targetSessionId),
-            deliveryMode
+            deliveryMode,
+            options
         }
         await stop()
     }, [config, stop])
