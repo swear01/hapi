@@ -537,7 +537,17 @@ export async function runPi(opts: {
             // whole execution — a /compact run performs an LLM summarization
             // pass that can take minutes.
             if (dequeued.localId) {
-                piSession.emitMessagesConsumed([dequeued.localId], { clearQueuedThinkingGrace: true });
+                piSession.emitMessagesConsumed(
+                    [dequeued.localId],
+                    // The queued-thinking grace is session-scoped; only drop
+                    // it for commands that finish synchronously. /compact
+                    // keeps working for minutes with queued prompts behind it
+                    // still awaiting their turn, so its acknowledgement must
+                    // not clear their grace.
+                    dequeued.command.type === 'compact'
+                        ? undefined
+                        : { clearQueuedThinkingGrace: true },
+                );
             }
             void handlePiSpecialCommand(dequeued.command)
                 .catch((error) => {

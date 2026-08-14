@@ -1320,7 +1320,7 @@ describe('Pi built-in slash commands', () => {
         // The /compact row is consumed at dispatch: slash commands are
         // executed by HAPI and never delivered to Pi as prompts, so they must
         // not linger in the web queued bar for the duration of the command.
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['compact-id'], { clearQueuedThinkingGrace: true }));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['compact-id'], undefined));
         // While the compact RPC is outstanding, the FIFO must not release the
         // following prompt — Pi rejects prompts during compaction.
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
@@ -1366,7 +1366,7 @@ describe('Pi built-in slash commands', () => {
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'steer' }));
 
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: {} });
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['steer-compact-id'], { clearQueuedThinkingGrace: true }));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['steer-compact-id'], undefined));
 
         harness.onError?.(new Error('finish test'));
         await running;
@@ -1443,7 +1443,7 @@ describe('Pi built-in slash commands', () => {
         // Consumption happens at dispatch, before the command outcome is
         // known: a failing /compact still leaves the queue immediately and
         // surfaces its failure through the ⚠️ event message instead.
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['fail-id'], { clearQueuedThinkingGrace: true }));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['fail-id'], undefined));
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: false, error: 'no model selected' });
 
         await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -1568,7 +1568,7 @@ describe('Pi built-in slash commands', () => {
 
         const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string };
         harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: { summary: 'done' } });
-        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['in-flight-id'], { clearQueuedThinkingGrace: true }));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['in-flight-id'], undefined));
 
         harness.onError?.(new Error('finish test'));
         await running;
