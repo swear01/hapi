@@ -530,14 +530,19 @@ export async function runPi(opts: {
             // Slash commands share the prompt FIFO so dispatch order matches
             // arrival order; execute out-of-band while the pump stays blocked.
             piSpecialCommandInFlight = true;
-            const finish = (): void => {
+            // Special commands are executed by HAPI itself and are never
+            // delivered to Pi as prompts. Consume the queue row the moment
+            // dispatch starts: deferring consumption until the command
+            // finishes would keep the row stuck in the web queued bar for the
+            // whole execution — a /compact run performs an LLM summarization
+            // pass that can take minutes.
+            if (dequeued.localId) {
+                piSession.emitMessagesConsumed([dequeued.localId], { clearQueuedThinkingGrace: true });
+            }
+            void handlePiSpecialCommand(dequeued.command).finally(() => {
                 piSpecialCommandInFlight = false;
-                if (dequeued.localId) {
-                    piSession.emitMessagesConsumed([dequeued.localId], { clearQueuedThinkingGrace: true });
-                }
                 pumpPromptQueue();
-            };
-            void handlePiSpecialCommand(dequeued.command).finally(finish);
+            });
             return;
         }
         setPromptCommandInFlight(true);
