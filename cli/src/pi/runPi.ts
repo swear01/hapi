@@ -939,18 +939,18 @@ export async function runPi(opts: {
                     if (result.summary) sendEvent(`📦 Compaction summary:\n${result.summary}`);
                 } catch (error) {
                     if (error instanceof PiRpcTimeoutError) {
-                        // Outcome is unknown but Pi's own compaction lifecycle
-                        // events still report completion/failure; the pump stays
-                        // blocked while compaction is genuinely running, and a
-                        // prompt sent into a stuck compaction is rejected by Pi
-                        // with a visible error. Do not poison the session.
-                        sendEvent(`⚠️ Compaction timed out — outcome unknown. If it is still running, prompts may be rejected until it finishes.`);
-                    } else {
-                        sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
+                        // The runtime lease is deliberately retained on timeout
+                        // (poisonOnError), so the session is indeterminate: Pi
+                        // may still be compacting while model switches, steers,
+                        // and history mutations can no longer run. Fail the
+                        // session instead of reopening the prompt FIFO.
+                        failNativeStartup(new Error(`Pi compaction outcome is indeterminate: ${error.message}`));
+                        return;
                     }
+                    sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
                 } finally {
                     piCompactInFlight = false;
-                    pumpPromptQueue();
+                    if (!cleanupInitiated) pumpPromptQueue();
                 }
                 return;
             }
@@ -979,11 +979,18 @@ export async function runPi(opts: {
 
             const specialCommand = parsePiSpecialCommand(message.content.text);
             if (specialCommand) {
+                // Release the cancellation reservation before executing: a
+                // cancel that lands while the command runs (startup wait or the
+                // long compact RPC) must not be acknowledged, or the hub would
+                // delete the queued row while the command still executes.
+                if (localId) {
+                    preparingLocalIds.delete(localId);
+                    if (cancelledWhilePreparing.delete(localId)) return;
+                }
                 try {
                     await handlePiSpecialCommand(specialCommand);
                 } finally {
                     if (localId) {
-                        preparingLocalIds.delete(localId);
                         piSession.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
                     }
                 }
