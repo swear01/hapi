@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, deliverVoiceSend, notifyResolvedSession, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, deliverVoiceSend, notifyResolvedSession, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -79,18 +79,17 @@ export function useRealtimeDictation(config: {
                     const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
                     if (!result.delivered) {
                         // Surface the failure while the source component is still
-                        // mounted, then navigate to the resumed session (whose
-                        // recovered draft carries the retryable text). For a
-                        // cross-id resumed send the text lives only in that draft
-                        // store; for a non-resumed or same-id resumed send the
-                        // mounted composer IS the recovery target (a same-id resume
-                        // does not remount), so restore the text there too.
+                        // mounted, then navigate to the resumed session. The text is
+                        // restored into the mounted composer only when the transcript
+                        // was recovered under the mounted session (non-resumed,
+                        // same-id resume, or the cross-id fallback); a cross-id
+                        // recovery lives in the target's own draft store.
                         if (mountedRef.current) {
-                            if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
+                            if (result.recoveredSessionId === pendingSend.sessionId
                                 && !config.getCurrentText?.().trim()) {
                                 onFinalTranscriptRef.current(finalMessage)
                             }
-                            setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
+                            setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
                             setStatus('error')
                         }
                         await notifyResolvedSession(pendingSend, result.resumed, result.targetSessionId)
@@ -112,7 +111,7 @@ export function useRealtimeDictation(config: {
             // the user's input silently.
             if (mountedRef.current) {
                 onFinalTranscriptRef.current(finalMessage || text)
-                setError(error instanceof Error ? error.message : 'Failed to send message')
+                setError(error instanceof Error ? error.message : VOICE_SEND_FAILED_MESSAGE)
                 setStatus('error')
             }
         }

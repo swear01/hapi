@@ -89,7 +89,16 @@ export type DeliverVoiceSendResult = {
     resumed: boolean
     /** Session id the message was actually sent to / recovered under. */
     targetSessionId: string
+    /**
+     * Id under which the retryable transcript was persisted on failure
+     * (the targeted session, or the source session when the target's
+     * draft was not ours to touch). Equals `targetSessionId` on success.
+     */
+    recoveredSessionId: string
 }
+
+/** Shared fallback message for voice direct-send failures. */
+export const VOICE_SEND_FAILED_MESSAGE = 'Failed to send message'
 
 /**
  * Shared send-with-resume orchestration for voice dictation direct-sends
@@ -151,6 +160,7 @@ export async function deliverVoiceSend(args: {
         // still mounted) and then navigates via notifyResolvedSession, so
         // a post-resume failure is never silent.
         const recoverySessionId = targetSessionId
+        let recoveredSessionId: string
         if (recoverySessionId === args.pendingSend.sessionId) {
             // Same-id (or unresolved): the baseline is the pre-recording
             // draft, which the send consumed — overwrite it if it has not
@@ -160,32 +170,34 @@ export async function deliverVoiceSend(args: {
             } else {
                 saveDraft(recoverySessionId, appendTranscript(getDraft(recoverySessionId), args.finalMessage))
             }
+            recoveredSessionId = recoverySessionId
         } else if (recoveryDraftAtStart === '' && draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
             // Cross-id: only the empty-at-resolve target draft is ours to
             // write — a non-empty target baseline is the operator's own
             // text in the resumed session and must not be overwritten.
             saveDraft(recoverySessionId, args.finalMessage)
-        } else if (draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
+            recoveredSessionId = recoverySessionId
+        } else {
             // The target draft moved in flight (or was never empty): fall
             // back to the source id so the transcript is never lost (the
-            // source draft is preserved on failure anyway).
+            // source draft is preserved on failure anyway). The caller
+            // restores the text into the still-mounted source composer in
+            // this case.
             saveDraft(args.pendingSend.sessionId, args.finalMessage)
+            recoveredSessionId = args.pendingSend.sessionId
         }
-        return { delivered: false, error: sendError, resumed, targetSessionId }
+        return { delivered: false, error: sendError, resumed, targetSessionId, recoveredSessionId }
     }
     // Draft cleanup runs BEFORE the notify: the onSessionResolved callback
     // may itself seed/navigate the target session (and write drafts), so a
     // post-notify unchanged-check could either skip the cleanup or wipe a
     // freshly seeded draft. The delivery outcome no longer depends on the
     // draft store.
-    if (targetSessionId === args.pendingSend.sessionId) {
+    if (targetSessionId === args.pendingSend.sessionId
+        && draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
         // Same-id: the pre-recording draft was consumed by the delivery.
-        if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
-            clearDraft(targetSessionId)
-        }
-    } else if (recoveryDraftAtStart === '' && draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
-        // Cross-id: only clear a target draft that was empty at resolve
-        // time — a non-empty baseline is the operator's own text.
+        // Cross-id targets are never cleared: a target draft is either
+        // empty (nothing to clear) or the operator's own text (not ours).
         clearDraft(targetSessionId)
     }
     // A cross-id resume supersedes the source composer too; drop its
@@ -201,7 +213,7 @@ export async function deliverVoiceSend(args: {
     // delivered text as a retryable draft). Navigation keys off `resumed`
     // (also covers same-id resumes, where the id never changes).
     await notifyResolvedSession(args.pendingSend, resumed, targetSessionId)
-    return { delivered: true, resumed, targetSessionId }
+    return { delivered: true, resumed, targetSessionId, recoveredSessionId: targetSessionId }
 }
 
 function preferredMimeType(): string | undefined {
@@ -359,18 +371,17 @@ export function useDictation(config: {
                                 const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
                                 if (!result.delivered) {
                                     // Surface the failure while the source component is still
-                                    // mounted, then navigate to the resumed session (whose
-                                    // recovered draft carries the retryable text). For a
-                                    // cross-id resumed send the text lives only in that draft
-                                    // store; for a non-resumed or same-id resumed send the
-                                    // mounted composer IS the recovery target (a same-id resume
-                                    // does not remount), so restore the text there too.
+                                    // mounted, then navigate to the resumed session. The text is
+                                    // restored into the mounted composer only when the transcript
+                                    // was recovered under the mounted session (non-resumed,
+                                    // same-id resume, or the cross-id fallback); a cross-id
+                                    // recovery lives in the target's own draft store.
                                     if (mountedRef.current) {
-                                        if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
+                                        if (result.recoveredSessionId === pendingSend.sessionId
                                             && !config.getCurrentText().trim()) {
                                             config.onTextChange(finalMessage)
                                         }
-                                        setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
+                                        setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
                                         setStatus('error')
                                     }
                                     await notifyResolvedSession(pendingSend, result.resumed, result.targetSessionId)
