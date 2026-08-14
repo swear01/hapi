@@ -244,7 +244,7 @@ If a remote session reports authentication failure, run `grok login --device-aut
 
   HAPI translates a subset of Pi's TUI slash commands to native Pi RPC calls, so they work from the web chat as well:
 
-  - `/compact [instructions]` — manually compact context with optional custom summary instructions (runs Pi's `compact` RPC; the summary and token delta are reported back as chat messages).
+  - `/compact [instructions]` — manually compact context with optional custom summary instructions (runs Pi's `compact` RPC; the summary is rendered as a dedicated block in the chat with the token delta in its header).
   - `/session` — show session stats (messages, tokens, cost, context usage).
   - `/model [modelId]` — show the current model and available models, or switch with `/model <modelId>`.
   - `/help` — list the commands supported from HAPI.

@@ -976,17 +976,29 @@ export async function runPi(opts: {
                         }, PI_COMPACT_TIMEOUT_MS);
                     }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
                     // Pi emits compaction_start/compaction_end lifecycle events
-                    // which surface as "📦 Compaction …" status messages; add
-                    // the actual summary and token delta on top.
+                    // which surface as "📦 Compaction …" status messages. The
+                    // summary itself is a structured event so the web chat can
+                    // render it as a dedicated block instead of a tiny status
+                    // line; the token delta rides on the same event.
                     const parsed = PiCompactResultSchema.safeParse(data);
                     const result = parsed.success ? parsed.data : {};
-                    const delta: string[] = [];
-                    if (result.tokensBefore !== undefined) delta.push(String(result.tokensBefore));
-                    delta.push('→');
-                    if (result.estimatedTokensAfter !== undefined) delta.push(String(result.estimatedTokensAfter));
-                    else delta.push('?');
-                    sendEvent(`📦 Compaction completed (tokens: ${delta.join(' ')})`);
-                    if (result.summary) sendEvent(`📦 Compaction summary:\n${result.summary}`);
+                    if (result.summary) {
+                        piSession.sendSessionEvent({
+                            type: 'compact-summary',
+                            summary: result.summary,
+                            tokensBefore: result.tokensBefore,
+                            estimatedTokensAfter: result.estimatedTokensAfter,
+                        });
+                    } else {
+                        // No summary in the RPC result (defensive): fall back to
+                        // the plain status line so the token delta still lands.
+                        const delta: string[] = [];
+                        if (result.tokensBefore !== undefined) delta.push(String(result.tokensBefore));
+                        delta.push('→');
+                        if (result.estimatedTokensAfter !== undefined) delta.push(String(result.estimatedTokensAfter));
+                        else delta.push('?');
+                        sendEvent(`📦 Compaction completed (tokens: ${delta.join(' ')})`);
+                    }
                 } catch (error) {
                     if (error instanceof PiRpcTimeoutError) {
                         // The runtime lease is deliberately retained on timeout

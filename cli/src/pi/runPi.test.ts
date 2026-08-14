@@ -1331,12 +1331,20 @@ describe('Pi built-in slash commands', () => {
             data: { summary: 'API design focused summary', tokensBefore: 1000, estimatedTokensAfter: 120 },
         });
 
-        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: '📦 Compaction completed (tokens: 1000 → 120)',
-        })));
-        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
-            message: '📦 Compaction summary:\nAPI design focused summary',
-        })));
+        // The summary lands as a structured event (the web renders it as a
+        // dedicated block), not as a plain status message. (The /compact row
+        // was already consumed at dispatch above.)
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith({
+            type: 'compact-summary',
+            summary: 'API design focused summary',
+            tokensBefore: 1000,
+            estimatedTokensAfter: 120,
+        }));
+        expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('Compaction summary'),
+        }));
+
+        // The queued prompt may only flow once compaction completed.
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
             type: 'prompt', message: 'continue after compaction',
         })));
