@@ -1,0 +1,1152 @@
+diff --git a/cli/src/pi/promptQueue.test.ts b/cli/src/pi/promptQueue.test.ts
+index 34a1c184a..f61db40c8 100644
+--- a/cli/src/pi/promptQueue.test.ts
++++ b/cli/src/pi/promptQueue.test.ts
+@@ -1,5 +1,14 @@
+ import { describe, expect, it } from 'vitest';
+-import { PiPromptQueue } from './promptQueue';
++import { PiPromptQueue, isPiSpecialQueued, type PiPreparedPrompt, type PiPromptQueueEntry } from './promptQueue';
++
++/** Narrow a dequeued entry to the prompt variant for assertions. */
++function promptOf(entry: PiPromptQueueEntry | undefined): PiPreparedPrompt {
++    expect(entry).toBeDefined();
++    if (!entry || isPiSpecialQueued(entry)) {
++        throw new Error('expected a prompt entry');
++    }
++    return entry;
++}
+ 
+ describe('PiPromptQueue', () => {
+     it('preserves FIFO and permits cancellation before a Pi turn starts', () => {
+@@ -8,8 +17,8 @@ describe('PiPromptQueue', () => {
+         queue.enqueue({ message: 'cancel', images: [], outboundSequence: 2, localId: 'two' });
+         queue.enqueue({ message: 'third', images: [], outboundSequence: 3, localId: 'three' });
+         expect(queue.cancelByLocalId('two')).toBe(true);
+-        expect(queue.dequeue()?.message).toBe('first');
+-        expect(queue.dequeue()?.message).toBe('third');
++        expect(promptOf(queue.dequeue()).message).toBe('first');
++        expect(promptOf(queue.dequeue()).message).toBe('third');
+         expect(queue.dequeue()).toBeUndefined();
+     });
+ 
+@@ -18,8 +27,8 @@ describe('PiPromptQueue', () => {
+         queue.enqueue({ message: 'later ordinary', images: [], outboundSequence: 2, localId: 'two' });
+         queue.enqueue({ message: 'earlier steer fallback', images: [], outboundSequence: 1, localId: 'one' });
+ 
+-        expect(queue.dequeue()?.message).toBe('earlier steer fallback');
+-        expect(queue.dequeue()?.message).toBe('later ordinary');
++        expect(promptOf(queue.dequeue()).message).toBe('earlier steer fallback');
++        expect(promptOf(queue.dequeue()).message).toBe('later ordinary');
+     });
+ 
+     it('removes a queued entry by localId for explicit steer promotion', () => {
+@@ -29,11 +38,11 @@ describe('PiPromptQueue', () => {
+         queue.enqueue({ message: 'third', images: [], outboundSequence: 3, localId: 'three' });
+ 
+         const removed = queue.removeByLocalId('two');
+-        expect(removed?.message).toBe('steer me');
+-        expect(removed?.localId).toBe('two');
++        expect(promptOf(removed).message).toBe('steer me');
++        expect(promptOf(removed).localId).toBe('two');
+         // Remaining order preserved.
+-        expect(queue.dequeue()?.message).toBe('first');
+-        expect(queue.dequeue()?.message).toBe('third');
++        expect(promptOf(queue.dequeue()).message).toBe('first');
++        expect(promptOf(queue.dequeue()).message).toBe('third');
+         expect(queue.dequeue()).toBeUndefined();
+     });
+ 
+@@ -43,7 +52,7 @@ describe('PiPromptQueue', () => {
+ 
+         expect(queue.removeByLocalId('missing')).toBeUndefined();
+         expect(queue.removeByLocalId('')).toBeUndefined();
+-        expect(queue.removeByLocalId('one')?.message).toBe('only');
++        expect(promptOf(queue.removeByLocalId('one')).message).toBe('only');
+         expect(queue.removeByLocalId('one')).toBeUndefined();
+     });
+ });
+diff --git a/cli/src/pi/promptQueue.ts b/cli/src/pi/promptQueue.ts
+index f8e861a59..f32bd5c87 100644
+--- a/cli/src/pi/promptQueue.ts
++++ b/cli/src/pi/promptQueue.ts
+@@ -1,4 +1,5 @@
+ import type { PiImageContent } from './types';
++import type { PiSpecialCommand } from './specialCommands';
+ 
+ export type PiPreparedPrompt = {
+     message: string;
+@@ -8,6 +9,24 @@ export type PiPreparedPrompt = {
+     localId?: string;
+ };
+ 
++/**
++ * A Pi built-in slash command queued through the same FIFO as prompts so
++ * dispatch order matches message arrival order (a /compact typed after a
++ * prompt never jumps the queue).
++ */
++export type PiSpecialQueued = {
++    kind: 'special';
++    command: PiSpecialCommand;
++    outboundSequence: number;
++    localId?: string;
++};
++
++export type PiPromptQueueEntry = PiPreparedPrompt | PiSpecialQueued;
++
++export function isPiSpecialQueued(entry: PiPromptQueueEntry): entry is PiSpecialQueued {
++    return 'kind' in entry && entry.kind === 'special';
++}
++
+ /**
+  * Small cancellable FIFO: HAPI owns queueing, Pi receives only real turns.
+  *
+@@ -16,18 +35,22 @@ export type PiPreparedPrompt = {
+  * that boundary instead of using completion order.
+  */
+ export class PiPromptQueue {
+-    private readonly entries: PiPreparedPrompt[] = [];
++    private readonly entries: PiPromptQueueEntry[] = [];
+ 
+-    enqueue(prompt: PiPreparedPrompt): void {
+-        const index = this.entries.findIndex((entry) => entry.outboundSequence > prompt.outboundSequence);
+-        if (index === -1) this.entries.push(prompt);
+-        else this.entries.splice(index, 0, prompt);
++    enqueue(entry: PiPromptQueueEntry): void {
++        const index = this.entries.findIndex((item) => item.outboundSequence > entry.outboundSequence);
++        if (index === -1) this.entries.push(entry);
++        else this.entries.splice(index, 0, entry);
+     }
+ 
+-    dequeue(): PiPreparedPrompt | undefined {
++    dequeue(): PiPromptQueueEntry | undefined {
+         return this.entries.shift();
+     }
+ 
++    peek(): PiPromptQueueEntry | undefined {
++        return this.entries[0];
++    }
++
+     cancelByLocalId(localId: string): boolean {
+         if (!localId) return false;
+         const index = this.entries.findIndex((entry) => entry.localId === localId);
+@@ -41,7 +64,7 @@ export class PiPromptQueue {
+      * into the active turn (explicit steer). Returns undefined when the entry
+      * is absent (already dispatched, cancelled, or still preparing).
+      */
+-    removeByLocalId(localId: string): PiPreparedPrompt | undefined {
++    removeByLocalId(localId: string): PiPromptQueueEntry | undefined {
+         if (!localId) return undefined;
+         const index = this.entries.findIndex((entry) => entry.localId === localId);
+         if (index === -1) return undefined;
+diff --git a/cli/src/pi/runPi.test.ts b/cli/src/pi/runPi.test.ts
+index c2d4ed8db..848cd42a5 100644
+--- a/cli/src/pi/runPi.test.ts
++++ b/cli/src/pi/runPi.test.ts
+@@ -1250,3 +1250,425 @@ describe('Pi steer-queued-message RPC', () => {
+         await running;
+     });
+ });
++
++describe('Pi built-in slash commands', () => {
++    beforeEach(() => {
++        vi.useRealTimers();
++        harness.sent.length = 0;
++        harness.throwOnGetCommands = false;
++        harness.onError = null;
++        harness.onEvent = null;
++        harness.rpcHandlers.clear();
++        harness.session.onUserMessage.mockReset();
++        harness.session.onCancelQueuedMessage.mockReset();
++        harness.session.emitMessagesConsumed.mockReset();
++        harness.session.sendSessionEvent.mockReset();
++        harness.session.updateMetadata.mockReset();
++        harness.cleanupCount = 0;
++        harness.killCount = 0;
++        harness.session.rpcHandlerManager.registerHandler.mockReset();
++        harness.session.rpcHandlerManager.registerHandler.mockImplementation((method: string, handler: (payload: unknown) => Promise<unknown>) => {
++            harness.rpcHandlers.set(method, handler);
++        });
++    });
++
++    async function startReadySession(commands: Array<Record<string, unknown>> = [
++        { name: 'test-extension', description: 'Test extension', source: 'extension' },
++        { name: 'skill:brave-search', description: 'Search the web', source: 'skill' },
++    ]): Promise<{
++        running: Promise<void>;
++        onUserMessage: (message: {
++            role: 'user';
++            content: { type: 'text'; text: string };
++            meta?: { deliveryMode?: 'queue' | 'steer' };
++        }, localId: string) => void;
++    }> {
++        const running = runPi({ workingDirectory: '/work' });
++        await vi.waitFor(() => expect(harness.onEvent).not.toBeNull());
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
++        });
++        await completeHistoryInitialization();
++        // Warm the command cache: slash-message handling consults discovered
++        // commands to decide extension-vs-builtin precedence.
++        const getCommands = harness.sent.find((item) => (item as { type?: string }).type === 'get_commands') as { id: string };
++        harness.onEvent!({ type: 'response', id: getCommands.id, command: 'get_commands', success: true, data: { commands } });
++        const onUserMessage = harness.session.onUserMessage.mock.calls.at(-1)![0] as (message: {
++            role: 'user';
++            content: { type: 'text'; text: string };
++            meta?: { deliveryMode?: 'queue' | 'steer' };
++        }, localId: string) => void;
++        return { running, onUserMessage };
++    }
++
++    it('executes /compact via Pi RPC, reports the summary, and holds queued prompts until it completes', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        onUserMessage({
++            role: 'user',
++            content: { type: 'text', text: '/compact focus on the API design' },
++        }, 'compact-id');
++
++        onUserMessage({
++            role: 'user',
++            content: { type: 'text', text: 'continue after compaction' },
++        }, 'after-id');
++
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
++            type: 'compact', customInstructions: 'focus on the API design',
++        })));
++        // While the compact RPC is outstanding, the FIFO must not release the
++        // following prompt — Pi rejects prompts during compaction.
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
++
++        const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string };
++        harness.onEvent!({
++            type: 'response', id: compact.id, command: 'compact', success: true,
++            data: { summary: 'API design focused summary', tokensBefore: 1000, estimatedTokensAfter: 120 },
++        });
++
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['compact-id'], { clearQueuedThinkingGrace: true }));
++        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: '📦 Compaction completed (tokens: 1000 → 120)',
++        }));
++        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: '📦 Compaction summary:\nAPI design focused summary',
++        }));
++
++        // The queued prompt may only flow once compaction completed.
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
++            type: 'prompt', message: 'continue after compaction',
++        })));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('dispatches a head-of-line /compact even when delivered as a steer while streaming', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: true },
++        });
++        onUserMessage({
++            role: 'user',
++            content: { type: 'text', text: '/compact' },
++            meta: { deliveryMode: 'steer' },
++        }, 'steer-compact-id');
++
++        // /compact stays interruptible while streaming: Pi's compact() aborts
++        // the active generation itself, and the command must never degrade to
++        // a native steer.
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
++        const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string; customInstructions?: string };
++        expect(compact.customInstructions).toBeUndefined();
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'steer' }));
++
++        harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: {} });
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['steer-compact-id'], { clearQueuedThinkingGrace: true }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('keeps non-compact commands queued while streaming (FIFO head rule)', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: true },
++        });
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/session' } }, 'session-id');
++
++        await new Promise((resolve) => setTimeout(resolve, 100));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'get_session_stats' }));
++
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
++        });
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'get_session_stats' })));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('dispatches a prompt queued before /compact ahead of the command (FIFO)', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: true },
++        });
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'queued prompt B' } }, 'b-id');
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'compact-after-b-id');
++        await new Promise((resolve) => setTimeout(resolve, 100));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
++
++        // Turn settles: prompt B is dispatched first; /compact must wait.
++        harness.onEvent!({
++            type: 'response', command: 'get_state', success: true,
++            data: { sessionId: 'pi-slash-session', sessionFile: '/tmp/pi-slash.jsonl', isStreaming: false },
++        });
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
++            type: 'prompt', message: 'queued prompt B',
++        })));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
++
++        // Settle prompt B, then the queued /compact executes. The lifecycle
++        // fallback reads the append log before retiring the entry.
++        const promptB = harness.sent.find((item) => (item as { type?: string }).type === 'prompt') as { id: string };
++        vi.useFakeTimers();
++        harness.onEvent!({ type: 'response', id: promptB.id, command: 'prompt', success: true });
++        await vi.advanceTimersByTimeAsync(1_100);
++        const appendSync = harness.sent.filter((item) => (item as { type?: string }).type === 'get_entries').at(-1) as { id: string };
++        harness.onEvent!({ type: 'response', id: appendSync.id, command: 'get_entries', success: true, data: { entries: [], leafId: null } });
++        await vi.advanceTimersByTimeAsync(10);
++        vi.useRealTimers();
++        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('reports compact failures as a visible message', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'fail-id');
++
++        const compact = await vi.waitFor(() => {
++            const found = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string } | undefined;
++            expect(found).toBeDefined();
++            return found!;
++        });
++        harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: false, error: 'no model selected' });
++
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: '⚠️ Compaction failed: no model selected',
++        })));
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['fail-id'], { clearQueuedThinkingGrace: true }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('shows session stats for /session', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/session' } }, 'stats-id');
++
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'get_session_stats' })));
++        const statsCmd = harness.sent.find((item) => (item as { type?: string }).type === 'get_session_stats') as { id: string };
++        harness.onEvent!({
++            type: 'response', id: statsCmd.id, command: 'get_session_stats', success: true,
++            data: {
++                totalMessages: 42,
++                tokens: { input: 3000, output: 2000, total: 5000 },
++                cost: 0.1234,
++                contextUsage: { tokens: 4000, contextWindow: 200000, percent: 2 },
++            },
++        });
++
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('Messages: 42'),
++        })));
++        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('Tokens: total 5000 · in 3000 · out 2000'),
++        }));
++        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('Cost: $0.1234'),
++        }));
++        expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('Context: 4000 / 200000 tokens (2%)'),
++        }));
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['stats-id'], { clearQueuedThinkingGrace: true }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('lists or switches the model for /model', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        harness.onEvent!({ type: 'response', command: 'get_available_models', success: true, data: {
++            models: [
++                { id: 'gpt-5.2', provider: 'openai' },
++                { id: 'gpt-4.1', provider: 'openai' },
++            ],
++        } });
++        await vi.waitFor(() => expect(harness.session.updateMetadata).toHaveBeenCalled());
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/model' } }, 'list-id');
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('Available: gpt-5.2, gpt-4.1'),
++        })));
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['list-id'], { clearQueuedThinkingGrace: true }));
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/model gpt-4.1' } }, 'switch-id');
++        const setModel = await vi.waitFor(() => {
++            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_model') as { id: string; provider?: string; modelId?: string } | undefined;
++            expect(found).toBeDefined();
++            return found!;
++        });
++        expect(setModel).toMatchObject({ provider: 'openai', modelId: 'gpt-4.1' });
++        harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true });
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: 'Model switched to gpt-4.1',
++        })));
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['switch-id'], { clearQueuedThinkingGrace: true }));
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/model does-not-exist' } }, 'unknown-id');
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: '⚠️ Unknown model: does-not-exist. Use /model to list available models.',
++        })));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('fails the session when compaction times out with a queued prompt', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        // Fake timers must be installed before the compact RPC is issued so
++        // its 120s timeout timer is mocked.
++        vi.useFakeTimers();
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'timeout-id');
++        onUserMessage({ role: 'user', content: { type: 'text', text: 'queued behind compaction' } }, 'queued-id');
++        await vi.advanceTimersByTimeAsync(10);
++
++        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' }));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
++
++        // The compact RPC never answers: the outcome is indeterminate and the
++        // runtime lease stays poisoned, so the session must be torn down and
++        // the prompt FIFO must never be reopened into a possibly-compacting Pi.
++        await vi.advanceTimersByTimeAsync(120_000);
++        expect(harness.cleanupCount).toBe(1);
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
++        vi.useRealTimers();
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('does not acknowledge cancellation while a special command is executing', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'in-flight-id');
++
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
++
++        // The reservation is released before execution starts, so a cancel that
++        // lands while the compact RPC is in flight is not acknowledged — the
++        // hub keeps the queued row instead of deleting it mid-execution.
++        const onCancelQueuedMessage = harness.session.onCancelQueuedMessage.mock.calls.at(-1)![0] as (localId: string) => boolean;
++        expect(onCancelQueuedMessage('in-flight-id')).toBe(false);
++
++        const compact = harness.sent.find((item) => (item as { type?: string }).type === 'compact') as { id: string };
++        harness.onEvent!({ type: 'response', id: compact.id, command: 'compact', success: true, data: { summary: 'done' } });
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['in-flight-id'], { clearQueuedThinkingGrace: true }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('refuses ambiguous bare model IDs shared across providers and accepts qualified ones', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        harness.onEvent!({ type: 'response', command: 'get_available_models', success: true, data: {
++            models: [
++                { id: 'gpt-5.2', provider: 'openai' },
++                { id: 'gpt-5.2', provider: 'azure' },
++            ],
++        } });
++        await vi.waitFor(() => expect(harness.session.updateMetadata).toHaveBeenCalled());
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/model gpt-5.2' } }, 'ambig-id');
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: '⚠️ Ambiguous model: gpt-5.2. Use openai/gpt-5.2, azure/gpt-5.2.',
++        })));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'set_model' }));
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['ambig-id'], { clearQueuedThinkingGrace: true }));
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/model azure/gpt-5.2' } }, 'qualified-id');
++        const setModel = await vi.waitFor(() => {
++            const found = harness.sent.find((item) => (item as { type?: string }).type === 'set_model') as { id: string; provider?: string; modelId?: string } | undefined;
++            expect(found).toBeDefined();
++            return found!;
++        });
++        expect(setModel).toMatchObject({ provider: 'azure', modelId: 'gpt-5.2' });
++        harness.onEvent!({ type: 'response', id: setModel.id, command: 'set_model', success: true });
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: 'Model switched to azure/gpt-5.2',
++        })));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('shows help and flags terminal-only Pi builtins instead of passing them to the model', async () => {
++        const { running, onUserMessage } = await startReadySession();
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/help' } }, 'help-id');
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('/compact [instructions]'),
++        })));
++
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/tree 42' } }, 'tree-id');
++        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('/tree is a Pi terminal-only command'),
++        })));
++        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['tree-id'], { clearQueuedThinkingGrace: true }));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('leaves unknown slash text on the normal prompt path', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/some-custom-thing arg' } }, 'custom-id');
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
++            type: 'prompt', message: '/some-custom-thing arg',
++        })));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('merges HAPI builtins with Pi extension commands in the slash-command list', async () => {
++        const { running } = await startReadySession();
++        const slashHandler = harness.rpcHandlers.get(RPC_METHODS.ListSlashCommands)!;
++
++        const result = await slashHandler({ agent: 'pi' });
++        const names = (result as { commands: Array<{ name: string }> }).commands.map((command) => command.name);
++        expect(names).toEqual(expect.arrayContaining(['compact', 'session', 'model', 'help', 'test-extension']));
++        // Skills stay out of slash completion; they surface via $ instead.
++        expect(names).not.toContain('skill:brave-search');
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('lets a discovered extension named compact override the builtin', async () => {
++        const { running, onUserMessage } = await startReadySession([
++            { name: 'compact', description: 'Custom compact', source: 'extension' },
++        ]);
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'ext-compact-id');
++
++        // The menu lists the extension over the builtin, so the message must
++        // reach Pi as an ordinary prompt instead of the HAPI compact RPC.
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
++            type: 'prompt', message: '/compact',
++        })));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++
++    it('treats reserved-name path prefixes as ordinary prompts', async () => {
++        const { running, onUserMessage } = await startReadySession();
++        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact.md notes' } }, 'path-id');
++        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({
++            type: 'prompt', message: '/compact.md notes',
++        })));
++        expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'compact' }));
++
++        harness.onError?.(new Error('finish test'));
++        await running;
++    });
++});
+diff --git a/cli/src/pi/runPi.ts b/cli/src/pi/runPi.ts
+index d1fdd926e..117471a94 100644
+--- a/cli/src/pi/runPi.ts
++++ b/cli/src/pi/runPi.ts
+@@ -9,11 +9,13 @@ import { PiTransport } from './piTransport';
+ import { PiSession } from './session';
+ import { PiConversationHistory, PiHistoryRestoreError } from './conversationHistory';
+ import { parsePiModels, parsePiCommands, PiRpcTimeoutError, sendPiRpcAndWait, wireTransportEvents } from './loop';
+-import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema } from './schemas';
++import { PiThinkingLevelSchema, SetSessionConfigPayloadSchema, PiCompactResultSchema, PiFullSessionStatsSchema } from './schemas';
+ import type { PiImageContent, PiThinkingLevel } from './types';
+-import { PiPromptQueue, type PiPreparedPrompt } from './promptQueue';
++import { parsePiSpecialCommand, parseLeadingSlashName, type PiSpecialCommand } from './specialCommands';
++import { PiPromptQueue, isPiSpecialQueued, type PiPreparedPrompt } from './promptQueue';
+ import { PiSteerDispatcher } from './steerDispatcher';
+-import type { ListPiModelsResponse, PiCommandSummary, SlashCommand, SlashCommandsResponse } from '@hapi/protocol/apiTypes';
++import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
++import type { ListPiModelsResponse, PiCommandSummary, PiModelSummary, SlashCommand, SlashCommandsResponse } from '@hapi/protocol/apiTypes';
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+ import type { ListSkillsResponse, SkillSummary } from '@/modules/common/skills';
+ import type { AttachmentMetadata } from '@/api/types';
+@@ -26,6 +28,44 @@ import { isAuthorizedUploadFile, isPathWithinUploadDir, type UploadFileIdentity
+ // but healthy startup still flips ready via get_state first (issue #1143).
+ const PI_READY_FALLBACK_MS = 30_000;
+ const PI_ABORT_OPERATION_TIMEOUT_MS = 25_000;
++// Manual compaction runs an LLM summarization pass; give it a generous window
++// far above the 10s default Pi RPC timeout.
++const PI_COMPACT_TIMEOUT_MS = 120_000;
++
++const PI_HELP_TEXT = [
++    'Supported HAPI Pi commands:',
++    '/compact [instructions] — compress conversation history to save context',
++    '/session — show session stats (tokens, cost, context usage)',
++    '/model [modelId] — show or switch the active model',
++    '/help — show this message',
++].join('\n');
++
++function formatPiSessionStatsMessage(stats: {
++    totalMessages?: number;
++    tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
++    cost?: number;
++    contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number };
++}): string {
++    const lines: string[] = ['📊 Pi session stats'];
++    if (stats.totalMessages !== undefined) lines.push(`Messages: ${stats.totalMessages}`);
++    const tokens = stats.tokens;
++    if (tokens && tokens.total !== undefined) {
++        const parts = [`total ${tokens.total}`];
++        if (tokens.input !== undefined) parts.push(`in ${tokens.input}`);
++        if (tokens.output !== undefined) parts.push(`out ${tokens.output}`);
++        if (tokens.cacheRead !== undefined) parts.push(`cacheR ${tokens.cacheRead}`);
++        if (tokens.cacheWrite !== undefined) parts.push(`cacheW ${tokens.cacheWrite}`);
++        lines.push(`Tokens: ${parts.join(' · ')}`);
++    }
++    if (stats.cost !== undefined) lines.push(`Cost: $${stats.cost.toFixed(4)}`);
++    const usage = stats.contextUsage;
++    if (usage && usage.tokens !== null && usage.tokens !== undefined) {
++        const window = usage.contextWindow ? ` / ${usage.contextWindow}` : '';
++        const percent = usage.percent !== undefined && usage.percent !== null ? ` (${usage.percent}%)` : '';
++        lines.push(`Context: ${usage.tokens}${window} tokens${percent}`);
++    }
++    return lines.join('\n');
++}
+ 
+ function isPiNoActiveAbortError(detail: string): boolean {
+     return /no active|nothing.*abort/i.test(detail);
+@@ -368,6 +408,12 @@ export async function runPi(opts: {
+     let preparationChain = Promise.resolve();
+     let promptCommandInFlight = false;
+     let abortInFlight = false;
++    // Set while a queued Pi special command (e.g. /compact) is executing. Pi's
++    // compact() aborts any active stream itself, so piIsStreaming/
++    // promptCommandInFlight can go false mid-compaction; this flag keeps the
++    // prompt pump from dispatching the next FIFO item Pi would reject
++    // ("Cannot submit a prompt while compaction is in progress").
++    let piSpecialCommandInFlight = false;
+     let activePromptLocalId: string | undefined;
+     let historyPumpDeferred = false;
+     let agentLifecycleStarted = false;
+@@ -462,25 +508,48 @@ export async function runPi(opts: {
+         }
+         if (
+             !piSession.isReady
+-            || piSession.piIsStreaming
+-            || promptCommandInFlight
+             || abortInFlight
++            || piSpecialCommandInFlight
+             // Earlier steers can fall back only after async preparation/runtime
+             // lock wait. Do not let a later normal prompt overtake that result.
+             || steerDispatcher?.hasPending
+         ) return;
+-        const next = promptQueue.dequeue();
+-        if (!next) return;
++        // A head-of-line /compact stays interruptible while Pi is streaming:
++        // Pi's compact() aborts the active generation itself, so a long or
++        // stuck turn can still be compacted from HAPI. Every other item waits
++        // for the stream to settle (FIFO order preserved).
++        const next = promptQueue.peek();
++        const canInterrupt = next !== undefined
++            && isPiSpecialQueued(next)
++            && next.command.type === 'compact'
++            && piSession.piIsStreaming;
++        if (!canInterrupt && (piSession.piIsStreaming || promptCommandInFlight)) return;
++        const dequeued = promptQueue.dequeue();
++        if (!dequeued) return;
++        if (isPiSpecialQueued(dequeued)) {
++            // Slash commands share the prompt FIFO so dispatch order matches
++            // arrival order; execute out-of-band while the pump stays blocked.
++            piSpecialCommandInFlight = true;
++            const finish = (): void => {
++                piSpecialCommandInFlight = false;
++                if (dequeued.localId) {
++                    piSession.emitMessagesConsumed([dequeued.localId], { clearQueuedThinkingGrace: true });
++                }
++                pumpPromptQueue();
++            };
++            void handlePiSpecialCommand(dequeued.command).finally(finish);
++            return;
++        }
+         setPromptCommandInFlight(true);
+-        activePromptLocalId = next.localId;
++        activePromptLocalId = dequeued.localId;
+         agentLifecycleStarted = false;
+         const promptId = randomUUID();
+         transportEvents?.beginPromptLifecycle(promptId);
+-        if (next.localId) {
+-            conversationHistory.registerUserEntry(next.localId);
+-            pendingLocalIds.push(next.localId);
++        if (dequeued.localId) {
++            conversationHistory.registerUserEntry(dequeued.localId);
++            pendingLocalIds.push(dequeued.localId);
+         }
+-        transport.send({ id: promptId, type: 'prompt', message: next.message, ...(next.images.length > 0 ? { images: next.images } : {}) });
++        transport.send({ id: promptId, type: 'prompt', message: dequeued.message, ...(dequeued.images.length > 0 ? { images: dequeued.images } : {}) });
+     };
+ 
+     transportEvents = wireTransportEvents(transport, piSession, pendingLocalIds, {
+@@ -592,6 +661,12 @@ export async function runPi(opts: {
+         if (!entry) {
+             return { steered: false, error: 'Message not found or already dispatched' };
+         }
++        // Slash commands are not steerable prompts: restoring them into the FIFO
++        // lets the pump execute them in arrival order once the turn settles.
++        if (isPiSpecialQueued(entry)) {
++            promptQueue.enqueue(entry);
++            return { steered: false, error: 'Slash commands cannot be steered' };
++        }
+         // Only steer into a live Pi generation. Otherwise restore the entry to
+         // its FIFO position (enqueue re-orders by outboundSequence) and let the
+         // normal pump deliver it when the agent settles.
+@@ -778,7 +853,11 @@ export async function runPi(opts: {
+             const { slashCommands } = buildPiCommandInventory(await getPiCommands());
+             return {
+                 success: true,
+-                commands: slashCommands,
++                // Pi's get_commands only reports extension commands, prompt
++                // templates, and skills — never its TUI builtins. Merge the
++                // HAPI-side builtin list (the subset translatable to Pi RPC)
++                // so the web / menu exposes /compact, /session, /model, /help.
++                commands: mergeSlashCommands([...getBuiltinSlashCommands('pi'), ...slashCommands]),
+             };
+         }
+     );
+@@ -791,7 +870,115 @@ export async function runPi(opts: {
+         }
+     );
+ 
+-    // --- User message handler ---
++    // --- Pi built-in slash commands ---
++    // pi only runs as `pi --mode rpc` over piped stdio, so TUI slash commands
++    // typed in web would otherwise fall through to the LLM as plain text and
++    // silently do nothing. Intercept the subset HAPI can translate to Pi RPC
++    // (compact/session/model/help) and make terminal-only commands explicit.
++    const handlePiSpecialCommand = async (command: PiSpecialCommand): Promise<void> => {
++        const sendEvent = (message: string): void => {
++            piSession.sendSessionEvent({ type: 'message', message });
++        };
++        const errorDetail = (error: unknown): string => error instanceof Error ? error.message : String(error);
++
++        switch (command.type) {
++            case 'help':
++                sendEvent(PI_HELP_TEXT);
++                return;
++            case 'session': {
++                try {
++                    const data = await sendPiRpcAndWait(piSession, transport, { type: 'get_session_stats' });
++                    const parsed = PiFullSessionStatsSchema.safeParse(data);
++                    sendEvent(formatPiSessionStatsMessage(parsed.success ? parsed.data : {}));
++                } catch (error) {
++                    sendEvent(`⚠️ Could not read Pi session stats: ${errorDetail(error)}`);
++                }
++                return;
++            }
++            case 'model': {
++                if (!command.modelId) {
++                    const available = piSession.cachedPiModels
++                        .map((model) => model.modelId)
++                        .join(', ');
++                    sendEvent(`Current model: ${piSession.currentModel ?? 'unset'}.\nAvailable: ${available || 'unknown — use /model <modelId>'}`);
++                    return;
++                }
++                // The catalog is provider-qualified; prefer an exact
++                // provider/modelId match and refuse bare IDs shared by more
++                // than one provider instead of silently picking the first.
++                const qualified = (model: PiModelSummary): string => `${model.provider}/${model.modelId}`;
++                const exact = piSession.cachedPiModels.find((model) => qualified(model) === command.modelId);
++                const bare = piSession.cachedPiModels.filter((model) => model.modelId === command.modelId);
++                if (!exact && bare.length > 1) {
++                    sendEvent(`⚠️ Ambiguous model: ${command.modelId}. Use ${bare.map(qualified).join(', ')}.`);
++                    return;
++                }
++                const match = exact ?? bare[0];
++                if (!match) {
++                    sendEvent(`⚠️ Unknown model: ${command.modelId}. Use /model to list available models.`);
++                    return;
++                }
++                try {
++                    await piSession.runRuntimeMutation(async () => {
++                        await sendPiRpcAndWait(piSession, transport, {
++                            type: 'set_model',
++                            provider: match.provider,
++                            modelId: match.modelId,
++                        });
++                        piSession.currentModel = match.modelId;
++                        piSession.currentProvider = match.provider;
++                        piSession.pushKeepAlive();
++                    }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
++                    sendEvent(`Model switched to ${command.modelId}`);
++                } catch (error) {
++                    if (error instanceof PiRpcTimeoutError) {
++                        failNativeStartup(new Error(`Pi model switch outcome is indeterminate: ${error.message}`));
++                    } else {
++                        sendEvent(`⚠️ Model switch failed: ${errorDetail(error)}`);
++                    }
++                }
++                return;
++            }
++            case 'compact': {
++                try {
++                    const data = await piSession.runRuntimeMutation(async () => {
++                        return await sendPiRpcAndWait(piSession, transport, {
++                            type: 'compact',
++                            ...(command.instructions ? { customInstructions: command.instructions } : {}),
++                        }, PI_COMPACT_TIMEOUT_MS);
++                    }, { poisonOnError: (error) => error instanceof PiRpcTimeoutError });
++                    // Pi emits compaction_start/compaction_end lifecycle events
++                    // which surface as "📦 Compaction …" status messages; add
++                    // the actual summary and token delta on top.
++                    const parsed = PiCompactResultSchema.safeParse(data);
++                    const result = parsed.success ? parsed.data : {};
++                    const delta: string[] = [];
++                    if (result.tokensBefore !== undefined) delta.push(String(result.tokensBefore));
++                    delta.push('→');
++                    if (result.estimatedTokensAfter !== undefined) delta.push(String(result.estimatedTokensAfter));
++                    else delta.push('?');
++                    sendEvent(`📦 Compaction completed (tokens: ${delta.join(' ')})`);
++                    if (result.summary) sendEvent(`📦 Compaction summary:\n${result.summary}`);
++                } catch (error) {
++                    if (error instanceof PiRpcTimeoutError) {
++                        // The runtime lease is deliberately retained on timeout
++                        // (poisonOnError), so the session is indeterminate: Pi
++                        // may still be compacting while model switches, steers,
++                        // and history mutations can no longer run. Fail the
++                        // session instead of reopening the prompt FIFO.
++                        failNativeStartup(new Error(`Pi compaction outcome is indeterminate: ${error.message}`));
++                        return;
++                    }
++                    sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
++                }
++                return;
++            }
++            case 'unsupported':
++                sendEvent(`⚠️ /${command.name} is a Pi terminal-only command and cannot run from HAPI web. Supported here: /compact, /session, /model, /help.`);
++                return;
++        }
++    };
++
+     // Preparation reads image files asynchronously. A single promise chain keeps
+     // attachment completion order identical to user-message arrival order.
+     apiSession.onUserMessage((message, localId) => {
+@@ -808,6 +995,39 @@ export async function runPi(opts: {
+                 preparingLocalIds.delete(localId);
+                 return;
+             }
++
++            const name = parseLeadingSlashName(message.content.text);
++            // Discovered extension commands / prompt templates win over HAPI
++            // builtins: the menu already lets them override same-name entries,
++            // so a user extension named "compact" must keep executing instead
++            // of being swallowed by the builtin interception.
++            const discovered = name
++                ? await getPiCommands()
++                : piSession.cachedPiCommands;
++            const isCustomCommand = Boolean(name && discovered.some((item) => item.name.toLowerCase() === name.toLowerCase()));
++            const specialCommand = isCustomCommand
++                ? null
++                : parsePiSpecialCommand(message.content.text);
++            if (specialCommand) {
++                // Enter the same FIFO as prompts so dispatch order matches
++                // arrival order (a /compact typed after a queued prompt never
++                // jumps it). Release the cancellation reservation first: a
++                // cancel that lands while the queued command is being dispatched
++                // or executing is handled by the queue itself (cancelByLocalId)
++                // and must not be acknowledged via preparingLocalIds.
++                if (localId) {
++                    preparingLocalIds.delete(localId);
++                }
++                promptQueue.enqueue({
++                    kind: 'special',
++                    command: specialCommand,
++                    outboundSequence,
++                    ...(localId ? { localId } : {}),
++                });
++                pumpPromptQueue();
++                return;
++            }
++
+             const prepared = await preparePiUserMessage(
+                 message.content.text,
+                 message.content.attachments,
+diff --git a/cli/src/pi/schemas.ts b/cli/src/pi/schemas.ts
+index 0ce25e135..bde79953f 100644
+--- a/cli/src/pi/schemas.ts
++++ b/cli/src/pi/schemas.ts
+@@ -315,6 +315,46 @@ const PiSessionStatsDataSchema = z.object({
+     }).passthrough().optional(),
+ }).passthrough();
+ 
++// ============================================================================
++// Pi compact response data
++// ============================================================================
++
++export const PiCompactResultSchema = z.object({
++    summary: z.string().optional(),
++    firstKeptEntryId: z.string().optional(),
++    tokensBefore: z.number().optional(),
++    estimatedTokensAfter: z.number().optional(),
++}).passthrough();
++
++// ============================================================================
++// Pi get_session_stats response data (used by the /session slash command)
++// ============================================================================
++
++export const PiFullSessionStatsSchema = z.object({
++    sessionId: z.string().optional(),
++    sessionFile: z.string().optional(),
++    userMessages: z.number().optional(),
++    assistantMessages: z.number().optional(),
++    toolCalls: z.number().optional(),
++    toolResults: z.number().optional(),
++    totalMessages: z.number().optional(),
++    tokens: z.object({
++        input: z.number().optional(),
++        output: z.number().optional(),
++        cacheRead: z.number().optional(),
++        cacheWrite: z.number().optional(),
++        total: z.number().optional(),
++    }).passthrough().optional(),
++    cost: z.number().optional(),
++    contextUsage: z.object({
++        tokens: asContextTokens,
++        contextWindow: asOptPositiveNum,
++        percent: asOptNum,
++    }).passthrough().optional(),
++}).passthrough();
++
++export type PiFullSessionStats = z.infer<typeof PiFullSessionStatsSchema>;
++
+ // ============================================================================
+ // Pi State (get_state response data)
+ // ============================================================================
+diff --git a/cli/src/pi/specialCommands.test.ts b/cli/src/pi/specialCommands.test.ts
+new file mode 100644
+index 000000000..045849091
+--- /dev/null
++++ b/cli/src/pi/specialCommands.test.ts
+@@ -0,0 +1,49 @@
++import { describe, expect, it } from 'vitest';
++import { parsePiSpecialCommand } from './specialCommands';
++
++describe('parsePiSpecialCommand', () => {
++    it('parses /compact with optional custom instructions', () => {
++        expect(parsePiSpecialCommand('/compact')).toEqual({ type: 'compact' });
++        expect(parsePiSpecialCommand('/compact focus on the API design'))
++            .toEqual({ type: 'compact', instructions: 'focus on the API design' });
++        expect(parsePiSpecialCommand('  /compact   keep tests green  '))
++            .toEqual({ type: 'compact', instructions: 'keep tests green' });
++        expect(parsePiSpecialCommand('/compact\nmulti-line instructions'))
++            .toEqual({ type: 'compact', instructions: 'multi-line instructions' });
++    });
++
++    it('parses /session, /model, and /help', () => {
++        expect(parsePiSpecialCommand('/session')).toEqual({ type: 'session' });
++        expect(parsePiSpecialCommand('/session extra args')).toEqual({ type: 'session' });
++        expect(parsePiSpecialCommand('/model')).toEqual({ type: 'model' });
++        expect(parsePiSpecialCommand('/model gpt-5.2')).toEqual({ type: 'model', modelId: 'gpt-5.2' });
++        expect(parsePiSpecialCommand('/model openai/gpt-5.2')).toEqual({ type: 'model', modelId: 'openai/gpt-5.2' });
++        expect(parsePiSpecialCommand('/help')).toEqual({ type: 'help' });
++        expect(parsePiSpecialCommand('/COMPACT')).toEqual({ type: 'compact' });
++    });
++
++    it('flags terminal-only Pi builtins as unsupported', () => {
++        for (const name of ['tree', 'export', 'import', 'reload', 'settings', 'new', 'name', 'login', 'logout', 'quit', 'hotkeys', 'changelog', 'share', 'resume', 'trust', 'fork', 'clone', 'copy', 'scoped-models', 'llama']) {
++            expect(parsePiSpecialCommand(`/${name}`)).toEqual({ type: 'unsupported', name });
++        }
++        expect(parsePiSpecialCommand('/tree some entry')).toEqual({ type: 'unsupported', name: 'tree' });
++    });
++
++    it('requires a command-token boundary (no path-like prefixes)', () => {
++        expect(parsePiSpecialCommand('/compact.md notes')).toBeNull();
++        expect(parsePiSpecialCommand('/compact/notes')).toBeNull();
++        expect(parsePiSpecialCommand('/model/config.json')).toBeNull();
++        expect(parsePiSpecialCommand('/session-settings')).toBeNull();
++    });
++
++    it('leaves extension commands, skills, templates, and prose untouched', () => {
++        expect(parsePiSpecialCommand('/my-extension arg')).toBeNull();
++        expect(parsePiSpecialCommand('/skill:brave-search latest news')).toBeNull();
++        expect(parsePiSpecialCommand('/my_template')).toBeNull();
++        expect(parsePiSpecialCommand('/etc/hosts is a path')).toBeNull();
++        expect(parsePiSpecialCommand('please /compact now')).toBeNull();
++        expect(parsePiSpecialCommand('normal message')).toBeNull();
++        expect(parsePiSpecialCommand('')).toBeNull();
++        expect(parsePiSpecialCommand('/')).toBeNull();
++    });
++});
+diff --git a/cli/src/pi/specialCommands.ts b/cli/src/pi/specialCommands.ts
+new file mode 100644
+index 000000000..d1d22a5fa
+--- /dev/null
++++ b/cli/src/pi/specialCommands.ts
+@@ -0,0 +1,86 @@
++/**
++ * Pi built-in commands that exist in the pi TUI but cannot run through HAPI
++ * (pi only runs as `pi --mode rpc` with piped stdio; these commands need the
++ * interactive TUI). Typing them in web today passes the literal text to the
++ * LLM as an ordinary prompt — silently doing nothing. Intercepting them with
++ * an explicit message makes the failure visible instead.
++ */
++export const PI_TERMINAL_ONLY_COMMANDS = [
++    'login',
++    'logout',
++    'llama',
++    'scoped-models',
++    'settings',
++    'resume',
++    'new',
++    'name',
++    'tree',
++    'trust',
++    'fork',
++    'clone',
++    'copy',
++    'export',
++    'import',
++    'share',
++    'reload',
++    'hotkeys',
++    'changelog',
++    'quit',
++] as const;
++
++export type PiTerminalOnlyCommand = (typeof PI_TERMINAL_ONLY_COMMANDS)[number];
++
++export type PiSpecialCommand =
++    | { type: 'compact'; instructions?: string }
++    | { type: 'session' }
++    | { type: 'model'; modelId?: string }
++    | { type: 'help' }
++    | { type: 'unsupported'; name: string };
++
++const PI_TERMINAL_ONLY_SET: ReadonlySet<string> = new Set<string>(PI_TERMINAL_ONLY_COMMANDS);
++
++/**
++ * Extract the leading slash token of a message, or null when the message does
++ * not start with a well-formed `/name` token (a command boundary — whitespace
++ * or end of line — is required, so `/compact.md` is not treated as `/compact`).
++ */
++export function parseLeadingSlashName(message: string): string | null {
++    const trimmed = message.trim();
++    if (!trimmed.startsWith('/')) return null;
++    const match = /^\/[a-z0-9:_-]+(?=\s|$)/i.exec(trimmed);
++    return match ? match[0].slice(1) : null;
++}
++
++/**
++ * Parse a user message that targets a Pi built-in command.
++ *
++ * Returns null for anything that is not a recognized Pi built-in (including
++ * extension commands, /skill:name, prompt templates, and plain prose starting
++ * with `/`), so those keep flowing through the normal prompt path.
++ */
++export function parsePiSpecialCommand(message: string): PiSpecialCommand | null {
++    const trimmed = message.trim();
++    if (!trimmed.startsWith('/')) return null;
++    // Pi commands are case-insensitive in the TUI; match on the lowercased
++    // line but slice args from the original text to preserve their case.
++    const lower = trimmed.toLowerCase();
++    const nameMatch = /^\/[a-z0-9:_-]+(?=\s|$)/i.exec(lower);
++    if (!nameMatch) return null;
++
++    const name = nameMatch[0].slice(1);
++    const args = trimmed.slice(nameMatch[0].length).trim();
++    switch (name) {
++        case 'compact':
++            return { type: 'compact', ...(args ? { instructions: args } : {}) };
++        case 'session':
++            return { type: 'session' };
++        case 'model':
++            return { type: 'model', ...(args ? { modelId: args } : {}) };
++        case 'help':
++            return { type: 'help' };
++        default:
++            return PI_TERMINAL_ONLY_SET.has(name)
++                ? { type: 'unsupported', name }
++                : null;
++    }
++}
+diff --git a/docs/guide/agents.md b/docs/guide/agents.md
+index 061a9c1a0..d7a970042 100644
+--- a/docs/guide/agents.md
++++ b/docs/guide/agents.md
+@@ -242,6 +242,15 @@ If a remote session reports authentication failure, run `grok login --device-aut
+ - **Antigravity** (`hapi agy`) — Google's Antigravity CLI (`agy`), driven as an interactive PTY with hook-based permission bridging. [Google Antigravity](https://antigravity.google)
+ - **Pi** (`hapi pi`) — the Pi coding agent running as `pi --mode rpc` (JSON-line RPC over piped stdio); remote-control only, no local TUI input path. [badlogic/pi-mono](https://github.com/badlogic/pi-mono)
+ 
++  HAPI translates a subset of Pi's TUI slash commands to native Pi RPC calls, so they work from the web chat as well:
++
++  - `/compact [instructions]` — manually compact context with optional custom summary instructions (runs Pi's `compact` RPC; the summary and token delta are reported back as chat messages).
++  - `/session` — show session stats (messages, tokens, cost, context usage).
++  - `/model [modelId]` — show the current model and available models, or switch with `/model <modelId>`.
++  - `/help` — list the commands supported from HAPI.
++
++  Pi's extension commands and prompt templates (discovered via `get_commands`) keep working from the `/` menu, and skills are available through `$skill-name` like other ACP flavors. Other Pi TUI builtins (e.g. `/tree`, `/export`, `/reload`) cannot run over RPC; typing them in web shows an explicit "terminal-only" notice instead of silently forwarding the text to the model.
++
+ ## Related
+ 
+ - [How it Works](./how-it-works.md) - Architecture and data flow
+diff --git a/shared/src/slashCommands.ts b/shared/src/slashCommands.ts
+index 0c1a9aa5f..79fc46b5d 100644
+--- a/shared/src/slashCommands.ts
++++ b/shared/src/slashCommands.ts
+@@ -75,7 +75,16 @@ export const BUILTIN_SLASH_COMMANDS = {
+         { name: 'usage', description: 'Show session usage metrics', source: 'builtin' },
+     ],
+     kimi: [],
+-    pi: [],
++    // Pi runs `pi --mode rpc` over stdio; only commands HAPI can translate
++    // to Pi RPC calls are listed. Terminal-only Pi builtins (e.g. /tree,
++    // /export, /reload) are intercepted with an explicit "not supported"
++    // message instead of being passed to the model as plain text.
++    pi: [
++        { name: 'help', description: 'Show supported HAPI Pi slash commands', source: 'builtin' },
++        { name: 'compact', description: 'Compress conversation history to save context (optional custom instructions)', source: 'builtin' },
++        { name: 'session', description: 'Show Pi session stats (tokens, cost, context usage)', source: 'builtin' },
++        { name: 'model', description: 'Show or switch the Pi model, e.g. /model gpt-5.2', source: 'builtin' },
++    ],
+ } as const satisfies Record<string, readonly SlashCommand[]>
+ 
+ export function getBuiltinSlashCommands(agent: string): SlashCommand[] {
+diff --git a/web/src/lib/codexSlashCommands.test.ts b/web/src/lib/codexSlashCommands.test.ts
+index a0375e9b8..5af2a1936 100644
+--- a/web/src/lib/codexSlashCommands.test.ts
++++ b/web/src/lib/codexSlashCommands.test.ts
+@@ -27,8 +27,15 @@ describe('getBuiltinSlashCommands', () => {
+         )
+     })
+ 
+-    it.each(['pi', 'kimi'])('does not fall back to Claude commands for %s', (flavor) => {
+-        expect(getBuiltinSlashCommands(flavor)).toEqual([])
++    it('keeps pi builtins as its own list (no Claude fallback)', () => {
++        const commands = getBuiltinSlashCommands('pi')
++        expect(commands.length).toBeGreaterThan(0)
++        expect(commands.map((command) => command.name)).not.toContain('clear')
++        expect(commands.map((command) => command.name)).toContain('compact')
++    })
++
++    it('does not fall back to Claude commands for kimi', () => {
++        expect(getBuiltinSlashCommands('kimi')).toEqual([])
+     })
+ 
+     it('includes debug only in Cursor permission modes', () => {

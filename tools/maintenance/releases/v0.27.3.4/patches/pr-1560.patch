@@ -1,0 +1,356 @@
+diff --git a/web/src/lib/message-window-store.test.ts b/web/src/lib/message-window-store.test.ts
+index 82649ed91..6a849bfe1 100644
+--- a/web/src/lib/message-window-store.test.ts
++++ b/web/src/lib/message-window-store.test.ts
+@@ -230,16 +230,16 @@ afterEach(() => {
+ })
+ 
+ describe('message tail synchronization', () => {
+-    it('renders a persisted window immediately, activates tail mode, then requests only missed messages', async () => {
++    it('renders a persisted window immediately, then requests the latest tail on re-entry', async () => {
+         const id = sessionId('reentry')
+-        const cached = makeAgentMessage({ id: 'cached', seq: 10, at: 1_000 })
++        const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 40_000 })
+         sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
+             messages: [cached],
+             hasMore: true,
+-            oldestPositionAt: 1_000,
+-            oldestPositionSeq: 10,
+-            newestPositionAt: 1_000,
+-            newestPositionSeq: 10,
++            oldestPositionAt: 40_000,
++            oldestPositionSeq: 40,
++            newestPositionAt: 40_000,
++            newestPositionSeq: 40,
+             epoch: 3
+         }))
+ 
+@@ -248,26 +248,92 @@ describe('message tail synchronization', () => {
+         activateMessageWindow(id)
+         expect(getMessageWindowState(id).viewMode).toBe('tail')
+ 
+-        const missed = makeAgentMessage({ id: 'missed', seq: 11, at: 1_100 })
+-        const getMessages = vi.fn(async () => afterResponse([missed], {
++        const latest = makeAgentMessage({ id: 'latest', seq: 2_040, at: 2_040_000 })
++        const getMessages = vi.fn(async () => latestResponse([latest], {
+             epoch: 3,
+-            nextAfterAt: 1_100,
+-            nextAfterSeq: 11,
+-            snapshotHeadAt: 1_100,
+-            snapshotHeadSeq: 11
++            hasMore: true,
++            nextBeforeAt: 1_841_000,
++            nextBeforeSeq: 1_841
++        }))
++        await syncTailMessages(createApi(getMessages), id)
++
++        expect(getMessages).toHaveBeenCalledWith(id, { limit: 200 })
++        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['latest'])
++        expect(getMessageWindowState(id).hasMore).toBe(true)
++        expect('pending' in getMessageWindowState(id)).toBe(false)
++    })
++
++    it('preserves queued rows while replacing stale server rows on re-entry', async () => {
++        const id = sessionId('reentry-queued')
++        const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 4_000 })
++        const queued = makeUserMessage({
++            id: 'local-1',
++            localId: 'local-1',
++            createdAt: 4_100,
++            invokedAt: null,
++            status: 'queued'
++        })
++        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
++            messages: [cached, queued],
++            hasMore: true,
++            oldestPositionAt: 4_000,
++            oldestPositionSeq: 40,
++            newestPositionAt: 4_000,
++            newestPositionSeq: 40,
++            epoch: 3
++        }))
++
++        activateMessageWindow(id)
++        const latest = makeAgentMessage({ id: 'latest', seq: 2_000, at: 200_000 })
++        const getMessages = vi.fn(async () => latestResponse([latest], { epoch: 3 }))
++        await syncTailMessages(createApi(getMessages), id)
++
++        expect(getMessages).toHaveBeenCalledWith(id, { limit: 200 })
++        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual([
++            'local-1',
++            'latest'
++        ])
++        expect(getMessageWindowState(id).messages).toContainEqual(expect.objectContaining({
++            id: 'local-1',
++            status: 'queued'
++        }))
++    })
++
++    it('keeps incremental synchronization for non-activation refreshes', async () => {
++        const id = sessionId('incremental-refresh')
++        const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 40_000 })
++        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
++            messages: [cached],
++            hasMore: true,
++            oldestPositionAt: 40_000,
++            oldestPositionSeq: 40,
++            newestPositionAt: 40_000,
++            newestPositionSeq: 40,
++            epoch: 3
++        }))
++
++        const latest = makeAgentMessage({ id: 'latest', seq: 41, at: 41_000 })
++        const getMessages = vi.fn(async () => afterResponse([latest], {
++            epoch: 3,
++            nextAfterAt: 41_000,
++            nextAfterSeq: 41,
++            snapshotHeadAt: 41_000,
++            snapshotHeadSeq: 41
+         }))
+         await syncTailMessages(createApi(getMessages), id)
+ 
+         expect(getMessages).toHaveBeenCalledWith(id, {
+-            afterAt: 1_000,
+-            afterSeq: 10,
++            afterAt: 40_000,
++            afterSeq: 40,
+             untilAt: null,
+             untilSeq: null,
+             epoch: 3,
+             limit: 200
+         })
+-        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['cached', 'missed'])
+-        expect('pending' in getMessageWindowState(id)).toBe(false)
++        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual([
++            'cached',
++            'latest'
++        ])
+     })
+ 
+     it('preserves SSE rows that arrive while the latest snapshot is in flight', async () => {
+@@ -462,6 +528,49 @@ describe('message tail synchronization', () => {
+         ])
+     })
+ 
++    it('invalidates an in-flight incremental request when re-entry prioritizes latest', async () => {
++        const id = sessionId('reentry-in-flight')
++        const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 40_000 })
++        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
++            messages: [cached],
++            hasMore: true,
++            oldestPositionAt: 40_000,
++            oldestPositionSeq: 40,
++            newestPositionAt: 40_000,
++            newestPositionSeq: 40,
++            epoch: 3
++        }))
++
++        const staleResponse = deferred<MessagesResponse>()
++        const latest = makeAgentMessage({ id: 'latest', seq: 2_040, at: 2_040_000 })
++        const getMessages = vi.fn()
++            .mockImplementationOnce(async () => await staleResponse.promise)
++            .mockResolvedValueOnce(latestResponse([latest], { epoch: 3 }))
++        const api = createApi(getMessages)
++        const initialSync = syncTailMessages(api, id)
++        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(1))
++
++        activateMessageWindow(id)
++        const reentrySync = syncTailMessages(api, id)
++        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
++        expect(getMessages.mock.calls[1]?.[1]).toEqual({ limit: 200 })
++        staleResponse.resolve(afterResponse([
++            makeAgentMessage({ id: 'stale-page', seq: 41, at: 41_000 })
++        ], {
++            epoch: 3,
++            nextAfterAt: 41_000,
++            nextAfterSeq: 41,
++            snapshotHeadAt: 2_040_000,
++            snapshotHeadSeq: 2_040,
++            hasMore: true
++        }))
++
++        await initialSync
++        await reentrySync
++
++        expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['latest'])
++    })
++
+     it('deduplicates SSE and REST delivery while preserving the authoritative invocation timestamp', async () => {
+         const id = sessionId('dedupe')
+         const initial = makeAgentMessage({ id: 'initial', seq: 1, at: 1_000 })
+diff --git a/web/src/lib/message-window-store.ts b/web/src/lib/message-window-store.ts
+index d7a14e428..fa846ec2f 100644
+--- a/web/src/lib/message-window-store.ts
++++ b/web/src/lib/message-window-store.ts
+@@ -53,6 +53,7 @@ type InternalState = MessageWindowState & {
+     newestPositionAt: number | null
+     newestPositionSeq: number | null
+     requiresLatestReset: boolean
++    preferLatestOnActivation: boolean
+     syncGeneration: number
+     olderGeneration: number
+ }
+@@ -71,6 +72,7 @@ type TailSyncController = {
+     api: ApiClient
+     running: Promise<void> | null
+     trailingRequested: boolean
++    runningPrefersLatest: boolean
+ }
+ 
+ const states = new Map<string, InternalState>()
+@@ -237,6 +239,7 @@ function createState(sessionId: string): InternalState {
+         newestPositionAt: null,
+         newestPositionSeq: null,
+         requiresLatestReset: false,
++        preferLatestOnActivation: false,
+         syncGeneration: 0,
+         olderGeneration: 0
+     }
+@@ -386,6 +389,7 @@ function buildState(
+         | 'newestPositionAt'
+         | 'newestPositionSeq'
+         | 'requiresLatestReset'
++        | 'preferLatestOnActivation'
+         | 'syncGeneration'
+         | 'olderGeneration'
+         | 'historyVersion'
+@@ -614,9 +618,11 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+     try {
+         const initial = getState(sessionId)
+         const initialCursor = getNewestCursor(initial)
++        const preferLatestOnActivation = initial.preferLatestOnActivation
+         const canIncrement = initialCursor !== null
+             && initial.epoch !== null
+             && !initial.requiresLatestReset
++            && !preferLatestOnActivation
+ 
+         if (!canIncrement) {
+             const requestBaseline = new Map(getState(sessionId).messages.map((message) => [message.id, message]))
+@@ -624,10 +630,13 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+             if (!isCurrentTailSync(sessionId, generation)) return
+             updateState(sessionId, (previous) => {
+                 if (previous.syncGeneration !== generation) return previous
+-                return applyLatestResponse(previous, response, {
+-                    replaceServerRows: initial.requiresLatestReset || response.page.reset,
++                const next = applyLatestResponse(previous, response, {
++                    replaceServerRows: initial.requiresLatestReset
++                        || preferLatestOnActivation
++                        || response.page.reset,
+                     requestBaseline
+                 })
++                return buildState(next, { preferLatestOnActivation: false })
+             })
+             finishTailSync(sessionId, generation, null)
+             return
+@@ -686,7 +695,12 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+             })
+ 
+             const current = getState(sessionId)
+-            if (current.requiresLatestReset || !response.page.hasMore || !nextAfter) {
++            if (
++                current.requiresLatestReset
++                || current.preferLatestOnActivation
++                || !response.page.hasMore
++                || !nextAfter
++            ) {
+                 break
+             }
+             if (comparePosition(nextAfter, after) <= 0) {
+@@ -707,13 +721,16 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+ }
+ 
+ function startTailSync(sessionId: string, controller: TailSyncController): Promise<void> {
++    const runningPrefersLatest = getState(sessionId).preferLatestOnActivation
+     const running = runTailSync(controller.api, sessionId)
+     controller.running = running
++    controller.runningPrefersLatest = runningPrefersLatest
+     const finish = () => {
+         if (tailSyncControllers.get(sessionId) !== controller || controller.running !== running) {
+             return
+         }
+         controller.running = null
++        controller.runningPrefersLatest = false
+         if (!controller.trailingRequested) {
+             return
+         }
+@@ -758,18 +775,51 @@ function enterTailMode(previous: InternalState): InternalState {
+ }
+ 
+ export function activateMessageWindow(sessionId: string): void {
++    let requestedLatest = false
+     updateState(sessionId, (previous) => {
+         const { kept } = trimPreservingQueued(previous.messages, VISIBLE_WINDOW_SIZE, 'append')
+         const forceLatest = previous.requiresLatestReset
++        const hasUsableCursor = getNewestCursor(previous) !== null
++            && previous.epoch !== null
++            && !forceLatest
++        const preferLatestOnActivation = hasUsableCursor && kept.length > 0
++        requestedLatest = preferLatestOnActivation && !previous.preferLatestOnActivation
++        const invalidateRunningSync = requestedLatest && previous.isSyncingTail
++        const activationUpdates = preferLatestOnActivation
++            ? {
++                preferLatestOnActivation: true,
++                ...(invalidateRunningSync
++                    ? {
++                        syncGeneration: previous.syncGeneration + 1,
++                        olderGeneration: previous.olderGeneration + 1
++                    }
++                    : {})
++            }
++            : {}
++        // A persisted cursor may be many pages behind after another client
++        // has added messages. Fetch the current tail first on re-entry;
++        // `runTailSync` will reconcile the response through the same
++        // optimistic/concurrent-row preservation path as a reset response.
+         if (
+             previous.viewMode === 'tail'
+             && kept.length === previous.messages.length
+             && !forceLatest
+         ) {
+-            return previous
++            return preferLatestOnActivation
++                ? buildState(previous, activationUpdates)
++                : previous
+         }
+-        return enterTailMode(previous)
++        const next = enterTailMode(previous)
++        return preferLatestOnActivation
++            ? buildState(next, activationUpdates)
++            : next
+     }, true)
++    if (requestedLatest) {
++        const controller = tailSyncControllers.get(sessionId)
++        if (controller?.running) {
++            controller.trailingRequested = true
++        }
++    }
+ }
+ 
+ export function syncTailMessages(
+@@ -779,13 +829,25 @@ export function syncTailMessages(
+ ): Promise<void> {
+     let controller = tailSyncControllers.get(sessionId)
+     if (!controller) {
+-        controller = { api, running: null, trailingRequested: false }
++        controller = {
++            api,
++            running: null,
++            trailingRequested: false,
++            runningPrefersLatest: false
++        }
+         tailSyncControllers.set(sessionId, controller)
+     }
+     controller.api = api
+     if (!controller.running) {
+         return startTailSync(sessionId, controller)
+     }
++    if (getState(sessionId).preferLatestOnActivation) {
++        if (controller.runningPrefersLatest) {
++            return controller.running
++        }
++        controller.trailingRequested = false
++        return startTailSync(sessionId, controller)
++    }
+     const observed = controller.running
+     if (!options.ensureAfterCurrent) {
+         return observed

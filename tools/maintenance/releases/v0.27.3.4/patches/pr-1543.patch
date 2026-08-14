@@ -1,0 +1,120 @@
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 1ec7f0e1a..0c93f07f8 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -15,7 +15,7 @@ jobs:
+             - run: bun install
+             - run: bun typecheck
+             - run: bunx playwright install --with-deps chromium
+-            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts
++            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts share-turn.spec.ts
+             - run: bun run test
+ 
+     # Serial runner-integration suite: starts real detached runner/session
+diff --git a/e2e/share-turn.spec.ts b/e2e/share-turn.spec.ts
+index 25fc702d5..8af1cccfa 100644
+--- a/e2e/share-turn.spec.ts
++++ b/e2e/share-turn.spec.ts
+@@ -124,6 +124,36 @@ test('keeps a stripped tool-only assistant snapshot out of the export', async ({
+     expect(size.height).toBeGreaterThan(1_000)
+ })
+ 
++test('keeps long inline code aligned when exporting a wrapped message', async ({ page }, testInfo) => {
++    await page.setViewportSize({ width: 900, height: 844 })
++    await page.goto('/e2e-fixtures/share-turn-fixture.html?inlineWrap=1')
++
++    const sourceCode = page.getByTestId('source-turn').locator('.aui-md-code').filter({ hasText: 'useClientLookup: Index 0 out of bounds' }).first()
++    await expect(sourceCode).toBeVisible()
++    await expect(sourceCode).toHaveCSS('display', 'inline')
++    await page.getByTestId('source-turn').screenshot({ path: testInfo.outputPath('inline-source.png') })
++
++    await page.getByRole('button', { name: 'Open share preview' }).click()
++    const dialog = page.getByRole('dialog')
++    const previewCode = dialog.locator('.aui-md-code').filter({ hasText: 'useClientLookup: Index 0 out of bounds' }).first()
++    await expect(previewCode).toBeVisible()
++    await expect(previewCode).toHaveCSS('display', 'inline')
++    await dialog.screenshot({ path: testInfo.outputPath('inline-preview.png') })
++
++    const downloadPromise = page.waitForEvent('download')
++    await dialog.getByRole('button', { name: 'Download' }).click()
++    const download = await downloadPromise
++    const path = testInfo.outputPath('inline-export.png')
++    await download.saveAs(path)
++    const bytes = await readFile(path)
++    const size = pngSize(bytes)
++    expect(size.width).toBe(1730)
++    expect(size.height).toBeGreaterThan(1_000)
++    expect(bytes).toMatchSnapshot('wrapped-inline-code-export.png', {
++        maxDiffPixelRatio: 0.005,
++    })
++})
++
+ test('localizes the share dialog actions in Chinese', async ({ page }) => {
+     await page.addInitScript(() => localStorage.setItem('hapi-lang', 'zh-CN'))
+     await page.goto('/e2e-fixtures/share-turn-fixture.html')
+diff --git a/e2e/share-turn.spec.ts-snapshots/wrapped-inline-code-export-chromium-linux.png b/e2e/share-turn.spec.ts-snapshots/wrapped-inline-code-export-chromium-linux.png
+new file mode 100644
+index 000000000..491793281
+Binary files /dev/null and b/e2e/share-turn.spec.ts-snapshots/wrapped-inline-code-export-chromium-linux.png differ
+diff --git a/e2e/share-turn.spec.ts-snapshots/wrapped-inline-code-export-chromium-win32.png b/e2e/share-turn.spec.ts-snapshots/wrapped-inline-code-export-chromium-win32.png
+new file mode 100644
+index 000000000..19947728d
+Binary files /dev/null and b/e2e/share-turn.spec.ts-snapshots/wrapped-inline-code-export-chromium-win32.png differ
+diff --git a/web/e2e-fixtures/share-turn-fixture.tsx b/web/e2e-fixtures/share-turn-fixture.tsx
+index 01acf0325..4433a42cc 100644
+--- a/web/e2e-fixtures/share-turn-fixture.tsx
++++ b/web/e2e-fixtures/share-turn-fixture.tsx
+@@ -26,12 +26,17 @@ const portraitFixtureImage = 'data:image/svg+xml;charset=utf-8,' + encodeURIComp
+     </svg>
+ `)
+ 
++const longInlineError =
++    'useClientLookup: Index 0 out of bounds (length: 0); messageStore.getMessagesPage -> useSessionMessageWindow -> SessionChat render -> message epoch mismatch after rewind; requestId=rewind-20260812-162035; source=codex-session-history-replay; retry=0; snapshotHeadSeq=4; nextBeforeSeq=null; invariant=visible-message-window-consistency'
++
+ const markdown = `## Complex response fixture
+ 
+ ## ✅ AList 的 frp 和 Caddy 配置已彻底移除
+ 
+ This paragraph contains **bold text**, *emphasis*, ~~strikethrough~~, inline \`code\`, a [safe link](https://example.com), 中文内容，以及一段足够长的文字，用于验证换行、行高和宽屏导出效果是否与原始 HAPI 页面保持一致。
+ 
++已复现：/rewind 返回 200，但随后前端进入错误页。错误为 \`${longInlineError}\`，Console 也有完整堆栈；我正在整理脱敏后的证据文件和截图。
++
+ > A multi-line blockquote used to verify borders, indentation, colors, and wrapping.  \n> 第二行引用包含中文。
+ 
+ ### Lists
+@@ -74,7 +79,9 @@ function App() {
+     const sourceRef = useRef<HTMLDivElement>(null)
+     const [snapshots, setSnapshots] = useState<Snapshot[]>([])
+     const [open, setOpen] = useState(false)
+-    const wideSource = new URLSearchParams(window.location.search).get('wide') === '1'
++    const searchParams = new URLSearchParams(window.location.search)
++    const wideSource = searchParams.get('wide') === '1'
++    const narrowInlineSource = searchParams.get('inlineWrap') === '1'
+     const { preferences: headerMetadata } = useSessionHeaderMetadata()
+     const metadataItems = selectShareTurnMetadata(headerMetadata, {
+         agent: { text: 'codex', flavor: 'codex' },
+@@ -112,7 +119,7 @@ function App() {
+ 
+     return (
+         <I18nProvider>
+-            <main className={`mx-auto max-w-full bg-[var(--app-bg)] p-5 text-[var(--app-fg)] ${wideSource ? 'w-[1120px]' : 'w-[960px]'}`}>
++            <main className={`mx-auto max-w-full bg-[var(--app-bg)] p-5 text-[var(--app-fg)] ${narrowInlineSource ? 'w-[865px]' : wideSource ? 'w-[1120px]' : 'w-[960px]'}`}>
+                 <div ref={sourceRef} data-testid="source-turn" className="flex flex-col gap-3">
+                     <div data-hapi-message-role="user" className="happy-message flex flex-col items-end">
+                         <div className={getUserBubbleClassName()}>
+diff --git a/web/src/components/AssistantChat/ShareTurnDialog.tsx b/web/src/components/AssistantChat/ShareTurnDialog.tsx
+index 019f32822..1e3396e24 100644
+--- a/web/src/components/AssistantChat/ShareTurnDialog.tsx
++++ b/web/src/components/AssistantChat/ShareTurnDialog.tsx
+@@ -461,7 +461,10 @@ async function elementToPngBlob(
+         const { default: html2canvas } = await import('html2canvas-pro')
+         canvas = await html2canvas(captureElement, {
+             backgroundColor,
+-            foreignObjectRendering: false,
++            // Let the browser paint inline fragments so a wrapped <code>
++            // element keeps its per-line background instead of becoming one
++            // bounding rectangle in html2canvas-pro's canvas renderer.
++            foreignObjectRendering: true,
+             imageTimeout: 15000,
+             logging: false,
+             removeContainer: true,
