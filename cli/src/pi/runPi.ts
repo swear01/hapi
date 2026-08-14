@@ -539,10 +539,19 @@ export async function runPi(opts: {
             if (dequeued.localId) {
                 piSession.emitMessagesConsumed([dequeued.localId], { clearQueuedThinkingGrace: true });
             }
-            void handlePiSpecialCommand(dequeued.command).finally(() => {
-                piSpecialCommandInFlight = false;
-                pumpPromptQueue();
-            });
+            void handlePiSpecialCommand(dequeued.command)
+                .catch((error) => {
+                    // All known command failures surface as events inside
+                    // handlePiSpecialCommand; this catch only guards against
+                    // an unexpected rejection leaving an unhandled promise
+                    // rejection, and always keeps the pump unblocked via the
+                    // finally below.
+                    logger.warn(`[pi] Special command ${dequeued.command.type} failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+                })
+                .finally(() => {
+                    piSpecialCommandInFlight = false;
+                    pumpPromptQueue();
+                });
             return;
         }
         setPromptCommandInFlight(true);
