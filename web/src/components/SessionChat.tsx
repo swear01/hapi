@@ -76,7 +76,7 @@ import {
     type AttachmentDraftInput,
 } from '@/lib/composer-attachment-drafts'
 import { useTranslation } from '@/lib/use-translation'
-import type { SendMessageAcceptance, SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
+import type { SendMessageAcceptance, SendMessageSettlement, ResolvedSession } from '@/hooks/mutations/useSendMessage'
 import { handoffComposerDraft, transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
@@ -432,7 +432,7 @@ type SessionChatProps = {
     resolveSessionIdForUpload?: (sessionId: string) => Promise<string>
     onUploadSessionResolved?: (sessionId: string) => void
     /** Inactive-session resume for voice dictation direct-sends; see HappyComposer. */
-    resolveSessionIdForVoice?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    resolveSessionIdForVoice?: (sessionId: string) => Promise<ResolvedSession>
     /** Navigate/seed after a voice direct-send resumed an inactive session. */
     onVoiceSessionResolved?: (sessionId: string) => void
     onViewModeChange: (mode: 'tail' | 'history') => void

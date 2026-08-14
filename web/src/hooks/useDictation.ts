@@ -4,6 +4,7 @@ import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
+import type { ResolvedSession } from './mutations/useSendMessage'
 import { useRealtimeDictation } from './useRealtimeDictation'
 
 export function appendTranscript(text: string, transcript: string): string {
@@ -44,7 +45,7 @@ export type DictationPendingSendOptions = {
      * `resumed: true` so the operator is navigated to the recovered
      * session after a failure.
      */
-    resolveSessionId?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    resolveSessionId?: (sessionId: string) => Promise<ResolvedSession>
     /**
      * Called when `resolveSessionId` resumed the session into a live one,
      * so the caller can navigate/seed the resumed session. Fires after a
@@ -62,6 +63,20 @@ export type DictationPendingSendOptions = {
 export function draftUnchanged(sessionId: string, baseline: string): boolean {
     const cur = getDraft(sessionId)
     return cur === '' || cur === baseline
+}
+
+/**
+ * Recover a failed transcript into a draft: overwrite the unmoved
+ * baseline (it was consumed by the send) or append only the transcribed
+ * delta when the draft moved in flight, so in-flight operator text is
+ * preserved and the initial text is not duplicated.
+ */
+function recoverDraft(sessionId: string, baseline: string, finalMessage: string, delta: string): void {
+    if (draftUnchanged(sessionId, baseline)) {
+        saveDraft(sessionId, finalMessage)
+    } else {
+        saveDraft(sessionId, appendTranscript(getDraft(sessionId), delta))
+    }
 }
 
 export async function notifyResolvedSession(
@@ -168,14 +183,8 @@ export async function deliverVoiceSend(args: {
         let recoveredSessionId: string
         if (recoverySessionId === args.pendingSend.sessionId) {
             // Same-id (or unresolved): the baseline is the pre-recording
-            // draft, which the send consumed — overwrite it if it has not
-            // moved, otherwise append just the transcribed delta so the
-            // transcript is never lost without duplicating initialText.
-            if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
-                saveDraft(recoverySessionId, args.finalMessage)
-            } else {
-                saveDraft(recoverySessionId, appendTranscript(getDraft(recoverySessionId), args.transcriptDelta))
-            }
+            // draft, which the send consumed.
+            recoverDraft(recoverySessionId, recoveryDraftAtStart, args.finalMessage, args.transcriptDelta)
             recoveredSessionId = recoverySessionId
         } else if (recoveryDraftAtStart === '' && draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
             // Cross-id: only the empty-at-resolve target draft is ours to
@@ -186,15 +195,8 @@ export async function deliverVoiceSend(args: {
         } else {
             // The target draft moved in flight (or was never empty): fall
             // back to the source id so the transcript is never lost (the
-            // source draft is preserved on failure anyway). Overwrite only
-            // the unmoved pre-recording baseline; append just the
-            // transcribed delta when the operator typed in the source
-            // composer while the request was in flight.
-            if (draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
-                saveDraft(args.pendingSend.sessionId, args.finalMessage)
-            } else {
-                saveDraft(args.pendingSend.sessionId, appendTranscript(getDraft(args.pendingSend.sessionId), args.transcriptDelta))
-            }
+            // source draft is preserved on failure anyway).
+            recoverDraft(args.pendingSend.sessionId, args.pendingSend.draftAtStart, args.finalMessage, args.transcriptDelta)
             recoveredSessionId = args.pendingSend.sessionId
         }
         return { delivered: false, error: sendError, resumed, targetSessionId, recoveredSessionId }

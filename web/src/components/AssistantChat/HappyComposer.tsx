@@ -4,6 +4,7 @@ import {
     getPermissionModeOptionsForFlavor,
     type CopilotAgentMode
 } from '@hapi/protocol'
+import type { ResolvedSession } from '@/hooks/mutations/useSendMessage'
 import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { flushTapSync } from '@assistant-ui/tap'
 import {
@@ -354,7 +355,7 @@ export function HappyComposer(props: {
      * direct voice sends are allowed on inactive sessions (they resume
      * first instead of being downgraded to a plain stop).
      */
-    resolveSessionIdForVoice?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    resolveSessionIdForVoice?: (sessionId: string) => Promise<ResolvedSession>
     /**
      * Called when the voice direct-send resumed an inactive session, so the
      * caller can navigate/seed the resumed session (mirrors
