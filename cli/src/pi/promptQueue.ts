@@ -47,6 +47,10 @@ export class PiPromptQueue {
         return this.entries.shift();
     }
 
+    peek(): PiPromptQueueEntry | undefined {
+        return this.entries[0];
+    }
+
     cancelByLocalId(localId: string): boolean {
         if (!localId) return false;
         const index = this.entries.findIndex((entry) => entry.localId === localId);

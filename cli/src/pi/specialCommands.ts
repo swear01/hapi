@@ -40,6 +40,18 @@ export type PiSpecialCommand =
 const PI_TERMINAL_ONLY_SET: ReadonlySet<string> = new Set<string>(PI_TERMINAL_ONLY_COMMANDS);
 
 /**
+ * Extract the leading slash token of a message, or null when the message does
+ * not start with a well-formed `/name` token (a command boundary — whitespace
+ * or end of line — is required, so `/compact.md` is not treated as `/compact`).
+ */
+export function parseLeadingSlashName(message: string): string | null {
+    const trimmed = message.trim();
+    if (!trimmed.startsWith('/')) return null;
+    const match = /^\/[a-z0-9:_-]+(?=\s|$)/i.exec(trimmed);
+    return match ? match[0].slice(1) : null;
+}
+
+/**
  * Parse a user message that targets a Pi built-in command.
  *
  * Returns null for anything that is not a recognized Pi built-in (including
@@ -52,7 +64,7 @@ export function parsePiSpecialCommand(message: string): PiSpecialCommand | null 
     // Pi commands are case-insensitive in the TUI; match on the lowercased
     // line but slice args from the original text to preserve their case.
     const lower = trimmed.toLowerCase();
-    const nameMatch = /^\/[a-z0-9:_-]+/.exec(lower);
+    const nameMatch = /^\/[a-z0-9:_-]+(?=\s|$)/i.exec(lower);
     if (!nameMatch) return null;
 
     const name = nameMatch[0].slice(1);
