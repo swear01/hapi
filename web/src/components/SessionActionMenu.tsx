@@ -248,15 +248,101 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onDelete()
     }
 
+    const updatePosition = useCallback(() => {
+        const menuEl = menuRef.current
+        if (!menuEl) return
+
+        const menuRect = menuEl.getBoundingClientRect()
+        const viewportWidth = window.innerWidth
+        const viewportHeight = window.innerHeight
+        const padding = 8
+        const gap = 8
+
+        const spaceBelow = viewportHeight - anchorPoint.y
+        const spaceAbove = anchorPoint.y
+        const openAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow
+
+        let top = openAbove ? anchorPoint.y - menuRect.height - gap : anchorPoint.y + gap
+        // Keep the menu centered on the trigger, then clamp it only when it would leave the viewport.
+        let left = anchorPoint.x - menuRect.width / 2
+        const transformOrigin = openAbove ? 'bottom center' : 'top center'
+
+        top = Math.min(Math.max(top, padding), viewportHeight - menuRect.height - padding)
+        left = Math.min(Math.max(left, padding), viewportWidth - menuRect.width - padding)
+
+        setMenuPosition({ top, left, transformOrigin })
+    }, [anchorPoint])
+
+    useLayoutEffect(() => {
+        if (!isOpen) return
+        updatePosition()
+    }, [isOpen, updatePosition])
+
+    useEffect(() => {
+        if (!isOpen) {
+            setMenuPosition(null)
+            return
+        }
+
+        const handlePointerDown = (event: PointerEvent) => {
+            const target = event.target as Node
+            if (menuRef.current?.contains(target)) return
+            onClose()
+        }
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                onClose()
+            }
+        }
+
+        const handleReflow = () => {
+            updatePosition()
+        }
+
+        document.addEventListener('pointerdown', handlePointerDown)
+        document.addEventListener('keydown', handleKeyDown)
+        window.addEventListener('resize', handleReflow)
+        window.addEventListener('scroll', handleReflow, true)
+
+        return () => {
+            document.removeEventListener('pointerdown', handlePointerDown)
+            document.removeEventListener('keydown', handleKeyDown)
+            window.removeEventListener('resize', handleReflow)
+            window.removeEventListener('scroll', handleReflow, true)
+        }
+    }, [isOpen, onClose, updatePosition])
+
+    useEffect(() => {
+        if (!isOpen) return
+
+        const frame = window.requestAnimationFrame(() => {
+            const firstItem = menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')
+            firstItem?.focus()
+        })
+
+        return () => window.cancelAnimationFrame(frame)
+    }, [isOpen])
+
     if (!isOpen) return null
 
+    const menuStyle: CSSProperties | undefined = menuPosition
+        ? {
+            top: `max(${menuPosition.top}px, calc(env(safe-area-inset-top) + 8px))`,
+            left: menuPosition.left,
+            transformOrigin: menuPosition.transformOrigin
+        }
+        : undefined
+
+    // The left text inset includes the icon and gap; mirror it on the right so
+    // the text-to-border distance is symmetric without counting the icon twice.
     const baseItemClassName =
-        'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
+        'flex w-full items-center gap-3 rounded-md py-2 pl-3 pr-[42px] text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
 
     return (
         <div
             ref={menuRef}
-            className="fixed z-50 min-w-[200px] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-lg animate-menu-pop"
+            className="fixed z-50 box-border w-max max-w-[calc(100vw-16px)] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-lg animate-menu-pop"
             style={menuStyle}
         >
             <div
