@@ -1321,6 +1321,10 @@ describe('Pi built-in slash commands', () => {
         // executed by HAPI and never delivered to Pi as prompts, so they must
         // not linger in the web queued bar for the duration of the command.
         await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['compact-id'], undefined));
+        // Compaction keeps working for minutes without a Pi streaming event,
+        // so the session reports thinking while the RPC is outstanding and
+        // clears it once the run settles.
+        await vi.waitFor(() => expect(harness.session.keepAlive).toHaveBeenCalledWith(true, expect.anything(), expect.anything()));
         // While the compact RPC is outstanding, the FIFO must not release the
         // following prompt — Pi rejects prompts during compaction.
         expect(harness.sent).not.toContainEqual(expect.objectContaining({ type: 'prompt' }));
@@ -1343,6 +1347,7 @@ describe('Pi built-in slash commands', () => {
         expect(harness.session.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
             message: expect.stringContaining('Compaction summary'),
         }));
+        await vi.waitFor(() => expect(harness.session.keepAlive).toHaveBeenCalledWith(false, expect.anything(), expect.anything()));
 
         // The queued prompt may only flow once compaction completed.
         await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({

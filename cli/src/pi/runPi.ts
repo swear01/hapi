@@ -968,6 +968,12 @@ export async function runPi(opts: {
                 return;
             }
             case 'compact': {
+                // A compaction run can take minutes without any Pi streaming
+                // event, so mark the session as thinking for the duration;
+                // the 15s queued-thinking grace alone would let the web show
+                // the session idle while compaction and any queued prompts
+                // are still pending.
+                piSession.updateThinkingState(true)
                 try {
                     const data = await piSession.runRuntimeMutation(async () => {
                         return await sendPiRpcAndWait(piSession, transport, {
@@ -1010,6 +1016,8 @@ export async function runPi(opts: {
                         return;
                     }
                     sendEvent(`⚠️ Compaction failed: ${errorDetail(error)}`);
+                } finally {
+                    piSession.updateThinkingState(false)
                 }
                 return;
             }

@@ -308,12 +308,17 @@ function convertVisibleMetadataRecord(
         const summary = asString(record.summary)
         if (summary) {
             // Structured event: the web chat renders compaction summaries as a
-            // dedicated block (same shape as the live pi wrapper's compact RPC
-            // result).
-            structured = importedAgent({
-                type: 'compact-summary',
-                summary,
-            })
+            // dedicated block (same event envelope as the live pi wrapper's
+            // compact RPC result; the codex payload envelope is dropped by
+            // the web normalizer).
+            structured = {
+                role: 'agent',
+                content: {
+                    type: 'event',
+                    data: { type: 'compact-summary', summary },
+                },
+                meta: { sentFrom: 'cli' },
+            }
         }
     } else if (record.type === 'branch_summary') {
         const summary = asString(record.summary)
