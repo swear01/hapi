@@ -131,6 +131,8 @@ export async function deliverVoiceSend(args: {
         options: DictationPendingSendOptions
     }
     finalMessage: string
+    /** Raw transcribed text (without the pre-recording initialText). */
+    transcriptDelta: string
     sendMsg: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
 }): Promise<DeliverVoiceSendResult> {
     let targetSessionId = args.pendingSend.sessionId
@@ -167,11 +169,12 @@ export async function deliverVoiceSend(args: {
         if (recoverySessionId === args.pendingSend.sessionId) {
             // Same-id (or unresolved): the baseline is the pre-recording
             // draft, which the send consumed — overwrite it if it has not
-            // moved, otherwise merge so the transcript is never lost.
+            // moved, otherwise append just the transcribed delta so the
+            // transcript is never lost without duplicating initialText.
             if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
                 saveDraft(recoverySessionId, args.finalMessage)
             } else {
-                saveDraft(recoverySessionId, appendTranscript(getDraft(recoverySessionId), args.finalMessage))
+                saveDraft(recoverySessionId, appendTranscript(getDraft(recoverySessionId), args.transcriptDelta))
             }
             recoveredSessionId = recoverySessionId
         } else if (recoveryDraftAtStart === '' && draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
@@ -184,12 +187,13 @@ export async function deliverVoiceSend(args: {
             // The target draft moved in flight (or was never empty): fall
             // back to the source id so the transcript is never lost (the
             // source draft is preserved on failure anyway). Overwrite only
-            // the unmoved pre-recording baseline; merge when the operator
-            // typed in the source composer while the request was in flight.
+            // the unmoved pre-recording baseline; append just the
+            // transcribed delta when the operator typed in the source
+            // composer while the request was in flight.
             if (draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
                 saveDraft(args.pendingSend.sessionId, args.finalMessage)
             } else {
-                saveDraft(args.pendingSend.sessionId, appendTranscript(getDraft(args.pendingSend.sessionId), args.finalMessage))
+                saveDraft(args.pendingSend.sessionId, appendTranscript(getDraft(args.pendingSend.sessionId), args.transcriptDelta))
             }
             recoveredSessionId = args.pendingSend.sessionId
         }
@@ -375,7 +379,7 @@ export function useDictation(config: {
                             const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                             if (finalMessage.trim()) {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
-                                const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
+                                const result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
                                 if (!result.delivered) {
                                     // Surface the failure while the source component is still
                                     // mounted, then navigate to the resumed session. The text is

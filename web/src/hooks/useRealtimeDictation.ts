@@ -76,7 +76,7 @@ export function useRealtimeDictation(config: {
                 finalMessage = appendTranscript(pendingSend.initialText, text)
                 if (finalMessage.trim()) {
                     const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
-                    const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
+                    const result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: text, sendMsg })
                     if (!result.delivered) {
                         // Surface the failure while the source component is still
                         // mounted, then navigate to the resumed session. The text is
