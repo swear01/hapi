@@ -180,3 +180,22 @@ directly instead:
 
 7. After the workflow completes, verify all artifacts on the GitHub Release and
    deploy through the Skillshare HAPI fleet workflow.
+
+## Smoke-test harness (`smoke-runner.sh`)
+
+`tools/maintenance/smoke-runner.sh` starts a throwaway dev hub + source runner
+against an isolated `HAPI_HOME` (mktemp dir) and kills both on exit — no
+`setsid`/`nohup` orphans, no touching the production runner.
+
+Rules:
+
+- **Never run it on a production runner host** (oracle/swever, cthulhu, athena,
+  valkyrie, zeus): the script refuses by hostname. The 12 GB oracle box has
+  died twice from `build:web` + a second runner exhausting RAM/swap. Run it on
+  the Mac or mazu. `HAPI_SMOKE_FORCE=1` overrides only when you know the
+  machine can take it.
+- Default `HAPI_LISTEN_HOST=127.0.0.1` — use an SSH tunnel for remote access.
+  Never `0.0.0.0` on the public internet.
+- `SKIP_BUILD=1` skips the memory-hungry `build:web` step.
+- Ctrl-C stops hub + runner and removes the temp home. Stray processes from an
+  interrupted run block the next run until killed.
