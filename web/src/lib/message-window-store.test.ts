@@ -1248,6 +1248,7 @@ describe('optimistic and queued-message operations', () => {
             makeAgentMessage({ id: 'agent', seq: 2, at: 2_000 })
         ])
 
+        const beforeConsumed = getMessageWindowState(id).tailRevision
         markMessagesConsumed(id, ['local-1'], 3_000)
 
         expect(getMessageWindowState(id).messages.at(-1)).toMatchObject({
@@ -1255,6 +1256,7 @@ describe('optimistic and queued-message operations', () => {
             status: 'sent',
             invokedAt: 3_000
         })
+        expect(getMessageWindowState(id).tailRevision).toBe(beforeConsumed + 1)
     })
 
     it('reconciles queued candidates without a secondary pending collection', () => {
