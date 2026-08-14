@@ -1671,6 +1671,33 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('fails closed when the direct compact-abort RPC times out', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/compact' } }, 'timeout-abort-id');
+        await vi.waitFor(() => expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'compact' })));
+
+        vi.useFakeTimers();
+        const abort = harness.rpcHandlers.get(RPC_METHODS.Abort)!;
+        const abortPromise = abort({});
+        // Attach the settlement handler before advancing timers so the
+        // rejection is never observed as unhandled.
+        const settled = abortPromise.then(() => 'ok', () => 'failed');
+        await vi.advanceTimersByTimeAsync(10);
+        expect(harness.sent).toContainEqual(expect.objectContaining({ type: 'abort' }));
+
+        // The abort RPC never answers: the compaction outcome is
+        // indeterminate (the compact RPC keeps the mutation lease for up to
+        // 120s), so the session must fail closed exactly like the ordinary
+        // Abort path and never release the prompt FIFO.
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(await settled).toBe('failed');
+        expect(harness.cleanupCount).toBe(1);
+        vi.useRealTimers();
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('fails the session when compaction times out with a queued prompt', async () => {
         const { running, onUserMessage } = await startReadySession();
         // Fake timers must be installed before the compact RPC is issued so

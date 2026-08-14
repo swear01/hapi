@@ -1239,10 +1239,23 @@ export async function runPi(opts: {
                     activeCompact.cancelled = true;
                     return Promise.resolve({ success: true } as const);
                 })();
-            abortPromise = interrupted.finally(() => {
-                abortInFlight = false;
-                abortPromise = null;
-            });
+            abortPromise = interrupted
+                .catch((error) => {
+                    // Mirror the ordinary Abort path: an unanswered abort RPC
+                    // leaves the compaction outcome indeterminate (the compact
+                    // RPC can keep the mutation lease for up to 120s), so fail
+                    // the session instead of presenting the wrapper as live.
+                    if (error instanceof PiRpcTimeoutError) {
+                        const fatal = new Error(`Pi abort failed closed: ${error.message}`);
+                        failNativeStartup(fatal);
+                        throw fatal;
+                    }
+                    throw error;
+                })
+                .finally(() => {
+                    abortInFlight = false;
+                    abortPromise = null;
+                });
             return await abortPromise;
         }
         piSession.assertNoHistoryTransaction('abort Pi');
