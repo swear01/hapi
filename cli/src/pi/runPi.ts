@@ -870,6 +870,20 @@ export async function runPi(opts: {
         }
     };
 
+    const getPiModels = async (): Promise<PiModelSummary[]> => {
+        // Startup model discovery can be late or fail once; retry the RPC on
+        // an empty cache so /model never reports valid models as unknown.
+        if (piSession.cachedPiModels.length > 0) return piSession.cachedPiModels;
+        try {
+            const data = await sendPiRpcAndWait(piSession, transport, { type: 'get_available_models' });
+            const models = parsePiModels(data);
+            if (models.length > 0) piSession.cachedPiModels = models;
+            return models;
+        } catch {
+            return [];
+        }
+    };
+
     // --- Pi commands and skills ---
     apiSession.rpcHandlerManager.registerHandler<{ agent?: string }, SlashCommandsResponse>(
         RPC_METHODS.ListSlashCommands,
@@ -921,6 +935,7 @@ export async function runPi(opts: {
             }
             case 'model': {
                 const qualified = (model: PiModelSummary): string => `${model.provider}/${model.modelId}`;
+                const models = await getPiModels();
                 if (!command.modelId) {
                     // List qualified selectors: duplicate bare IDs across
                     // providers are rejected by the switch path, so every
@@ -928,15 +943,15 @@ export async function runPi(opts: {
                     const current = piSession.currentModel && piSession.currentProvider
                         ? qualified({ provider: piSession.currentProvider, modelId: piSession.currentModel })
                         : piSession.currentModel ?? 'unset';
-                    const available = piSession.cachedPiModels.map(qualified).join(', ');
+                    const available = models.map(qualified).join(', ');
                     sendEvent(`Current model: ${current}.\nAvailable: ${available || 'unknown — use /model <modelId>'}`);
                     return;
                 }
                 // The catalog is provider-qualified; prefer an exact
                 // provider/modelId match and refuse bare IDs shared by more
                 // than one provider instead of silently picking the first.
-                const exact = piSession.cachedPiModels.find((model) => qualified(model) === command.modelId);
-                const bare = piSession.cachedPiModels.filter((model) => model.modelId === command.modelId);
+                const exact = models.find((model) => qualified(model) === command.modelId);
+                const bare = models.filter((model) => model.modelId === command.modelId);
                 if (!exact && bare.length > 1) {
                     sendEvent(`⚠️ Ambiguous model: ${command.modelId}. Use ${bare.map(qualified).join(', ')}.`);
                     return;

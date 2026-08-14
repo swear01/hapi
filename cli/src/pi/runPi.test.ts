@@ -1542,6 +1542,36 @@ describe('Pi built-in slash commands', () => {
         await running;
     });
 
+    it('recovers /model from an empty model cache by retrying discovery', async () => {
+        const { running, onUserMessage } = await startReadySession();
+        // No get_available_models was answered at startup: the cache is empty
+        // and the first /model must retry the discovery RPC instead of
+        // reporting the catalog as unknown.
+        onUserMessage({ role: 'user', content: { type: 'text', text: '/model' } }, 'retry-list-id');
+
+        const discovery = await vi.waitFor(() => {
+            // Pick the latest discovery request: the startup probe may also
+            // still be outstanding.
+            const found = harness.sent.filter((item) => (item as { type?: string }).type === 'get_available_models').at(-1) as { id: string } | undefined;
+            expect(found).toBeDefined();
+            return found!;
+        });
+        harness.onEvent!({ type: 'response', id: discovery.id, command: 'get_available_models', success: true, data: {
+            models: [
+                { id: 'gpt-5.2', provider: 'openai' },
+                { id: 'gpt-4.1', provider: 'openai' },
+            ],
+        } });
+
+        await vi.waitFor(() => expect(harness.session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            message: expect.stringContaining('Available: openai/gpt-5.2, openai/gpt-4.1'),
+        })));
+        await vi.waitFor(() => expect(harness.session.emitMessagesConsumed).toHaveBeenCalledWith(['retry-list-id'], { clearQueuedThinkingGrace: true }));
+
+        harness.onError?.(new Error('finish test'));
+        await running;
+    });
+
     it('fails the session when compaction times out with a queued prompt', async () => {
         const { running, onUserMessage } = await startReadySession();
         // Fake timers must be installed before the compact RPC is issued so
