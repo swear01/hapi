@@ -1340,6 +1340,7 @@ export function HappyComposer(props: {
         dictation.toggle,
         dictation.stopAndSend,
         props.sessionId,
+        props.resolveSessionIdForVoice,
         sendVoiceDirect,
         props.agentFlavor,
         props.thinking,

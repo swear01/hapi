@@ -146,22 +146,22 @@ export async function deliverVoiceSend(args: {
     } catch (sendError) {
         // After a resume the source session is superseded: recover the
         // retryable transcript under the id the message actually targeted
-        // so the operator can retry from the live session (and is
-        // navigated there via onSessionResolved) instead of leaving it
-        // under the archived source id.
+        // so the operator can retry from the live session instead of
+        // leaving it under the archived source id. Navigation is NOT fired
+        // here: the caller surfaces the failure first (while the source
+        // component is still mounted) and then navigates via
+        // notifyResolvedSession, so a post-resume failure is never silent.
         const recoverySessionId = targetSessionId
         if (draftUnchanged(recoverySessionId, recoveryDraftAtStart)) {
             saveDraft(recoverySessionId, args.finalMessage)
         }
-        await notifyResolvedSession(args.pendingSend, resumed, recoverySessionId)
         return { delivered: false, error: sendError, resumed, targetSessionId }
     }
-    // Notification is a side effect of an already-delivered send: it runs
-    // outside the send try/catch so a throw from navigation/cache updates
-    // cannot be misread as a send failure (which would re-insert the
-    // delivered text as a retryable draft). Navigation keys off `resumed`
-    // (also covers same-id resumes, where the id never changes).
-    await notifyResolvedSession(args.pendingSend, resumed, targetSessionId)
+    // Draft cleanup runs BEFORE the notify: the onSessionResolved callback
+    // may itself seed/navigate the target session (and write drafts), so a
+    // post-notify unchanged-check could either skip the cleanup or wipe a
+    // freshly seeded draft. The delivery outcome no longer depends on the
+    // draft store.
     if (draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
         clearDraft(targetSessionId)
     }
@@ -172,6 +172,12 @@ export async function deliverVoiceSend(args: {
         && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
         clearDraft(args.pendingSend.sessionId)
     }
+    // Notification is a side effect of an already-delivered send: it runs
+    // outside the send try/catch so a throw from navigation/cache updates
+    // cannot be misread as a send failure (which would re-insert the
+    // delivered text as a retryable draft). Navigation keys off `resumed`
+    // (also covers same-id resumes, where the id never changes).
+    await notifyResolvedSession(args.pendingSend, resumed, targetSessionId)
     return { delivered: true, resumed, targetSessionId }
 }
 
@@ -328,18 +334,23 @@ export function useDictation(config: {
                             if (finalMessage.trim()) {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                                 const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
-                                if (!result.delivered && mountedRef.current) {
-                                    // For a cross-id resumed send the retryable text lives in the
-                                    // resumed session's draft store; do not also write it into the
-                                    // still-mounted archived composer. For a non-resumed or same-id
-                                    // resumed send the mounted composer IS the recovery target (a
-                                    // same-id resume does not remount), so restore the text there.
-                                    if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
-                                        && !config.getCurrentText().trim()) {
-                                        config.onTextChange(finalMessage)
+                                if (!result.delivered) {
+                                    // Surface the failure while the source component is still
+                                    // mounted, then navigate to the resumed session (whose
+                                    // recovered draft carries the retryable text). For a
+                                    // cross-id resumed send the text lives only in that draft
+                                    // store; for a non-resumed or same-id resumed send the
+                                    // mounted composer IS the recovery target (a same-id resume
+                                    // does not remount), so restore the text there too.
+                                    if (mountedRef.current) {
+                                        if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
+                                            && !config.getCurrentText().trim()) {
+                                            config.onTextChange(finalMessage)
+                                        }
+                                        setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
+                                        setStatus('error')
                                     }
-                                    setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
-                                    setStatus('error')
+                                    await notifyResolvedSession(pendingSend, result.resumed, result.targetSessionId)
                                     return
                                 }
                             }

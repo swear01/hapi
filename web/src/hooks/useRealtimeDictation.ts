@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, deliverVoiceSend, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, deliverVoiceSend, notifyResolvedSession, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -76,18 +76,23 @@ export function useRealtimeDictation(config: {
                 if (finalMessage.trim()) {
                     const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                     const result = await deliverVoiceSend({ pendingSend, finalMessage, sendMsg })
-                    if (!result.delivered && mountedRef.current) {
-                        // For a cross-id resumed send the retryable text lives in the
-                        // resumed session's draft store; do not also write it into the
-                        // still-mounted archived composer. For a non-resumed or same-id
-                        // resumed send the mounted composer IS the recovery target (a
-                        // same-id resume does not remount), so restore the text there.
-                        if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
-                            && !config.getCurrentText?.().trim()) {
-                            onFinalTranscriptRef.current(finalMessage)
+                    if (!result.delivered) {
+                        // Surface the failure while the source component is still
+                        // mounted, then navigate to the resumed session (whose
+                        // recovered draft carries the retryable text). For a
+                        // cross-id resumed send the text lives only in that draft
+                        // store; for a non-resumed or same-id resumed send the
+                        // mounted composer IS the recovery target (a same-id resume
+                        // does not remount), so restore the text there too.
+                        if (mountedRef.current) {
+                            if ((!result.resumed || result.targetSessionId === pendingSend.sessionId)
+                                && !config.getCurrentText?.().trim()) {
+                                onFinalTranscriptRef.current(finalMessage)
+                            }
+                            setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
+                            setStatus('error')
                         }
-                        setError(result.error instanceof Error ? result.error.message : 'Failed to send message')
-                        setStatus('error')
+                        await notifyResolvedSession(pendingSend, result.resumed, result.targetSessionId)
                         return
                     }
                 }
