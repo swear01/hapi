@@ -1,0 +1,10 @@
+patch	state	upstream_ref	source_commits
+# v0.27.3.5 — UFR rebuild from upstream/main 901f17d0c (16 official commits: #1471 #1490 #1495 #1530 #1544 #1546 #1547 #1550 #1562 #1565 #1568 #1569 #1570 #1576 #1577 #1578).
+# Officially merged this cycle (carried patches superseded, recorded drop in ledger): #1471 #1490 #1495 #1530 #1544 #1546 #1547 #1550 #1562 #1565 #1568 #1569 #1570 (fork PR #6).
+# New carries (3): #1573 (Fork action preservation), #1581 (stale drafts after delayed queued sends), #1582 (fork PR #7, compact-summary mapping, personal).
+# In-tree carries from v0.27.3.4 retained via fork overlay (not yet merged upstream): #1541 #1543 #1548 #1552 #1557 #1560 #1563 #906 #1422 #1414 #847 #987 #945 #1447 #1158 #1424 #1469 #1418 #955.
+# Drop: #1091 (operator ruling 2026-08-13), #1320 (permanent exclusion).
+01-pr-1573.patch	carry	pr-1573	5ffdee3c895aac21a1ea9e26d09b5e5e9b0d90b3
+02-pr-1581.patch	carry	pr-1581	ac2750164e3b10b49e99b190bab4eb57ad489b32
+03-pr-1582.patch	carry	pr-1582	4ecb4b31e784e8965f091177c22f973f724dbcdd
+overlay	regenerate	-	-
