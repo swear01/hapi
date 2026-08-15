@@ -602,9 +602,49 @@ describe('SessionList collapse behavior', () => {
         expect(screen.getByTitle('Active sessions')).toBeInTheDocument()
         expect(screen.getByText(/Active \(1\)/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Quiet task/ })).toBeInTheDocument()
-        // No directory group remains: every session is pinned above folders.
-        expect(screen.queryByTitle('/work/hapi')).toBeNull()
-        expect(screen.queryByTitle('/work/other')).toBeNull()
+        // The directory header survives as an action-only header (copy-path /
+        // new-session-in-directory) even though every row floated.
+        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
+        expect(screen.getByTitle('/work/hapi').nextElementSibling).toBeNull()
+        expect(screen.getByTitle('/work/other')).toBeInTheDocument()
+        expect(screen.getByTitle('/work/other').nextElementSibling).toBeNull()
+    })
+
+    it('keeps new-session-in-directory actions for projects whose rows all floated', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const onNewSessionInDirectory = vi.fn()
+        const sessions = [
+            makeSession({
+                id: 'session-quiet',
+                active: true,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', machineId: 'machine-1', name: 'Quiet task', flavor: 'codex' },
+            }),
+        ]
+        renderWithProviders(
+            <SessionList
+                sessions={sessions}
+                selectedSessionId={null}
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+                onNewSessionInDirectory={onNewSessionInDirectory}
+            />
+        )
+
+        expect(screen.getByTitle('Active sessions')).toBeInTheDocument()
+        // The project header survives as an action-only header.
+        const header = screen.getByTitle('/work/hapi')
+        expect(header.nextElementSibling).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: 'New session in this directory' }))
+        expect(onNewSessionInDirectory).toHaveBeenCalledWith({
+            machineId: 'machine-1',
+            directory: '/work/hapi',
+        })
     })
 
     it('auto-expands the path again when the selected session changes', async () => {

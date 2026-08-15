@@ -1347,6 +1347,24 @@ export function SessionList(props: {
         ),
         [machineFilteredSessions, pinInProgressSessions]
     )
+    // Directory groups whose rows all floated to the pinned sections still
+    // render an action-only header so copy-path / new-session-in-directory
+    // stay available (no rows to group, but the project itself is live).
+    // Based on the same machineFilteredSessions set as `groups` so machine /
+    // unread filters stay consistent.
+    const allDirectoryGroups = useMemo(
+        () => groupSessionsByDirectory(
+            machineFilteredSessions.filter((session) => !session.globalPinned)
+        ),
+        [machineFilteredSessions]
+    )
+    const actionOnlyGroups = useMemo(() => {
+        if (!pinInProgressSessions) {
+            return []
+        }
+        const visibleKeys = new Set(groups.map((group) => group.key))
+        return allDirectoryGroups.filter((group) => !visibleKeys.has(group.key))
+    }, [groups, allDirectoryGroups, pinInProgressSessions])
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
@@ -1511,6 +1529,44 @@ export function SessionList(props: {
                         })}
                     </div>
                     </div>
+                </div>
+            </div>
+        )
+    }
+
+    const renderActionOnlyGroupHeader = (group: SessionGroup) => {
+        // With multiple machines in the unfiltered view, disambiguate
+        // same-named directories by suffixing the machine label.
+        const groupTitle = showMachineFilterBar && activeMachineFilter === null
+            ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
+            : group.displayName
+        return (
+            <div key={group.key}>
+                <div
+                    className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] min-w-0 w-full select-none"
+                    title={group.directory}
+                >
+                    <span className="font-medium text-sm truncate flex-1">
+                        {groupTitle}
+                    </span>
+                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                    {onNewSessionInDirectory && group.directory !== 'Other' ? (
+                        <button
+                            type="button"
+                            onClick={(event) => {
+                                event.stopPropagation()
+                                onNewSessionInDirectory({
+                                    machineId: group.machineId,
+                                    directory: group.directory
+                                })
+                            }}
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                            title={t('sessions.group.new')}
+                            aria-label={t('sessions.group.new')}
+                        >
+                            <PlusIcon className="h-3.5 w-3.5" />
+                        </button>
+                    ) : null}
                 </div>
             </div>
         )
@@ -1984,6 +2040,7 @@ export function SessionList(props: {
                     bucketKeys: ['active'],
                 })}
                 {groups.map(renderDirectoryGroup)}
+                {actionOnlyGroups.map(renderActionOnlyGroupHeader)}
             </div>
             </div>
             </div>
