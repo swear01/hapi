@@ -67,7 +67,6 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
         scrollToConversationStart: async () => false,
         isLoadingConversationStart: false,
         isNavigationInFlight: false,
-=======
         ...overrides,
     }
 }
