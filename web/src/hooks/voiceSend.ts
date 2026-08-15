@@ -137,6 +137,9 @@ export const VOICE_SEND_FAILED_MESSAGE = 'Failed to send message'
 /** Shown when the message was delivered but the resumed session could not be opened. */
 export const VOICE_NAVIGATION_FAILED_MESSAGE = 'Message sent, but opening the resumed session failed'
 
+/** Shown when the send failed and the resumed session holding the recovery could not be opened. */
+export const VOICE_SEND_NAVIGATION_FAILED_MESSAGE = 'Message not sent, and the resumed session could not be opened'
+
 /**
  * Shared send-with-resume orchestration for voice dictation direct-sends
  * (used by both the standard recorder path and realtime providers).
@@ -316,7 +319,21 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
             args.setError(args.result.error instanceof Error ? args.result.error.message : VOICE_SEND_FAILED_MESSAGE)
             args.setStatusError()
         }
-        await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId)
+        const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId)
+        if (args.result.shouldNotify && !navigated) {
+            // The transcript was recovered under the resumed session and the
+            // operator was not navigated there: make it reachable locally so
+            // the failed text is never stranded in an unseen session.
+            if (args.mounted) {
+                if (args.result.recoveredSessionId !== args.pendingSend.sessionId) {
+                    args.restoreText(args.finalMessage, args.transcriptDelta)
+                }
+                args.setError(VOICE_SEND_NAVIGATION_FAILED_MESSAGE)
+                args.setStatusError()
+            } else {
+                console.warn('Voice send: failed and the resumed session could not be opened')
+            }
+        }
         return 'handled'
     }
     if (args.result.resumed && !args.result.notified) {

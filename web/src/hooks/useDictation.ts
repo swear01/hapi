@@ -10,7 +10,6 @@ import {
     deliverVoiceSend,
     draftUnchanged,
     handleVoiceSendOutcome,
-    notifyResolvedSession,
     VOICE_SEND_FAILED_MESSAGE,
     type DictationPendingSendOptions,
     type DeliverVoiceSendResult,
