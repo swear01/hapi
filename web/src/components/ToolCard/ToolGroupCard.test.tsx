@@ -376,11 +376,6 @@ describe('ToolGroupCard', () => {
                         isSyncingTail,
                         isLoadingMoreMessages: false,
                         loadOlderMessagesPreservingScroll,
-                        jumpToPrompt: async () => false,
-                        loadingPromptMessageId: null,
-                        scrollToConversationStart: async () => false,
-                        isLoadingConversationStart: false,
-                        isNavigationInFlight: false,
                     }}>
                         <ToolGroupCard
                             block={makeGroup({

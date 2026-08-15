@@ -61,11 +61,6 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
         isSyncingTail: false,
         isLoadingMoreMessages: false,
         loadOlderMessagesPreservingScroll: async () => 'loaded',
-        jumpToPrompt: async () => false,
-        loadingPromptMessageId: null,
-        scrollToConversationStart: async () => false,
-        isLoadingConversationStart: false,
-        isNavigationInFlight: false,
         ...overrides,
     }
 }

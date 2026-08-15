@@ -1451,8 +1451,6 @@ export function HappyThread(props: {
         props.onOutlineOpenChange(false)
     }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
 
-    }, [])
-
 
     useEffect(() => {
         if (
