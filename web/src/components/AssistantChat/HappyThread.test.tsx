@@ -12,6 +12,7 @@ import {
     isNestedScrollEvent,
     findPromptTarget,
     findPreviousUserMessage,
+    scrollTargetIntoView,
     getScrollIntent,
     loadOlderForNavigationWithRetry,
     loadAllOlderMessages,
@@ -85,6 +86,32 @@ describe('ConversationStartStatus', () => {
     it('announces prompt loading separately from conversation-start loading', () => {
         render(<I18nProvider><ConversationStartStatus status="loading" kind="prompt" /></I18nProvider>)
         expect(screen.getByRole('status')).toHaveTextContent('Loading turn input…')
+    })
+})
+
+describe('scrollTargetIntoView', () => {
+    it('accepts a clamped max-scroll landing for a target near the end', async () => {
+        const viewport = document.createElement('div')
+        const target = document.createElement('div')
+        Object.defineProperty(viewport, 'scrollHeight', { value: 1_000 })
+        Object.defineProperty(viewport, 'clientHeight', { value: 100 })
+        viewport.scrollTop = 900 // already at the maximum scroll position
+        const scrollIntoView = vi.fn()
+        target.scrollIntoView = scrollIntoView
+        target.getBoundingClientRect = () => ({
+            top: 500, left: 0, right: 0, bottom: 0, width: 0, height: 0,
+            x: 0, y: 0, toJSON: () => ({})
+        }) as DOMRect
+        viewport.getBoundingClientRect = () => ({
+            top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0,
+            x: 0, y: 0, toJSON: () => ({})
+        }) as DOMRect
+
+        // The target cannot scroll any closer (browser clamp at max scroll):
+        // the helper must accept the best reachable landing immediately
+        // instead of spinning until the retry deadline.
+        await scrollTargetIntoView(viewport, target)
+        expect(scrollIntoView).toHaveBeenCalledTimes(1)
     })
 })
 

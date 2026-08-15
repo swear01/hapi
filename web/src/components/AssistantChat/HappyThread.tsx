@@ -470,6 +470,13 @@ export async function scrollTargetIntoView(viewport: HTMLElement, target: HTMLEl
         if (offset >= 0 && offset <= 32) {
             return
         }
+        // A target near the end of the transcript is clamped by the browser
+        // at the maximum scroll position: the prompt is fully visible at the
+        // best reachable spot even though its top offset stays large.
+        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        if (Math.abs(viewport.scrollTop - maxScrollTop) <= 1 && offset > 32) {
+            return
+        }
     }
     target.scrollIntoView({ block: 'start', behavior: 'auto' })
 }
