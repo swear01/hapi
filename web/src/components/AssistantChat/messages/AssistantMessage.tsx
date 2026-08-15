@@ -91,7 +91,11 @@ export function HappyAssistantMessage() {
                 showFork={showForkCurrent}
                 historyActionPending={ctx.historyActionPending}
                 onFork={showForkCurrent ? () => ctx.onForkConversation!() : undefined}
-                onJumpToPrompt={() => { void ctx.jumpToPrompt(messageId, replyToMessageId) }}
+                onJumpToPrompt={
+                    replyToMessageId || ctx.hasMoreMessages
+                        ? () => { void ctx.jumpToPrompt(messageId, replyToMessageId) }
+                        : undefined
+                }
                 onJumpToConversationStart={() => { void ctx.scrollToConversationStart() }}
                 isLoadingConversationStart={ctx.isLoadingConversationStart}
                 isLoadingPrompt={ctx.loadingPromptMessageId === messageId}
