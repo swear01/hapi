@@ -487,19 +487,28 @@ function trimNavigationWindow(
     if (messages.length <= limit) {
         return { kept: messages, dropped: [] }
     }
-    const head = messages.slice(0, NAVIGATION_HEAD_LIMIT)
-    const tail = messages.slice(messages.length - NAVIGATION_TAIL_LIMIT)
+    // Queued/scheduled rows must survive the trim: the queued-messages bar
+    // reads them straight from the window, so dropping them mid-navigation
+    // would silently disable its edit/cancel/steer controls.
+    const queued = messages.filter(isQueuedForInvocation)
+    const queuedIds = new Set(queued.map((message) => message.id))
+    const trimmable = messages.filter((message) => !queuedIds.has(message.id))
+    const head = trimmable.slice(0, NAVIGATION_HEAD_LIMIT)
+    const tail = trimmable.slice(messages.length - NAVIGATION_TAIL_LIMIT)
     const headLast = head.at(-1) ?? null
     const tailFirst = tail[0] ?? null
     const headLastSeq = headLast?.seq ?? null
     const tailFirstSeq = tailFirst?.seq ?? null
     const contiguous = headLastSeq !== null && tailFirstSeq !== null && tailFirstSeq === headLastSeq + 1
     const gapAt = headLast ? (headLast.invokedAt ?? headLast.createdAt) : 0
+    const windowRows = contiguous
+        ? [...head, ...tail]
+        : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq, gapAt), ...tail]
+    const kept = mergeMessages(windowRows, queued)
+    const keptIds = new Set(kept.map((message) => message.id))
     return {
-        kept: contiguous
-            ? [...head, ...tail]
-            : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq, gapAt), ...tail],
-        dropped: messages.slice(NAVIGATION_HEAD_LIMIT, messages.length - NAVIGATION_TAIL_LIMIT)
+        kept,
+        dropped: messages.filter((message) => !keptIds.has(message.id))
     }
 }
 

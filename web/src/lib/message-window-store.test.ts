@@ -1326,6 +1326,30 @@ describe('explicit history navigation', () => {
         releaseNavigation()
     })
 
+    it('preserves queued rows dropped into the trimmed middle while navigating', () => {
+        const id = sessionId('navigation-keeps-queued')
+        const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        const total = HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 50
+        const messages = Array.from({ length: total }, (_, index) =>
+            makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
+        )
+        ingestIncomingMessages(id, messages)
+        // A queued user message whose natural position lands in the dropped
+        // middle (between the retained head and tail).
+        const queued = makeUserMessage({
+            id: 'queued-middle',
+            seq: HISTORY_WINDOW_SIZE + 100,
+            localId: 'queued-middle',
+            invokedAt: null
+        })
+        ingestIncomingMessages(id, [queued])
+
+        const state = getMessageWindowState(id)
+        expect(state.messages.some((message) => message.id === 'queued-middle')).toBe(true)
+        releaseNavigation()
+    })
+
     it('keeps navigation active while any overlapping lease is held', () => {
         const id = sessionId('navigation-overlapping-leases')
         setMessageViewMode(id, 'history')
