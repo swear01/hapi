@@ -213,10 +213,10 @@ describe('useRealtimeDictation', () => {
             expect(result.current.status).toBe('error')
             expect(result.current.error).toBe('boom')
         })
-        // finalMessage already existed when the unexpected rejection hit, so
-        // the recovery paths owned the outcome (the draft was saved) and the
-        // catch must not restore again (which could invite a duplicate send).
-        expect(onFinalTranscript).not.toHaveBeenCalled()
+        // The unexpected rejection hit before restoreText ran and the
+        // composer state is unreadable, so the catch restores the full
+        // message (the draft was also persisted as a second recovery path).
+        expect(onFinalTranscript).toHaveBeenCalledWith('initial text spoken words')
         expect(getDraft('session-K')).toBe('initial text spoken words')
     })
 })

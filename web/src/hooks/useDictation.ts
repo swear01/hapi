@@ -181,11 +181,11 @@ export function useDictation(config: {
                                 // path, which would drop the transcribed delta.
                                 let delivered = false
                                 try {
-                                    const result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
-                                    delivered = result.delivered
+                                    const sendResult = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
+                                    delivered = sendResult.delivered
                                     if (await handleVoiceSendOutcome({
                                         pendingSend,
-                                        result,
+                                        result: sendResult,
                                         finalMessage,
                                         transcriptDelta: transcribedText,
                                         isMounted: () => mountedRef.current,

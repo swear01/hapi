@@ -118,8 +118,19 @@ export function useRealtimeDictation(config: {
                 saveDraft(pendingSend.sessionId, finalMessage)
             }
             if (mountedRef.current) {
-                if (!finalMessage.trim()) {
-                    onFinalTranscriptRef.current(text)
+                // Restore when nothing was composed yet OR the composer is
+                // still empty (an early rejection before restoreText ran):
+                // the full message when it exists, the raw commit otherwise.
+                let composerEmpty = false
+                try {
+                    composerEmpty = !config.getCurrentText?.().trim()
+                } catch {
+                    // Composer state unreadable; assume empty — restoring is
+                    // the recovery for an unexpected failure.
+                    composerEmpty = true
+                }
+                if (!finalMessage.trim() || composerEmpty) {
+                    onFinalTranscriptRef.current(finalMessage.trim() ? finalMessage : text)
                 }
                 setError(error instanceof Error ? error.message : VOICE_SEND_FAILED_MESSAGE)
                 setStatus('error')

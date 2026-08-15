@@ -197,7 +197,10 @@ export async function deliverVoiceSend(args: {
     try {
         if (args.pendingSend.options.resolveSessionId) {
             const resolved = await args.pendingSend.options.resolveSessionId(args.pendingSend.sessionId)
-            if (!resolved || typeof resolved.sessionId !== 'string' || typeof resolved.resumed !== 'boolean') {
+            if (!resolved
+                || typeof resolved.sessionId !== 'string'
+                || resolved.sessionId.trim() === ''
+                || typeof resolved.resumed !== 'boolean') {
                 throw new Error('Voice send: session resolver returned an invalid result')
             }
             targetSessionId = resolved.sessionId
@@ -351,7 +354,9 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
             args.setStatusError()
         }
         const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId, { error: args.result.error })
-        if (args.result.shouldNotify && navigated === false) {
+        if (args.result.shouldNotify && navigated !== true) {
+            // A rejected OR absent navigation callback strands the recovered
+            // transcript in the unseen target session; remediate locally.
             // The transcript was recovered under the resumed session and the
             // operator was not navigated there: make it reachable locally so
             // the failed text is never stranded in an unseen session.
