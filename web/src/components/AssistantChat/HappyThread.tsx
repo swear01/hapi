@@ -418,12 +418,46 @@ export async function smoothScrollViewportToTop(viewport: HTMLElement): Promise<
     })
 }
 
+/**
+ * Resolves once the viewport's scroll position has been stable for a few
+ * samples, or the deadline expires. scrollIntoView({ behavior: 'smooth' })
+ * returns before the animation lands; callers keep their navigation lease
+ * held until the landing so a live window mutation cannot cancel the
+ * animation mid-flight.
+ */
+export async function waitForViewportScrollEnd(viewport: HTMLElement): Promise<void> {
+    const startedAt = Date.now()
+    await new Promise<void>((resolve) => {
+        let lastTop = viewport.scrollTop
+        let stableSamples = 0
+        const watch = () => {
+            if (Date.now() - startedAt >= NAVIGATION_SCROLL_RETRY_DEADLINE_MS) {
+                resolve()
+                return
+            }
+            const top = viewport.scrollTop
+            if (top === lastTop) {
+                stableSamples += 1
+                if (stableSamples >= 4) {
+                    resolve()
+                    return
+                }
+            } else {
+                stableSamples = 0
+                lastTop = top
+            }
+            window.setTimeout(watch, 50)
+        }
+        window.setTimeout(watch, 50)
+    })
+}
+
 export async function runAfterPendingHistoryLoad(
     pendingLoad: Promise<unknown> | null,
-    action: () => boolean
+    action: () => boolean | Promise<boolean>
 ): Promise<boolean> {
     if (pendingLoad) await pendingLoad
-    return action()
+    return await action()
 }
 
 export async function loadOlderForNavigationWithRetry(
@@ -1650,9 +1684,11 @@ export function HappyThread(props: {
                 hasMoreMessages: () => hasMoreMessagesRef.current,
                 loadOlderPreservingScroll: loadOlderForOutline
             })
-            if (target) {
+            if (target && viewportRef.current) {
                 target.scrollIntoView({ block: 'start', behavior: 'smooth' })
                 markExplicitNavigationAwayFromBottom()
+                // Keep the navigation lease until the animation lands.
+                await waitForViewportScrollEnd(viewportRef.current)
             }
             props.onOutlineItemClick?.(item)
             props.onOutlineOpenChange(false)
@@ -1663,7 +1699,7 @@ export function HappyThread(props: {
         }
     }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
 
-    const scrollToMessage = useCallback((messageId: string): boolean => {
+    const scrollToMessage = useCallback(async (messageId: string): Promise<boolean> => {
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
         const target = document.getElementById(getConversationMessageAnchorId(messageId))
@@ -1671,6 +1707,8 @@ export function HappyThread(props: {
         if (!target || !viewport?.contains(target)) return false
         target.scrollIntoView({ block: 'start', behavior: 'smooth' })
         markExplicitNavigationAwayFromBottom()
+        // Keep the navigation lease until the animation lands.
+        await waitForViewportScrollEnd(viewport)
         return true
     }, [clearInitialScrollTimers, markExplicitNavigationAwayFromBottom])
 
@@ -1727,6 +1765,8 @@ export function HappyThread(props: {
             }
             if (!target) throw new Error('Could not find the user prompt')
             target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+            // Keep the navigation lease until the animation lands.
+            await waitForViewportScrollEnd(viewport)
             setPromptNavigationStatus('success')
             promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), 1400)
             return true
