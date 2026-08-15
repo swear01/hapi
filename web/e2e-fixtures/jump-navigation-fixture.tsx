@@ -253,6 +253,7 @@ window.__jumpProbe = {
             messageCount: state.messages.length,
             oldestSeq: seqs.length ? Math.min(...seqs) : null,
             newestSeq: seqs.length ? Math.max(...seqs) : null,
+            gapPresent: state.messages.some((message) => message.id.startsWith('__transcript-gap__')),
             scrollTop: viewport ? Math.round(viewport.scrollTop) : 0
         }
     },
@@ -308,6 +309,7 @@ function FixtureChat() {
     }, [messages])
 
     const reduced = useMemo(() => reduceChatBlocks(normalizedMessages, null, {}), [normalizedMessages])
+
     const reconciled = useMemo(
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
         [reduced.blocks]
