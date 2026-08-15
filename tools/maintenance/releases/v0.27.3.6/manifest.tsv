@@ -1,0 +1,13 @@
+patch	state	upstream_ref	source_commits
+# v0.27.3.6 — carry + fork-cleanup release on upstream 901f17d0c (official v0.27.4 not released yet).
+# Dropped this cycle: pr-1093 (assistant response navigation) per 2026-08-15 operator ruling — fork-carried implementation REMOVED from tree (13 files), upstream PR stays open.
+# Deferred: #1590 (quiet active pinned section) — merge conflicts with fork overlay (ProjectGroupHeader context menu #955, attached-jobs pin mode, machine-label UX); carry next cycle or after official merge.
+# New carries (4): #1584 (status summaries follow conversation language), #1585 (AGY Gemini 3.7 Flash), #1592 (reasoning collapse in history), #1595 (Ctrl+A select-all + e2e).
+# In-tree carries retained (unchanged): #1541 #1543 #1548 #1552 #1557 #1560 #1563 #906 #1422 #1414 #847 #987 #945 #1447 #1158 #1424 #1469 #1418 #955.
+# Drop: #1091 (operator ruling 2026-08-13), #1320 (permanent exclusion), pr-1093 (operator ruling 2026-08-15).
+01-pr-1584.patch	carry	pr-1584	4607962d23dd
+02-pr-1585.patch	carry	pr-1585	87a7dbfa5c2d
+03-pr-1592.patch	carry	pr-1592	95dfb7dc3afa
+04-pr-1595.patch	carry	pr-1595	8a0ec8880e4a
+pr-1093	drop	pr-1093	-
+overlay	regenerate	-	-

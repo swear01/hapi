@@ -1,0 +1,513 @@
+diff --git a/cli/src/agy/utils/agyModelKeys.test.ts b/cli/src/agy/utils/agyModelKeys.test.ts
+index 57f90932e..61da0357c 100644
+--- a/cli/src/agy/utils/agyModelKeys.test.ts
++++ b/cli/src/agy/utils/agyModelKeys.test.ts
+@@ -1,15 +1,27 @@
++import { AGY_MODEL_LABELS } from '@hapi/protocol'
+ import { describe, expect, it } from 'vitest'
+ import { buildAgyModelNavigationKeys, buildAgyModelPickerTarget, findAgyCurrentModelRow } from './agyModelKeys'
+ 
+ describe('buildAgyModelPickerTarget', () => {
++    // Every id is listed: a row that no case pins can drift out of step with
++    // the picker on its own, and a partial shift is silent until a live model
++    // change lands on the wrong row.
+     it.each([
+-        ['gemini-3.6-flash-high', 0, 2, 'Gemini 3.6 Flash (High)'],
+-        ['gemini-3.5-flash-low', 1, 0, 'Gemini 3.5 Flash (Low)'],
+-        ['gemini-3.1-pro-high', 2, 2, 'Gemini 3.1 Pro (High)'],
+-        ['claude-sonnet-4-6', 3, null, 'Claude Sonnet 4.6 (Thinking)'],
+-        ['claude-opus-4-6-thinking', 4, null, 'Claude Opus 4.6 (Thinking)'],
+-        ['gpt-oss-120b-medium', 5, null, 'GPT-OSS 120B (Medium)'],
+-    ] as const)('maps %s to the verified AGY 1.1.5 picker row', (modelId, row, effort, label) => {
++        ['gemini-3.7-flash-high', 0, 2, 'Gemini 3.7 Flash (High)'],
++        ['gemini-3.7-flash-medium', 0, 1, 'Gemini 3.7 Flash (Medium)'],
++        ['gemini-3.7-flash-low', 0, 0, 'Gemini 3.7 Flash (Low)'],
++        ['gemini-3.6-flash-high', 1, 2, 'Gemini 3.6 Flash (High)'],
++        ['gemini-3.6-flash-medium', 1, 1, 'Gemini 3.6 Flash (Medium)'],
++        ['gemini-3.6-flash-low', 1, 0, 'Gemini 3.6 Flash (Low)'],
++        ['gemini-3.5-flash-high', 2, 2, 'Gemini 3.5 Flash (High)'],
++        ['gemini-3.5-flash-medium', 2, 1, 'Gemini 3.5 Flash (Medium)'],
++        ['gemini-3.5-flash-low', 2, 0, 'Gemini 3.5 Flash (Low)'],
++        ['gemini-3.1-pro-high', 3, 2, 'Gemini 3.1 Pro (High)'],
++        ['gemini-3.1-pro-low', 3, 0, 'Gemini 3.1 Pro (Low)'],
++        ['claude-sonnet-4-6', 4, null, 'Claude Sonnet 4.6 (Thinking)'],
++        ['claude-opus-4-6-thinking', 5, null, 'Claude Opus 4.6 (Thinking)'],
++        ['gpt-oss-120b-medium', 6, null, 'GPT-OSS 120B (Medium)'],
++    ] as const)('maps %s to the verified AGY 1.1.13 picker row', (modelId, row, effort, label) => {
+         expect(buildAgyModelPickerTarget(modelId)).toEqual({ row, effort, label })
+     })
+ 
+@@ -21,6 +33,8 @@ describe('buildAgyModelPickerTarget', () => {
+ 
+ describe('AGY model picker navigation', () => {
+     it('finds the current row and moves relatively without relying on Home', () => {
++        // The expected values are MODEL_ROWS indices, not fixture line numbers:
++        // the fixture only lists the three rows around the current one.
+         const picker = [
+             '  Gemini 3.6 Flash',
+             '> Gemini 3.5 Flash             (current)',
+@@ -28,18 +42,44 @@ describe('AGY model picker navigation', () => {
+         ].join('\n')
+         const target = buildAgyModelPickerTarget('gemini-3.6-flash-low')
+ 
+-        expect(findAgyCurrentModelRow(picker)).toBe(1)
+-        expect(findAgyCurrentModelRow(picker.replaceAll('\n', ''))).toBe(1)
+-        expect(buildAgyModelNavigationKeys(target, 1)).toBe(`\x1b[A${'\x1b[D'.repeat(3)}`)
++        expect(findAgyCurrentModelRow(picker)).toBe(2)
++        expect(findAgyCurrentModelRow(picker.replaceAll('\n', ''))).toBe(2)
++        expect(buildAgyModelNavigationKeys(target, 2)).toBe(`\x1b[A${'\x1b[D'.repeat(3)}`)
+     })
+ 
+     it('moves down from the current row and does not move vertically for the same row', () => {
+         const target = buildAgyModelPickerTarget('gemini-3.1-pro-high')
+-        expect(buildAgyModelNavigationKeys(target, 0)).toBe(`${'\x1b[B'.repeat(2)}${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
+-        expect(buildAgyModelNavigationKeys(target, 2)).toBe(`${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
++        expect(buildAgyModelNavigationKeys(target, 1)).toBe(`${'\x1b[B'.repeat(2)}${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
++        expect(buildAgyModelNavigationKeys(target, 3)).toBe(`${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
+     })
+ 
+     it('fails closed when the picker does not identify its current row', () => {
+         expect(findAgyCurrentModelRow('Switch Model\n  Gemini 3.6 Flash')).toBeNull()
+     })
++
++    it('identifies row 0 when agy starts a session on its new Gemini 3.7 Flash default', () => {
++        // Real `/model` picker capture (stripTerminalControlSequences output,
++        // single line, no newlines) with agy 1.1.13's new default current model.
++        const picker = 'Switch Model> Gemini 3.7 Flash  (current)  Gemini 3.6 Flash  Gemini 3.5 Flash  Gemini 3.1 Pro  Claude Sonnet 4.6 (Thinking)  Claude Opus 4.6 (Thinking)  GPT-OSS 120B (Medium)  Effort'
++        expect(findAgyCurrentModelRow(picker)).toBe(0)
++    })
++
++    it('keeps the delta between pre-existing rows unchanged after the 3.7 row was inserted at the top', () => {
++        // gemini-3.6-flash-low is row 1 and gemini-3.5-flash-high is row 2. The
++        // +1 shift from adding the 3.7 row moved both uniformly, so the delta
++        // between them, and therefore the emitted key sequence, is unchanged.
++        const from = buildAgyModelPickerTarget('gemini-3.6-flash-low')
++        const to = buildAgyModelPickerTarget('gemini-3.5-flash-high')
++        expect(buildAgyModelNavigationKeys(to, from.row)).toBe(`${'\x1b[B'.repeat(1)}${'\x1b[D'.repeat(3)}${'\x1b[C'.repeat(2)}`)
++    })
++})
++
++describe('AGY model table consistency', () => {
++    it('has a picker target for every model AGY_MODEL_LABELS advertises, with a matching label', () => {
++        // A model offered by the pickers but missing here would only fail once
++        // a user actually tried to switch to it mid-session.
++        for (const [modelId, label] of Object.entries(AGY_MODEL_LABELS)) {
++            expect(buildAgyModelPickerTarget(modelId).label, `picker target for ${modelId}`).toBe(label)
++        }
++    })
+ })
+diff --git a/cli/src/agy/utils/agyModelKeys.ts b/cli/src/agy/utils/agyModelKeys.ts
+index 63062280e..1134b66fe 100644
+--- a/cli/src/agy/utils/agyModelKeys.ts
++++ b/cli/src/agy/utils/agyModelKeys.ts
+@@ -5,20 +5,24 @@ export type AgyModelPickerTarget = {
+ }
+ 
+ const TARGETS: Record<string, AgyModelPickerTarget> = {
+-    'gemini-3.6-flash-low': { row: 0, effort: 0, label: 'Gemini 3.6 Flash (Low)' },
+-    'gemini-3.6-flash-medium': { row: 0, effort: 1, label: 'Gemini 3.6 Flash (Medium)' },
+-    'gemini-3.6-flash-high': { row: 0, effort: 2, label: 'Gemini 3.6 Flash (High)' },
+-    'gemini-3.5-flash-low': { row: 1, effort: 0, label: 'Gemini 3.5 Flash (Low)' },
+-    'gemini-3.5-flash-medium': { row: 1, effort: 1, label: 'Gemini 3.5 Flash (Medium)' },
+-    'gemini-3.5-flash-high': { row: 1, effort: 2, label: 'Gemini 3.5 Flash (High)' },
+-    'gemini-3.1-pro-low': { row: 2, effort: 0, label: 'Gemini 3.1 Pro (Low)' },
+-    'gemini-3.1-pro-high': { row: 2, effort: 2, label: 'Gemini 3.1 Pro (High)' },
+-    'claude-sonnet-4-6': { row: 3, effort: null, label: 'Claude Sonnet 4.6 (Thinking)' },
+-    'claude-opus-4-6-thinking': { row: 4, effort: null, label: 'Claude Opus 4.6 (Thinking)' },
+-    'gpt-oss-120b-medium': { row: 5, effort: null, label: 'GPT-OSS 120B (Medium)' },
++    'gemini-3.7-flash-low': { row: 0, effort: 0, label: 'Gemini 3.7 Flash (Low)' },
++    'gemini-3.7-flash-medium': { row: 0, effort: 1, label: 'Gemini 3.7 Flash (Medium)' },
++    'gemini-3.7-flash-high': { row: 0, effort: 2, label: 'Gemini 3.7 Flash (High)' },
++    'gemini-3.6-flash-low': { row: 1, effort: 0, label: 'Gemini 3.6 Flash (Low)' },
++    'gemini-3.6-flash-medium': { row: 1, effort: 1, label: 'Gemini 3.6 Flash (Medium)' },
++    'gemini-3.6-flash-high': { row: 1, effort: 2, label: 'Gemini 3.6 Flash (High)' },
++    'gemini-3.5-flash-low': { row: 2, effort: 0, label: 'Gemini 3.5 Flash (Low)' },
++    'gemini-3.5-flash-medium': { row: 2, effort: 1, label: 'Gemini 3.5 Flash (Medium)' },
++    'gemini-3.5-flash-high': { row: 2, effort: 2, label: 'Gemini 3.5 Flash (High)' },
++    'gemini-3.1-pro-low': { row: 3, effort: 0, label: 'Gemini 3.1 Pro (Low)' },
++    'gemini-3.1-pro-high': { row: 3, effort: 2, label: 'Gemini 3.1 Pro (High)' },
++    'claude-sonnet-4-6': { row: 4, effort: null, label: 'Claude Sonnet 4.6 (Thinking)' },
++    'claude-opus-4-6-thinking': { row: 5, effort: null, label: 'Claude Opus 4.6 (Thinking)' },
++    'gpt-oss-120b-medium': { row: 6, effort: null, label: 'GPT-OSS 120B (Medium)' },
+ }
+ 
+ const MODEL_ROWS = [
++    'Gemini 3.7 Flash',
+     'Gemini 3.6 Flash',
+     'Gemini 3.5 Flash',
+     'Gemini 3.1 Pro',
+diff --git a/cli/src/modules/common/agyModels.test.ts b/cli/src/modules/common/agyModels.test.ts
+index 89cf2fc40..935a86b58 100644
+--- a/cli/src/modules/common/agyModels.test.ts
++++ b/cli/src/modules/common/agyModels.test.ts
+@@ -4,7 +4,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ const spawnMock = vi.hoisted(() => vi.fn())
+ vi.mock('node:child_process', () => ({ spawn: spawnMock }))
+ 
+-import { _parseAgyModelsOutputForTests, _resetAgyModelsCacheForTests, listAgyModels } from './agyModels'
++import {
++    _parseAgyModelsJsonForTests,
++    _parseAgyModelsOutputForTests,
++    _resetAgyModelsCacheForTests,
++    listAgyModels
++} from './agyModels'
++
++// Real `agy --output-format=json models` capture, trimmed to four models.
++const JSON_LISTING = JSON.stringify({
++    conversation_id: '',
++    status: 'SUCCESS',
++    response: 'gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n',
++    command: {
++        name: 'models',
++        data: {
++            models: [
++                { id: 'gemini-3.7-flash-high', label: 'Gemini 3.7 Flash (High)' },
++                { id: 'gemini-3.7-flash-medium', label: 'Gemini 3.7 Flash (Medium)' },
++                { id: 'gemini-3.6-flash-low', label: 'Gemini 3.6 Flash (Low)' },
++                { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' }
++            ]
++        }
++    }
++})
+ 
+ function fakeChild() {
+     return Object.assign(new EventEmitter(), {
+@@ -20,8 +43,41 @@ beforeEach(() => {
+     _resetAgyModelsCacheForTests()
+ })
+ 
++describe('parseAgyModelsJson', () => {
++    it('reads the ids and labels straight out of the structured listing', () => {
++        expect(_parseAgyModelsJsonForTests(JSON_LISTING)).toEqual([
++            { modelId: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
++            { modelId: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
++            { modelId: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)' },
++            { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
++        ])
++    })
++
++    it('ignores the progress line agy writes alongside the payload', () => {
++        // The probe reads stdout and stderr together, so the status line and
++        // the JSON object arrive in the same string in either order.
++        expect(_parseAgyModelsJsonForTests(`Fetching available models...\n${JSON_LISTING}\n`))
++            .toHaveLength(4)
++        expect(_parseAgyModelsJsonForTests(`${JSON_LISTING}\nFetching available models...\n`))
++            .toHaveLength(4)
++    })
++
++    it('declines output that is not the structured listing so the caller can fall back', () => {
++        // Older agy releases ignore `--output-format` and print the table.
++        expect(_parseAgyModelsJsonForTests('gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n')).toBeNull()
++        expect(_parseAgyModelsJsonForTests('{"command":{"data":{"models":[]}}}')).toBeNull()
++        expect(_parseAgyModelsJsonForTests('{"command":{"name":"models"}}')).toBeNull()
++        expect(_parseAgyModelsJsonForTests('{ truncated')).toBeNull()
++    })
++
++    it('keeps an entry whose label is missing rather than dropping the model', () => {
++        const payload = JSON.stringify({ command: { data: { models: [{ id: 'gemini-9-future' }, { id: '' }] } } })
++        expect(_parseAgyModelsJsonForTests(payload)).toEqual([{ modelId: 'gemini-9-future' }])
++    })
++})
++
+ describe('parseAgyModelsOutput', () => {
+-    it('parses agy 1.1.5 id and display-name columns without duplicating the id', () => {
++    it('parses space-aligned id and display-name columns without duplicating the id', () => {
+         expect(_parseAgyModelsOutputForTests([
+             'gemini-3.6-flash-high     Gemini 3.6 Flash (High)',
+             'claude-sonnet-4-6         Claude Sonnet 4.6 (Thinking)'
+@@ -52,6 +108,36 @@ describe('parseAgyModelsOutput', () => {
+             { modelId: 'gemini-9.9-experimental' }
+         ])
+     })
++
++    it('parses piped output, which separates the id/name columns with a single tab', () => {
++        // Real `agy models` capture (piped, agy 1.1.13): the status line is
++        // followed by tab-separated `id<TAB>name` rows.
++        const output = [
++            'Fetching available models...',
++            'gemini-3.7-flash-high\tGemini 3.7 Flash (High)',
++            'gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)',
++            'gemini-3.7-flash-low\tGemini 3.7 Flash (Low)',
++            'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)',
++        ].join('\n')
++
++        expect(_parseAgyModelsOutputForTests(output)).toEqual([
++            { modelId: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
++            { modelId: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
++            { modelId: 'gemini-3.7-flash-low', name: 'Gemini 3.7 Flash (Low)' },
++            { modelId: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
++        ])
++    })
++
++    it('does not mistake the "Fetching available models..." status line for a model row', () => {
++        // A naive `\s+` widening would split this into
++        // {modelId:'Fetching', name:'available models...'} — a fake entry at
++        // the top of the list. Requiring a tab or 2+ spaces keeps it out.
++        const output = 'Fetching available models...\ngemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n'
++
++        expect(_parseAgyModelsOutputForTests(output)).toEqual([
++            { modelId: 'gemini-3.7-flash-low', name: 'Gemini 3.7 Flash (Low)' }
++        ])
++    })
+ })
+ 
+ 
+@@ -61,7 +147,9 @@ describe('listAgyModels live probe', () => {
+         spawnMock.mockReturnValue(child)
+         const resultPromise = listAgyModels()
+ 
+-        expect(spawnMock).toHaveBeenCalledWith('agy', ['models'], expect.objectContaining({
++        // `--output-format=json` is a global flag: after the subcommand, or in
++        // its space-separated form, agy rejects it.
++        expect(spawnMock).toHaveBeenCalledWith('agy', ['--output-format=json', 'models'], expect.objectContaining({
+             stdio: ['ignore', 'pipe', 'pipe'],
+             env: expect.objectContaining({ GEMINI_FORCE_FILE_STORAGE: 'true' }),
+             windowsHide: process.platform === 'win32',
+@@ -70,11 +158,64 @@ describe('listAgyModels live probe', () => {
+         expect(options.env.PATH).toBe(process.env.PATH)
+         expect(Object.keys(options.env).some((key) => key.startsWith('SSH_'))).toBe(false)
+ 
++        child.stdout.emit('data', Buffer.from(`${JSON_LISTING}\n`))
++        child.stderr.emit('data', Buffer.from('Fetching available models...\n'))
++        child.emit('exit', 0)
++        const result = await resultPromise
++        expect(result.success).toBe(true)
++        expect(result.availableModels).toEqual([
++            { modelId: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
++            { modelId: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
++            { modelId: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)' },
++            { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }
++        ])
++    })
++
++    it('asks again without the flag when the first probe returns no listing at all', async () => {
++        // Every agy from 1.0.16 to 1.1.13 ignores an unknown `--output-format`
++        // and prints the table anyway, but a build that rejected it outright
++        // would leave nothing for either parser to read, and the picker would
++        // silently drop to the hardcoded mirror.
++        const rejecting = fakeChild()
++        const plain = fakeChild()
++        spawnMock.mockReturnValueOnce(rejecting).mockReturnValueOnce(plain)
++        const resultPromise = listAgyModels()
++
++        rejecting.stderr.emit('data', Buffer.from('flags provided but not defined: -output-format\n'))
++        rejecting.emit('exit', 1)
++        await Promise.resolve()
++        plain.stdout.emit('data', Buffer.from('gemini-3.6-flash-low\n'))
++        plain.emit('exit', 0)
++
++        const result = await resultPromise
++        expect(spawnMock).toHaveBeenCalledTimes(2)
++        expect(spawnMock.mock.calls[1][1]).toEqual(['models'])
++        expect(result.availableModels).toEqual([
++            { modelId: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)' }
++        ])
++    })
++
++    it('does not ask twice when the first probe already produced a listing', async () => {
++        const child = fakeChild()
++        spawnMock.mockReturnValue(child)
++        const resultPromise = listAgyModels()
++
++        child.stdout.emit('data', Buffer.from(`${JSON_LISTING}\n`))
++        child.emit('exit', 0)
++        await resultPromise
++        expect(spawnMock).toHaveBeenCalledTimes(1)
++    })
++
++    it('falls back to the printed table on agy releases that ignore the flag', async () => {
++        const child = fakeChild()
++        spawnMock.mockReturnValue(child)
++        const resultPromise = listAgyModels()
++
+         child.stdout.emit('data', Buffer.from('gemini-3.6-flash-low\n'))
+         child.emit('exit', 0)
+         await expect(resultPromise).resolves.toMatchObject({
+             success: true,
+-            availableModels: [{ modelId: 'gemini-3.6-flash-low' }]
++            availableModels: [{ modelId: 'gemini-3.6-flash-low', name: 'Gemini 3.6 Flash (Low)' }]
+         })
+     })
+ 
+diff --git a/cli/src/modules/common/agyModels.ts b/cli/src/modules/common/agyModels.ts
+index 8bd0a038b..64b792d4c 100644
+--- a/cli/src/modules/common/agyModels.ts
++++ b/cli/src/modules/common/agyModels.ts
+@@ -51,6 +51,38 @@ function deriveAgyId(name: string): string {
+     return id.replace(/-+/g, '-')
+ }
+ 
++// agy's structured listing: one JSON object on stdout carrying the exact wire
++// ids and display labels, so nothing has to be recovered from the human-facing
++// table. Returns null when the output isn't that object — which is how older
++// agy releases behave: they don't know `--output-format` and print the table
++// instead of failing, so the caller falls through to the text parser.
++function parseAgyModelsJson(output: string): AgyModelsResponse['availableModels'] | null {
++    for (const line of output.split('\n')) {
++        const trimmed = line.trim()
++        if (!trimmed.startsWith('{')) continue
++        let payload: unknown
++        try {
++            payload = JSON.parse(trimmed)
++        } catch {
++            continue
++        }
++        const entries = (payload as { command?: { data?: { models?: unknown } } })?.command?.data?.models
++        if (!Array.isArray(entries)) continue
++        const models: AgyModelsResponse['availableModels'] = []
++        const seen = new Set<string>()
++        for (const entry of entries) {
++            const { id, label } = (entry ?? {}) as { id?: unknown; label?: unknown }
++            if (typeof id !== 'string' || !id || seen.has(id)) continue
++            seen.add(id)
++            models.push(typeof label === 'string' && label ? { modelId: id, name: label } : { modelId: id })
++        }
++        if (models.length > 0) return models
++    }
++    return null
++}
++
++export const _parseAgyModelsJsonForTests = parseAgyModelsJson
++
+ // Parse `agy models` stdout into model entries, preserving agy's order. Returns
+ // null when no model lines are found (so the caller can fall back).
+ function parseAgyModelsOutput(output: string): AgyModelsResponse['availableModels'] | null {
+@@ -60,10 +92,14 @@ function parseAgyModelsOutput(output: string): AgyModelsResponse['availableModel
+     for (const raw of clean.split('\n')) {
+         const line = raw.trim()
+         if (!line) continue
+-        // agy 1.1.5 prints two columns: the exact wire id, then the display
+-        // name separated by two or more spaces. Never derive an id from the
+-        // whole row: that produced ids such as `<id>-<id>`.
+-        const columns = line.match(/^([a-z0-9][a-z0-9._/-]*)\s{2,}(.+)$/i)
++        // agy prints two columns: the exact wire id, then the display name. It
++        // pads them into aligned columns when stdout is a TTY, and separates
++        // them with a single tab when stdout is a pipe, which is the path this
++        // probe takes. Require a tab or 2+ spaces, never a single space: a bare
++        // `\s+` would also split status prose like "Fetching available
++        // models..." into a fake model row. Never derive an id from the whole
++        // row either: that produced ids such as `<id>-<id>`.
++        const columns = line.match(/^([a-z0-9][a-z0-9._/-]*)(?:\t+| {2,})(.+)$/i)
+         if (columns) {
+             const modelId = columns[1]
+             if (seen.has(modelId)) continue
+@@ -120,13 +156,16 @@ function buildAgyProbeEnv(): NodeJS.ProcessEnv {
+     return env
+ }
+ 
+-// Fetch the live model list from `agy models` (the agy CLI's own listing) so the
+-// picker always matches what agy currently offers — no redeploy when agy changes
+-// models. The hardcoded mirror is only a fallback (timeout / spawn error /
+-// unparseable output). An auth failure is surfaced so the UI can prompt sign-in.
+-async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
+-    return await new Promise((resolve) => {
+-        const child = spawn('agy', ['models'], {
++// `unreachable` covers the cases where agy never produced a listing at all
++// (spawn failure, timeout) and there is nothing to read either way.
++type AgyModelsProbe = { output: string } | { unreachable: true }
++
++// Run one `agy` invocation and hand back everything it wrote. Both streams are
++// joined because agy splits the listing (stdout) from its progress line
++// (stderr), and the auth failure can surface on either.
++function probeAgyModels(args: string[]): Promise<AgyModelsProbe> {
++    return new Promise((resolve) => {
++        const child = spawn('agy', args, {
+             stdio: ['ignore', 'pipe', 'pipe'],
+             env: buildAgyProbeEnv(),
+             windowsHide: process.platform === 'win32',
+@@ -139,7 +178,7 @@ async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
+             if (settled) return
+             settled = true
+             child.kill('SIGTERM')
+-            resolve({ success: true, availableModels: buildModelList() })
++            resolve({ unreachable: true })
+         }, PROBE_TIMEOUT_MS)
+ 
+         child.stdout?.on('data', (chunk: Buffer) => {
+@@ -152,28 +191,59 @@ async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
+             if (settled) return
+             settled = true
+             clearTimeout(timeout)
+-            resolve({ success: true, availableModels: buildModelList() })
++            resolve({ unreachable: true })
+         })
+         child.on('exit', () => {
+             if (settled) return
+             settled = true
+             clearTimeout(timeout)
+-
+-            const output = stdout + stderr
+-            const authError = checkOutputForAuthError(output)
+-            if (authError) {
+-                resolve({ success: false, error: authError })
+-                return
+-            }
+-
+-            // Prefer the live list; fall back to the hardcoded mirror if the
+-            // output couldn't be parsed (format change, partial fetch, etc.).
+-            const parsed = parseAgyModelsOutput(output)
+-            resolve({ success: true, availableModels: parsed ?? buildModelList() })
++            resolve({ output: stdout + stderr })
+         })
+     })
+ }
+ 
++// Fetch the live model list from `agy models` (the agy CLI's own listing) so the
++// picker always matches what agy currently offers — no redeploy when agy changes
++// models. The hardcoded mirror is only a fallback (timeout / spawn error /
++// unparseable output). An auth failure is surfaced so the UI can prompt sign-in.
++async function fetchAgyModels(): Promise<ListAgyModelsResponse> {
++    // `--output-format` is a global flag: it has to come before the subcommand,
++    // and agy only accepts the `=` form here. Releases that predate it ignore
++    // the flag and print the table, which the text parser still understands.
++    const probe = await probeAgyModels(['--output-format=json', 'models'])
++    if ('unreachable' in probe) {
++        return { success: true, availableModels: buildModelList() }
++    }
++
++    const authError = checkOutputForAuthError(probe.output)
++    if (authError) {
++        return { success: false, error: authError }
++    }
++
++    // Prefer the structured listing, then the printed table for agy releases
++    // that don't emit it, then the hardcoded mirror if neither could be read
++    // (format change, partial fetch, etc.).
++    const parsed = parseAgyModelsJson(probe.output) ?? parseAgyModelsOutput(probe.output)
++    if (parsed) {
++        return { success: true, availableModels: parsed }
++    }
++
++    // Nothing readable came back. Every agy release checked ignores an unknown
++    // `--output-format` and prints the table anyway, but a build that rejected
++    // it would emit no models at all and leave the picker on the mirror, so ask
++    // once more without the flag before giving up on the live list. This only
++    // costs a second invocation on builds that produced nothing usable.
++    const retry = await probeAgyModels(['models'])
++    if ('unreachable' in retry) {
++        return { success: true, availableModels: buildModelList() }
++    }
++    const retryAuthError = checkOutputForAuthError(retry.output)
++    if (retryAuthError) {
++        return { success: false, error: retryAuthError }
++    }
++    return { success: true, availableModels: parseAgyModelsOutput(retry.output) ?? buildModelList() }
++}
++
+ export async function listAgyModels(): Promise<ListAgyModelsResponse> {
+     if (cache.expiresAt > Date.now() && (cache.response.availableModels?.length ?? 0) > 0) {
+         return cache.response
+diff --git a/shared/src/models.ts b/shared/src/models.ts
+index 6981a8a64..544fb5dde 100644
+--- a/shared/src/models.ts
++++ b/shared/src/models.ts
+@@ -29,6 +29,9 @@ export const DEFAULT_GEMINI_MODEL: GeminiModelPreset = 'gemini-2.5-pro'
+ // needs an interactive keyring unlock, so this stays a hand-maintained mirror —
+ // update it when agy's listing changes.
+ export const AGY_MODEL_LABELS = {
++    'gemini-3.7-flash-high': 'Gemini 3.7 Flash (High)',
++    'gemini-3.7-flash-medium': 'Gemini 3.7 Flash (Medium)',
++    'gemini-3.7-flash-low': 'Gemini 3.7 Flash (Low)',
+     'gemini-3.6-flash-high': 'Gemini 3.6 Flash (High)',
+     'gemini-3.6-flash-medium': 'Gemini 3.6 Flash (Medium)',
+     'gemini-3.6-flash-low': 'Gemini 3.6 Flash (Low)',
