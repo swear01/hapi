@@ -168,7 +168,7 @@ function createApp(session: Session, opts?: {
         forkConversation: opts?.forkConversation ?? (async () => ({ type: 'success', sessionId: 'child-1' })),
         rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
         suggestSessionTitle: opts?.suggestSessionTitle ?? (async () => 'Generated title'),
-        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {})
+        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {}),
         getPrimaryAttachedJobsBySessionIds: () => new Map(),
         allocateAttachedJobVersion: () => Date.now()
     } as Partial<SyncEngine>

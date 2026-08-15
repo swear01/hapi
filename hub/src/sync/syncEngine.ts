@@ -2444,6 +2444,8 @@ export class SyncEngine {
 
     async updateSessionSummary(sessionId: string, text: string): Promise<void> {
         await this.sessionCache.updateSessionSummary(sessionId, text)
+    }
+
     async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
         await this.sessionCache.acknowledgeModelError(sessionId, eventId)
     }
