@@ -77,6 +77,14 @@ describe('ReasoningGroup', () => {
     })
 
     it('expands on click', () => {
+        const { container } = renderGroup()
+        const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
+        expect(scroll.tabIndex).toBe(-1)
+        fireEvent.click(container.querySelector('button')!)
+        expect(isCollapsed(container)).toBe(false)
+        expect(scroll.tabIndex).toBe(0)
+    })
+
     it('can be expanded manually while the preference is enabled', () => {
         window.localStorage.setItem(STORAGE_KEY, 'true')
         const { container } = renderGroup()
