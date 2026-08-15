@@ -75,6 +75,8 @@ describe('sessionSummaryInstruction', () => {
         expect(body).toContain('action 不得超过 12 个词语。')
         expect(body).toContain(SESSION_SUMMARY_CONTRACT_LINE)
         expect(body).not.toContain('Session status summary:')
+    })
+
     it('adds user-language guidance without changing the existing prompt contract', () => {
         applyHubSessionSummaryContract(true)
         const body = sessionSummaryInstructionOrEmpty({})
