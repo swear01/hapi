@@ -96,11 +96,6 @@ function renderCard(block: ToolGroupBlock, options?: {
                 isSyncingTail: options?.isSyncingTail ?? false,
                 isLoadingMoreMessages: options?.isLoadingMore ?? false,
                 loadOlderMessagesPreservingScroll,
-                jumpToPrompt: vi.fn(async () => true),
-                loadingPromptMessageId: null,
-                scrollToConversationStart: vi.fn(async () => true),
-                isLoadingConversationStart: false,
-                isNavigationInFlight: false,
             }}>
                 <ToolGroupCard block={block} metadata={{ path: 'repo', host: 'local' }} />
             </HappyChatProvider>
@@ -321,11 +316,6 @@ describe('ToolGroupCard', () => {
                         isSyncingTail: false,
                         isLoadingMoreMessages: false,
                         loadOlderMessagesPreservingScroll,
-                        jumpToPrompt: vi.fn(async () => true),
-                        loadingPromptMessageId: null,
-                        scrollToConversationStart: vi.fn(async () => true),
-                        isLoadingConversationStart: false,
-                        isNavigationInFlight: false,
                     }}>
                         <ToolGroupCard
                             block={makeGroup({
@@ -460,11 +450,6 @@ describe('ToolGroupCard', () => {
                         isSyncingTail: false,
                         isLoadingMoreMessages: isLoadingMore,
                         loadOlderMessagesPreservingScroll,
-                        jumpToPrompt: vi.fn(async () => true),
-                        loadingPromptMessageId: null,
-                        scrollToConversationStart: vi.fn(async () => true),
-                        isLoadingConversationStart: false,
-                        isNavigationInFlight: false,
                     }}>
                         <ToolGroupCard
                             block={makeGroup({
@@ -522,11 +507,6 @@ describe('ToolGroupCard', () => {
                         isSyncingTail: false,
                         isLoadingMoreMessages: isLoadingMore,
                         loadOlderMessagesPreservingScroll,
-                        jumpToPrompt: vi.fn(async () => true),
-                        loadingPromptMessageId: null,
-                        scrollToConversationStart: vi.fn(async () => true),
-                        isLoadingConversationStart: false,
-                        isNavigationInFlight: false,
                     }}>
                         <ToolGroupCard
                             block={makeGroup({
