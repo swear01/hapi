@@ -41,6 +41,10 @@ export const VISIBLE_WINDOW_SIZE = 400
 export const HISTORY_WINDOW_SIZE = 600
 const AGENT_RUN_WINDOW_SIZE = 800
 const OLDER_LOAD_WINDOW_SIZE = 800
+// Explicit navigation (jump to conversation start / turn input / outline)
+// loads everything in one pass; the rolling caps above would evict the newest
+// messages mid-load and force a tail reset, so navigation widens the window.
+const NAVIGATION_WINDOW_SIZE = 20_000
 const PAGE_SIZE = 200
 
 type MessagePosition = {
@@ -55,6 +59,7 @@ type InternalState = MessageWindowState & {
     newestPositionSeq: number | null
     requiresLatestReset: boolean
     preferLatestOnActivation: boolean
+    navigationInFlight: boolean
     syncGeneration: number
     olderGeneration: number
 }
@@ -242,6 +247,7 @@ function createState(sessionId: string): InternalState {
         newestPositionSeq: null,
         requiresLatestReset: false,
         preferLatestOnActivation: false,
+        navigationInFlight: false,
         syncGeneration: 0,
         olderGeneration: 0
     }
@@ -392,6 +398,7 @@ function buildState(
         | 'newestPositionSeq'
         | 'requiresLatestReset'
         | 'preferLatestOnActivation'
+        | 'navigationInFlight'
         | 'syncGeneration'
         | 'olderGeneration'
         | 'historyVersion'
@@ -503,8 +510,11 @@ function mergeIntoWindow(
         return previous
     }
     const mode = options.mode ?? (previous.viewMode === 'history' ? 'prepend' : 'append')
-    const regularLimit = options.regularLimit
-        ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
+    const navigationInFlight = previous.navigationInFlight
+    const regularLimit = navigationInFlight
+        ? NAVIGATION_WINDOW_SIZE
+        : options.regularLimit
+            ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
     const merged = mergeMessages(previous.messages, retainedIncoming)
     const { kept, dropped } = trimPreservingQueued(merged, regularLimit, mode)
     let next = buildState(previous, {
@@ -513,7 +523,7 @@ function mergeIntoWindow(
             ? { tailRevision: previous.tailRevision + 1 }
             : {})
     })
-    if (dropped.length === 0) {
+    if (dropped.length === 0 || navigationInFlight) {
         return next
     }
     if (mode === 'append') {
@@ -731,6 +741,12 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
 }
 
 function startTailSync(sessionId: string, controller: TailSyncController): Promise<void> {
+    // An explicit navigation is loading older pages; a tail re-sync would bump
+    // olderGeneration and invalidate every in-flight before-load (flapping the
+    // load-all loop). Incoming tail updates can wait until navigation ends.
+    if (getState(sessionId).navigationInFlight) {
+        return Promise.resolve()
+    }
     const runningPrefersLatest = getState(sessionId).preferLatestOnActivation
     const running = runTailSync(controller.api, sessionId)
     controller.running = running
@@ -994,11 +1010,34 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
         if (previous.viewMode === mode) {
             return previous
         }
+        // An explicit navigation (jump to conversation start / turn input /
+        // outline) pins history mode: while it runs, the scroll handler's
+        // near-bottom frames must not flip back to tail mode, which would
+        // trigger a tail re-sync and reset the window mid-load.
+        if (previous.navigationInFlight && mode === 'tail') {
+            return previous
+        }
         if (mode === 'history') {
             return buildState(previous, { viewMode: 'history' })
         }
         return enterTailMode(previous)
     }, true)
+}
+
+/**
+ * Marks an explicit history navigation (jump to conversation start, jump to
+ * turn input, outline selection) as in flight. While set, the window keeps the
+ * newest messages instead of evicting them past the rolling caps, suppresses
+ * tail resets, pins history mode, and pauses tail synchronization so the
+ * navigation's older-page loads are not invalidated mid-flight.
+ */
+export function setNavigationInFlight(sessionId: string, inFlight: boolean): void {
+    updateState(sessionId, (previous) => {
+        if (previous.navigationInFlight === inFlight) {
+            return previous
+        }
+        return buildState(previous, { navigationInFlight: inFlight })
+    })
 }
 
 export function ingestIncomingMessages(sessionId: string, incoming: DecryptedMessage[]): void {

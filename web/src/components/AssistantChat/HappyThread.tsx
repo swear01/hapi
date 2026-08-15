@@ -25,6 +25,7 @@ import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { OlderLoadOutcome } from '@/lib/message-window-store'
+import { setNavigationInFlight } from '@/lib/message-window-store'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { useMachines } from '@/hooks/queries/useMachines'
 import { useMachineLabels } from '@/hooks/useMachineLabels'
@@ -127,6 +128,12 @@ const AUTO_SCROLL_RESUME_THRESHOLD_PX = 1
 const MANUAL_SCROLL_EPSILON_PX = 1
 const INITIAL_SCROLL_SETTLE_MS = 1800
 const INITIAL_SCROLL_SETTLE_DELAYS_MS = [0, 16, 50, 120, 250, 500, 900, 1400, 1800] as const
+// Prepended history renders in passes (assistant-ui tap scheduler). Chromium
+// cancels an in-flight smooth scroll whenever the content height changes, so
+// the conversation-start jump waits for the height to stabilize before
+// starting the animation and re-fires it if late growth cancels it again.
+const NAVIGATION_SCROLL_SETTLE_DEADLINE_MS = 2500
+const NAVIGATION_SCROLL_RETRY_DEADLINE_MS = 4000
 const HISTORY_PRELOAD_MARGIN_PX = 200
 // Bounded backoff for the same logical history load. A failed page leaves the
 // viewport geometry unchanged, so no new scroll/resize signal is guaranteed.
@@ -330,6 +337,70 @@ export async function loadAllOlderMessages(options: {
         if (!loaded) return false
     }
     return true
+}
+
+/**
+ * Smooth-scrolls the chat viewport to the top after an explicit navigation
+ * (jump to conversation start). Freshly prepended pages render in passes, and
+ * Chromium cancels a smooth scroll whenever the content height changes — so
+ * wait for the height to stabilize before starting the animation, then
+ * re-fire it if late growth cancels it again. Bounded so a pathological
+ * session cannot stall the navigation forever.
+ */
+export async function smoothScrollViewportToTop(viewport: HTMLElement): Promise<void> {
+    const startedAt = Date.now()
+    await new Promise<void>((resolve) => {
+        let lastHeight = viewport.scrollHeight
+        let stableFrames = 0
+        const settle = () => {
+            if (Date.now() - startedAt >= NAVIGATION_SCROLL_SETTLE_DEADLINE_MS) {
+                resolve()
+                return
+            }
+            const height = viewport.scrollHeight
+            if (height === lastHeight) {
+                stableFrames += 1
+                if (stableFrames >= 3) {
+                    resolve()
+                    return
+                }
+            } else {
+                stableFrames = 0
+                lastHeight = height
+            }
+            // setTimeout rather than rAF: rAF stops in backgrounded tabs and
+            // the deadline check above would never run, stranding the
+            // navigation state. Timers still fire (throttled) when hidden.
+            window.setTimeout(settle, 50)
+        }
+        window.setTimeout(settle, 50)
+    })
+
+    viewport.scrollTo({ top: 0, behavior: 'smooth' })
+    await new Promise<void>((resolve) => {
+        let lastTop = viewport.scrollTop
+        let stalledFrames = 0
+        const watch = () => {
+            if (viewport.scrollTop === 0 || Date.now() - startedAt >= NAVIGATION_SCROLL_RETRY_DEADLINE_MS) {
+                resolve()
+                return
+            }
+            const top = viewport.scrollTop
+            if (top === lastTop) {
+                stalledFrames += 1
+                if (stalledFrames >= 4) {
+                    // The animation was canceled (content grew underneath it).
+                    viewport.scrollTo({ top: 0, behavior: 'smooth' })
+                    stalledFrames = 0
+                }
+            } else {
+                stalledFrames = 0
+                lastTop = top
+            }
+            window.setTimeout(watch, 50)
+        }
+        window.setTimeout(watch, 50)
+    })
 }
 
 export async function runAfterPendingHistoryLoad(
@@ -1551,18 +1622,24 @@ export function HappyThread(props: {
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
-        const target = await locateOutlineTargetMessage({
-            targetMessageId: item.targetMessageId,
-            findTarget: (anchorId) => document.getElementById(anchorId),
-            hasMoreMessages: () => hasMoreMessagesRef.current,
-            loadOlderPreservingScroll: loadOlderForOutline
-        })
-        if (target) {
-            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            markExplicitNavigationAwayFromBottom()
+        const sessionId = sessionIdRef.current
+        setNavigationInFlight(sessionId, true)
+        try {
+            const target = await locateOutlineTargetMessage({
+                targetMessageId: item.targetMessageId,
+                findTarget: (anchorId) => document.getElementById(anchorId),
+                hasMoreMessages: () => hasMoreMessagesRef.current,
+                loadOlderPreservingScroll: loadOlderForOutline
+            })
+            if (target) {
+                target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+                markExplicitNavigationAwayFromBottom()
+            }
+            props.onOutlineItemClick?.(item)
+            props.onOutlineOpenChange(false)
+        } finally {
+            setNavigationInFlight(sessionId, false)
         }
-        props.onOutlineItemClick?.(item)
-        props.onOutlineOpenChange(false)
     }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
 
     const scrollToMessage = useCallback((messageId: string): boolean => {
@@ -1627,6 +1704,8 @@ export function HappyThread(props: {
         if (navigationInFlightRef.current) return false
         navigationInFlightRef.current = true
         setIsNavigationInFlight(true)
+        const navigationSessionId = sessionIdRef.current
+        setNavigationInFlight(navigationSessionId, true)
         try {
             if (replyToMessageId) {
                 const scrolled = await runAfterPendingHistoryLoad(
@@ -1639,6 +1718,7 @@ export function HappyThread(props: {
         } finally {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
+            setNavigationInFlight(navigationSessionId, false)
         }
     }, [scrollToMessage, scrollToPromptForMessage])
 
@@ -1649,6 +1729,8 @@ export function HappyThread(props: {
         if (navigationInFlightRef.current) return false
         navigationInFlightRef.current = true
         setIsNavigationInFlight(true)
+        const navigationSessionId = sessionIdRef.current
+        setNavigationInFlight(navigationSessionId, true)
         if (conversationStartStatusTimerRef.current !== null) {
             window.clearTimeout(conversationStartStatusTimerRef.current)
             conversationStartStatusTimerRef.current = null
@@ -1678,7 +1760,7 @@ export function HappyThread(props: {
             // near-bottom frame look non-upward and can flip view mode back to
             // tail, compacting the history we just loaded.
             lastScrollTopRef.current = viewport.scrollTop
-            viewport.scrollTo({ top: 0, behavior: 'smooth' })
+            await smoothScrollViewportToTop(viewport)
             setConversationStartStatus('success')
             conversationStartStatusTimerRef.current = window.setTimeout(() => setConversationStartStatus('idle'), 1400)
             return true
@@ -1690,6 +1772,7 @@ export function HappyThread(props: {
         } finally {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
+            setNavigationInFlight(navigationSessionId, false)
         }
     }, [clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom])
 
