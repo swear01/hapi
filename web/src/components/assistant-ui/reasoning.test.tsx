@@ -70,6 +70,7 @@ describe('ReasoningGroup', () => {
     })
 
     it('does not mount reasoning content while collapsed', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
         const { container, queryByTestId } = renderGroup()
 
         expect(isCollapsed(container)).toBe(true)
@@ -77,6 +78,7 @@ describe('ReasoningGroup', () => {
     })
 
     it('expands on click', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
         const { container } = renderGroup()
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
         expect(scroll.tabIndex).toBe(-1)
@@ -97,6 +99,7 @@ describe('ReasoningGroup', () => {
     })
 
     it('unmounts reasoning content after collapsing again', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
         const { container, queryByTestId } = renderGroup()
 
         fireEvent.click(container.querySelector('button')!)
