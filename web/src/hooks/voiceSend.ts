@@ -86,8 +86,8 @@ export async function notifyResolvedSession(
     pendingSend: { options: DictationPendingSendOptions },
     resumed: boolean,
     sessionId: string,
-): Promise<boolean> {
-    if (!resumed) return true
+): Promise<boolean | undefined> {
+    if (!resumed) return undefined
     try {
         // Callers may pass an async callback; await it so a rejection is
         // caught here instead of surfacing as an unhandled rejection.
@@ -118,9 +118,10 @@ export type DeliverVoiceSendResult = {
      */
     recoveredSessionId: string
     /**
-     * Set on success only: `false` when the post-delivery navigation/seed
-     * callback rejected. On failure the caller navigates itself via
-     * notifyResolvedSession after surfacing the error.
+     * Set on success only when the session was resumed: `false` when the
+     * post-delivery navigation/seed callback rejected, `undefined` when no
+     * callback ran (non-resumed send). On failure the caller navigates
+     * itself via notifyResolvedSession after surfacing the error.
      */
     notified?: boolean
     /**
@@ -312,11 +313,12 @@ export type VoiceSendOutcomeHandling = {
  */
 export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Promise<'handled' | 'continue'> {
     if (!args.result.delivered) {
+        let errorMessage = args.result.error instanceof Error ? args.result.error.message : VOICE_SEND_FAILED_MESSAGE
         if (args.isMounted()) {
             if (args.result.recoveredSessionId === args.pendingSend.sessionId) {
                 args.restoreText(args.finalMessage, args.transcriptDelta)
             }
-            args.setError(args.result.error instanceof Error ? args.result.error.message : VOICE_SEND_FAILED_MESSAGE)
+            args.setError(errorMessage)
             args.setStatusError()
         }
         const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId)
@@ -328,10 +330,9 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
                 if (args.result.recoveredSessionId !== args.pendingSend.sessionId) {
                     args.restoreText(args.finalMessage, args.transcriptDelta)
                 }
-                args.setError(args.result.error instanceof Error
-                    ? `${VOICE_SEND_NAVIGATION_FAILED_MESSAGE}: ${args.result.error.message}`
-                    : VOICE_SEND_NAVIGATION_FAILED_MESSAGE)
-                args.setStatusError()
+                // Amend the already-shown error with the navigation failure
+                // (keeping the root cause visible); no second status firing.
+                args.setError(`${VOICE_SEND_NAVIGATION_FAILED_MESSAGE}: ${errorMessage}`)
             } else {
                 console.warn('Voice send: failed and the resumed session could not be opened')
             }

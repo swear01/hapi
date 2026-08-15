@@ -533,7 +533,11 @@ export function HappyComposer(props: {
             resolveSessionId: props.resolveSessionIdForVoice,
             onSessionResolved: props.onVoiceSessionResolved,
         })
-    }, [api, dictation, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
+        // Depend on the stable stopAndSend reference, not the whole
+        // dictation object (useDictation returns a fresh object literal on
+        // every render, which would recreate this callback each render and
+        // destabilize handleSend/flushAndSend).
+    }, [api, dictation.stopAndSend, props.resolveSessionIdForVoice, props.onVoiceSessionResolved])
 
     // Direct voice send is eligible when the session is live or a session
     // resolver (inactive-session resume) is available; otherwise sending
