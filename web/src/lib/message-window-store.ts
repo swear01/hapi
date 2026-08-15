@@ -756,6 +756,12 @@ function startTailSync(sessionId: string, controller: TailSyncController): Promi
         if (!controller.trailingRequested) {
             return
         }
+        if (getState(sessionId).navigationLeaseCount > 0) {
+            // A navigation is still in flight: leave the refresh queued and
+            // let the last lease release start it, instead of re-running the
+            // sync mid-load (which would invalidate in-flight older pages).
+            return
+        }
         controller.trailingRequested = false
         startTailSync(sessionId, controller)
     }

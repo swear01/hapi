@@ -1409,6 +1409,40 @@ describe('explicit history navigation', () => {
         await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(1))
     })
 
+    it('does not restart a queued tail refresh while a navigation lease is held', async () => {
+        const id = sessionId('navigation-finish-race')
+        // A slow tail sync starts before the navigation begins.
+        let releaseFirstSync: (() => void) | null = null
+        const firstSyncGate = new Promise<void>((resolve) => {
+            releaseFirstSync = resolve
+        })
+        const getMessages = vi.fn()
+            .mockImplementationOnce(async () => {
+                await firstSyncGate
+                return latestResponse([
+                    makeAgentMessage({ id: 'latest', seq: 1, at: 1 })
+                ], { epoch: 1 })
+            })
+            .mockImplementation(async () => latestResponse([
+                makeAgentMessage({ id: 'after-nav', seq: 2, at: 2 })
+            ], { epoch: 1 }))
+        const api = createApi(getMessages)
+        const firstSync = syncTailMessages(api, id)
+        // Navigation starts while the sync is still running; a refresh is
+        // requested and queued.
+        const releaseNavigation = beginNavigation(id)
+        await syncTailMessages(api, id, { ensureAfterCurrent: true })
+        expect(getMessages).toHaveBeenCalledTimes(1)
+        // The in-flight sync completes: its finish must NOT restart the sync
+        // while the lease is held.
+        releaseFirstSync!()
+        await firstSync
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(1))
+        // Releasing the lease runs the queued refresh exactly once.
+        releaseNavigation()
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
+    })
+
     it('keeps navigation active while any overlapping lease is held', () => {
         const id = sessionId('navigation-overlapping-leases')
         setMessageViewMode(id, 'history')
