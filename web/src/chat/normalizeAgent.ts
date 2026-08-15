@@ -1034,6 +1034,27 @@ export function normalizeAgentRecord(
             }
         }
 
+        // Pi session imports carry compaction summaries through the codex
+        // envelope (the import schema only allows that payload type); map
+        // them to the same agent-event the live pi wrapper emits so they
+        // render as the dedicated chat block.
+        if (data.type === 'compact-summary' && typeof data.summary === 'string') {
+            return {
+                id: messageId,
+                localId,
+                createdAt,
+                role: 'event',
+                content: {
+                    type: 'compact-summary',
+                    summary: data.summary,
+                    tokensBefore: asNumber(data.tokensBefore) ?? undefined,
+                    estimatedTokensAfter: asNumber(data.estimatedTokensAfter) ?? undefined
+                },
+                isSidechain: false,
+                meta
+            }
+        }
+
         if (data.type === 'token_count') {
             const usage = normalizeCodexTokenUsage(data.info, data)
             return usage ? {
