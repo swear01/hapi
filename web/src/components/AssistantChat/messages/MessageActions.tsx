@@ -144,7 +144,7 @@ export function MessageActions({
                 {align === 'start' ? <DesktopTimestamp /> : null}
             </div>
             {align === 'start' && (onJumpToPrompt || onJumpToConversationStart) ? (
-                <div className="flex h-5 items-center gap-1">
+                <div className="happy-message-actions flex h-5 items-center gap-1">
                     {onJumpToConversationStart ? (
                         <NavigationButton
                             title={t('message.jumpToConversationStart')}
