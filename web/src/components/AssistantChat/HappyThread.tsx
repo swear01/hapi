@@ -1627,6 +1627,11 @@ export function HappyThread(props: {
     }, [])
 
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        // Serialize with response navigation: an outline pick while a jump is
+        // loading would race the jump's final scroll for the viewport.
+        if (navigationInFlightRef.current) return
+        navigationInFlightRef.current = true
+        setIsNavigationInFlight(true)
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
         const releaseNavigation = beginOwnedNavigation()
@@ -1644,6 +1649,8 @@ export function HappyThread(props: {
             props.onOutlineItemClick?.(item)
             props.onOutlineOpenChange(false)
         } finally {
+            navigationInFlightRef.current = false
+            setIsNavigationInFlight(false)
             releaseNavigation()
         }
     }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])

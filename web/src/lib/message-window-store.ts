@@ -42,6 +42,12 @@ export const VISIBLE_WINDOW_SIZE = 400
 export const HISTORY_WINDOW_SIZE = 600
 const AGENT_RUN_WINDOW_SIZE = 800
 const OLDER_LOAD_WINDOW_SIZE = 800
+// While an explicit navigation is in flight the window keeps both ends of the
+// transcript — the head the jump is about to show and the live tail that feeds
+// the StatusBar — and drops the middle, so the store stays bounded on
+// pathological sessions instead of copying an ever-growing array per page.
+const NAVIGATION_HEAD_LIMIT = HISTORY_WINDOW_SIZE
+const NAVIGATION_TAIL_LIMIT = VISIBLE_WINDOW_SIZE
 const PAGE_SIZE = 200
 
 type MessagePosition = {
@@ -441,6 +447,22 @@ function isCodexAgentRunMessage(message: DecryptedMessage): boolean {
     return type === 'agent-run-start' || type === 'agent-run-update' || type === 'agent-run-trace'
 }
 
+function trimNavigationWindow(
+    messages: DecryptedMessage[]
+): { kept: DecryptedMessage[]; dropped: DecryptedMessage[] } {
+    const limit = NAVIGATION_HEAD_LIMIT + NAVIGATION_TAIL_LIMIT
+    if (messages.length <= limit) {
+        return { kept: messages, dropped: [] }
+    }
+    return {
+        kept: [
+            ...messages.slice(0, NAVIGATION_HEAD_LIMIT),
+            ...messages.slice(messages.length - NAVIGATION_TAIL_LIMIT)
+        ],
+        dropped: messages.slice(NAVIGATION_HEAD_LIMIT, messages.length - NAVIGATION_TAIL_LIMIT)
+    }
+}
+
 function trimPreservingQueued(
     messages: DecryptedMessage[],
     regularLimit: number,
@@ -504,17 +526,20 @@ function mergeIntoWindow(
     const regularLimit = options.regularLimit
         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
     const merged = mergeMessages(previous.messages, retainedIncoming)
-    // An explicit navigation loads everything: trimming would evict the live
-    // tail (and its usage rows) mid-jump, which is the bug this mode exists to
-    // prevent. The load-all loop already renders the full history anyway, so
-    // the window simply holds it all until navigation ends.
     const { kept, dropped } = navigationInFlight
-        ? { kept: merged, dropped: [] as DecryptedMessage[] }
+        ? trimNavigationWindow(merged)
         : trimPreservingQueued(merged, regularLimit, mode)
     let next = buildState(previous, {
         messages: kept
     })
     if (dropped.length === 0) {
+        return next
+    }
+    if (navigationInFlight) {
+        // Trimmed the middle of the transcript while navigating: the head and
+        // the live tail survive, but the drop must never trigger a tail reset
+        // (that is the failure mode #1587 fixes) or re-arm positions — the
+        // navigation's fetchOlderMessages owns the pagination cursors.
         return next
     }
     if (mode === 'append') {

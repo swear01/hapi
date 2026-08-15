@@ -80,12 +80,14 @@ test('jump to conversation start reaches the top without dragging the composer o
     expect(statusSamples.length).toBeGreaterThan(5)
     expect(statusSamples.every((value) => value === initialStatus)).toBe(true)
 
-    // The navigation kept the newest messages (no mid-load eviction + tail
-    // reset) and loaded everything…
+    // The navigation kept both ends of the transcript (no mid-load eviction
+    // of the live tail + reset): the head is at the conversation start and
+    // the tail usage rows survive, with the middle bounded for pathological
+    // sessions…
     const finalState = await page.evaluate(() => window.__jumpProbe.windowState())
     expect(finalState.newestSeq).toBe(1201)
     expect(finalState.oldestSeq).toBe(1)
-    expect(finalState.messageCount).toBe(1201)
+    expect(finalState.messageCount).toBe(1000)
 
     // …and any tail refresh requested mid-navigation was queued, not fired
     // while the loads were in flight (at most the single post-landing refresh).

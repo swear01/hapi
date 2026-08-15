@@ -1299,6 +1299,25 @@ describe('explicit history navigation', () => {
         await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
     })
 
+    it('keeps both ends of the transcript while navigating past the bound', () => {
+        const id = sessionId('navigation-head-tail-bound')
+        const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        const total = HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 50
+        ingestIncomingMessages(id, Array.from({ length: total }, (_, index) =>
+            makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
+        ))
+
+        const state = getMessageWindowState(id)
+        // The head (what the jump is about to show) and the live tail (the
+        // StatusBar's usage rows) survive; the middle is dropped.
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE)
+        expect(state.messages[0]?.id).toBe('overflow-0')
+        expect(state.messages.at(-1)?.id).toBe(`overflow-${total - 1}`)
+        expect(state.messages.at(-1)?.id).toBe(`overflow-${HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 49}`)
+        releaseNavigation()
+    })
+
     it('keeps navigation active while any overlapping lease is held', () => {
         const id = sessionId('navigation-overlapping-leases')
         setMessageViewMode(id, 'history')
