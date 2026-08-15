@@ -134,8 +134,8 @@ export type DeliverVoiceSendResult = {
 /** Shared fallback message for voice direct-send failures. */
 export const VOICE_SEND_FAILED_MESSAGE = 'Failed to send message'
 
-/** Shown when the message was delivered but the resumed session could not be opened. */
-export const VOICE_NAVIGATION_FAILED_MESSAGE = 'Message sent, but opening the resumed session failed'
+/** Shown when the message was delivered but the resumed session could not be opened/synced (also covers same-id resumes, where only seeding/cache updates failed). */
+export const VOICE_NAVIGATION_FAILED_MESSAGE = 'Message sent, but the resumed session could not be opened or updated'
 
 /** Shown when the send failed and the resumed session holding the recovery could not be opened. */
 export const VOICE_SEND_NAVIGATION_FAILED_MESSAGE = 'Message not sent, and the resumed session could not be opened'
@@ -328,7 +328,9 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
                 if (args.result.recoveredSessionId !== args.pendingSend.sessionId) {
                     args.restoreText(args.finalMessage, args.transcriptDelta)
                 }
-                args.setError(VOICE_SEND_NAVIGATION_FAILED_MESSAGE)
+                args.setError(args.result.error instanceof Error
+                    ? `${VOICE_SEND_NAVIGATION_FAILED_MESSAGE}: ${args.result.error.message}`
+                    : VOICE_SEND_NAVIGATION_FAILED_MESSAGE)
                 args.setStatusError()
             } else {
                 console.warn('Voice send: failed and the resumed session could not be opened')
