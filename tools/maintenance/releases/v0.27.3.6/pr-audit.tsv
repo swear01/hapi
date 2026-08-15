@@ -1,0 +1,37 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1584	techotaku39	4607962d23dd	carry	ready	clear	clean	4607962d23	proportional	preserve	bot clean at head
+pr-1585	junmo-kim	87a7dbfa5c2d	carry	ready	clear	clean	87a7dbfa5c	proportional	preserve	bot clean at head
+pr-1592	techotaku39	95dfb7dc3afa	carry	ready	clear	clean	95dfb7dc3a	proportional	preserve	bot clean at head
+pr-1595	swear01	8a0ec8880e4a	carry	ready	clear	clean	8a0ec8880e	proportional	preserve	personal; bot clean at head
+pr-1541	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1543	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1548	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1552	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1557	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1560	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1563	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-906	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1422	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1414	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-847	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-987	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-945	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1447	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1158	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1424	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1469	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1418	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-955	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1573	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1581	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1582	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from previous releases
+pr-1093	-	-	drop	-	-	-	-	-	-	drop; operator ruling 2026-08-15; implementation removed from tree
+pr-1091	-	-	drop	-	-	-	-	-	-	drop; operator ruling 2026-08-13
+pr-1320	-	-	drop	-	-	-	-	-	-	drop; permanent exclusion
+pr-1590	-	-	defer	-	-	findings	-	-	review	defer; conflicts with fork overlay (ProjectGroupHeader #955 menu, attached-jobs pin mode, machine-label UX)
+pr-1574	-	-	defer	-	-	findings	-	-	review	personal; Major at head
+pr-1572	-	-	defer	-	-	findings	-	-	review	2x Major
+pr-1571	-	-	defer	-	-	findings	-	-	review	findings
+pr-1597	-	-	defer	-	-	findings	-	-	review	personal; Major lifetime
+pr-1598	-	-	defer	-	-	findings	-	-	review	2x Major
+pr-1591	-	-	defer	-	-	findings	-	-	review	personal; Major
