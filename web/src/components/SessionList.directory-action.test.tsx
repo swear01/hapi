@@ -568,7 +568,7 @@ describe('SessionList collapse behavior', () => {
         expect(screen.queryByTitle('Idle')).toBeNull()
     })
 
-    it('keeps quiet active sessions in directory groups when pin-in-progress is on', () => {
+    it('keeps quiet active sessions in the Active section when pin-in-progress is on', () => {
         localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
         const sessions = [
             makeSession({
@@ -597,11 +597,14 @@ describe('SessionList collapse behavior', () => {
         expect(screen.getByTitle('In progress')).toBeInTheDocument()
         expect(screen.getByText(/Running \(1\)/)).toBeInTheDocument()
         expect(screen.getByText(/pending \(1\)/)).toBeInTheDocument()
-        expect(screen.queryByText(/Idle \(/)).toBeNull()
-        // Quiet active stays under its project directory, not an Idle pin bucket.
-        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
+        // Quiet active sessions float into their own Active section (finished
+        // executing, still connected) instead of falling into directory groups.
+        expect(screen.getByTitle('Active sessions')).toBeInTheDocument()
+        expect(screen.getByText(/Active \(1\)/)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Quiet task/ })).toBeInTheDocument()
-        expect(getProjectPanel().getAttribute('data-open')).toBe('true')
+        // No directory group remains: every session is pinned above folders.
+        expect(screen.queryByTitle('/work/hapi')).toBeNull()
+        expect(screen.queryByTitle('/work/other')).toBeNull()
     })
 
     it('auto-expands the path again when the selected session changes', async () => {
