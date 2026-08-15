@@ -1463,6 +1463,9 @@ describe('explicit history navigation', () => {
         expect(state.messages[gapIndex]?.content).toMatchObject({
             role: 'user'
         })
+        // The marker carries a real timestamp so it is not treated as a
+        // queued user message (those are filtered before normalization).
+        expect(state.messages[gapIndex]?.invokedAt).not.toBeNull()
         expect(state.messages.at(-1)?.id).toBe(`overflow-${total - 1}`)
         releaseNavigation()
     })

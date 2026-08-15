@@ -343,6 +343,12 @@ export function buildAssistantReplyTargets(
     let latestUserMessageId: string | null = null
 
     for (const { block, threadMessageId } of blocks) {
+        if (block.id.startsWith('__transcript-gap__')) {
+            // The navigation window trimmed the middle of the transcript: the
+            // retained tail must never link back to a head prompt.
+            latestUserMessageId = null
+            continue
+        }
         const role = visibleBlockRole(block)
         if (role === 'user') {
             latestUserMessageId = threadMessageId
