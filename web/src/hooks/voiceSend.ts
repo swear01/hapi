@@ -5,7 +5,7 @@ import type { ResolvedSession } from './mutations/useSendMessage'
 export function appendTranscript(text: string, transcript: string): string {
     const addition = transcript.trim()
     if (!addition) return text
-    if (!text) return addition
+    if (!text.trim()) return addition
     return `${text}${/\s$/.test(text) ? '' : ' '}${addition}`
 }
 
@@ -354,9 +354,10 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
             args.setStatusError()
         }
         const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId, { error: args.result.error })
-        if (args.result.shouldNotify && navigated !== true) {
-            // A rejected OR absent navigation callback strands the recovered
-            // transcript in the unseen target session; remediate locally.
+        if (args.result.shouldNotify && navigated === false) {
+            // A rejected navigation callback strands the recovered transcript
+            // in the unseen target session; remediate locally. (An absent
+            // callback means no navigation was attempted — nothing to amend.)
             // The transcript was recovered under the resumed session and the
             // operator was not navigated there: make it reachable locally so
             // the failed text is never stranded in an unseen session.
