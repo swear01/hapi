@@ -59,7 +59,8 @@ export const Reasoning: FC = () => {
 }
 
 export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
-    const [isOpen, setIsOpen] = useState(false)
+    const { reasoningCollapsed } = useReasoningCollapse()
+    const [isOpen, setIsOpen] = useState(() => !reasoningCollapsed)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const followLatestRef = useRef(true)
     const pointerActiveRef = useRef(false)
@@ -70,18 +71,16 @@ export const ReasoningGroup: FC<PropsWithChildren> = ({ children }) => {
     const isStreaming = message.status?.type === 'running'
         && message.content.length > 0
         && message.content[message.content.length - 1]?.type === 'reasoning'
-    const { reasoningCollapsed } = useReasoningCollapse()
     const chatContext = useOptionalHappyChatContext()
     const shouldRenderContent = isOpen
 
     useEffect(() => {
-        if (!isStreaming) return
         const nextOpen = !reasoningCollapsed
         if (nextOpen) {
             followLatestRef.current = true
         }
         setIsOpen(nextOpen)
-    }, [isStreaming, reasoningCollapsed])
+    }, [reasoningCollapsed])
 
     useEffect(() => {
         if (isOpen || followLatestRef.current) return
