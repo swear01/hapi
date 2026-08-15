@@ -363,7 +363,7 @@ export function HappyComposer(props: {
      * after a failed post-resume send, so the operator lands on the
      * resumed session to retry from the recovered draft.
      */
-    onVoiceSessionResolved?: (sessionId: string) => void
+    onVoiceSessionResolved?: (sessionId: string, context?: { error?: unknown }) => void
     // Schedule props (lifted from internal state when provided)
     pendingSchedule?: PendingSchedule | null
     onSchedule?: (pending: PendingSchedule) => void

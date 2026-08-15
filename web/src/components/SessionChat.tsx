@@ -434,7 +434,7 @@ type SessionChatProps = {
     /** Inactive-session resume for voice dictation direct-sends; see HappyComposer. */
     resolveSessionIdForVoice?: (sessionId: string) => Promise<ResolvedSession>
     /** Navigate/seed after a voice direct-send resumed an inactive session. */
-    onVoiceSessionResolved?: (sessionId: string) => void
+    onVoiceSessionResolved?: (sessionId: string, context?: { error?: unknown }) => void
     onViewModeChange: (mode: 'tail' | 'history') => void
     onRetryMessage?: (localId: string) => void
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>

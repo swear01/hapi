@@ -85,13 +85,19 @@ function recoverDraft(sessionId: string, baseline: string, finalMessage: string,
  * the error is logged because this is the only signal that the operator
  * did not reach the recovered session.
  */
+/**
+ * @param notify Whether to fire the callback. The success path passes the
+ *   raw `resumed` flag; the failure path passes the stricter
+ *   `shouldNotify` (resumed AND the transcript was recovered under the
+ *   target session).
+ */
 export async function notifyResolvedSession(
     pendingSend: { options: DictationPendingSendOptions },
-    resumed: boolean,
+    notify: boolean,
     sessionId: string,
     context?: { error?: unknown },
 ): Promise<boolean | undefined> {
-    if (!resumed) return undefined
+    if (!notify) return undefined
     const callback = pendingSend.options.onSessionResolved
     if (!callback) return undefined
     try {
@@ -191,6 +197,9 @@ export async function deliverVoiceSend(args: {
     try {
         if (args.pendingSend.options.resolveSessionId) {
             const resolved = await args.pendingSend.options.resolveSessionId(args.pendingSend.sessionId)
+            if (!resolved || typeof resolved.sessionId !== 'string' || typeof resolved.resumed !== 'boolean') {
+                throw new Error('Voice send: session resolver returned an invalid result')
+            }
             targetSessionId = resolved.sessionId
             // Derive the resume flag from the id actually changing so a
             // resolver that swaps the id without reporting `resumed` still
