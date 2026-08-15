@@ -1393,4 +1393,18 @@ describe('explicit history navigation', () => {
         await syncTailMessages(api, id)
         expect(getMessages).toHaveBeenCalledTimes(1)
     })
+
+    it('runs a tail refresh requested during navigation once it ends', async () => {
+        const id = sessionId('navigation-queued-tail-sync')
+        const getMessages = vi.fn(async () => latestResponse([
+            makeAgentMessage({ id: 'latest', seq: 1, at: 1 })
+        ], { epoch: 1 }))
+        const api = createApi(getMessages)
+        setNavigationInFlight(id, true)
+        await syncTailMessages(api, id, { ensureAfterCurrent: true })
+        expect(getMessages).not.toHaveBeenCalled()
+        // Ending the navigation starts the queued refresh without another call.
+        setNavigationInFlight(id, false)
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(1))
+    })
 })

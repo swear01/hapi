@@ -41,10 +41,6 @@ export const VISIBLE_WINDOW_SIZE = 400
 export const HISTORY_WINDOW_SIZE = 600
 const AGENT_RUN_WINDOW_SIZE = 800
 const OLDER_LOAD_WINDOW_SIZE = 800
-// Explicit navigation (jump to conversation start / turn input / outline)
-// loads everything in one pass; the rolling caps above would evict the newest
-// messages mid-load and force a tail reset, so navigation widens the window.
-const NAVIGATION_WINDOW_SIZE = 20_000
 const PAGE_SIZE = 200
 
 type MessagePosition = {
@@ -511,19 +507,23 @@ function mergeIntoWindow(
     }
     const mode = options.mode ?? (previous.viewMode === 'history' ? 'prepend' : 'append')
     const navigationInFlight = previous.navigationInFlight
-    const regularLimit = navigationInFlight
-        ? NAVIGATION_WINDOW_SIZE
-        : options.regularLimit
-            ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
+    const regularLimit = options.regularLimit
+        ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
     const merged = mergeMessages(previous.messages, retainedIncoming)
-    const { kept, dropped } = trimPreservingQueued(merged, regularLimit, mode)
+    // An explicit navigation loads everything: trimming would evict the live
+    // tail (and its usage rows) mid-jump, which is the bug this mode exists to
+    // prevent. The load-all loop already renders the full history anyway, so
+    // the window simply holds it all until navigation ends.
+    const { kept, dropped } = navigationInFlight
+        ? { kept: merged, dropped: [] as DecryptedMessage[] }
+        : trimPreservingQueued(merged, regularLimit, mode)
     let next = buildState(previous, {
         messages: kept,
         ...(options.advanceTailRevision
             ? { tailRevision: previous.tailRevision + 1 }
             : {})
     })
-    if (dropped.length === 0 || navigationInFlight) {
+    if (dropped.length === 0) {
         return next
     }
     if (mode === 'append') {
@@ -741,12 +741,6 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
 }
 
 function startTailSync(sessionId: string, controller: TailSyncController): Promise<void> {
-    // An explicit navigation is loading older pages; a tail re-sync would bump
-    // olderGeneration and invalidate every in-flight before-load (flapping the
-    // load-all loop). Incoming tail updates can wait until navigation ends.
-    if (getState(sessionId).navigationInFlight) {
-        return Promise.resolve()
-    }
     const runningPrefersLatest = getState(sessionId).preferLatestOnActivation
     const running = runTailSync(controller.api, sessionId)
     controller.running = running
@@ -864,6 +858,14 @@ export function syncTailMessages(
         tailSyncControllers.set(sessionId, controller)
     }
     controller.api = api
+    if (getState(sessionId).navigationInFlight) {
+        // A tail refresh requested during an explicit navigation must not be
+        // dropped: it would bump olderGeneration and invalidate the in-flight
+        // older-page loads. Queue it and let setNavigationInFlight(false)
+        // start the sync once the navigation has landed.
+        controller.trailingRequested = true
+        return Promise.resolve()
+    }
     if (!controller.running) {
         return startTailSync(sessionId, controller)
     }
@@ -1038,6 +1040,15 @@ export function setNavigationInFlight(sessionId: string, inFlight: boolean): voi
         }
         return buildState(previous, { navigationInFlight: inFlight })
     })
+    if (inFlight) {
+        return
+    }
+    // Run any tail refresh that was queued while the navigation was in flight.
+    const controller = tailSyncControllers.get(sessionId)
+    if (controller && controller.trailingRequested && !controller.running) {
+        controller.trailingRequested = false
+        void startTailSync(sessionId, controller)
+    }
 }
 
 export function ingestIncomingMessages(sessionId: string, incoming: DecryptedMessage[]): void {
