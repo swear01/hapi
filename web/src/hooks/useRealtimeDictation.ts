@@ -82,7 +82,7 @@ export function useRealtimeDictation(config: {
                         result,
                         finalMessage,
                         transcriptDelta: text,
-                        mounted: mountedRef.current,
+                        isMounted: () => mountedRef.current,
                         restoreText: (fullMessage, delta) => {
                             if (config.getCurrentText?.().trim()) {
                                 onFinalTranscriptRef.current(delta)

@@ -162,7 +162,6 @@ export const VOICE_SEND_NAVIGATION_FAILED_MESSAGE = 'Message not sent, and the r
 export async function deliverVoiceSend(args: {
     pendingSend: {
         sessionId: string
-        initialText: string
         draftAtStart: string
         deliveryMode?: MessageDeliveryMode
         options: DictationPendingSendOptions
@@ -282,7 +281,8 @@ export type VoiceSendOutcomeHandling = {
     result: DeliverVoiceSendResult
     finalMessage: string
     transcriptDelta: string
-    mounted: boolean
+    /** Live mount check (re-read after each await inside the helper). */
+    isMounted: () => boolean
     /**
      * Restores the failed transcript into the composer. `fullMessage` is
      * the value to set when the composer is empty; `delta` is appended to
@@ -312,7 +312,7 @@ export type VoiceSendOutcomeHandling = {
  */
 export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Promise<'handled' | 'continue'> {
     if (!args.result.delivered) {
-        if (args.mounted) {
+        if (args.isMounted()) {
             if (args.result.recoveredSessionId === args.pendingSend.sessionId) {
                 args.restoreText(args.finalMessage, args.transcriptDelta)
             }
@@ -324,7 +324,7 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
             // The transcript was recovered under the resumed session and the
             // operator was not navigated there: make it reachable locally so
             // the failed text is never stranded in an unseen session.
-            if (args.mounted) {
+            if (args.isMounted()) {
                 if (args.result.recoveredSessionId !== args.pendingSend.sessionId) {
                     args.restoreText(args.finalMessage, args.transcriptDelta)
                 }
@@ -337,7 +337,7 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
         return 'handled'
     }
     if (args.result.resumed && !args.result.notified) {
-        if (args.mounted) {
+        if (args.isMounted()) {
             args.setError(VOICE_NAVIGATION_FAILED_MESSAGE)
             args.setStatusError()
         } else {

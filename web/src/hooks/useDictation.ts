@@ -188,7 +188,7 @@ export function useDictation(config: {
                                         result,
                                         finalMessage,
                                         transcriptDelta: transcribedText,
-                                        mounted: mountedRef.current,
+                                        isMounted: () => mountedRef.current,
                                         restoreText: (fullMessage, delta) => {
                                             const current = config.getCurrentText()
                                             config.onTextChange(current.trim()
