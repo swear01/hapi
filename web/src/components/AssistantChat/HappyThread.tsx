@@ -381,7 +381,14 @@ export async function smoothScrollViewportToTop(viewport: HTMLElement): Promise<
         let lastTop = viewport.scrollTop
         let stalledFrames = 0
         const watch = () => {
-            if (viewport.scrollTop === 0 || Date.now() - startedAt >= NAVIGATION_SCROLL_RETRY_DEADLINE_MS) {
+            if (viewport.scrollTop === 0) {
+                resolve()
+                return
+            }
+            if (Date.now() - startedAt >= NAVIGATION_SCROLL_RETRY_DEADLINE_MS) {
+                // The animation never took (pathological session); land anyway
+                // rather than leaving the view stranded mid-history.
+                viewport.scrollTop = 0
                 resolve()
                 return
             }

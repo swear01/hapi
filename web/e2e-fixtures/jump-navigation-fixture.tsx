@@ -155,6 +155,33 @@ const fakeApi = {
         window.__jumpProbe.requests.push({ direction, beforeSeq: query.beforeSeq ?? null })
         await new Promise((resolve) => setTimeout(resolve, direction === 'before' ? 80 : 50))
 
+        if (direction === 'after') {
+            // A tail refresh queued during navigation lands after the jump;
+            // the real API returns only genuinely newer rows, never a reset.
+            const cursorAt = query.afterAt ?? Number.NEGATIVE_INFINITY
+            const cursorSeq = query.afterSeq ?? Number.NEGATIVE_INFINITY
+            const newer = allMessages.filter((message) => {
+                const position = positionOf(message)
+                return position.at > cursorAt || (position.at === cursorAt && position.seq > cursorSeq)
+            })
+            const pageMessages = newer.slice(0, limit)
+            const newest = pageMessages.at(-1) ?? null
+            return {
+                messages: pageMessages,
+                page: pageFrom(pageMessages, {
+                    direction: 'after',
+                    limit,
+                    hasMore: newer.length > pageMessages.length,
+                    nextAfterSeq: newest?.seq ?? null,
+                    nextAfterAt: newest ? positionOf(newest).at : null,
+                    nextBeforeSeq: null,
+                    nextBeforeAt: null,
+                    snapshotHeadSeq: null,
+                    snapshotHeadAt: null
+                })
+            }
+        }
+
         if (direction === 'before') {
             const cursorAt = query.beforeAt ?? Number.POSITIVE_INFINITY
             const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY

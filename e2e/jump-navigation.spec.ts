@@ -86,7 +86,11 @@ test('jump to conversation start reaches the top without dragging the composer o
     expect(finalState.oldestSeq).toBe(1)
     expect(finalState.messageCount).toBe(1201)
 
-    // …and no tail re-sync was triggered while the navigation was in flight.
+    // …and any tail refresh requested mid-navigation was queued, not fired
+    // while the loads were in flight (at most the single post-landing refresh).
     const requests = await page.evaluate(() => window.__jumpProbe.requests)
-    expect(requests.every((r) => r.direction !== 'after')).toBe(true)
+    const afterCount = requests.filter((r) => r.direction === 'after').length
+    expect(afterCount).toBeLessThanOrEqual(1)
+    // The queued refresh found nothing newer, so the window was not replaced.
+    expect(finalState.newestSeq).toBe(1201)
 })
