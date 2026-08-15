@@ -116,7 +116,8 @@ export type DeliverVoiceSendResult = {
     /**
      * Id under which the retryable transcript was persisted on failure
      * (the targeted session, or the source session when the target's
-     * draft was not ours to touch). Equals `targetSessionId` on success.
+     * draft was not ours to touch / the send never started). Equals
+     * `targetSessionId` on success.
      */
     recoveredSessionId: string
     /**
@@ -177,6 +178,7 @@ export async function deliverVoiceSend(args: {
     let targetSessionId = args.pendingSend.sessionId
     let resumed = false
     let recoveryDraftAtStart = args.pendingSend.draftAtStart
+    let sendAttempted = false
     try {
         if (args.pendingSend.options.resolveSessionId) {
             const resolved = await args.pendingSend.options.resolveSessionId(args.pendingSend.sessionId)
@@ -195,6 +197,7 @@ export async function deliverVoiceSend(args: {
             // was in flight.
             if (targetSessionId !== args.pendingSend.sessionId) recoveryDraftAtStart = getDraft(targetSessionId)
         }
+        sendAttempted = true
         await args.sendMsg(targetSessionId, args.finalMessage, args.pendingSend.deliveryMode)
     } catch (sendError) {
         // After a resume the source session is superseded: recover the
@@ -207,9 +210,15 @@ export async function deliverVoiceSend(args: {
         // the transcript unrecovered; the caller's own restore path then
         // still puts the text back into the composer.
         const recoverySessionId = targetSessionId
-        let recoveredSessionId: string
+        let recoveredSessionId = args.pendingSend.sessionId
         try {
-            if (recoverySessionId === args.pendingSend.sessionId) {
+            if (!sendAttempted) {
+                // The resolver rejected before any POST: the baseline draft
+                // was never consumed, so do not overwrite it (the caller's
+                // composer restore still makes the text visible when mounted,
+                // and the unmounted case keeps the operator's baseline).
+                recoveredSessionId = args.pendingSend.sessionId
+            } else if (recoverySessionId === args.pendingSend.sessionId) {
                 // Same-id (or unresolved): the baseline is the pre-recording
                 // draft, which the send consumed.
                 recoverDraft(recoverySessionId, recoveryDraftAtStart, args.finalMessage, args.transcriptDelta)
@@ -324,7 +333,7 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
             args.setStatusError()
         }
         const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId)
-        if (args.result.shouldNotify && !navigated) {
+        if (args.result.shouldNotify && navigated === false) {
             // The transcript was recovered under the resumed session and the
             // operator was not navigated there: make it reachable locally so
             // the failed text is never stranded in an unseen session.
@@ -341,7 +350,7 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
         }
         return 'handled'
     }
-    if (args.result.resumed && !args.result.notified) {
+    if (args.result.resumed && args.result.notified === false) {
         if (args.isMounted()) {
             args.setError(VOICE_NAVIGATION_FAILED_MESSAGE)
             args.setStatusError()
