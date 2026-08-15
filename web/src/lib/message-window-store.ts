@@ -449,7 +449,11 @@ function isCodexAgentRunMessage(message: DecryptedMessage): boolean {
     return type === 'agent-run-start' || type === 'agent-run-update' || type === 'agent-run-trace'
 }
 
-function makeTranscriptGapMessage(beforeSeq: number | null, afterSeq: number | null): DecryptedMessage {
+export function isTranscriptGap(message: DecryptedMessage): boolean {
+    return message.id.startsWith('__transcript-gap__')
+}
+
+function makeTranscriptGapMessage(beforeSeq: number | null, afterSeq: number | null, at: number): DecryptedMessage {
     const missingStart = beforeSeq !== null ? beforeSeq + 1 : null
     const missingEnd = afterSeq !== null ? afterSeq - 1 : null
     const range = missingStart !== null && missingEnd !== null && missingEnd >= missingStart
@@ -461,6 +465,9 @@ function makeTranscriptGapMessage(beforeSeq: number | null, afterSeq: number | n
         // the window bounds (null would collapse to 0 in deriveSeqBounds).
         seq: beforeSeq !== null ? beforeSeq + 1 : null,
         localId: null,
+        // Non-null timestamps: the marker must not look like a queued user
+        // message (isQueuedForInvocation filters those before normalization,
+        // which would hide the prompt-association boundary entirely).
         content: {
             role: 'user',
             content: {
@@ -468,8 +475,8 @@ function makeTranscriptGapMessage(beforeSeq: number | null, afterSeq: number | n
                 text: `[History not loaded: messages ${range} were skipped during this jump.]`
             }
         },
-        createdAt: 0,
-        invokedAt: null
+        createdAt: at,
+        invokedAt: at
     } as DecryptedMessage
 }
 
@@ -487,10 +494,11 @@ function trimNavigationWindow(
     const headLastSeq = headLast?.seq ?? null
     const tailFirstSeq = tailFirst?.seq ?? null
     const contiguous = headLastSeq !== null && tailFirstSeq !== null && tailFirstSeq === headLastSeq + 1
+    const gapAt = headLast ? (headLast.invokedAt ?? headLast.createdAt) : 0
     return {
         kept: contiguous
             ? [...head, ...tail]
-            : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq), ...tail],
+            : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq, gapAt), ...tail],
         dropped: messages.slice(NAVIGATION_HEAD_LIMIT, messages.length - NAVIGATION_TAIL_LIMIT)
     }
 }
@@ -557,7 +565,15 @@ function mergeIntoWindow(
     const navigationInFlight = previous.navigationLeaseCount > 0
     const regularLimit = options.regularLimit
         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
-    const merged = mergeMessages(previous.messages, retainedIncoming)
+    // While navigating, drop stale gap markers before merging: each prepend
+    // re-derives the boundary, so old markers would accumulate and would also
+    // break the contiguity check against real rows.
+    const merged = mergeMessages(
+        navigationInFlight
+            ? previous.messages.filter((message) => !isTranscriptGap(message))
+            : previous.messages,
+        retainedIncoming
+    )
     const { kept, dropped } = navigationInFlight
         ? trimNavigationWindow(merged)
         : trimPreservingQueued(merged, regularLimit, mode)

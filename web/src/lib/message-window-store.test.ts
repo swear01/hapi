@@ -1310,8 +1310,8 @@ describe('explicit history navigation', () => {
 
         const state = getMessageWindowState(id)
         // Head + explicit gap marker + live tail: bounded, honest, and the
-        // marker (a user-role message) resets assistant→prompt association
-        // so the first retained tail response cannot link to a head prompt.
+        // marker resets assistant→prompt association so the first retained
+        // tail response cannot link to a head prompt.
         expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 1)
         expect(state.messages[0]?.id).toBe('overflow-0')
         const gapIndex = state.messages.findIndex((message) => message.id.startsWith('__transcript-gap__'))
@@ -1319,6 +1319,9 @@ describe('explicit history navigation', () => {
         expect(state.messages[gapIndex]?.content).toMatchObject({
             role: 'user'
         })
+        // The marker carries a real timestamp so it is not treated as a
+        // queued user message (those are filtered before normalization).
+        expect(state.messages[gapIndex]?.invokedAt).not.toBeNull()
         expect(state.messages.at(-1)?.id).toBe(`overflow-${total - 1}`)
         releaseNavigation()
     })
