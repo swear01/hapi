@@ -275,6 +275,13 @@ export function findPreviousUserMessage(
     const messageIndex = messages.findIndex((message) => message.id === messageAnchorId)
     if (messageIndex < 0) return null
     for (let index = messageIndex - 1; index >= 0; index -= 1) {
+        // The navigation window trims the middle of long transcripts and
+        // inserts a synthetic gap row: its prompt lives in the omitted
+        // middle, so the scan must stop at the boundary instead of treating
+        // the gap row (or anything before it) as the turn input.
+        if (messages[index].id.includes('__transcript-gap__')) {
+            return null
+        }
         if (messages[index].dataset.hapiMessageRole === 'user') {
             return messages[index]
         }
@@ -307,6 +314,7 @@ export function findPromptTarget(
         : messages.length
     if (boundaryIndex >= 0) {
         for (let index = boundaryIndex - 1; index >= 0; index -= 1) {
+            if (messages[index].id.includes('__transcript-gap__')) return null
             if (messages[index].dataset.hapiMessageRole === 'user') return messages[index]
         }
         return null

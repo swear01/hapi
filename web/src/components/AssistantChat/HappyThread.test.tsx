@@ -104,6 +104,25 @@ describe('assistant prompt lookup', () => {
             .toBe('hapi-message-user-text:second')
     })
 
+    it('stops at a transcript-gap boundary instead of linking to a head prompt', () => {
+        const viewport = document.createElement('div')
+        viewport.innerHTML = `
+            <div class="happy-thread-messages">
+                <div id="hapi-message-user-text:head-prompt" data-hapi-message-role="user"></div>
+                <div id="hapi-message-agent-text:head-answer"></div>
+                <div id="hapi-message-__transcript-gap__601-801" data-hapi-message-role="user"></div>
+                <div id="hapi-message-agent-text:tail-answer"></div>
+            </div>
+        `
+
+        // The first retained tail response has no reachable prompt: the scan
+        // must not fall through to the head prompt across the gap boundary.
+        expect(findPreviousUserMessage(viewport, 'agent-text:tail-answer')).toBeNull()
+
+        const assistantAnchorState = { current: false, nextAnchorId: null }
+        expect(findPromptTarget(viewport, 'agent-text:tail-answer', assistantAnchorState)).toBeNull()
+    })
+
     it('returns null when the prompt is outside the loaded history window', () => {
         const viewport = document.createElement('div')
         viewport.innerHTML = `
