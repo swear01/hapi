@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, deliverVoiceSend, notifyResolvedSession, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './voiceSend'
+import { appendTranscript, deliverVoiceSend, draftUnchanged, notifyResolvedSession, VOICE_NAVIGATION_FAILED_MESSAGE, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './voiceSend'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -108,7 +108,7 @@ export function useRealtimeDictation(config: {
                         // The message was delivered, but the operator was not
                         // navigated to the resumed session; surface that so it is
                         // not silent.
-                        setError('Message sent, but opening the resumed session failed')
+                        setError(VOICE_NAVIGATION_FAILED_MESSAGE)
                         setStatus('error')
                         return
                     }
@@ -127,7 +127,13 @@ export function useRealtimeDictation(config: {
             // transcript is restored only when no final message existed
             // yet (the send could not have been attempted); once
             // finalMessage exists the recovery paths already handled it,
-            // and restoring again could invite a duplicate send.
+            // and restoring again could invite a duplicate send — but a
+            // mid-recovery rejection is still persisted so a post-unmount
+            // send never drops the text.
+            if (finalMessage.trim() && pendingSend
+                && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                saveDraft(pendingSend.sessionId, finalMessage)
+            }
             if (mountedRef.current) {
                 if (!finalMessage.trim()) {
                     onFinalTranscriptRef.current(text)

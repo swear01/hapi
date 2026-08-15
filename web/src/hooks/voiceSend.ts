@@ -128,6 +128,9 @@ export type DeliverVoiceSendResult = {
 /** Shared fallback message for voice direct-send failures. */
 export const VOICE_SEND_FAILED_MESSAGE = 'Failed to send message'
 
+/** Shown when the message was delivered but the resumed session could not be opened. */
+export const VOICE_NAVIGATION_FAILED_MESSAGE = 'Message sent, but opening the resumed session failed'
+
 /**
  * Shared send-with-resume orchestration for voice dictation direct-sends
  * (used by both the standard recorder path and realtime providers).

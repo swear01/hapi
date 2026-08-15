@@ -10,6 +10,7 @@ import {
     deliverVoiceSend,
     draftUnchanged,
     notifyResolvedSession,
+    VOICE_NAVIGATION_FAILED_MESSAGE,
     VOICE_SEND_FAILED_MESSAGE,
     type DictationPendingSendOptions,
     type DeliverVoiceSendResult,
@@ -212,14 +213,17 @@ export function useDictation(config: {
                                         // The message was delivered, but the operator was not
                                         // navigated to the resumed session; surface that so it is
                                         // not silent.
-                                        setError('Message sent, but opening the resumed session failed')
+                                        setError(VOICE_NAVIGATION_FAILED_MESSAGE)
                                         setStatus('error')
                                         return
                                     }
                                 } catch (error) {
-                                    // Unexpected rejection before/around the send: the
-                                    // transcript was not recovered by deliverVoiceSend, so
-                                    // restore it and surface the send failure.
+                                    // Unexpected rejection before/around the send: persist the
+                                    // transcript so it survives even when the composer already
+                                    // unmounted, then surface the send failure.
+                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                        saveDraft(pendingSend.sessionId, finalMessage)
+                                    }
                                     if (mountedRef.current) {
                                         if (!config.getCurrentText().trim()) {
                                             config.onTextChange(finalMessage)
