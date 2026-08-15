@@ -9,7 +9,7 @@ import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, deliverVoiceSend, draftUnchanged, notifyResolvedSession, VOICE_NAVIGATION_FAILED_MESSAGE, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './voiceSend'
+import { appendTranscript, deliverVoiceSend, draftUnchanged, handleVoiceSendOutcome, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './voiceSend'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -77,39 +77,22 @@ export function useRealtimeDictation(config: {
                 if (finalMessage.trim()) {
                     const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                     const result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: text, sendMsg })
-                    if (!result.delivered) {
-                        // Surface the failure while the source component is still
-                        // mounted, then navigate to the resumed session. The text is
-                        // restored into the mounted composer only when the transcript
-                        // was recovered under the mounted session (non-resumed,
-                        // same-id resume, or the cross-id fallback): empty composer
-                        // gets the full message, in-flight operator text gets just
-                        // the transcribed delta appended.
-                        if (mountedRef.current) {
-                            if (result.recoveredSessionId === pendingSend.sessionId) {
-                                const current = config.getCurrentText?.().trim()
-                                if (current) {
-                                    onFinalTranscriptRef.current(text)
-                                } else {
-                                    onFinalTranscriptRef.current(finalMessage)
-                                }
+                    if (await handleVoiceSendOutcome({
+                        pendingSend,
+                        result,
+                        finalMessage,
+                        transcriptDelta: text,
+                        mounted: mountedRef.current,
+                        restoreText: (fullMessage, delta) => {
+                            if (config.getCurrentText?.().trim()) {
+                                onFinalTranscriptRef.current(delta)
+                            } else {
+                                onFinalTranscriptRef.current(fullMessage)
                             }
-                            setError(result.error instanceof Error ? result.error.message : VOICE_SEND_FAILED_MESSAGE)
-                            setStatus('error')
-                        }
-                        await notifyResolvedSession(
-                            pendingSend,
-                            result.resumed && result.recoveredSessionId === result.targetSessionId,
-                            result.targetSessionId,
-                        )
-                        return
-                    }
-                    if (result.resumed && !result.notified && mountedRef.current) {
-                        // The message was delivered, but the operator was not
-                        // navigated to the resumed session; surface that so it is
-                        // not silent.
-                        setError(VOICE_NAVIGATION_FAILED_MESSAGE)
-                        setStatus('error')
+                        },
+                        setError,
+                        setStatusError: () => setStatus('error'),
+                    }) === 'handled') {
                         return
                     }
                 }

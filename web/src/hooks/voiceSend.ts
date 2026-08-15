@@ -123,6 +123,12 @@ export type DeliverVoiceSendResult = {
      * notifyResolvedSession after surfacing the error.
      */
     notified?: boolean
+    /**
+     * Whether the caller should navigate/seed the target session: true on
+     * success after a resume, and on failure only when the retryable
+     * transcript was actually recovered under the target session.
+     */
+    shouldNotify: boolean
 }
 
 /** Shared fallback message for voice direct-send failures. */
@@ -220,26 +226,40 @@ export async function deliverVoiceSend(args: {
             console.warn('Voice send: draft recovery failed:', recoveryError)
             recoveredSessionId = args.pendingSend.sessionId
         }
-        return { delivered: false, error: sendError, resumed, targetSessionId, recoveredSessionId }
+        return {
+            delivered: false,
+            error: sendError,
+            resumed,
+            targetSessionId,
+            recoveredSessionId,
+            shouldNotify: resumed && recoveredSessionId === targetSessionId,
+        }
     }
     // Draft cleanup runs BEFORE the notify: the onSessionResolved callback
     // may itself seed/navigate the target session (and write drafts), so a
     // post-notify unchanged-check could either skip the cleanup or wipe a
     // freshly seeded draft. The delivery outcome no longer depends on the
-    // draft store.
-    if (targetSessionId === args.pendingSend.sessionId
-        && draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
-        // Same-id: the pre-recording draft was consumed by the delivery.
-        // Cross-id targets are never cleared: a target draft is either
-        // empty (nothing to clear) or the operator's own text (not ours).
-        clearDraft(targetSessionId)
-    }
-    // A cross-id resume supersedes the source composer too; drop its
-    // pre-recording draft so reopening the archived session does not
-    // resurrect stale text (mirrors clearDraftsAfterSend).
-    if (targetSessionId !== args.pendingSend.sessionId
-        && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
-        clearDraft(args.pendingSend.sessionId)
+    // draft store. The cleanup is guarded: the message is already
+    // delivered, so a storage failure must not reject (the callers'
+    // defensive nets would otherwise re-persist the delivered text as a
+    // retryable draft, risking a duplicate send).
+    try {
+        if (targetSessionId === args.pendingSend.sessionId
+            && draftUnchanged(targetSessionId, recoveryDraftAtStart)) {
+            // Same-id: the pre-recording draft was consumed by the delivery.
+            // Cross-id targets are never cleared: a target draft is either
+            // empty (nothing to clear) or the operator's own text (not ours).
+            clearDraft(targetSessionId)
+        }
+        // A cross-id resume supersedes the source composer too; drop its
+        // pre-recording draft so reopening the archived session does not
+        // resurrect stale text (mirrors clearDraftsAfterSend).
+        if (targetSessionId !== args.pendingSend.sessionId
+            && draftUnchanged(args.pendingSend.sessionId, args.pendingSend.draftAtStart)) {
+            clearDraft(args.pendingSend.sessionId)
+        }
+    } catch (cleanupError) {
+        console.warn('Voice send: post-delivery draft cleanup failed:', cleanupError)
     }
     // Notification is a side effect of an already-delivered send: it runs
     // outside the send try/catch so a throw from navigation/cache updates
@@ -247,5 +267,66 @@ export async function deliverVoiceSend(args: {
     // delivered text as a retryable draft). Navigation keys off `resumed`
     // (also covers same-id resumes, where the id never changes).
     const notified = await notifyResolvedSession(args.pendingSend, resumed, targetSessionId)
-    return { delivered: true, resumed, targetSessionId, recoveredSessionId: targetSessionId, notified }
+    return { delivered: true, resumed, targetSessionId, recoveredSessionId: targetSessionId, notified, shouldNotify: resumed }
+}
+
+export type VoiceSendOutcomeHandling = {
+    pendingSend: {
+        sessionId: string
+        draftAtStart: string
+        options: DictationPendingSendOptions
+    }
+    result: DeliverVoiceSendResult
+    finalMessage: string
+    transcriptDelta: string
+    mounted: boolean
+    /**
+     * Restores the failed transcript into the composer. `fullMessage` is
+     * the value to set when the composer is empty; `delta` is appended to
+     * the operator's in-flight text when it is not.
+     */
+    restoreText: (fullMessage: string, delta: string) => void
+    setError: (message: string) => void
+    setStatusError: () => void
+}
+
+/**
+ * Shared call-site orchestration for a completed `deliverVoiceSend`
+ * outcome, used by both the standard recorder path and the realtime
+ * hook so failure surfacing, text recovery and post-resume navigation
+ * cannot drift.
+ *
+ * Failure: surfaces the error while the source component is still
+ * mounted, restores the text when the transcript was recovered under
+ * the mounted session, then navigates to the resumed session (only when
+ * the retryable transcript actually lives there).
+ *
+ * Success with a rejected navigation/seed callback: surfaces a visible
+ * error (or at least a warning when unmounted) so a delivered message
+ * whose session could not be opened is never silent.
+ *
+ * Returns 'handled' when the caller must return early.
+ */
+export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Promise<'handled' | 'continue'> {
+    if (!args.result.delivered) {
+        if (args.mounted) {
+            if (args.result.recoveredSessionId === args.pendingSend.sessionId) {
+                args.restoreText(args.finalMessage, args.transcriptDelta)
+            }
+            args.setError(args.result.error instanceof Error ? args.result.error.message : VOICE_SEND_FAILED_MESSAGE)
+            args.setStatusError()
+        }
+        await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId)
+        return 'handled'
+    }
+    if (args.result.resumed && !args.result.notified) {
+        if (args.mounted) {
+            args.setError(VOICE_NAVIGATION_FAILED_MESSAGE)
+            args.setStatusError()
+        } else {
+            console.warn('Voice send: delivered, but the resumed session could not be opened')
+        }
+        return 'handled'
+    }
+    return 'continue'
 }
