@@ -1,9 +1,14 @@
-import { beforeAll, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeAll, describe, expect, it, mock } from 'bun:test'
 import { Hono } from 'hono'
 import type { SyncEngine } from '../../sync/syncEngine'
-import { createConfiguration } from '../../configuration'
+import { createConfiguration, getConfiguration } from '../../configuration'
+import { writeAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
 import { createCliRoutes } from './cli'
 import { SessionIdentityConflictError } from '../../store/sessions'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { writeNamespaceLocale } from '../../config/namespaceSettings'
 
 function createApp(engine: Partial<SyncEngine>) {
     const app = new Hono()
@@ -238,6 +243,29 @@ describe('cli lazy session creation', () => {
         )
     })
 
+    it('returns the namespace locale during session bootstrap', async () => {
+        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-cli-locale-'))
+        try {
+            await writeNamespaceLocale(dataDir, 'default', 'zh-CN')
+            const app = new Hono()
+            app.route('/cli', createCliRoutes(() => ({
+                getOrCreateSession: () => ({ id: sessionId })
+            } as never), dataDir))
+
+            const response = await app.request('/cli/sessions', {
+                method: 'POST',
+                headers: { ...authHeaders(), 'content-type': 'application/json' },
+                body: JSON.stringify({ tag: 'localized', metadata: {} })
+            })
+
+            expect(response.status).toBe(200)
+            const body = await response.json() as { sessionSummaryLocale?: string }
+            expect(body.sessionSummaryLocale).toBe('zh-CN')
+        } finally {
+            await rm(dataDir, { recursive: true, force: true })
+        }
+    })
+
     it('rejects an embedded machine owned by another namespace', async () => {
         const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
         const getOrCreateSession = mock(() => ({ id: sessionId }))
@@ -266,6 +294,70 @@ describe('cli lazy session creation', () => {
         expect(getOrCreateSession).not.toHaveBeenCalled()
     })
 
+    it('rejects a session whose path is outside the machine workspace roots (fork guard)', async () => {
+        const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
+        const getOrCreateSession = mock(() => ({ id: sessionId }))
+        const app = createApp({
+            getMachine: () => null,
+            getMachineByNamespace: () => ({
+                id: 'machine-1',
+                namespace: 'default',
+                metadata: { workspaceRoots: ['/home/ubuntu'] }
+            }),
+            getOrCreateMachine,
+            getOrCreateSession
+        } as never)
+
+        const response = await app.request('/cli/sessions', {
+            method: 'POST',
+            headers: {
+                ...authHeaders(),
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                id: sessionId,
+                tag: 'lazy-tag',
+                metadata: { path: '/tmp', machineId: 'machine-1' },
+                machine: { id: 'machine-1', metadata: {} }
+            })
+        })
+
+        expect(response.status).toBe(403)
+        expect(getOrCreateSession).not.toHaveBeenCalled()
+    })
+
+    it('accepts a session whose path is inside the machine workspace roots', async () => {
+        const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
+        const getOrCreateSession = mock(() => ({ id: sessionId }))
+        const app = createApp({
+            getMachine: () => null,
+            getMachineByNamespace: () => ({
+                id: 'machine-1',
+                namespace: 'default',
+                metadata: { workspaceRoots: ['/home/ubuntu'] }
+            }),
+            getOrCreateMachine,
+            getOrCreateSession
+        } as never)
+
+        const response = await app.request('/cli/sessions', {
+            method: 'POST',
+            headers: {
+                ...authHeaders(),
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                id: sessionId,
+                tag: 'lazy-tag',
+                metadata: { path: '/home/ubuntu/hapi', machineId: 'machine-1' },
+                machine: { id: 'machine-1', metadata: {} }
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(getOrCreateSession).toHaveBeenCalled()
+    })
+
     it('returns 409 for a requested identity conflict', async () => {
         const app = createApp({
             getOrCreateSession: () => {
@@ -287,5 +379,63 @@ describe('cli lazy session creation', () => {
         })
 
         expect(response.status).toBe(409)
+    })
+})
+
+describe('cli autoBridgeTransientModelErrors namespace gate', () => {
+    afterEach(async () => {
+        await writeAutoBridgeTransientModelErrorsEnabled(getConfiguration().dataDir, false)
+    })
+
+    it('returns hub auto-bridge only for the default namespace', async () => {
+        await writeAutoBridgeTransientModelErrorsEnabled(getConfiguration().dataDir, true)
+        const sessionId = '22222222-2222-4222-8222-222222222222'
+        const app = createApp({
+            getOrCreateSession: () => ({ id: sessionId }),
+            resolveSessionAccess: () => ({
+                ok: true,
+                session: { id: sessionId },
+                sessionId
+            })
+        } as never)
+
+        const defaultCreate = await app.request('/cli/sessions', {
+            method: 'POST',
+            headers: {
+                ...authHeaders(),
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                id: sessionId,
+                tag: 'auto-bridge-default',
+                metadata: {}
+            })
+        })
+        expect(defaultCreate.status).toBe(200)
+        const defaultBody = await defaultCreate.json() as { autoBridgeTransientModelErrors?: boolean }
+        expect(defaultBody.autoBridgeTransientModelErrors).toBe(true)
+
+        const tenantCreate = await app.request('/cli/sessions', {
+            method: 'POST',
+            headers: {
+                authorization: 'Bearer test-token:tenant-a',
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                id: sessionId,
+                tag: 'auto-bridge-tenant',
+                metadata: {}
+            })
+        })
+        expect(tenantCreate.status).toBe(200)
+        const tenantCreateBody = await tenantCreate.json() as { autoBridgeTransientModelErrors?: boolean }
+        expect(tenantCreateBody.autoBridgeTransientModelErrors).toBe(false)
+
+        const tenantGet = await app.request(`/cli/sessions/${sessionId}`, {
+            headers: { authorization: 'Bearer test-token:tenant-a' }
+        })
+        expect(tenantGet.status).toBe(200)
+        const tenantGetBody = await tenantGet.json() as { autoBridgeTransientModelErrors?: boolean }
+        expect(tenantGetBody.autoBridgeTransientModelErrors).toBe(false)
     })
 })

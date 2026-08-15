@@ -916,6 +916,151 @@ export class SessionCache {
      * or `undefined` for other flavors. Throws on version mismatch / store error.
      * No-op when metadata is null (callers should pre-check).
      */
+    async markModelErrorBridged(sessionId: string, eventId: string): Promise<void> {
+        const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+        if (!session) {
+            throw new Error('Session not found')
+        }
+
+        const currentMetadata = session.metadata ?? { path: '', host: '' }
+        const currentError = currentMetadata.lastModelError
+        if (!currentError || currentError.eventId !== eventId) {
+            return
+        }
+        if (currentError.bridgedForEventId === eventId) {
+            return
+        }
+
+        const newMetadata = {
+            ...currentMetadata,
+            lastModelError: {
+                ...currentError,
+                bridgedForEventId: eventId
+            }
+        }
+
+        const result = this.store.sessions.updateSessionMetadata(
+            sessionId,
+            newMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            throw new Error('Failed to update session metadata')
+        }
+
+        if (result.result === 'version-mismatch') {
+            throw new Error('Session was modified concurrently. Please try again.')
+        }
+
+        this.refreshSession(sessionId)
+    }
+
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        // Bind dismiss to the error the client actually showed. If a newer
+        // lastModelError replaced it between render and click, refuse so we
+        // don't silently ack the unseen error (banner/dot would vanish).
+        // Identity is eventId (not wall-clock atTs). Retry version-mismatch
+        // (CLI metadata race) like markModelErrorNotified.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                throw new Error('Session not found')
+            }
+
+            const currentMetadata = session.metadata ?? { path: '', host: '' }
+            const currentError = currentMetadata.lastModelError
+            if (!currentError) {
+                return
+            }
+            if (currentError.eventId !== eventId) {
+                throw new Error('Model error changed; refresh before acknowledging.')
+            }
+            if (typeof currentError.acknowledgedAt === 'number') {
+                return
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                {
+                    ...currentMetadata,
+                    lastModelError: {
+                        ...currentError,
+                        acknowledgedAt: Date.now()
+                    }
+                },
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+            if (result.result === 'error') {
+                throw new Error('Failed to update session metadata')
+            }
+
+            this.refreshSession(sessionId)
+        }
+
+        throw new Error('Session was modified concurrently. Please try again.')
+    }
+
+    /**
+     * Persist delivery watermark on lastModelError so hub restarts do not
+     * re-page the same unacknowledged eventId (in-memory Map alone is lost).
+     * No-ops when the error changed under us — a different eventId owns the page.
+     * Retries on version-mismatch (same pattern as renameSession / #919).
+     */
+    async markModelErrorNotified(sessionId: string, eventId: string): Promise<void> {
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                return
+            }
+
+            const currentMetadata = session.metadata ?? { path: '', host: '' }
+            const currentError = currentMetadata.lastModelError
+            if (!currentError || currentError.eventId !== eventId) {
+                return
+            }
+            if (typeof currentError.notifiedAt === 'number') {
+                return
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                {
+                    ...currentMetadata,
+                    lastModelError: {
+                        ...currentError,
+                        notifiedAt: Date.now()
+                    }
+                },
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+            if (result.result === 'error') {
+                throw new Error('Failed to persist model-error notification')
+            }
+
+            this.refreshSession(sessionId)
+        }
+
+        throw new Error('Model-error notification metadata stayed contended')
+    }
+
+
     async clearSessionArchiveMetadata(sessionId: string): Promise<{ cursorSessionProtocol?: 'acp' | 'stream-json' }> {
         // tiann/hapi#919: retry-with-refresh on version-mismatch. The reopen
         // flow runs this on every archived-session resume — a stale snapshot

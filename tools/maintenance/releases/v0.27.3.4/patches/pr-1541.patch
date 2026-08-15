@@ -1,0 +1,605 @@
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+index e69dbe584..ba8698969 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
+ import { MessageQueue2 } from '@/utils/MessageQueue2';
+ import type { EnhancedMode } from './loop';
++import type { AgentMessage } from '@/agent/types';
+ 
+ const harness = vi.hoisted(() => ({
+     initializeError: null as Error | null,
+@@ -14,6 +15,12 @@ const harness = vi.hoisted(() => ({
+     newSessionAttempts: 0,
+     promptCalls: 0,
+     prompts: [] as unknown[][],
++    promptErrors: [] as Error[],
++    promptMessages: [] as AgentMessage[],
++    promptMessageBatches: [] as AgentMessage[][],
++    promptStderrErrors: [] as Array<{ type: string; message: string; raw: string }>,
++    deferPrompt: null as Promise<void> | null,
++    releasePrompt: null as (() => void) | null,
+     backendArgs: null as { command: string; args?: string[] } | null,
+     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
+     deferSetConfigOption: null as Promise<void> | null,
+@@ -126,9 +133,16 @@ vi.mock('./utils/cursorAcpBackend', () => ({
+                 }
+                 return undefined;
+             }),
+-            prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
++            prompt: vi.fn(async (_sessionId: string, content: unknown[], onMessage?: (message: AgentMessage) => void) => {
+                 harness.promptCalls++;
+                 harness.prompts.push(content);
++                const messages = harness.promptMessageBatches.shift() ?? harness.promptMessages.splice(0, 1);
++                for (const message of messages) onMessage?.(message);
++                const stderrError = harness.promptStderrErrors.shift();
++                if (stderrError) harness.stderrErrorHandler?.(stderrError);
++                if (harness.deferPrompt) await harness.deferPrompt;
++                const error = harness.promptErrors.shift();
++                if (error) throw error;
+             }),
+             cancelPrompt: vi.fn(async () => {}),
+             respondToPermission: vi.fn(async () => {}),
+@@ -234,6 +248,7 @@ function makeClient() {
+         flushMetadata: vi.fn(async () => true),
+         sendSessionEvent: vi.fn(),
+         sendAgentMessage: vi.fn(),
++        sendClaudeSessionMessage: vi.fn(),
+         keepAlive: vi.fn(),
+         emitSessionReady: vi.fn()
+     } as unknown as ApiSessionClient;
+@@ -252,6 +267,12 @@ describe('cursorAcpRemoteLauncher', () => {
+         harness.newSessionAttempts = 0;
+         harness.promptCalls = 0;
+         harness.prompts = [];
++        harness.promptErrors = [];
++        harness.promptMessages = [];
++        harness.promptMessageBatches = [];
++        harness.promptStderrErrors = [];
++        harness.deferPrompt = null;
++        harness.releasePrompt = null;
+         harness.setConfigOptionCalls = [];
+         harness.deferSetConfigOption = null;
+         harness.releaseSetConfigOption = null;
+@@ -319,6 +340,281 @@ describe('cursorAcpRemoteLauncher', () => {
+         await runPromise;
+     });
+ 
++    it('retries a transient Cursor connection failure three times using api_error events', async () => {
++        harness.promptErrors = [
++            new Error('Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL'),
++            new Error('Error: RetriableError: [unavailable] connection reset'),
++            new Error("ACP request 'session/prompt' timed out after 120000ms")
++        ];
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = makeClient() as unknown as ApiSessionClient & {
++            sendClaudeSessionMessage: ReturnType<typeof vi.fn>;
++            sendAgentMessage: ReturnType<typeof vi.fn>;
++        };
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++        queue.close();
++
++        await cursorAcpRemoteLauncher(session);
++
++        expect(harness.promptCalls).toBe(4);
++        expect(harness.prompts).toEqual(Array(4).fill([{ type: 'text', text: 'finish the task' }]));
++        expect(client.sendClaudeSessionMessage.mock.calls.map(([message]) => ({
++            subtype: message.subtype,
++            retryAttempt: message.retryAttempt,
++            maxRetries: message.maxRetries
++        }))).toEqual([
++            { subtype: 'api_error', retryAttempt: 1, maxRetries: 4 },
++            { subtype: 'api_error', retryAttempt: 2, maxRetries: 4 },
++            { subtype: 'api_error', retryAttempt: 3, maxRetries: 4 }
++        ]);
++        expect(client.sendAgentMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
++    });
++
++    it('suppresses an inline Cursor connection error and retries instead of rendering it as plaintext', async () => {
++        harness.promptMessages = [
++            { type: 'text', text: 'Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL' }
++        ];
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = makeClient() as unknown as ApiSessionClient & {
++            sendClaudeSessionMessage: ReturnType<typeof vi.fn>;
++            sendAgentMessage: ReturnType<typeof vi.fn>;
++        };
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++        queue.close();
++
++        await cursorAcpRemoteLauncher(session);
++
++        expect(harness.promptCalls).toBe(2);
++        expect(client.sendClaudeSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
++            subtype: 'api_error',
++            retryAttempt: 1,
++            maxRetries: 4
++        }));
++        expect(client.sendAgentMessage).not.toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('http/2 stream closed')
++        }));
++    });
++
++    it('suppresses retryable Cursor stderr while a prompt is retried', async () => {
++        harness.promptStderrErrors = [{
++            type: 'unknown',
++            message: 'http/2 stream closed with error code CANCEL',
++            raw: 'http/2 stream closed with error code CANCEL'
++        }];
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = makeClient() as unknown as ApiSessionClient & {
++            sendClaudeSessionMessage: ReturnType<typeof vi.fn>;
++            sendAgentMessage: ReturnType<typeof vi.fn>;
++        };
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++        queue.close();
++
++        await cursorAcpRemoteLauncher(session);
++
++        expect(harness.promptCalls).toBe(2);
++        expect(client.sendClaudeSessionMessage).toHaveBeenCalledWith(expect.objectContaining({
++            subtype: 'api_error',
++            retryAttempt: 1
++        }));
++        expect(client.sendAgentMessage).not.toHaveBeenCalledWith(expect.objectContaining({
++            message: expect.stringContaining('http/2 stream closed')
++        }));
++    });
++
++    it('does not retry when Cursor completes the turn after transient stderr', async () => {
++        harness.promptStderrErrors = [{
++            type: 'unknown',
++            message: 'http/2 stream closed with error code CANCEL',
++            raw: 'http/2 stream closed with error code CANCEL'
++        }];
++        harness.promptMessages = [{ type: 'turn_complete', stopReason: 'end_turn' }];
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = makeClient() as unknown as ApiSessionClient & {
++            sendClaudeSessionMessage: ReturnType<typeof vi.fn>;
++        };
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++        queue.close();
++
++        await cursorAcpRemoteLauncher(session);
++
++        expect(harness.promptCalls).toBe(1);
++        expect(client.sendClaudeSessionMessage).not.toHaveBeenCalled();
++    });
++
++    it('retries when inline failure accompanies recovered stderr and turn_complete', async () => {
++        harness.promptStderrErrors = [{
++            type: 'unknown',
++            message: 'http/2 stream closed with error code CANCEL',
++            raw: 'http/2 stream closed with error code CANCEL'
++        }];
++        harness.promptMessageBatches = [[
++            { type: 'text', text: 'Error: RetriableError: [canceled] http/2 stream closed' },
++            { type: 'turn_complete', stopReason: 'end_turn' }
++        ]];
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const session = new CursorSession({
++            api: {} as never,
++            client: makeClient(),
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++        queue.close();
++
++        await cursorAcpRemoteLauncher(session);
++
++        expect(harness.promptCalls).toBe(2);
++    });
++
++    it('does not retry when Stop resolves a prompt after a retryable stderr signal', async () => {
++        harness.promptStderrErrors = [{
++            type: 'unknown',
++            message: 'http/2 stream closed with error code CANCEL',
++            raw: 'http/2 stream closed with error code CANCEL'
++        }];
++        harness.deferPrompt = new Promise<void>((resolve) => {
++            harness.releasePrompt = resolve;
++        });
++        const handlers = new Map<string, () => Promise<void>>();
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = {
++            ...makeClient(),
++            rpcHandlerManager: {
++                registerHandler: vi.fn((method: string, handler: () => Promise<void>) => handlers.set(method, handler)),
++                unregisterHandler: vi.fn()
++            }
++        } as unknown as ApiSessionClient;
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++
++        const launchPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
++        await handlers.get('abort')!();
++        harness.releasePrompt!();
++        queue.close();
++        await launchPromise;
++
++        expect(harness.promptCalls).toBe(1);
++    });
++
++    it('does not replay a prompt when a transient failure follows tool activity', async () => {
++        harness.promptMessages = [{
++            type: 'tool_call',
++            id: 'tool-1',
++            name: 'shell',
++            input: { command: 'touch output.txt' },
++            status: 'completed'
++        }];
++        harness.promptErrors = [
++            new Error('Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL')
++        ];
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = makeClient() as unknown as ApiSessionClient & {
++            sendAgentMessage: ReturnType<typeof vi.fn>;
++        };
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++        queue.push('finish the task', { permissionMode: 'default' });
++        queue.close();
++
++        await cursorAcpRemoteLauncher(session);
++
++        expect(harness.promptCalls).toBe(1);
++        expect(client.sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
++            type: 'error',
++            message: expect.stringContaining('not retried')
++        }));
++    });
++
+     it('removes the Cursor MCP overlay even when backend.disconnect rejects', async () => {
+         harness.disconnectError = new Error('disconnect failed');
+         const session = makeSession(null);
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index 0e49a7b0c..cfa3539d1 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -1,4 +1,5 @@
+ import React from 'react';
++import { randomUUID } from 'node:crypto';
+ import { logger } from '@/ui/logger';
+ import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
+ import { convertAgentMessage } from '@/agent/messageConverter';
+@@ -43,6 +44,11 @@ import {
+     resolveCursorSpawnModel,
+     tryRemapCursorSpawnModelFromConnectError
+ } from './utils/cursorStaleModelRemap';
++import {
++    CURSOR_AUTO_RETRY_LIMIT,
++    isRetryableCursorError,
++    stripRetryableCursorError
++} from './cursorAutoRetry';
+ 
+ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     private readonly session: CursorSession;
+@@ -62,6 +68,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
+     private autoReviewSlashQueued = false;
+     private cursorMcpOverlay: CursorMcpOverlayHandle | null = null;
++    private pendingRetryableError: string | null = null;
++    private pendingRetryableFromStderr = false;
++    private pendingInlineRetryableError = false;
++    private attemptProducedToolActivity = false;
++    private promptInFlight = false;
++    private userAbortRequested = false;
+ 
+     constructor(session: CursorSession) {
+         super(process.env.DEBUG ? session.logPath : undefined);
+@@ -210,7 +222,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+             session.client,
+             backend,
+             () => session.getPermissionMode(),
+-            (response) => extensionAdapter.handlePermissionResponse(response)
++            (response) => this.handlePermissionResponse(extensionAdapter, response)
+         );
+ 
+         const resumeSessionId = session.sessionId;
+@@ -269,7 +281,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                             session.client,
+                             backend,
+                             () => session.getPermissionMode(),
+-                            (response) => this.extensionAdapter!.handlePermissionResponse(response)
++                            (response) => this.handlePermissionResponse(this.extensionAdapter!, response)
+                         );
+                         continue;
+                     }
+@@ -330,7 +342,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+                             session.client,
+                             backend,
+                             () => session.getPermissionMode(),
+-                            (response) => this.extensionAdapter!.handlePermissionResponse(response)
++                            (response) => this.handlePermissionResponse(this.extensionAdapter!, response)
+                         );
+                         continue;
+                     }
+@@ -453,20 +465,53 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+             session.onThinkingChange(true);
+ 
+             try {
+-                await backend.prompt(acpSessionId, promptContent, (message) => {
+-                    this.handleAgentMessage(message);
+-                });
+-                void backend.refreshSessionInfo(acpSessionId, session.path);
+-            } catch (error) {
+-                logger.warn('[cursor-acp] prompt failed', error);
+-                const errMsg = error instanceof Error ? error.message : String(error);
+-                const message = `Cursor Agent failed: ${errMsg}`;
+-                const converted = convertAgentMessage({ type: 'error', message });
+-                if (converted) {
+-                    session.sendAgentMessage(converted);
++                this.promptInFlight = true;
++                this.userAbortRequested = false;
++                for (let retryAttempt = 0; retryAttempt <= CURSOR_AUTO_RETRY_LIMIT; retryAttempt += 1) {
++                    this.pendingRetryableError = null;
++                    this.pendingRetryableFromStderr = false;
++                    this.pendingInlineRetryableError = false;
++                    this.attemptProducedToolActivity = false;
++                    let turnCompleted = false;
++                    try {
++                        await backend.prompt(acpSessionId, promptContent, (message) => {
++                            if (message.type === 'turn_complete') turnCompleted = true;
++                            this.handleAgentMessage(message);
++                        });
++                        if (this.userAbortRequested) break;
++                        if (turnCompleted && this.pendingRetryableFromStderr && !this.pendingInlineRetryableError) {
++                            this.pendingRetryableError = null;
++                        }
++                        if (!this.pendingRetryableError) {
++                            void backend.refreshSessionInfo(acpSessionId, session.path);
++                            break;
++                        }
++                    } catch (error) {
++                        logger.warn('[cursor-acp] prompt failed', error);
++                        if (this.userAbortRequested) break;
++                        if (!isRetryableCursorError(error)) {
++                            this.surfacePromptFailure(error instanceof Error ? error.message : String(error));
++                            break;
++                        }
++                        this.pendingRetryableError = error instanceof Error ? error.message : String(error);
++                    }
++
++                    if (this.attemptProducedToolActivity) {
++                        this.surfacePromptFailure('Cursor connection interrupted after tool activity; the prompt was not retried.');
++                        break;
++                    }
++                    if (retryAttempt < CURSOR_AUTO_RETRY_LIMIT) {
++                        this.surfaceRetry(retryAttempt + 1);
++                        continue;
++                    }
++                    this.surfacePromptFailure(`Cursor Agent failed after ${CURSOR_AUTO_RETRY_LIMIT} retries.`);
+                 }
+-                messageBuffer.addMessage(message, 'status');
+             } finally {
++                this.promptInFlight = false;
++                this.pendingRetryableError = null;
++                this.pendingRetryableFromStderr = false;
++                this.pendingInlineRetryableError = false;
++                this.attemptProducedToolActivity = false;
+                 session.onThinkingChange(false);
+                 await this.permissionAdapter?.cancelAll('Prompt finished');
+                 await this.extensionAdapter?.cancelAll('Prompt finished');
+@@ -523,6 +568,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+             logger.debug('[cursor-acp] stderr error', error);
+             const hint = error.raw || error.message;
+             onHint(hint);
++            if (this.promptInFlight && isRetryableCursorError(hint)) {
++                if (!this.userAbortRequested) {
++                    this.pendingRetryableError = hint;
++                    this.pendingRetryableFromStderr = true;
++                }
++                return;
++            }
+             if (error.type === 'model_not_found' && extractCannotUseThisModelMessage(hint)) {
+                 return;
+             }
+@@ -563,6 +615,14 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+         });
+     }
+ 
++    private handlePermissionResponse(
++        extensionAdapter: CursorExtensionAdapter,
++        response: { id: string; approved: boolean; decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort' }
++    ): Promise<boolean> {
++        if (response.decision === 'abort') this.userAbortRequested = true;
++        return extensionAdapter.handlePermissionResponse(response);
++    }
++
+     /**
+      * #1470 / #1502: ACP foreground state → hub thinking via keepalive.
+      * Background tool/content updates are ignored; running is debounced in the backend.
+@@ -576,6 +636,23 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     }
+ 
+     private handleAgentMessage(message: AgentMessage): void {
++        if (this.promptInFlight && (
++            message.type === 'tool_call'
++            || message.type === 'tool_result'
++            || message.type === 'generated_image'
++        )) {
++            this.attemptProducedToolActivity = true;
++        }
++        if (message.type === 'text') {
++            const visibleText = stripRetryableCursorError(message.text);
++            if (visibleText !== null) {
++                if (this.userAbortRequested) return;
++                this.pendingRetryableError = message.text;
++                this.pendingInlineRetryableError = true;
++                if (!visibleText) return;
++                message = { ...message, text: visibleText };
++            }
++        }
+         const converted = convertAgentMessage(message, this.currentBackendModel);
+         if (converted) {
+             this.session.sendAgentMessage(converted);
+@@ -611,6 +688,23 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+         }
+     }
+ 
++    private surfaceRetry(retryAttempt: number): void {
++        this.session.client.sendClaudeSessionMessage({
++            type: 'system',
++            uuid: randomUUID(),
++            subtype: 'api_error',
++            retryAttempt,
++            maxRetries: CURSOR_AUTO_RETRY_LIMIT + 1,
++            error: { message: 'Cursor connection interrupted.' }
++        });
++    }
++
++    private surfacePromptFailure(message: string): void {
++        const converted = convertAgentMessage({ type: 'error', message });
++        if (converted) this.session.sendAgentMessage(converted);
++        this.messageBuffer.addMessage(message, 'status');
++    }
++
+     private installLiveSessionConfigSync(
+         backend: AcpSdkBackend,
+         acpSessionId: string,
+@@ -791,6 +885,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     }
+ 
+     private async handleAbort(): Promise<void> {
++        this.userAbortRequested = true;
+         const backend = this.backend;
+         const sessionId = this.session.sessionId;
+         if (backend && sessionId) {
+diff --git a/cli/src/cursor/cursorAutoRetry.test.ts b/cli/src/cursor/cursorAutoRetry.test.ts
+new file mode 100644
+index 000000000..2fdf27f35
+--- /dev/null
++++ b/cli/src/cursor/cursorAutoRetry.test.ts
+@@ -0,0 +1,17 @@
++import { describe, expect, it } from 'vitest';
++import { isRetryableCursorError, stripRetryableCursorError } from './cursorAutoRetry';
++
++describe('Cursor automatic retry classification', () => {
++    it('recognizes Cursor connection failures without treating ordinary HTTP/2 prose as inline errors', () => {
++        expect(isRetryableCursorError(new Error('http/2 stream closed with error code CANCEL'))).toBe(true);
++        expect(isRetryableCursorError(new Error('HTTP/1.1 connection reset'))).toBe(true);
++        expect(isRetryableCursorError(new Error('HTTP/2 401 Unauthorized'))).toBe(false);
++        expect(stripRetryableCursorError('HTTP/2 is a binary framing protocol.')).toBeNull();
++        expect(stripRetryableCursorError(
++            'Partial answer\n\nError: RetriableError: [canceled] http/2 stream closed'
++        )).toBe('Partial answer');
++        expect(stripRetryableCursorError(
++            'Example:\n```text\nError: RetriableError: [canceled] http/2 stream closed\n```'
++        )).toBeNull();
++    });
++});
+diff --git a/cli/src/cursor/cursorAutoRetry.ts b/cli/src/cursor/cursorAutoRetry.ts
+new file mode 100644
+index 000000000..5c2800e6e
+--- /dev/null
++++ b/cli/src/cursor/cursorAutoRetry.ts
+@@ -0,0 +1,17 @@
++export const CURSOR_AUTO_RETRY_LIMIT = 3;
++
++const RETRYABLE_CURSOR_ERROR = /(?:Error: (?:T|RetriableError): \[(?:canceled|deadline_exceeded|unavailable)\]|http\/(?:1\.1|2).*stream closed|connection (?:reset|stalled|closed)|ACP request 'session\/prompt' timed out after \d+ms)/i;
++const INLINE_CURSOR_ERROR = /^[ \t]*Error: (?:T|RetriableError):/im;
++
++export function isRetryableCursorError(error: unknown): boolean {
++    const message = error instanceof Error ? error.message : String(error);
++    return RETRYABLE_CURSOR_ERROR.test(message);
++}
++
++export function stripRetryableCursorError(text: string): string | null {
++    const marker = INLINE_CURSOR_ERROR.exec(text);
++    if (!marker || !isRetryableCursorError(text.slice(marker.index))) return null;
++    const before = text.slice(0, marker.index);
++    if ((before.match(/^[ \t]{0,3}(?:```|~~~)/gm)?.length ?? 0) % 2 === 1) return null;
++    return text.slice(0, marker.index).trimEnd();
++}

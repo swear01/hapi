@@ -2,11 +2,36 @@ import { describe, expect, it } from 'vitest'
 import {
     ClearOpencodeSessionCallbackRequestSchema,
     ClearOpencodeSessionResponseSchema,
+    ListClaudeSessionsRpcResponseSchema,
     ListCodexSessionsRpcResponseSchema,
     ListPiSessionsRpcResponseSchema,
     MessagesQuerySchema,
-    SendMessageRequestSchema
+    SendMessageRequestSchema,
+    SpawnSessionRequestSchema
 } from './apiTypes'
+
+describe('SpawnSessionRequestSchema', () => {
+    it('allows Codex resumeSessionId', () => {
+        expect(SpawnSessionRequestSchema.safeParse({
+            directory: '/tmp/project',
+            agent: 'codex',
+            resumeSessionId: 'thread-1'
+        }).success).toBe(true)
+    })
+
+    it('rejects resumeSessionId for non-Codex agents on the public spawn API', () => {
+        expect(SpawnSessionRequestSchema.safeParse({
+            directory: '/tmp/project',
+            agent: 'claude',
+            resumeSessionId: 'claude-session-1'
+        }).success).toBe(false)
+
+        expect(SpawnSessionRequestSchema.safeParse({
+            directory: '/tmp/project',
+            resumeSessionId: 'thread-1'
+        }).success).toBe(false)
+    })
+})
 
 describe('ListCodexSessionsRpcResponseSchema', () => {
     it('preserves Codex session messages when parsing runner RPC responses', () => {
@@ -34,6 +59,37 @@ describe('ListCodexSessionsRpcResponseSchema', () => {
         if (parsed.success) {
             expect(parsed.sessions[0]?.messages).toHaveLength(1)
         }
+    })
+})
+
+describe('ListClaudeSessionsRpcResponseSchema', () => {
+    it('preserves paged Claude transcript messages when parsing runner RPC responses', () => {
+        const parsed = ListClaudeSessionsRpcResponseSchema.parse({
+            success: true,
+            mode: 'messages',
+            page: {
+                session: {
+                    id: 'claude-session-id',
+                    title: 'Claude Session',
+                    file: '/home/user/.claude/projects/project/session.jsonl',
+                    modifiedAt: 1_000,
+                    messageCount: 1
+                },
+                messages: [{
+                    localId: 'claude:claude-session-id:user-1',
+                    createdAt: 900,
+                    content: {
+                        role: 'user',
+                        content: { type: 'text', text: 'hello' },
+                        meta: { sentFrom: 'cli' }
+                    }
+                }],
+                nextCursor: null
+            }
+        })
+
+        expect(parsed.success).toBe(true)
+        if (parsed.success && parsed.mode === 'messages') expect(parsed.page.messages).toHaveLength(1)
     })
 })
 

@@ -1,0 +1,635 @@
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 2d313572a..a9385cc0b 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1,6 +1,7 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { flushSync } from 'react-dom'
+ import { useNavigate } from '@tanstack/react-router'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
+ import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
+ import type { ApiClient } from '@/api/client'
+@@ -475,7 +476,11 @@ function SessionChatInner(props: SessionChatProps) {
+         setHistoryActionPending(true)
+         try {
+             const result = await props.api.forkConversation(props.session.id, messageLocalId)
+-            await navigate({ to: '/sessions/$sessionId', params: { sessionId: result.sessionId } })
++            await navigate({
++                to: '/sessions/$sessionId',
++                params: { sessionId: result.sessionId },
++                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++            })
+         } finally {
+             setHistoryActionPending(false)
+         }
+@@ -1397,7 +1402,8 @@ function SessionChatInner(props: SessionChatProps) {
+         setOutlineOpen(false)
+         navigate({
+             to: '/sessions/$sessionId/files',
+-            params: { sessionId: props.session.id }
++            params: { sessionId: props.session.id },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, props.session.id])
+ 
+@@ -1408,7 +1414,8 @@ function SessionChatInner(props: SessionChatProps) {
+     const handleViewTerminal = useCallback(() => {
+         navigate({
+             to: '/sessions/$sessionId/terminal',
+-            params: { sessionId: props.session.id }
++            params: { sessionId: props.session.id },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, props.session.id])
+ 
+@@ -1602,7 +1609,8 @@ function SessionChatInner(props: SessionChatProps) {
+                         () => navigate({
+                             to: '/sessions/$sessionId',
+                             params: { sessionId: newSessionId },
+-                            replace: true
++                            replace: true,
++                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                         }),
+                     )
+                 }}
+diff --git a/web/src/components/ToastContainer.tsx b/web/src/components/ToastContainer.tsx
+index 719dc86ef..238963288 100644
+--- a/web/src/components/ToastContainer.tsx
++++ b/web/src/components/ToastContainer.tsx
+@@ -1,4 +1,5 @@
+ import { useNavigate } from '@tanstack/react-router'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ import { Toast } from '@/components/ui/Toast'
+ import { useToast } from '@/lib/toast-context'
+ 
+@@ -26,7 +27,8 @@ export function ToastContainer() {
+                         if (toast.sessionId) {
+                             void navigate({
+                                 to: '/sessions/$sessionId',
+-                                params: { sessionId: toast.sessionId }
++                                params: { sessionId: toast.sessionId },
++                                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                             })
+                             return
+                         }
+diff --git a/web/src/components/assistant-ui/markdown-file-anchor.test.tsx b/web/src/components/assistant-ui/markdown-file-anchor.test.tsx
+index a0445d99d..17454503f 100644
+--- a/web/src/components/assistant-ui/markdown-file-anchor.test.tsx
++++ b/web/src/components/assistant-ui/markdown-file-anchor.test.tsx
+@@ -57,6 +57,7 @@ describe('chat file anchors', () => {
+                 path: encodeBase64(filePath),
+                 origin: 'chat',
+             },
++            resetScroll: false,
+         })
+     })
+ })
+diff --git a/web/src/components/assistant-ui/markdown-text.tsx b/web/src/components/assistant-ui/markdown-text.tsx
+index 2a201511c..df7bcd19e 100644
+--- a/web/src/components/assistant-ui/markdown-text.tsx
++++ b/web/src/components/assistant-ui/markdown-text.tsx
+@@ -15,6 +15,7 @@ import rehypeKatex from 'rehype-katex'
+ import remarkDisableIndentedCode from '@/lib/remark-disable-indented-code'
+ import remarkRepairTables from '@/lib/remark-repair-tables'
+ import { useNavigate } from '@tanstack/react-router'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ import remarkStripCjkAutolink from '@/lib/remark-strip-cjk-autolink'
+ import remarkNonHttpsAutolink from '@/lib/remark-non-https-autolink'
+ import { cn, encodeBase64 } from '@/lib/utils'
+@@ -513,7 +514,8 @@ function FilePathAnchor(props: ComponentPropsWithoutRef<'a'> & { filePath: strin
+             search: {
+                 path: encodeBase64(filePath),
+                 origin: 'chat',
+-            }
++            },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }
+ 
+@@ -543,6 +545,7 @@ function SessionPathAnchor(props: ComponentPropsWithoutRef<'a'> & { targetSessio
+         void navigate({
+             to: '/sessions/$sessionId',
+             params: { sessionId: props.targetSessionId },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }
+ 
+diff --git a/web/src/hooks/useAppGoBack.test.ts b/web/src/hooks/useAppGoBack.test.ts
+index fda578129..6e814dc0c 100644
+--- a/web/src/hooks/useAppGoBack.test.ts
++++ b/web/src/hooks/useAppGoBack.test.ts
+@@ -72,6 +72,7 @@ describe('useAppGoBack file preview navigation', () => {
+ 
+         expect(routerMocks.navigate).toHaveBeenCalledWith({
+             to: '/sessions/session-1',
++            resetScroll: false,
+         })
+     })
+ 
+@@ -92,6 +93,7 @@ describe('useAppGoBack file preview navigation', () => {
+                 tab: 'directories',
+                 query: 'readme',
+             },
++            resetScroll: false,
+         })
+     })
+ })
+diff --git a/web/src/hooks/useAppGoBack.ts b/web/src/hooks/useAppGoBack.ts
+index d3b217b73..fe61e311c 100644
+--- a/web/src/hooks/useAppGoBack.ts
++++ b/web/src/hooks/useAppGoBack.ts
+@@ -1,5 +1,6 @@
+ import { useCallback } from 'react'
+ import { useLocation, useNavigate, useRouter } from '@tanstack/react-router'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ 
+ export function getSettingsBackTarget(pathname: string): string | null {
+     if (pathname === '/settings') return '/sessions'
+@@ -32,7 +33,10 @@ export function useAppGoBack(): () => void {
+     return useCallback(() => {
+         // Use explicit path navigation for consistent behavior across all environments
+         if (pathname === '/sessions/new') {
+-            navigate({ to: '/sessions' })
++            navigate({
++                to: '/sessions',
++                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++            })
+             return
+         }
+ 
+@@ -50,19 +54,29 @@ export function useAppGoBack(): () => void {
+                 ? (search as { origin?: unknown }).origin
+                 : undefined
+             if (origin === 'chat') {
+-                navigate({ to: pathname.replace(/\/file$/, '') })
++                navigate({
++                    to: pathname.replace(/\/file$/, ''),
++                    ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++                })
+                 return
+             }
+ 
+             const filesPath = pathname.replace(/\/file$/, '/files')
+-            navigate({ to: filesPath, search: getSessionFilesBackSearch(search) })
++            navigate({
++                to: filesPath,
++                search: getSessionFilesBackSearch(search),
++                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++            })
+             return
+         }
+ 
+         // For session routes, navigate to parent path
+         if (pathname.startsWith('/sessions/')) {
+             const parentPath = pathname.replace(/\/[^/]+$/, '') || '/sessions'
+-            navigate({ to: parentPath })
++            navigate({
++                to: parentPath,
++                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++            })
+             return
+         }
+ 
+diff --git a/web/src/lib/sessionNavigation.test.ts b/web/src/lib/sessionNavigation.test.ts
+new file mode 100644
+index 000000000..5e077d72b
+--- /dev/null
++++ b/web/src/lib/sessionNavigation.test.ts
+@@ -0,0 +1,21 @@
++import { describe, expect, it } from 'vitest'
++import {
++    getSessionListSelectionNavigation,
++    PRESERVE_SESSION_SIDEBAR_SCROLL,
++} from './sessionNavigation'
++
++describe('PRESERVE_SESSION_SIDEBAR_SCROLL', () => {
++    it('skips router-wide scroll restoration for internal session navigation', () => {
++        expect(PRESERVE_SESSION_SIDEBAR_SCROLL).toEqual({ resetScroll: false })
++    })
++})
++
++describe('getSessionListSelectionNavigation', () => {
++    it('preserves the shared sidebar scroll position when selecting a session', () => {
++        expect(getSessionListSelectionNavigation('session-active')).toEqual({
++            to: '/sessions/$sessionId',
++            params: { sessionId: 'session-active' },
++            resetScroll: false,
++        })
++    })
++})
+diff --git a/web/src/lib/sessionNavigation.ts b/web/src/lib/sessionNavigation.ts
+new file mode 100644
+index 000000000..52e4458b1
+--- /dev/null
++++ b/web/src/lib/sessionNavigation.ts
+@@ -0,0 +1,16 @@
++// The /sessions layout keeps its sidebar mounted while its child route changes.
++// TanStack Router restores every scrollable element by default, so a cached child
++// route can otherwise overwrite the sidebar's current scrollTop. The child panes
++// own their own scroll state; internal workspace navigation should skip the
++// router-wide restoration pass.
++export const PRESERVE_SESSION_SIDEBAR_SCROLL = {
++    resetScroll: false,
++} as const
++
++export function getSessionListSelectionNavigation(sessionId: string) {
++    return {
++        to: '/sessions/$sessionId' as const,
++        params: { sessionId },
++        ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++    }
++}
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index ebb3e6e2d..d9861c6a2 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -13,6 +13,10 @@ import {
+     useSearch,
+ } from '@tanstack/react-router'
+ import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
++import {
++    getSessionListSelectionNavigation,
++    PRESERVE_SESSION_SIDEBAR_SCROLL,
++} from '@/lib/sessionNavigation'
+ import { App } from '@/App'
+ import { SessionChat } from '@/components/SessionChat'
+ import { SessionList } from '@/components/SessionList'
+@@ -215,7 +219,8 @@ function SessionsPage() {
+             to: '/sessions/new',
+             search: args.machineId
+                 ? { directory: args.directory, machineId: args.machineId }
+-                : { directory: args.directory }
++                : { directory: args.directory },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate])
+ 
+@@ -236,11 +241,11 @@ function SessionsPage() {
+                         key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
+                         sessions={sessions}
+                         selectedSessionId={selectedSessionId}
+-                        onSelect={(sessionId) => navigate({
+-                            to: '/sessions/$sessionId',
+-                            params: { sessionId },
++                        onSelect={(sessionId) => navigate(getSessionListSelectionNavigation(sessionId))}
++                        onNewSession={() => navigate({
++                            to: '/sessions/new',
++                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                         })}
+-                        onNewSession={() => navigate({ to: '/sessions/new' })}
+                         onNewSessionInDirectory={handleNewSessionInDirectory}
+                         onBrowse={canBrowse ? () => navigate({ to: '/browse' }) : undefined}
+                         onRefresh={handleRefresh}
+@@ -268,7 +273,10 @@ function SessionsPage() {
+                                 </button>
+                                 <button
+                                     type="button"
+-                                    onClick={() => navigate({ to: '/sessions/new' })}
++                                    onClick={() => navigate({
++                                        to: '/sessions/new',
++                                        ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++                                    })}
+                                     className="session-list-new-button flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-link)] transition-colors"
+                                     title={t('sessions.new')}
+                                 >
+@@ -444,7 +452,8 @@ function SessionPage() {
+                         () => navigate({
+                             to: '/sessions/$sessionId',
+                             params: { sessionId: result.sessionId },
+-                            replace: true
++                            replace: true,
++                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                         }),
+                     )
+                 }
+@@ -557,7 +566,8 @@ function SessionPage() {
+         navigate({
+             to: '/sessions/$sessionId',
+             params: { sessionId: resolvedSessionId },
+-            replace: true
++            replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+         if (api) {
+             void refreshSessionDetailPreservingActive(
+@@ -737,6 +747,7 @@ function SessionPage() {
+             to: '/sessions/$sessionId',
+             params: { sessionId },
+             replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, sessionId])
+ 
+@@ -855,7 +866,8 @@ function SessionDetailRoute() {
+         navigate({
+             to: '/sessions/$sessionId',
+             params: { sessionId: supersedingSessionId },
+-            replace: true
++            replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, session, sessionId, supersedingSessionId])
+ 
+@@ -863,7 +875,11 @@ function SessionDetailRoute() {
+         if (!sessionNotFound) {
+             return
+         }
+-        navigate({ to: '/sessions', replace: true })
++        navigate({
++            to: '/sessions',
++            replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++        })
+     }, [navigate, sessionNotFound, sessionId])
+ 
+     if (sessionNotFound) {
+@@ -890,7 +906,10 @@ function NewSessionPage() {
+         if (shareTransferId) {
+             void deleteShareTransfer(shareTransferId)
+         }
+-        navigate({ to: '/sessions' })
++        navigate({
++            to: '/sessions',
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++        })
+     }, [navigate, shareTransferId])
+ 
+     const handleSuccess = useCallback((sessionId: string) => {
+@@ -899,12 +918,17 @@ function NewSessionPage() {
+         }
+         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+         // Replace current page with /sessions to clear spawn flow from history
+-        navigate({ to: '/sessions', replace: true })
++        navigate({
++            to: '/sessions',
++            replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++        })
+         // Then navigate to new session
+         requestAnimationFrame(() => {
+             navigate({
+                 to: '/sessions/$sessionId',
+                 params: { sessionId },
++                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+             })
+         })
+     }, [navigate, queryClient, shareTransferId])
+diff --git a/web/src/routes/sessions/file.test.tsx b/web/src/routes/sessions/file.test.tsx
+index a270a8d95..9f1fcb08d 100644
+--- a/web/src/routes/sessions/file.test.tsx
++++ b/web/src/routes/sessions/file.test.tsx
+@@ -79,6 +79,7 @@ describe('FilePage markdown preview', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
+         window.localStorage.clear()
++        window.sessionStorage.clear()
+     })
+ 
+     it('renders markdown preview by default and toggles to source', async () => {
+@@ -114,4 +115,23 @@ describe('FilePage markdown preview', () => {
+             expect(screen.getByTestId('markdown-preview')).toBeInTheDocument()
+         })
+     })
++
++    it('preserves the file preview scroll position across route remounts', async () => {
++        const firstRender = renderWithProviders()
++
++        await waitFor(() => {
++            expect(screen.getByTestId('markdown-preview')).toBeInTheDocument()
++        })
++        const firstScrollRegion = document.querySelector('[data-hapi-file-scroll="true"]') as HTMLElement
++        expect(firstScrollRegion).not.toBeNull()
++        firstScrollRegion.scrollTop = 123
++        firstRender.unmount()
++
++        renderWithProviders()
++        await waitFor(() => {
++            expect(screen.getByTestId('markdown-preview')).toBeInTheDocument()
++        })
++        const secondScrollRegion = document.querySelector('[data-hapi-file-scroll="true"]') as HTMLElement
++        expect(secondScrollRegion.scrollTop).toBe(123)
++    })
+ })
+diff --git a/web/src/routes/sessions/file.tsx b/web/src/routes/sessions/file.tsx
+index 24d99c83f..9a6cbbd95 100644
+--- a/web/src/routes/sessions/file.tsx
++++ b/web/src/routes/sessions/file.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useMemo, useState } from 'react'
++import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+ import { useQuery } from '@tanstack/react-query'
+ import { useParams, useSearch } from '@tanstack/react-router'
+ import type { GitCommandResponse } from '@/types/api'
+@@ -24,6 +24,11 @@ import {
+ import { downloadBase64File } from '@/lib/file-download'
+ 
+ const MAX_COPYABLE_FILE_BYTES = 1_000_000
++const FILE_SCROLL_KEY_PREFIX = 'hapi-file-scroll-'
++
++function getFileScrollStorageKey(sessionId: string, filePath: string, staged: boolean | undefined): string {
++    return `${FILE_SCROLL_KEY_PREFIX}${sessionId}:${encodeURIComponent(filePath)}:${staged === true ? 'staged' : 'unstaged'}`
++}
+ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+     apng: 'image/apng',
+     avif: 'image/avif',
+@@ -272,6 +277,51 @@ export default function FilePage() {
+     const canDownload = fileContentResult?.success === true && Boolean(fileContentResult.content)
+ 
+     const [displayMode, setDisplayMode] = useState<'diff' | 'file'>('diff')
++    const fileScrollRef = useRef<HTMLDivElement>(null)
++    const restoredScrollKeyRef = useRef<string | null>(null)
++    const fileScrollKey = useMemo(
++        () => getFileScrollStorageKey(sessionId, filePath, staged),
++        [filePath, sessionId, staged]
++    )
++
++    const restoreFileScroll = useCallback((element: HTMLDivElement | null = fileScrollRef.current) => {
++        if (!element) return
++        try {
++            const saved = sessionStorage.getItem(fileScrollKey)
++            if (saved !== null) element.scrollTop = Number(saved)
++        } catch {
++            // Ignore unavailable storage.
++        }
++    }, [fileScrollKey])
++
++    useLayoutEffect(() => {
++        restoreFileScroll()
++        const frame = typeof requestAnimationFrame === 'function'
++            ? requestAnimationFrame(() => restoreFileScroll())
++            : undefined
++        return () => {
++            if (frame !== undefined && typeof cancelAnimationFrame === 'function') {
++                cancelAnimationFrame(frame)
++            }
++            const element = fileScrollRef.current
++            if (!element) return
++            try {
++                sessionStorage.setItem(fileScrollKey, String(element.scrollTop))
++            } catch {
++                // Ignore unavailable storage.
++            }
++        }
++    }, [fileScrollKey, restoreFileScroll])
++
++    // Query results can arrive after the route first renders. Re-apply the
++    // saved position once content has been mounted, but do not overwrite
++    // user scrolling when a query refreshes the same file.
++    useEffect(() => {
++        if (diffQuery.isLoading || fileQuery.isLoading) return
++        if (restoredScrollKeyRef.current === fileScrollKey) return
++        restoreFileScroll()
++        restoredScrollKeyRef.current = fileScrollKey
++    }, [diffQuery.isLoading, fileQuery.isLoading, fileScrollKey, restoreFileScroll])
+ 
+     const setMarkdownPreviewMode = (mode: MarkdownPreviewMode) => {
+         setMarkdownMode(mode)
+@@ -388,7 +438,7 @@ export default function FilePage() {
+                 </div>
+             ) : null}
+ 
+-            <div className="app-scroll-y flex-1 min-h-0">
++            <div ref={fileScrollRef} data-hapi-file-scroll="true" className="app-scroll-y flex-1 min-h-0">
+                 <div className="mx-auto w-full max-w-content p-4">
+                     {diffErrorMessage ? (
+                         <div className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]">
+diff --git a/web/src/routes/sessions/files.test.tsx b/web/src/routes/sessions/files.test.tsx
+index 74dee5995..9e0f87ee6 100644
+--- a/web/src/routes/sessions/files.test.tsx
++++ b/web/src/routes/sessions/files.test.tsx
+@@ -138,6 +138,7 @@ describe('FilesPage search navigation', () => {
+                 tab: 'directories',
+                 query: '感',
+             },
++            resetScroll: false,
+         })
+ 
+         fireEvent.change(input, { target: { value: '言' } })
+@@ -149,6 +150,7 @@ describe('FilesPage search navigation', () => {
+                 query: '言',
+             },
+             replace: true,
++            resetScroll: false,
+         })
+ 
+         fireEvent.click(screen.getByRole('button', { name: 'Clear search' }))
+@@ -157,6 +159,7 @@ describe('FilesPage search navigation', () => {
+             params: { sessionId: 'session-1' },
+             search: { tab: 'directories' },
+             replace: true,
++            resetScroll: false,
+         })
+     })
+ })
+@@ -184,6 +187,18 @@ describe('FilesPage reopen draft transfer', () => {
+             to: '/sessions/$sessionId/files',
+             params: { sessionId: 'session-reopened' },
+             replace: true,
++            resetScroll: false,
+         })
+     })
++
++    it('preserves the directory scroll position across route remounts', () => {
++        const firstRender = renderFilesPage()
++        const firstScrollRegion = document.querySelector('[data-hapi-session-files-scroll="true"]') as HTMLElement
++        firstScrollRegion.scrollTop = 87
++        firstRender.unmount()
++
++        renderFilesPage()
++        const secondScrollRegion = document.querySelector('[data-hapi-session-files-scroll="true"]') as HTMLElement
++        expect(secondScrollRegion.scrollTop).toBe(87)
++    })
+ })
+diff --git a/web/src/routes/sessions/files.tsx b/web/src/routes/sessions/files.tsx
+index 5e1bfa363..4471c417d 100644
+--- a/web/src/routes/sessions/files.tsx
++++ b/web/src/routes/sessions/files.tsx
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { useNavigate, useParams, useSearch } from '@tanstack/react-router'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ import type { FileSearchItem, GitFileStatus } from '@/types/api'
+ import { FileIcon } from '@/components/FileIcon'
+ import { DirectoryTree } from '@/components/SessionFiles/DirectoryTree'
+@@ -331,6 +332,7 @@ export default function FilesPage() {
+                 ...(query ? { query } : {}),
+             },
+             replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [activeTab, navigate, sessionId])
+ 
+@@ -345,7 +347,7 @@ export default function FilesPage() {
+     useEffect(() => {
+         const el = scrollRef.current
+         if (!el) return
+-        const key = SCROLL_KEY_PREFIX + sessionId
++        const key = `${SCROLL_KEY_PREFIX}${sessionId}:${activeTab}`
+         try {
+             const saved = sessionStorage.getItem(key)
+             if (saved !== null) el.scrollTop = Number(saved)
+@@ -360,7 +362,7 @@ export default function FilesPage() {
+             }
+         }
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-    }, [sessionId])
++    }, [activeTab, sessionId])
+ 
+     const {
+         status: gitStatus,
+@@ -389,7 +391,8 @@ export default function FilesPage() {
+         navigate({
+             to: '/sessions/$sessionId/file',
+             params: { sessionId },
+-            search: fileSearch
++            search: fileSearch,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [activeTab, navigate, searchQuery, sessionId])
+ 
+@@ -437,6 +440,7 @@ export default function FilesPage() {
+                 ...(searchQuery ? { query: searchQuery } : {}),
+             },
+             replace: true,
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, searchQuery, sessionId])
+ 
+@@ -444,6 +448,7 @@ export default function FilesPage() {
+         navigate({
+             to: '/sessions/$sessionId',
+             params: { sessionId },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, sessionId])
+ 
+@@ -452,6 +457,7 @@ export default function FilesPage() {
+             to: '/sessions/$sessionId',
+             params: { sessionId },
+             search: { outline: true },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+     }, [navigate, sessionId])
+ 
+@@ -482,6 +488,7 @@ export default function FilesPage() {
+                             to: '/sessions/$sessionId/files',
+                             params: { sessionId: newSessionId },
+                             replace: true,
++                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                         }),
+                     )
+                 }}
+@@ -575,7 +582,11 @@ export default function FilesPage() {
+                 </div>
+             ) : null}
+ 
+-            <div ref={scrollRef} className="app-scroll-y flex-1 min-h-0">
++            <div
++                ref={scrollRef}
++                data-hapi-session-files-scroll="true"
++                className="app-scroll-y flex-1 min-h-0"
++            >
+                 <div className="mx-auto w-full max-w-content">
+                     {showGitErrorBanner && activeTab === 'changes' ? (
+                         <div className="border-b border-[var(--app-divider)] bg-amber-500/10 px-3 py-2 text-xs text-[var(--app-hint)]">

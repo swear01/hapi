@@ -10,6 +10,12 @@ const getSqliteStorageUsage = vi.fn().mockResolvedValue({
     walBytes: 2,
     shmBytes: 3,
     totalBytes: 6,
+    pageSize: 4096,
+    pageCount: 1,
+    freelistBytes: 0,
+    usedBytes: 1,
+    tables: [],
+    breakdownApproximate: false,
 })
 
 vi.mock('@/lib/app-context', () => ({
@@ -37,7 +43,7 @@ describe('SettingsStoragePage', () => {
         })
 
         expect(screen.queryByRole('heading', { name: /Exact sizes/i })).not.toBeInTheDocument()
-        expect(screen.getByTestId('storage-pie-legend-database')).toBeInTheDocument()
+        expect(screen.getByTestId('storage-pie-legend-used')).toBeInTheDocument()
         expect(screen.getByTestId('storage-pie-total')).toBeInTheDocument()
         expect(screen.getByTestId('storage-pie-path')).toHaveTextContent('C:\\hapi\\hapi.db')
     })

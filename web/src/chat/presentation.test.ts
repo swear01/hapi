@@ -107,6 +107,22 @@ describe('getEventPresentation — api-error', () => {
     })
 })
 
+describe('getEventPresentation — modelError', () => {
+    it('renders a short kind label without rawSnippet JSON dump', () => {
+        const result = getEventPresentation({
+            type: 'modelError',
+            kind: 'quota_exhausted',
+            transient: true,
+            rawSnippet: 'Error: RetriableError: [resource_exhausted] Error',
+            priorAssistantClaimsDone: false
+        })
+
+        expect(result.icon).toBe('⚠️')
+        expect(result.text).toBe('Model error (quota_exhausted, transient)')
+        expect(result.text).not.toContain('RetriableError')
+    })
+})
+
 describe('getEventPresentation — limit-warning', () => {
     it('formats five_hour warning', () => {
         const result = getEventPresentation({
@@ -231,6 +247,27 @@ describe('getEventPresentation — thread goals', () => {
         })
 
         expect(result.text).toBe('Goal limited by budget · 4k / 5k')
+    })
+
+    it.each([
+        ['blocked', 'Goal blocked'],
+        ['usageLimited', 'Goal limited by usage']
+    ] as const)('formats %s goal status', (status, expected) => {
+        const result = getEventPresentation({
+            type: 'thread-goal-updated',
+            goal: {
+                threadId: 'thread-1',
+                objective: 'ship goal support',
+                status,
+                tokenBudget: null,
+                tokensUsed: 0,
+                timeUsedSeconds: 0,
+                createdAt: 1,
+                updatedAt: 2
+            }
+        })
+
+        expect(result.text).toBe(expected)
     })
 
     it('formats goal clear events', () => {

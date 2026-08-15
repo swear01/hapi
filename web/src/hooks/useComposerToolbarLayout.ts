@@ -4,6 +4,8 @@ export const COMPOSER_TOOLBAR_ITEM_IDS = [
     'attachment',
     'settings',
     'expand',
+    'model',
+    'effort',
     'piModel',
     'piThinking',
     'terminal',

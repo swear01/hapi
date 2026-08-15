@@ -1,0 +1,449 @@
+diff --git a/cli/src/codex/appServerTypes.ts b/cli/src/codex/appServerTypes.ts
+index 6615b6624..27cbfe975 100644
+--- a/cli/src/codex/appServerTypes.ts
++++ b/cli/src/codex/appServerTypes.ts
+@@ -303,7 +303,13 @@ export interface ThreadCompactStartResponse {
+     [key: string]: unknown;
+ }
+ 
+-export type ThreadGoalStatus = 'active' | 'paused' | 'budgetLimited' | 'complete';
++export type ThreadGoalStatus =
++    | 'active'
++    | 'paused'
++    | 'budgetLimited'
++    | 'usageLimited'
++    | 'blocked'
++    | 'complete';
+ 
+ export interface ThreadGoal {
+     threadId: string;
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index 51017f63e..7d325e8bb 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -1571,7 +1571,7 @@ describe('codexRemoteLauncher', () => {
+         });
+     });
+ 
+-    it('sets a Codex goal without starting a normal turn', async () => {
++    it('sets a Codex goal without starting a duplicate client turn', async () => {
+         const { session, sessionEvents, codexMessages, foundSessionIds } = createSessionStub(['/goal improve benchmark coverage']);
+ 
+         const exitReason = await codexRemoteLauncher(session as never);
+@@ -1643,6 +1643,70 @@ describe('codexRemoteLauncher', () => {
+         ]));
+     });
+ 
++    it('does not start client turns for goal commands', async () => {
++        const { session } = createSessionStub([
++            '/goal improve benchmark coverage',
++            '/goal',
++            '/goal pause',
++            '/goal resume',
++            '/goal clear'
++        ], createMode(), true);
++
++        await codexRemoteLauncher(session as never);
++
++        expect(harness.startTurnParams).toHaveLength(0);
++    });
++
++    it('tracks externally started turns used by app-server goals', async () => {
++        const { session, thinkingChanges } = createSessionStub(['/goal improve benchmark coverage']);
++
++        const running = codexRemoteLauncher(session as never);
++        await vi.waitFor(() => {
++            expect(harness.goalSetCalls).toHaveLength(1);
++        });
++
++        harness.dispatchNotification?.('turn/started', {
++            threadId: 'thread-1',
++            turn: { id: 'goal-turn-1' }
++        });
++        await vi.waitFor(() => {
++            expect(session.thinking).toBe(true);
++        });
++
++        harness.dispatchNotification?.('turn/completed', {
++            threadId: 'thread-1',
++            turn: { id: 'goal-turn-1', status: 'completed' }
++        });
++        await vi.waitFor(() => {
++            expect(session.thinking).toBe(false);
++        });
++
++        expect(thinkingChanges).toEqual(expect.arrayContaining([true, false]));
++        expect(await running).toBe('exit');
++    });
++
++    it('formats usage-limited goal status', async () => {
++        harness.goal = {
++            threadId: 'thread-1',
++            objective: 'improve benchmark coverage',
++            status: 'usageLimited',
++            tokenBudget: null,
++            tokensUsed: 10,
++            timeUsedSeconds: 1,
++            createdAt: 1,
++            updatedAt: 2
++        };
++        const { session, sessionEvents } = createSessionStub(['/goal']);
++
++        await codexRemoteLauncher(session as never);
++
++        expect(harness.startTurnParams).toHaveLength(0);
++        expect(sessionEvents).toContainEqual({
++            type: 'message',
++            message: 'Goal limited by usage · 10 tokens'
++        });
++    });
++
+     it('does not emit ready when a goal command interrupts an active turn', async () => {
+         harness.suppressTurnCompletion = true;
+         harness.emitTurnAbortedOnInterrupt = true;
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index 7636b7e03..2e1450447 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -187,6 +187,10 @@ function formatGoalStatus(status: unknown): string {
+             return 'paused';
+         case 'budgetLimited':
+             return 'limited by budget';
++        case 'usageLimited':
++            return 'limited by usage';
++        case 'blocked':
++            return 'blocked';
+         case 'complete':
+             return 'complete';
+         default:
+diff --git a/cli/src/codex/utils/appServerConfig.test.ts b/cli/src/codex/utils/appServerConfig.test.ts
+index af2b25f52..a2f794e7f 100644
+--- a/cli/src/codex/utils/appServerConfig.test.ts
++++ b/cli/src/codex/utils/appServerConfig.test.ts
+@@ -15,6 +15,29 @@ describe('appServerConfig', () => {
+         return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}`;
+     };
+ 
++    it('preserves Codex built-in base instructions by omitting the default override', () => {
++        const params = buildThreadStartParams({
++            cwd: '/workspace/project',
++            mode: { permissionMode: 'default', collaborationMode: 'default' },
++            mcpServers
++        });
++
++        expect(params).not.toHaveProperty('baseInstructions');
++        expect(params.developerInstructions).toBe(codexSystemPrompt);
++    });
++
++    it('keeps an explicit base instruction override separate from HAPI developer instructions', () => {
++        const params = buildThreadStartParams({
++            cwd: '/workspace/project',
++            mode: { permissionMode: 'default', collaborationMode: 'default' },
++            mcpServers,
++            baseInstructions: 'Custom base instructions.'
++        });
++
++        expect(params.baseInstructions).toBe('Custom base instructions.');
++        expect(params.developerInstructions).toBe(codexSystemPrompt);
++    });
++
+     it('applies CLI overrides when permission mode is default', () => {
+         const params = buildThreadStartParams({
+             cwd: '/workspace/project',
+@@ -26,7 +49,7 @@ describe('appServerConfig', () => {
+         expect(params.cwd).toBe('/workspace/project');
+         expect(params.sandbox).toBe('danger-full-access');
+         expect(params.approvalPolicy).toBe('never');
+-        expect(params.baseInstructions).toBe(codexSystemPrompt);
++        expect(params.baseInstructions).toBeUndefined();
+         expect(params.developerInstructions).toBe(codexSystemPrompt);
+         expect(params.config).toEqual({
+             'mcp_servers.hapi': {
+@@ -129,7 +152,7 @@ describe('appServerConfig', () => {
+         });
+     });
+ 
+-    it('concatenates custom developer instructions after base instructions', () => {
++    it('concatenates custom developer instructions after HAPI instructions without overriding base instructions', () => {
+         const params = buildThreadStartParams({
+             cwd: '/workspace/project',
+             mode: { permissionMode: 'default', collaborationMode: 'default' },
+@@ -137,7 +160,7 @@ describe('appServerConfig', () => {
+             developerInstructions: 'Only respond in Chinese.'
+         });
+ 
+-        expect(params.baseInstructions).toBe(codexSystemPrompt);
++        expect(params.baseInstructions).toBeUndefined();
+         expect(params.developerInstructions).toBe(`${codexSystemPrompt}\n\nOnly respond in Chinese.`);
+         expect(params.config).toEqual({
+             'mcp_servers.hapi': {
+diff --git a/cli/src/codex/utils/appServerConfig.ts b/cli/src/codex/utils/appServerConfig.ts
+index 083be9820..c87bc9cb3 100644
+--- a/cli/src/codex/utils/appServerConfig.ts
++++ b/cli/src/codex/utils/appServerConfig.ts
+@@ -114,11 +114,12 @@ function buildMcpServerConfig(mcpServers: McpServersConfig): Record<string, unkn
+ function resolveInstructions(args: {
+     baseInstructions?: string;
+     developerInstructions?: string;
+-}): { baseInstructions: string; developerInstructions: string } {
+-    const baseInstructions = args.baseInstructions ?? getCodexSystemPrompt();
++}): { baseInstructions: string | undefined; developerInstructions: string } {
++    const baseInstructions = args.baseInstructions;
++    const hapiDeveloperInstructions = getCodexSystemPrompt();
+     const developerInstructions = args.developerInstructions
+-        ? `${baseInstructions}\n\n${args.developerInstructions}`
+-        : baseInstructions;
++        ? `${hapiDeveloperInstructions}\n\n${args.developerInstructions}`
++        : hapiDeveloperInstructions;
+     return {
+         baseInstructions,
+         developerInstructions
+@@ -218,7 +219,7 @@ export function buildThreadStartParams(args: {
+         cwd: args.cwd,
+         approvalPolicy: resolvedApprovalPolicy,
+         sandbox: resolvedSandbox,
+-        baseInstructions,
++        ...(baseInstructions !== undefined ? { baseInstructions } : {}),
+         developerInstructions: resolvedDeveloperInstructions,
+         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
+     };
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index 8b2b31eb1..6d1788196 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -74,10 +74,16 @@ describe('cli session handlers', () => {
+             }
+         })
+ 
+-        socket.trigger('message', {
+-            sid: session.id,
+-            message: redundantGoalStatusContent('Goal active · 8016 tokens')
+-        })
++        for (const message of [
++            'Goal active · 8016 tokens',
++            'Goal blocked',
++            'Goal limited by usage · 8016 tokens'
++        ]) {
++            socket.trigger('message', {
++                sid: session.id,
++                message: redundantGoalStatusContent(message)
++            })
++        }
+ 
+         expect(store.messages.getMessages(session.id)).toHaveLength(0)
+         expect(socket.roomEvents).toHaveLength(0)
+diff --git a/hub/src/sync/messageService.test.ts b/hub/src/sync/messageService.test.ts
+index ba313e901..8d76c9ec9 100644
+--- a/hub/src/sync/messageService.test.ts
++++ b/hub/src/sync/messageService.test.ts
+@@ -110,6 +110,8 @@ describe('MessageService goal status filtering', () => {
+ 
+         store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: '/goal ship it' } })
+         store.messages.addMessage(session.id, redundantGoalStatusContent('Goal active · 8016 tokens'))
++        store.messages.addMessage(session.id, redundantGoalStatusContent('Goal blocked'))
++        store.messages.addMessage(session.id, redundantGoalStatusContent('Goal limited by usage · 8016 tokens'))
+         store.messages.addMessage(session.id, redundantGoalStatusContent('No goal to clear'))
+ 
+         const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
+diff --git a/shared/src/messages.test.ts b/shared/src/messages.test.ts
+index 7533feac3..1c62cf875 100644
+--- a/shared/src/messages.test.ts
++++ b/shared/src/messages.test.ts
+@@ -344,12 +344,16 @@ describe('extractNotifySummary + extractAssistantPlainText (integration)', () =>
+ })
+ 
+ describe('isRedundantGoalStatusEventContent (regression-guard for messages.ts edits)', () => {
+-    test('still detects goal-active events', () => {
++    test.each([
++        'Goal active · build the thing',
++        'Goal blocked',
++        'Goal limited by usage · 8016 tokens'
++    ])('detects redundant goal status event: %s', (message) => {
+         const value = {
+             role: 'agent',
+             content: {
+                 type: 'event',
+-                data: { type: 'message', message: 'Goal active · build the thing' }
++                data: { type: 'message', message }
+             }
+         }
+         expect(isRedundantGoalStatusEventContent(value)).toBe(true)
+diff --git a/shared/src/messages.ts b/shared/src/messages.ts
+index cb231b064..b3f4cd18d 100644
+--- a/shared/src/messages.ts
++++ b/shared/src/messages.ts
+@@ -64,7 +64,7 @@ export function isRedundantGoalStatusMessageText(value: unknown): boolean {
+     if (typeof value !== 'string') return false
+     const message = value.trim()
+     return message === 'Goal cleared'
+-        || /^Goal (active|paused|complete|limited by budget)(?:$|\s+·\s+)/.test(message)
++        || /^Goal (active|paused|complete|blocked|limited by (?:budget|usage))(?:$|\s+·\s+)/.test(message)
+ }
+ 
+ export function isRedundantGoalStatusEventContent(value: unknown): boolean {
+diff --git a/shared/src/schemas.goal.test.ts b/shared/src/schemas.goal.test.ts
+new file mode 100644
+index 000000000..f929a2e6f
+--- /dev/null
++++ b/shared/src/schemas.goal.test.ts
+@@ -0,0 +1,15 @@
++import { describe, expect, it } from 'vitest'
++import { ThreadGoalSchema } from './schemas'
++
++describe('ThreadGoalSchema upstream status compatibility', () => {
++    it.each(['blocked', 'usageLimited'] as const)('accepts %s goal updates', (status) => {
++        const result = ThreadGoalSchema.safeParse({
++            threadId: 'thread-1',
++            objective: 'Finish the long-running task',
++            status
++        })
++
++        expect(result.success).toBe(true)
++        expect(result.data?.status).toBe(status)
++    })
++})
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 1a3d38d2e..d44ddd929 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -254,7 +254,14 @@ export const TeamStateSchema = z.object({
+ 
+ export type TeamState = z.infer<typeof TeamStateSchema>
+ 
+-export const ThreadGoalStatusSchema = z.enum(['active', 'paused', 'budgetLimited', 'complete'])
++export const ThreadGoalStatusSchema = z.enum([
++    'active',
++    'paused',
++    'budgetLimited',
++    'complete',
++    'blocked',
++    'usageLimited'
++])
+ export type ThreadGoalStatus = z.infer<typeof ThreadGoalStatusSchema>
+ 
+ export const ThreadGoalSchema = z.object({
+diff --git a/web/src/chat/normalizeAgent.test.ts b/web/src/chat/normalizeAgent.test.ts
+index 5bb00d1bd..d11f4fecb 100644
+--- a/web/src/chat/normalizeAgent.test.ts
++++ b/web/src/chat/normalizeAgent.test.ts
+@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest'
+ import { normalizeAgentRecord } from '@/chat/normalizeAgent'
+ 
+ describe('normalizeAgentRecord — agentTimestamp exposure', () => {
++    it.each(['blocked', 'usageLimited'] as const)('preserves %s Codex goal status', (status) => {
++        const normalized = normalizeAgentRecord('goal-row', null, 1, {
++            type: 'codex',
++            data: {
++                type: 'thread_goal_updated',
++                thread_id: 'thread-1',
++                goal: {
++                    threadId: 'thread-1',
++                    objective: 'finish the task',
++                    status
++                }
++            }
++        })
++
++        expect(normalized).toMatchObject({
++            role: 'event',
++            content: {
++                type: 'thread-goal-updated',
++                goal: { status }
++            }
++        })
++    })
++
+     it('preserves a wire text message id as its snapshot stream id', () => {
+         const normalized = normalizeAgentRecord('message-row-1', null, 1, {
+             type: 'codex',
+diff --git a/web/src/chat/normalizeAgent.ts b/web/src/chat/normalizeAgent.ts
+index d65afba4e..3dbdb1f6c 100644
+--- a/web/src/chat/normalizeAgent.ts
++++ b/web/src/chat/normalizeAgent.ts
+@@ -40,7 +40,14 @@ function normalizeThreadGoal(value: unknown) {
+     const objective = asString(value.objective)
+     const status = asString(value.status)
+     if (!threadId || !objective || !status) return null
+-    if (status !== 'active' && status !== 'paused' && status !== 'budgetLimited' && status !== 'complete') return null
++    if (
++        status !== 'active'
++        && status !== 'paused'
++        && status !== 'budgetLimited'
++        && status !== 'usageLimited'
++        && status !== 'blocked'
++        && status !== 'complete'
++    ) return null
+     return {
+         threadId,
+         objective,
+diff --git a/web/src/chat/presentation.test.ts b/web/src/chat/presentation.test.ts
+index b78d1d0e2..4fc79504e 100644
+--- a/web/src/chat/presentation.test.ts
++++ b/web/src/chat/presentation.test.ts
+@@ -233,6 +233,27 @@ describe('getEventPresentation — thread goals', () => {
+         expect(result.text).toBe('Goal limited by budget · 4k / 5k')
+     })
+ 
++    it.each([
++        ['blocked', 'Goal blocked'],
++        ['usageLimited', 'Goal limited by usage']
++    ] as const)('formats %s goal status', (status, expected) => {
++        const result = getEventPresentation({
++            type: 'thread-goal-updated',
++            goal: {
++                threadId: 'thread-1',
++                objective: 'ship goal support',
++                status,
++                tokenBudget: null,
++                tokensUsed: 0,
++                timeUsedSeconds: 0,
++                createdAt: 1,
++                updatedAt: 2
++            }
++        })
++
++        expect(result.text).toBe(expected)
++    })
++
+     it('formats goal clear events', () => {
+         const result = getEventPresentation({ type: 'thread-goal-cleared', threadId: 'thread-1' })
+ 
+diff --git a/web/src/chat/presentation.ts b/web/src/chat/presentation.ts
+index 86f92b956..dbb23e670 100644
+--- a/web/src/chat/presentation.ts
++++ b/web/src/chat/presentation.ts
+@@ -118,6 +118,8 @@ function formatGoalStatus(status: string): string {
+     if (status === 'active') return 'active'
+     if (status === 'paused') return 'paused'
+     if (status === 'budgetLimited') return 'limited by budget'
++    if (status === 'usageLimited') return 'limited by usage'
++    if (status === 'blocked') return 'blocked'
+     if (status === 'complete') return 'complete'
+     return status
+ }
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index de9c307d9..d132334bd 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -1124,6 +1124,8 @@ export default {
+   'session.status.goal.active': 'Active',
+   'session.status.goal.paused': 'Paused',
+   'session.status.goal.budgetLimited': 'Limited',
++  'session.status.goal.usageLimited': 'Usage limited',
++  'session.status.goal.blocked': 'Blocked',
+   'session.status.goal.complete': 'Complete',
+   'session.status.subagent.running': 'Running',
+   'session.status.subagent.waiting': 'Waiting',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 8642c15a8..bd33aee7d 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -1123,6 +1123,8 @@ export default {
+   'session.status.goal.active': '进行中',
+   'session.status.goal.paused': '已暂停',
+   'session.status.goal.budgetLimited': '已受限',
++  'session.status.goal.usageLimited': '用量受限',
++  'session.status.goal.blocked': '已阻塞',
+   'session.status.goal.complete': '已完成',
+   'session.status.subagent.running': '运行中',
+   'session.status.subagent.waiting': '等待中',

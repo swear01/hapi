@@ -1,12 +1,29 @@
 import { logger } from "@/ui/logger";
 
-interface QueueItem<T> {
+export type QueueItemInternal =
+    | { kind: 'model-error-bridge'; eventId: string };
+
+export interface QueueItem<T> {
     message: string;
     mode: T;
     modeHash: string;
     localId?: string;
     isolate?: boolean; // If true, this message must be processed alone
+    /** Queue-owned provenance — never inferred from caller localId. */
+    internal?: QueueItemInternal;
 }
+
+export type CollectedQueueItem = {
+    message: string
+    localId?: string
+    internal?: QueueItemInternal
+};
+
+export type QueueReservation<T> = {
+    item: QueueItem<T>;
+    index: number;
+    state: 'reserved' | 'dispatching' | 'cancelled';
+};
 
 /**
  * A mode-aware message queue that stores messages with their modes.
@@ -19,6 +36,7 @@ export class MessageQueue2<T> {
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
     onBatchConsumed: ((localIds: string[]) => void) | null = null;
     modeHasher: (mode: T) => string;
+    private readonly reservations = new Map<string, QueueReservation<T>>();
 
     constructor(
         modeHasher: (mode: T) => string,
@@ -226,7 +244,12 @@ export class MessageQueue2<T> {
      * that failed transiently and must retry without batching against sibling
      * prompts).
      */
-    unshiftIsolated(message: string, mode: T, localId?: string): void {
+    unshiftIsolated(
+        message: string,
+        mode: T,
+        localId?: string,
+        internal?: QueueItemInternal
+    ): void {
         if (this.closed) {
             throw new Error('Cannot unshift to closed queue');
         }
@@ -239,7 +262,8 @@ export class MessageQueue2<T> {
             mode,
             modeHash,
             localId,
-            isolate: true
+            isolate: true,
+            internal
         });
 
         if (this.onMessageHandler) {
@@ -255,6 +279,23 @@ export class MessageQueue2<T> {
         logger.debug(`[MessageQueue2] unshiftIsolated() completed. Queue size: ${this.queue.length}`);
     }
 
+    /** True when a non-bridge user/API turn is already waiting. */
+    hasPendingNonBridgeTurn(): boolean {
+        return this.queue.some((item) => item.internal?.kind !== 'model-error-bridge');
+    }
+
+    /** Drop a pending model-error bridge by its eventId (queue-owned provenance). */
+    cancelModelErrorBridge(eventId: string): boolean {
+        if (!eventId) return false;
+        const idx = this.queue.findIndex(
+            (item) => item.internal?.kind === 'model-error-bridge'
+                && item.internal.eventId === eventId
+        );
+        if (idx === -1) return false;
+        this.queue.splice(idx, 1);
+        return true;
+    }
+
     /**
      * Remove the first queued message that matches the given localId.
      * Returns true if a message was removed, false if not found.
@@ -264,9 +305,96 @@ export class MessageQueue2<T> {
     cancelByLocalId(localId: string): boolean {
         if (!localId) return false;
         const idx = this.queue.findIndex(item => item.localId === localId);
-        if (idx === -1) return false;
-        this.queue.splice(idx, 1);
+        if (idx !== -1) {
+            this.queue.splice(idx, 1);
+            return true;
+        }
+        const reservation = this.reservations.get(localId);
+        if (!reservation) return false;
+        if (reservation.state === 'dispatching') return false;
+        reservation.state = 'cancelled';
         return true;
+    }
+
+    /**
+     * Look up a queued item by localId without removing it.
+     */
+    peekByLocalId(localId: string): QueueItem<T> | null {
+        if (!localId) return null;
+        return this.queue.find(item => item.localId === localId) ?? null;
+    }
+
+    /**
+     * Remove and return a queued item by localId (with its original index),
+     * or null if not found. Pair with {@link restoreTakenItem} when an async
+     * operation may need to put the item back in order.
+     */
+    takeByLocalId(localId: string): QueueReservation<T> | null {
+        if (!localId) return null;
+        const idx = this.queue.findIndex(item => item.localId === localId);
+        if (idx === -1) return null;
+        const [item] = this.queue.splice(idx, 1);
+        if (!item) return null;
+        const reservation: QueueReservation<T> = { item, index: idx, state: 'reserved' };
+        if (item.localId) {
+            this.reservations.set(item.localId, reservation);
+        }
+        return reservation;
+    }
+
+    /**
+     * Re-insert an item previously removed by {@link takeByLocalId} at its
+     * original index (clamped if the queue shrank).
+     */
+    restoreReservation(reservation: QueueReservation<T>): boolean {
+        if (reservation.state === 'cancelled') {
+            return false;
+        }
+        if (this.closed) {
+            throw new Error('Cannot restore into closed queue');
+        }
+        if (reservation.item.localId) {
+            if (this.reservations.get(reservation.item.localId) !== reservation) {
+                return false;
+            }
+            this.reservations.delete(reservation.item.localId);
+        }
+        const idx = Math.max(0, Math.min(reservation.index, this.queue.length));
+        this.queue.splice(idx, 0, reservation.item);
+        if (this.waiter) {
+            const waiter = this.waiter;
+            this.waiter = null;
+            waiter(true);
+        }
+        return true;
+    }
+
+    commitReservation(reservation: QueueReservation<T>): boolean {
+        if (reservation.state === 'cancelled') {
+            return false;
+        }
+        if (reservation.item.localId) {
+            if (this.reservations.get(reservation.item.localId) !== reservation) {
+                return false;
+            }
+            this.reservations.delete(reservation.item.localId);
+        }
+        return true;
+    }
+
+    beginReservationDispatch(reservation: QueueReservation<T>): boolean {
+        if (reservation.state !== 'reserved') {
+            return false;
+        }
+        if (reservation.item.localId && this.reservations.get(reservation.item.localId) !== reservation) {
+            return false;
+        }
+        reservation.state = 'dispatching';
+        return true;
+    }
+
+    restoreTakenItem(taken: QueueReservation<T>): void {
+        this.restoreReservation(taken);
     }
 
     /**
@@ -275,6 +403,10 @@ export class MessageQueue2<T> {
     reset(): void {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
+        for (const reservation of this.reservations.values()) {
+            reservation.state = 'cancelled';
+        }
+        this.reservations.clear();
         this.closed = false;
 
         // Clear waiter without calling it since we're not closing
@@ -298,6 +430,10 @@ export class MessageQueue2<T> {
     close(): void {
         logger.debug(`[MessageQueue2] close() called`);
         this.closed = true;
+        for (const reservation of this.reservations.values()) {
+            reservation.state = 'cancelled';
+        }
+        this.reservations.clear();
 
         // Notify any waiting caller
         if (this.waiter) {
@@ -325,7 +461,7 @@ export class MessageQueue2<T> {
      * Wait for messages and return all messages with the same mode as a single string
      * Returns { message: string, mode: T } or null if aborted/closed
      */
-    async waitForMessagesAndGetAsString(abortSignal?: AbortSignal): Promise<{ message: string, mode: T, isolate: boolean, hash: string, items: Array<{ message: string, localId?: string }> } | null> {
+    async waitForMessagesAndGetAsString(abortSignal?: AbortSignal): Promise<{ message: string, mode: T, isolate: boolean, hash: string, items: CollectedQueueItem[] } | null> {
         // If we have messages, return them immediately
         if (this.queue.length > 0) {
             return this.collectBatch();
@@ -349,7 +485,7 @@ export class MessageQueue2<T> {
     /**
      * Collect a batch of messages with the same mode, respecting isolation requirements
      */
-    private collectBatch(): { message: string, mode: T, hash: string, isolate: boolean, items: Array<{ message: string, localId?: string }> } | null {
+    private collectBatch(): { message: string, mode: T, hash: string, isolate: boolean, items: CollectedQueueItem[] } | null {
         if (this.queue.length === 0) {
             return null;
         }
@@ -361,7 +497,7 @@ export class MessageQueue2<T> {
         // `message` string below so callers that need to requeue individual
         // messages (e.g. restoring a failed batch with each item's own
         // localId intact) don't have to re-split an already-joined string.
-        const items: Array<{ message: string, localId?: string }> = [];
+        const items: CollectedQueueItem[] = [];
         let mode = firstItem.mode;
         let isolate = firstItem.isolate ?? false;
         const targetModeHash = firstItem.modeHash;
@@ -370,7 +506,7 @@ export class MessageQueue2<T> {
         if (firstItem.isolate) {
             const item = this.queue.shift()!;
             sameModeMessages.push(item.message);
-            items.push({ message: item.message, localId: item.localId });
+            items.push({ message: item.message, localId: item.localId, internal: item.internal });
             if (item.localId) consumedLocalIds.push(item.localId);
             logger.debug(`[MessageQueue2] Collected isolated message with mode hash: ${targetModeHash}`);
         } else {
@@ -380,7 +516,7 @@ export class MessageQueue2<T> {
                 !this.queue[0].isolate) {
                 const item = this.queue.shift()!;
                 sameModeMessages.push(item.message);
-                items.push({ message: item.message, localId: item.localId });
+                items.push({ message: item.message, localId: item.localId, internal: item.internal });
                 if (item.localId) consumedLocalIds.push(item.localId);
             }
             logger.debug(`[MessageQueue2] Collected batch of ${sameModeMessages.length} messages with mode hash: ${targetModeHash}`);

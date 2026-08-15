@@ -15,6 +15,21 @@ describe('ApiClient error mapping', () => {
         globalThis.fetch = originalFetch
     })
 
+    it('reads and updates namespace-scoped locale settings', async () => {
+        fetchMock
+            .mockResolvedValueOnce(new Response(JSON.stringify({ locale: 'zh-CN' }), { status: 200 }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ locale: 'en' }), { status: 200 }))
+
+        const api = new ApiClient('test-token')
+        await expect(api.getNamespaceSettings()).resolves.toEqual({ locale: 'zh-CN' })
+        await expect(api.updateNamespaceSettings({ locale: 'en' })).resolves.toEqual({ locale: 'en' })
+        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/namespace-settings')
+        expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+            method: 'PUT',
+            body: JSON.stringify({ locale: 'en' })
+        })
+    })
+
     it('prefers the stable `code` field over the human-readable `error` message in ApiError.code', async () => {
         // Match the shape /sessions/:id/reopen actually returns on a 503.
         fetchMock.mockResolvedValueOnce(
@@ -141,6 +156,37 @@ describe('ApiClient error mapping', () => {
         expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
             method: 'POST',
             body: JSON.stringify({ sessionIds: ['pi-1'], cwd: '/tmp/project', machineId: 'machine-1' })
+        })
+    })
+
+    it('lists and imports Claude sessions through the selected machine', async () => {
+        fetchMock
+            .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, sessions: [], machineId: 'machine-1' }), { status: 200 }))
+            .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, results: [], machineId: 'machine-1' }), { status: 200 }))
+        const api = new ApiClient('test-token')
+
+        await api.getClaudeSessions('/tmp/project', 'machine-1')
+        await api.importClaudeSessions({
+            sessionIds: ['claude-1'],
+            cwd: '/tmp/project',
+            machineId: 'machine-1',
+            model: 'claude-sonnet-4-5',
+            effort: 'high',
+            permissionMode: 'bypassPermissions'
+        })
+
+        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/claude/sessions?cwd=%2Ftmp%2Fproject&machineId=machine-1')
+        expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/claude/import-sessions')
+        expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+            method: 'POST',
+            body: JSON.stringify({
+                sessionIds: ['claude-1'],
+                cwd: '/tmp/project',
+                machineId: 'machine-1',
+                model: 'claude-sonnet-4-5',
+                effort: 'high',
+                permissionMode: 'bypassPermissions'
+            })
         })
     })
 

@@ -1,0 +1,20 @@
+patch	state	upstream_ref	source_commits
+# v0.27.3.3 — UFR rebuild from upstream/main febbf8ff5 (2 commits past v0.27.3.1 base fea42212e: official #1529, #1545)
+# Added this cycle: fork PR #5 (SSE mobile suspend/resume recovery) — content merged into fork main as 5161be5c9 and copied into this release.
+# Dropped this cycle: #1091 (managed agent API profiles — temporary exclusion per operator ruling 2026-08-13; recorded drop in ledger, existing overlay retained pending the session model-picker grouping fix); #1320 (permanent exclusion).
+# Upstream-merged since last release: #1529 (official version supersedes carried patch).
+# Deferred: #1541 #1543 #1546 #1547 #1548 #1552 #1557 #1560 #1563 (new ready+clean PRs; hotfix-scoped release, carry next cycle); all PRs with open bot findings or non-ready status.
+05-pr-1091.patch	drop	pr-1091	-
+27-pr-1529.patch	drop	pr-1529	-
+25-pr-1530.patch	carry	pr-1530	5eccc0ab7a81287a955b7bf084bfb8f87e03cf7f
+17-pr-1447.patch	carry	pr-1447	7f061b438f502531ccc74fabe99bf43f27ff173c
+07-pr-1158.patch	carry	pr-1158	aa2cd23a8e45be854038aceb5d69599b2b0cb343
+09-pr-906.patch	carry	pr-906	-
+12-pr-1424.patch	carry	pr-1424	-
+05-pr-1422.patch	carry	pr-1422	-
+08-pr-1414.patch	carry	pr-1414	-
+03-pr-847.patch	carry	pr-847	-
+02-pr-987.patch	carry	pr-987	-
+04-pr-945.patch	carry	pr-945	-
+fork-pr-5	carry	pr-1562	5161be5c93dde86f045fc37b5ec37be5184f9ab9
+overlay	regenerate	-	-

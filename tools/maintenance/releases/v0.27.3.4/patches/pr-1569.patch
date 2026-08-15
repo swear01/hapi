@@ -1,0 +1,208 @@
+diff --git a/web/src/components/SessionActionMenu.test.tsx b/web/src/components/SessionActionMenu.test.tsx
+index f89a4c596..9afb661e6 100644
+--- a/web/src/components/SessionActionMenu.test.tsx
++++ b/web/src/components/SessionActionMenu.test.tsx
+@@ -74,6 +74,67 @@ describe('SessionActionMenu - Pin action', () => {
+     })
+ })
+ 
++describe('SessionActionMenu - positioning', () => {
++    it('centers the menu on the supplied anchor', () => {
++        const originalInnerWidth = window.innerWidth
++        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
++        const menuRect = {
++            bottom: 320,
++            height: 320,
++            left: 0,
++            right: 240,
++            top: 0,
++            width: 240,
++            x: 0,
++            y: 0,
++            toJSON: () => ({})
++        } as DOMRect
++        const getBoundingClientRect = vi
++            .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
++            .mockReturnValue(menuRect)
++
++        try {
++            renderMenu({ anchorPoint: { x: 160, y: 100 } })
++
++            const menu = screen.getByRole('menu').parentElement
++            expect(menu).toHaveClass('w-max')
++            expect(menu).toHaveStyle({ left: '40px' })
++            expect(screen.getAllByRole('menuitem')[0]).toHaveClass('pl-3', 'pr-[42px]')
++        } finally {
++            getBoundingClientRect.mockRestore()
++            Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
++        }
++    })
++
++    it('clamps the trigger-centered menu at the viewport edge', () => {
++        const originalInnerWidth = window.innerWidth
++        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
++        const menuRect = {
++            bottom: 320,
++            height: 320,
++            left: 0,
++            right: 240,
++            top: 0,
++            width: 240,
++            x: 0,
++            y: 0,
++            toJSON: () => ({})
++        } as DOMRect
++        const getBoundingClientRect = vi
++            .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
++            .mockReturnValue(menuRect)
++
++        try {
++            renderMenu({ anchorPoint: { x: 100, y: 100 } })
++
++            expect(screen.getByRole('menu').parentElement).toHaveStyle({ left: '8px' })
++        } finally {
++            getBoundingClientRect.mockRestore()
++            Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalInnerWidth })
++        }
++    })
++})
++
+ describe('SessionActionMenu - Reopen action', () => {
+     it('renders the Reopen item on inactive sessions when onReopen is provided', () => {
+         renderMenu({ sessionActive: false })
+@@ -150,10 +211,10 @@ describe('SessionActionMenu - Reopen action', () => {
+ })
+ 
+ describe('SessionActionMenu - Codex sync action', () => {
+-    it('renders Sync from Codex only when a handler is provided', () => {
++    it('renders Sync Codex only when a handler is provided', () => {
+         const { rerender } = renderMenu({ onSyncCodex: undefined })
+ 
+-        expect(screen.queryByRole('menuitem', { name: /Sync from Codex/ })).toBeNull()
++        expect(screen.queryByRole('menuitem', { name: /Sync Codex/ })).toBeNull()
+ 
+         rerender(
+             <I18nProvider>
+@@ -174,7 +235,7 @@ describe('SessionActionMenu - Codex sync action', () => {
+             </I18nProvider>
+         )
+ 
+-        expect(screen.getByRole('menuitem', { name: /Sync from Codex/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Sync Codex/ })).toBeInTheDocument()
+     })
+ 
+     it('fires onSyncCodex and closes the menu when clicked', () => {
+@@ -182,7 +243,7 @@ describe('SessionActionMenu - Codex sync action', () => {
+         const onClose = vi.fn()
+         renderMenu({ onSyncCodex, onClose })
+ 
+-        fireEvent.click(screen.getByRole('menuitem', { name: /Sync from Codex/ }))
++        fireEvent.click(screen.getByRole('menuitem', { name: /Sync Codex/ }))
+ 
+         expect(onSyncCodex).toHaveBeenCalledTimes(1)
+         expect(onClose).toHaveBeenCalledTimes(1)
+diff --git a/web/src/components/SessionActionMenu.tsx b/web/src/components/SessionActionMenu.tsx
+index 49ae99348..ca44e8e84 100644
+--- a/web/src/components/SessionActionMenu.tsx
++++ b/web/src/components/SessionActionMenu.tsx
+@@ -277,6 +277,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
+         const openAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow
+ 
+         let top = openAbove ? anchorPoint.y - menuRect.height - gap : anchorPoint.y + gap
++        // Keep the menu centered on the trigger, then clamp it only when it would leave the viewport.
+         let left = anchorPoint.x - menuRect.width / 2
+         const transformOrigin = openAbove ? 'bottom center' : 'top center'
+ 
+@@ -347,13 +348,15 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
+         }
+         : undefined
+ 
++    // The left text inset includes the icon and gap; mirror it on the right so
++    // the text-to-border distance is symmetric without counting the icon twice.
+     const baseItemClassName =
+-        'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
++        'flex w-full items-center gap-3 rounded-md py-2 pl-3 pr-[42px] text-left text-base transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
+ 
+     return (
+         <div
+             ref={menuRef}
+-            className="fixed z-50 min-w-[200px] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-lg animate-menu-pop"
++            className="fixed z-50 box-border w-max max-w-[calc(100vw-16px)] rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] p-1 shadow-lg animate-menu-pop"
+             style={menuStyle}
+         >
+             <div
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 78af37f80..dff13172c 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -273,6 +273,31 @@ describe('SessionHeader', () => {
+         }
+     })
+ 
++    it('anchors the action menu to the center of the More actions trigger', () => {
++        renderHeader(baseSession())
++
++        const moreButton = screen.getByTitle('More actions')
++        const getBoundingClientRect = vi.spyOn(moreButton, 'getBoundingClientRect').mockReturnValue({
++            bottom: 64,
++            height: 32,
++            left: 100,
++            right: 132,
++            top: 32,
++            width: 32,
++            x: 100,
++            y: 32,
++            toJSON: () => ({})
++        } as DOMRect)
++
++        try {
++            fireEvent.click(moreButton)
++
++            expect(screen.getByRole('menu').parentElement).toHaveStyle({ left: '116px' })
++        } finally {
++            getBoundingClientRect.mockRestore()
++        }
++    })
++
+     it('toggles pin state from the header action menu', async () => {
+         const setSessionPinMode = vi.fn().mockResolvedValue(undefined)
+         const api = {
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 140e7e0ce..a7149ab24 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -355,7 +355,7 @@ export function SessionHeader(props: {
+     const handleMenuToggle = () => {
+         if (!menuOpen && menuAnchorRef.current) {
+             const rect = menuAnchorRef.current.getBoundingClientRect()
+-            setMenuAnchorPoint({ x: rect.right, y: rect.bottom })
++            setMenuAnchorPoint({ x: rect.left + rect.width / 2, y: rect.bottom })
+         }
+         setMenuOpen((open) => !open)
+     }
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index de9c307d9..fdaed5e9c 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -235,7 +235,7 @@ export default {
+   'session.action.pinFailed': 'Could not update pin',
+   'sessions.pinnedSection': 'Pinned sessions',
+   'session.action.export': 'Export conversation',
+-  'session.action.syncCodex': 'Sync from Codex',
++  'session.action.syncCodex': 'Sync Codex',
+   'session.action.syncPi': 'Sync Pi history',
+   'session.action.archive': 'Archive',
+   'session.action.reopen': 'Reopen',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 8642c15a8..761bc4afe 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -235,7 +235,7 @@ export default {
+   'session.action.pinFailed': '无法更新置顶状态',
+   'sessions.pinnedSection': '置顶会话',
+   'session.action.export': '导出对话',
+-  'session.action.syncCodex': '从 Codex 同步',
++  'session.action.syncCodex': '同步 Codex',
+   'session.action.syncPi': '同步 Pi 历史',
+   'session.action.archive': '归档',
+   'session.action.reopen': '重新打开',

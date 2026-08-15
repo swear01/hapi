@@ -74,10 +74,16 @@ describe('cli session handlers', () => {
             }
         })
 
-        socket.trigger('message', {
-            sid: session.id,
-            message: redundantGoalStatusContent('Goal active · 8016 tokens')
-        })
+        for (const message of [
+            'Goal active · 8016 tokens',
+            'Goal blocked',
+            'Goal limited by usage · 8016 tokens'
+        ]) {
+            socket.trigger('message', {
+                sid: session.id,
+                message: redundantGoalStatusContent(message)
+            })
+        }
 
         expect(store.messages.getMessages(session.id)).toHaveLength(0)
         expect(socket.roomEvents).toHaveLength(0)
@@ -335,9 +341,15 @@ describe('cli session handlers', () => {
         expect(uuids).toEqual(['msg-1', 'msg-2'])
     })
 
-    it.each(['supersededBySessionId', 'opencodeClearOperation'] as const)(
+    it.each([
+        ['supersededBySessionId', 'foreign-session'],
+        ['opencodeClearOperation', { replacementSessionId: 'foreign-session', state: 'reserved', updatedAt: Date.now() }],
+        ['jobsAcceptedFromSessionIds', ['foreign-session']],
+        ['jobsTransferredToSessionId', 'foreign-session'],
+        ['jobKeyRedirects', { 'foreign-session/beets': 'beets.foreign' }],
+    ] as const)(
         'ignores a forged hub-owned %s addition from CLI metadata',
-        (field) => {
+        (field, forged) => {
             const store = new Store(':memory:')
             const session = store.sessions.getOrCreateSession('forged-clear-link', { path: '/tmp/project' }, null, 'default')
             const socket = new FakeSocket()
@@ -351,20 +363,22 @@ describe('cli session handlers', () => {
                 expectedVersion: session.metadataVersion,
                 metadata: {
                     path: '/tmp/project',
-                    [field]: field === 'supersededBySessionId'
-                        ? 'foreign-session'
-                        : { replacementSessionId: 'foreign-session', state: 'reserved', updatedAt: Date.now() }
+                    [field]: forged
                 }
             }, () => {})
             expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).not.toHaveProperty(field)
         }
     )
 
-    it('preserves existing hub-owned clear metadata across CLI metadata updates', () => {
+    it('preserves existing hub-owned clear and job-redirect metadata across CLI metadata updates', () => {
         const store = new Store(':memory:')
         const operation = { replacementSessionId: 'owned-target', state: 'completed', updatedAt: Date.now() }
         const session = store.sessions.getOrCreateSession('preserve-clear-link', {
-            supersededBySessionId: 'owned-target', opencodeClearOperation: operation
+            supersededBySessionId: 'owned-target',
+            opencodeClearOperation: operation,
+            jobsAcceptedFromSessionIds: ['old-session'],
+            jobsTransferredToSessionId: 'merge-target',
+            jobKeyRedirects: { 'old-session/beets': 'beets.oldsess1' },
         }, null, 'default')
         const socket = new FakeSocket()
         registerSessionHandlers(socket as unknown as CliSocketWithData, {
@@ -378,11 +392,19 @@ describe('cli session handlers', () => {
             metadata: {
                 lifecycleState: 'archived',
                 supersededBySessionId: 'forged-target',
-                opencodeClearOperation: { replacementSessionId: 'forged-target', state: 'reserved', updatedAt: 0 }
+                opencodeClearOperation: { replacementSessionId: 'forged-target', state: 'reserved', updatedAt: 0 },
+                jobsAcceptedFromSessionIds: ['forged-session'],
+                jobsTransferredToSessionId: 'forged-target',
+                jobKeyRedirects: { 'forged/beets': 'beets.forged' },
             }
         }, () => {})
         expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).toMatchObject({
-            supersededBySessionId: 'owned-target', opencodeClearOperation: operation, lifecycleState: 'archived'
+            supersededBySessionId: 'owned-target',
+            opencodeClearOperation: operation,
+            jobsAcceptedFromSessionIds: ['old-session'],
+            jobsTransferredToSessionId: 'merge-target',
+            jobKeyRedirects: { 'old-session/beets': 'beets.oldsess1' },
+            lifecycleState: 'archived',
         })
     })
 })

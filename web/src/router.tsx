@@ -13,6 +13,10 @@ import {
     useSearch,
 } from '@tanstack/react-router'
 import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
+import {
+    getSessionListSelectionNavigation,
+    PRESERVE_SESSION_SIDEBAR_SCROLL,
+} from '@/lib/sessionNavigation'
 import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
 import { SessionList } from '@/components/SessionList'
@@ -58,12 +62,15 @@ import TerminalPage from '@/routes/sessions/terminal'
 import SettingsLayout from '@/routes/settings/layout'
 import SettingsHubPage from '@/routes/settings'
 import SettingsGeneralPage from '@/routes/settings/general'
+import SettingsRunnerManagementPage from '@/routes/settings/runner-management'
 import SettingsDisplayPage from '@/routes/settings/display'
 import SettingsChatPage from '@/routes/settings/chat'
+import SettingsProvidersPage from '@/routes/settings/providers'
 import SettingsVoicePage from '@/routes/settings/voice'
 import SettingsVoiceVoicesPage from '@/routes/settings/voice-voices'
 import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
 import SettingsMachinesPage from '@/routes/settings/machines'
+import SettingsNotificationsPage from '@/routes/settings/notifications'
 import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import SettingsUsagePage from '@/routes/settings/usage'
@@ -215,7 +222,8 @@ function SessionsPage() {
             to: '/sessions/new',
             search: args.machineId
                 ? { directory: args.directory, machineId: args.machineId }
-                : { directory: args.directory }
+                : { directory: args.directory },
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
     }, [navigate])
 
@@ -236,11 +244,11 @@ function SessionsPage() {
                         key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
                         sessions={sessions}
                         selectedSessionId={selectedSessionId}
-                        onSelect={(sessionId) => navigate({
-                            to: '/sessions/$sessionId',
-                            params: { sessionId },
+                        onSelect={(sessionId) => navigate(getSessionListSelectionNavigation(sessionId))}
+                        onNewSession={() => navigate({
+                            to: '/sessions/new',
+                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
                         })}
-                        onNewSession={() => navigate({ to: '/sessions/new' })}
                         onNewSessionInDirectory={handleNewSessionInDirectory}
                         onBrowse={canBrowse ? () => navigate({ to: '/browse' }) : undefined}
                         onRefresh={handleRefresh}
@@ -268,7 +276,10 @@ function SessionsPage() {
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => navigate({ to: '/sessions/new' })}
+                                    onClick={() => navigate({
+                                        to: '/sessions/new',
+                                        ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                                    })}
                                     className="session-list-new-button flex h-9 w-9 items-center justify-center rounded-full text-[var(--app-link)] transition-colors"
                                     title={t('sessions.new')}
                                 >
@@ -445,7 +456,8 @@ function SessionPage() {
                         () => navigate({
                             to: '/sessions/$sessionId',
                             params: { sessionId: result.sessionId },
-                            replace: true
+                            replace: true,
+                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
                         }),
                     )
                 }
@@ -558,7 +570,8 @@ function SessionPage() {
         navigate({
             to: '/sessions/$sessionId',
             params: { sessionId: resolvedSessionId },
-            replace: true
+            replace: true,
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
         if (api) {
             void refreshSessionDetailPreservingActive(
@@ -738,6 +751,7 @@ function SessionPage() {
             to: '/sessions/$sessionId',
             params: { sessionId },
             replace: true,
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
     }, [navigate, sessionId])
 
@@ -857,7 +871,8 @@ function SessionDetailRoute() {
         navigate({
             to: '/sessions/$sessionId',
             params: { sessionId: supersedingSessionId },
-            replace: true
+            replace: true,
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
     }, [navigate, session, sessionId, supersedingSessionId])
 
@@ -865,7 +880,11 @@ function SessionDetailRoute() {
         if (!sessionNotFound) {
             return
         }
-        navigate({ to: '/sessions', replace: true })
+        navigate({
+            to: '/sessions',
+            replace: true,
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+        })
     }, [navigate, sessionNotFound, sessionId])
 
     if (sessionNotFound) {
@@ -892,7 +911,10 @@ function NewSessionPage() {
         if (shareTransferId) {
             void deleteShareTransfer(shareTransferId)
         }
-        navigate({ to: '/sessions' })
+        navigate({
+            to: '/sessions',
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+        })
     }, [navigate, shareTransferId])
 
     const handleSuccess = useCallback((sessionId: string) => {
@@ -901,12 +923,17 @@ function NewSessionPage() {
         }
         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
         // Replace current page with /sessions to clear spawn flow from history
-        navigate({ to: '/sessions', replace: true })
+        navigate({
+            to: '/sessions',
+            replace: true,
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+        })
         // Then navigate to new session
         requestAnimationFrame(() => {
             navigate({
                 to: '/sessions/$sessionId',
                 params: { sessionId },
+                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
             })
         })
     }, [navigate, queryClient, shareTransferId])
@@ -1175,6 +1202,12 @@ const settingsGeneralRoute = createRoute({
     component: SettingsGeneralPage,
 })
 
+const settingsRunnerManagementRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'general/runners',
+    component: SettingsRunnerManagementPage,
+})
+
 const settingsDisplayRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'display',
@@ -1185,6 +1218,12 @@ const settingsChatRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'chat',
     component: SettingsChatPage,
+})
+
+const settingsProvidersRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'providers',
+    component: SettingsProvidersPage,
 })
 
 const settingsVoiceRoute = createRoute({
@@ -1209,6 +1248,12 @@ const settingsMachinesRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'machines',
     component: SettingsMachinesPage,
+})
+
+const settingsNotificationsRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'notifications',
+    component: SettingsNotificationsPage,
 })
 
 const settingsAboutRoute = createRoute({
@@ -1256,12 +1301,15 @@ export const routeTree = rootRoute.addChildren([
     settingsRoute.addChildren([
         settingsIndexRoute,
         settingsGeneralRoute,
+        settingsRunnerManagementRoute,
         settingsDisplayRoute,
         settingsChatRoute,
+        settingsProvidersRoute,
         settingsVoiceRoute,
         settingsVoiceVoicesRoute,
         settingsVoiceAdvancedRoute,
         settingsMachinesRoute,
+        settingsNotificationsRoute,
         settingsStorageRoute,
         settingsUsageRoute,
         settingsAboutRoute,

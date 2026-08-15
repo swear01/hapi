@@ -1,5 +1,6 @@
 import React from 'react';
 import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 
 import { CodexAppServerClient } from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
@@ -14,6 +15,9 @@ import type { EnhancedMode } from './loop';
 import { hasCodexCliOverrides } from './utils/codexCliOverrides';
 import { AppServerEventConverter } from './utils/appServerEventConverter';
 import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
+import { convertCodexEvent } from './utils/codexEventConverter';
+import { createCodexSessionScanner, readLatestCodexUsageFromTail, type CodexSessionScanner } from './utils/codexSessionScanner';
+import { emptyLiveUsageDimensions, filterTranscriptUsageForLive, markLiveUsageDimensions, type LiveUsageDimensions } from './utils/codexUsage';
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerConfig';
 import type { SkillMetadata, ThreadGoal, ThreadGoalStatus } from './appServerTypes';
@@ -21,6 +25,7 @@ import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { extractErrorInfo } from '@/utils/errorUtils';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import { findCodexSessionFile } from '@/modules/common/codexSessions';
 import {
     RemoteLauncherBase,
     type RemoteLauncherDisplayContext,
@@ -187,6 +192,10 @@ function formatGoalStatus(status: unknown): string {
             return 'paused';
         case 'budgetLimited':
             return 'limited by budget';
+        case 'usageLimited':
+            return 'limited by usage';
+        case 'blocked':
+            return 'blocked';
         case 'complete':
             return 'complete';
         default:
@@ -208,6 +217,14 @@ function stripAnsi(value: string): string {
     return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
+export function isCurrentSteerHandler(
+    currentEpoch: number,
+    handlerEpoch: number,
+    shouldExit: boolean
+): boolean {
+    return currentEpoch === handlerEpoch && !shouldExit;
+}
+
 class CodexRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CodexSession;
     private readonly appServerClient: CodexAppServerClient;
@@ -216,10 +233,27 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     private diffProcessor: DiffProcessor | null = null;
     private happyServer: HappyServer | null = null;
     private abortController: AbortController = new AbortController();
+    /** Invalidates queued-message steer handlers after abort or cleanup. */
+    private steerEpoch = 0;
     private currentThreadId: string | null = null;
     private currentTurnId: string | null = null;
     private readonly activeChildTurns = new Map<string, string>();
     readonly conversationHistory = new CodexConversationHistory(() => this.appServerClient);
+    private usageScanner: CodexSessionScanner | null = null;
+    private usageScannerThreadId: string | null = null;
+    private usageScannerSetup: Promise<void> | null = null;
+    private readonly liveUsageByThread = new Map<string, LiveUsageDimensions>();
+    /** Account-scoped rate limits can arrive before any thread id exists. */
+    private liveAccountRateLimits = false;
+    private shuttingDown = false;
+
+    private liveUsageForThread(threadId: string): LiveUsageDimensions {
+        const threadLive = this.liveUsageByThread.get(threadId) ?? emptyLiveUsageDimensions();
+        return {
+            tokens: threadLive.tokens,
+            rateLimits: threadLive.rateLimits || this.liveAccountRateLimits
+        };
+    }
 
     constructor(session: CodexSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
@@ -272,6 +306,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async handleAbort(): Promise<void> {
+        this.steerEpoch++;
         logger.debug('[Codex] Abort requested - stopping current task');
         try {
             await this.interruptActiveTurns('abort');
@@ -308,6 +343,168 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         this.exitReason = 'switch';
         this.shouldExit = true;
         await this.handleAbort();
+    }
+
+    private async ensureUsageScanner(threadId: string): Promise<void> {
+        if (this.usageScannerThreadId === threadId && (this.usageScanner || this.usageScannerSetup)) {
+            return this.usageScannerSetup ?? Promise.resolve();
+        }
+
+        const setupTask = this.replaceUsageScanner(threadId).finally(() => {
+            if (this.usageScannerSetup === setupTask) {
+                this.usageScannerSetup = null;
+            }
+        });
+        this.usageScannerSetup = setupTask;
+        return setupTask;
+    }
+
+    private async replaceUsageScanner(threadId: string): Promise<void> {
+        const previousScanner = this.usageScanner;
+        this.usageScanner = null;
+        this.usageScannerThreadId = threadId;
+        if (previousScanner) {
+            await previousScanner.cleanup();
+        }
+
+        const transcriptPath = await this.findTranscriptWithRetry(threadId);
+        if (this.shuttingDown || this.usageScannerThreadId !== threadId) {
+            return;
+        }
+        if (!transcriptPath) {
+            logger.debug(`[Codex] No transcript found for remote thread ${threadId}; usage unavailable`);
+            return;
+        }
+
+        let transcriptSize = 0;
+        try {
+            transcriptSize = (await stat(transcriptPath)).size;
+        } catch (error) {
+            // Resume can race the first transcript flush; still attach at offset 0 and
+            // seed from whatever the tail reader can see.
+            logger.debug(`[Codex] Failed to stat transcript for remote thread ${threadId}:`, error);
+        }
+        if (this.shuttingDown || this.usageScannerThreadId !== threadId) {
+            return;
+        }
+
+        // Attach the live watcher before the (bounded) historical seed so a fast
+        // session exit cannot skip scanner registration after an extra await.
+        const scanner = await createCodexSessionScanner({
+            transcriptPath,
+            initialCursor: transcriptSize,
+            replayExistingHistory: false,
+            onEvent: (event) => {
+                const converted = convertCodexEvent(event);
+                for (const message of converted?.messages ?? []) {
+                    if (message.type !== 'token_count') {
+                        continue;
+                    }
+                    const scopeRole = message.scopeRole ?? message.scope_role;
+                    if (scopeRole === 'child') {
+                        continue;
+                    }
+                    const eventThreadId = message.threadId ?? message.thread_id;
+                    if (eventThreadId && eventThreadId !== threadId) {
+                        continue;
+                    }
+                    if (
+                        this.currentThreadId !== threadId
+                        || this.usageScannerThreadId !== threadId
+                    ) {
+                        continue;
+                    }
+                    const live = this.liveUsageForThread(threadId);
+                    const filtered = filterTranscriptUsageForLive(message, live);
+                    if (filtered) {
+                        this.session.recordCodexUsage(filtered);
+                    }
+                }
+            }
+        });
+        if (this.shuttingDown || this.usageScannerThreadId !== threadId) {
+            await scanner.cleanup();
+            return;
+        }
+        this.usageScanner = scanner;
+
+        const latestUsage = await readLatestCodexUsageFromTail(transcriptPath, {
+            maxBytes: 4 * 1024 * 1024,
+            chunkBytes: 64 * 1024,
+            threadId
+        });
+        if (
+            this.shuttingDown
+            || this.usageScannerThreadId !== threadId
+            || this.currentThreadId !== threadId
+        ) {
+            return;
+        }
+        const live = this.liveUsageForThread(threadId);
+        for (const payload of latestUsage) {
+            const filtered = filterTranscriptUsageForLive(payload, live);
+            if (filtered) {
+                this.session.recordCodexUsage(filtered);
+            }
+        }
+    }
+
+    private async findTranscriptWithRetry(threadId: string): Promise<string | null> {
+        const attempts = 6;
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+            if (this.shuttingDown || this.usageScannerThreadId !== threadId) {
+                return null;
+            }
+            try {
+                const transcriptPath = findCodexSessionFile(threadId);
+                if (transcriptPath) {
+                    return transcriptPath;
+                }
+            } catch (error) {
+                logger.debug(`[Codex] Failed to find transcript for remote thread ${threadId}:`, error);
+                return null;
+            }
+            if (attempt < attempts - 1) {
+                await this.sleep(250);
+            }
+        }
+        return null;
+    }
+
+    private async sleep(ms: number): Promise<void> {
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, ms);
+            timer.unref?.();
+        });
+    }
+
+    private async detachUsageScanner(): Promise<void> {
+        this.usageScannerThreadId = null;
+        this.liveUsageByThread.clear();
+        const setup = this.usageScannerSetup;
+        this.usageScannerSetup = null;
+        const scanner = this.usageScanner;
+        this.usageScanner = null;
+        if (setup) {
+            try {
+                await setup;
+            } catch (error) {
+                logger.debug('[Codex] Remote usage scanner setup failed during detach:', error);
+            }
+        }
+        // In-flight setup sees usageScannerThreadId mismatch and cleans its own scanner.
+        if (scanner) {
+            try {
+                await scanner.cleanup();
+            } catch (error) {
+                logger.debug('[Codex] Remote usage scanner detach failed:', error);
+            }
+        }
+    }
+
+    private async cleanupUsageScanner(): Promise<void> {
+        this.shuttingDown = true;
+        await this.detachUsageScanner();
     }
 
     public async launch(): Promise<RemoteLauncherExitReason> {
@@ -667,6 +864,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         let scheduleReadyAfterTurn: (() => void) | null = null;
         let clearReadyAfterTurnTimer: (() => void) | null = null;
         let turnInFlight = false;
+        const setTurnInFlight = (value: boolean) => {
+            turnInFlight = value;
+            session.client.updateAgentState((state) => ({ ...state, steeringActive: value }));
+        };
+        setTurnInFlight(false);
         let usageModel: string | null = null;
         let allowAnonymousTerminalEvent = false;
         let invalidThreadId: string | null = null;
@@ -1889,6 +2091,85 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             signal.addEventListener('abort', finish, { once: true });
         });
 
+        // Non-interrupting mid-turn inject via app-server `turn/steer`.
+        // Returns false when the turn ended or is review/compact (not steerable).
+        const trySteerActiveTurn = async (batch: QueuedMessage): Promise<boolean> => {
+            const threadId = this.currentThreadId;
+            const turnId = this.currentTurnId;
+            if (!threadId || !turnId || !turnInFlight) {
+                return false;
+            }
+            try {
+                await appServerClient.steerTurn({
+                    threadId,
+                    input: [{ type: 'text', text: batch.message }],
+                    expectedTurnId: turnId
+                }, { signal: this.abortController.signal });
+                messageBuffer.addMessage(batch.message, 'user');
+                logger.debug(`[Codex] Steered active turn ${turnId}`);
+                return true;
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                logger.debug(`[Codex] turn/steer failed (${detail})`);
+                return false;
+            }
+        };
+
+        // Per-message steer from the waiting queue (web "Steer" button).
+        session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.SteerQueuedMessage,
+            async (payload: unknown) => {
+                const localId = typeof (payload as { localId?: unknown } | null)?.localId === 'string'
+                    ? (payload as { localId: string }).localId
+                    : '';
+                if (!localId) {
+                    return { steered: false, error: 'Missing localId' };
+                }
+                if (!turnInFlight || !this.currentThreadId || !this.currentTurnId) {
+                    return { steered: false, error: 'No active steerable turn' };
+                }
+                // Reserve before awaiting turn/steer so the main loop cannot
+                // collect the same row for turn/start while steer is in flight.
+                const taken = session.queue.takeByLocalId(localId);
+                if (!taken) {
+                    return { steered: false, error: 'Message not in queue' };
+                }
+                const isControlCommand = Boolean(taken.item.isolate)
+                    || Boolean(parseCodexSpecialCommand(taken.item.message).type);
+                if (isControlCommand) {
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Control commands cannot be steered' };
+                }
+                if (activeMessage?.hash !== taken.item.modeHash) {
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Queued message mode differs from the active turn' };
+                }
+                const batch: QueuedMessage = {
+                    message: taken.item.message,
+                    mode: taken.item.mode,
+                    isolate: Boolean(taken.item.isolate),
+                    hash: taken.item.modeHash
+                };
+                const steerEpoch = this.steerEpoch;
+                if (!session.queue.beginReservationDispatch(taken)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
+                const steered = await trySteerActiveTurn(batch);
+                if (steered) {
+                    session.queue.commitReservation(taken);
+                    session.client.emitMessagesConsumed([localId], { steered: true });
+                    return { steered: true };
+                }
+                if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
+                if (!session.queue.restoreReservation(taken)) {
+                    return { steered: false, error: 'Steer cancelled' };
+                }
+                return { steered: false, error: 'Active turn is not steerable' };
+            }
+        );
+
         const clearCompactRecovery = (recovery: typeof compactRecovery) => {
             if (!recovery) {
                 return;
@@ -2194,7 +2475,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 });
 
                 lastFinalizedTurnId = request.turnId;
-                turnInFlight = false;
+                setTurnInFlight(false);
                 allowAnonymousTerminalEvent = false;
                 this.currentTurnId = null;
                 sameThreadRetryAttempt = 0;
@@ -2217,7 +2498,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             } catch (error) {
                 if (interrupted) {
                     lastFinalizedTurnId = request.turnId;
-                    turnInFlight = false;
+                    setTurnInFlight(false);
                     allowAnonymousTerminalEvent = false;
                     this.currentTurnId = null;
                     activeMessage = null;
@@ -2358,6 +2639,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         this.conversationHistory.setThreadId(threadId);
                         void this.conversationHistory.probeCapabilities().catch(() => {});
                         session.onSessionFound(threadId);
+                        await this.ensureUsageScanner(threadId).catch((error) => {
+                            logger.debug(`[Codex] Failed to start remote usage scanner for ${threadId}:`, error);
+                        });
                     } else {
                         logger.debug(
                             `[Codex] Ignoring thread_started for non-active thread; ` +
@@ -2415,11 +2699,15 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
 
             if (!eventThreadId && this.currentThreadId && isScopeSensitiveCodexEvent(msgType) && hasKnownChildAgents()) {
-                logger.debug(
-                    `[Codex] Dropping unscoped scope-sensitive event while child agents are active; ` +
-                    `type=${msgType}, activeThread=${this.currentThreadId}`
-                );
-                return;
+                const isAccountUsage = msgType === 'token_count'
+                    && (msg.usage_scope === 'account' || msg.usageScope === 'account');
+                if (!isAccountUsage) {
+                    logger.debug(
+                        `[Codex] Dropping unscoped scope-sensitive event while child agents are active; ` +
+                        `type=${msgType}, activeThread=${this.currentThreadId}`
+                    );
+                    return;
+                }
             }
 
             if (msgType === 'thread_goal_updated') {
@@ -2742,7 +3030,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
             if (msgType === 'task_started') {
                 clearReadyAfterTurnTimer?.();
-                turnInFlight = true;
+                setTurnInFlight(true);
                 if (!eventTurnId && !this.currentTurnId) {
                     allowAnonymousTerminalEvent = true;
                 }
@@ -2752,7 +3040,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             }
             if (isTerminalEvent) {
-                turnInFlight = false;
+                setTurnInFlight(false);
                 this.conversationHistory.setBusy(false);
                 allowAnonymousTerminalEvent = false;
                 if (session.thinking) {
@@ -2879,7 +3167,21 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             }
             if (msgType === 'token_count') {
+                const isAccountUsage = msg.usage_scope === 'account' || msg.usageScope === 'account';
+                if (!isAccountUsage && eventThreadId && eventThreadId !== this.currentThreadId) {
+                    return;
+                }
+                if (isAccountUsage) {
+                    this.liveAccountRateLimits = true;
+                }
                 const threadId = eventThreadId ?? this.currentThreadId;
+                if (threadId) {
+                    this.liveUsageByThread.set(
+                        threadId,
+                        markLiveUsageDimensions(this.liveUsageByThread.get(threadId), msg)
+                    );
+                }
+                session.recordCodexUsage(msg);
                 session.sendAgentMessage({
                     ...addCodexEventScope(msg, 'parent', threadId),
                     model: asString(msg.model) ?? usageModel,
@@ -3336,7 +3638,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         const resetCurrentTurnState = () => {
             clearDeferredThreadStatusFailure();
             cancelSafetyBufferingRequest('Session reset');
-            turnInFlight = false;
+            setTurnInFlight(false);
             allowAnonymousTerminalEvent = false;
             this.currentTurnId = null;
             permissionHandler.reset();
@@ -3602,6 +3904,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (specialCommand.type === 'clear') {
                 await interruptActiveTurn();
                 resetCurrentTurnState();
+                await this.detachUsageScanner();
                 this.currentThreadId = null;
                 invalidThreadId = null;
                 hasThread = false;
@@ -3776,6 +4079,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     this.conversationHistory.setThreadId(threadId);
                     void this.conversationHistory.probeCapabilities().catch(() => {});
                     session.onSessionFound(threadId);
+                    await this.ensureUsageScanner(threadId).catch((error) => {
+                        logger.debug(`[Codex] Failed to start remote usage scanner for ${threadId}:`, error);
+                    });
                     hasThread = true;
                 } else {
                     if (!this.currentThreadId) {
@@ -3786,7 +4092,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     }
                 }
 
-                turnInFlight = true;
+                setTurnInFlight(true);
                 this.conversationHistory.setBusy(true);
                 allowAnonymousTerminalEvent = false;
                 const mode = {
@@ -3866,7 +4172,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             } catch (error) {
                 logger.warn('Error in codex session:', error);
                 const isAbortError = error instanceof Error && error.name === 'AbortError';
-                turnInFlight = false;
+                setTurnInFlight(false);
                 this.conversationHistory.setBusy(false);
                 allowAnonymousTerminalEvent = false;
                 this.currentTurnId = null;
@@ -3922,7 +4228,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
+        this.steerEpoch++;
         this.appServerClient.setStderrHandler(null);
+        await this.cleanupUsageScanner();
         try {
             await this.appServerClient.disconnect();
         } catch (error) {
@@ -3930,6 +4238,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         }
 
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+        this.session.client.rpcHandlerManager.registerHandler(RPC_METHODS.SteerQueuedMessage, async () => ({
+            steered: false,
+            error: 'Session ending'
+        }));
 
         if (this.happyServer) {
             this.happyServer.stop();

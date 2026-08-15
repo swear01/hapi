@@ -1,7 +1,9 @@
 import type { Machine, MachinePatch } from '@hapi/protocol/types'
 import { MachineHealthSchema, MachineMetadataSchema, RunnerStateSchema } from '@hapi/protocol/schemas'
 import type { Store } from '../store'
+import type { RpcRegistry } from '../socket/rpcRegistry'
 import { clampAliveTime } from './aliveTime'
+import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { EventPublisher } from './eventPublisher'
 
 type MachineAlivePayload = {
@@ -45,20 +47,33 @@ export class MachineCache {
 
     constructor(
         private readonly store: Store,
-        private readonly publisher: EventPublisher
+        private readonly publisher: EventPublisher,
+        private readonly rpcRegistry?: RpcRegistry
     ) {
     }
 
+    /** True when a live runner socket has registered this RPC method. */
+    hasLiveRpc(machineId: string, method: string): boolean {
+        if (!this.rpcRegistry) {
+            return false
+        }
+        return this.rpcRegistry.hasMethod(`${machineId}:${method}`)
+    }
+
+
     getMachines(): Machine[] {
-        return Array.from(this.machines.values())
+        return this.mapLive(Array.from(this.machines.values()))
     }
 
     getMachinesByNamespace(namespace: string): Machine[] {
-        return this.getMachines().filter((machine) => machine.namespace === namespace)
+        return this.mapLive(
+            Array.from(this.machines.values()).filter((machine) => machine.namespace === namespace)
+        )
     }
 
     getMachine(machineId: string): Machine | undefined {
-        return this.machines.get(machineId)
+        const machine = this.machines.get(machineId)
+        return machine ? this.withLiveCapabilities(machine) : undefined
     }
 
     getMachineByNamespace(machineId: string, namespace: string): Machine | undefined {
@@ -185,7 +200,43 @@ export class MachineCache {
 
         this.machines.set(machineId, machine)
         this.publisher.emit({ type: 'machine-updated', machineId, data: machine })
-        return machine
+        return this.withLiveCapabilities(machine)
+    }
+
+
+    private mapLive(machines: Machine[]): Machine[] {
+        if (machines.length === 0 || !this.rpcRegistry) {
+            return machines
+        }
+        return machines.map((machine) => this.withLiveCapabilities(machine))
+    }
+
+    /** Overlay live RPC registrations onto advertised metadata capabilities for API/SSE consumers. */
+    private withLiveCapabilities(machine: Machine): Machine {
+        if (!machine.metadata || !this.rpcRegistry) {
+            return machine
+        }
+        const advertised = machine.metadata.capabilities ?? []
+        const live = CURRENT_MACHINE_CAPABILITIES.filter((cap) => (
+            this.rpcRegistry!.hasMethod(`${machine.id}:${cap}`)
+        ))
+        if (live.length === 0) {
+            return machine
+        }
+        const merged = Array.from(new Set([...advertised, ...live]))
+        if (
+            merged.length === advertised.length
+            && merged.every((cap) => advertised.includes(cap))
+        ) {
+            return machine
+        }
+        return {
+            ...machine,
+            metadata: {
+                ...machine.metadata,
+                capabilities: merged,
+            },
+        }
     }
 
     reloadAll(): void {

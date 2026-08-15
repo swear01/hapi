@@ -1,0 +1,20 @@
+patch	state	upstream_ref	source_commits
+# v0.27.3.4 — carry-only release; upstream/main unchanged since v0.27.3.3 base febbf8ff5 (official v0.27.3 + #1529/#1545).
+# New carries this cycle (13): 9 deferred-ready from v0.27.3.3 hotfix cycle (#1541 #1543 #1546 #1547 #1548 #1552 #1557 #1560 #1563) + 3 new clean (#1565 #1568 #1569) + fork PR #6 Pi slash commands (#1570, personal).
+# Deferred: #1564/#1566 (HAPI Bot Major findings at head), #1567 (5522-additions new agent provider, waits for maintainer acceptance), personal #1542/#1534/#1475/#1436/#1421/#1468/#1451/#1419 (bot findings or dirty), rest per ledger.
+# Drop: #1091 (operator ruling 2026-08-13), #1320 (permanent exclusion).
+# In-tree carries from v0.27.3.3 (heads unchanged, no re-application): #1562 (fork PR #5 SSE recovery), #1530, #1447, #1158, #906, #1424, #1422, #1414, #847, #987, #945, #1469, #1418, #955.
+01-pr-1541.patch	carry	pr-1541	2db15d1b3cee32ca9bc3ab0134642a34d6ef39b0
+02-pr-1543.patch	carry	pr-1543	f5ebfae0bae9d468e6562bf22e95e605f44a0491
+03-pr-1546.patch	carry	pr-1546	5b870568d077f618b9a6bff5ab6d65da8ff9d637
+04-pr-1547.patch	carry	pr-1547	127b0ac1ad23a338b94987689d0afce5c5efc79c
+05-pr-1548.patch	carry	pr-1548	7f1875ba818b21527adb7600c589691ea31f8916
+06-pr-1552.patch	carry	pr-1552	66691c72d1ecb05c061fefc7470e632b57236e5d
+07-pr-1557.patch	carry	pr-1557	10bd24dfdfcd4b1165c5026d4d3288cd0a137d16
+08-pr-1560.patch	carry	pr-1560	6dd8a3123b649bdbe5de035724a76094ea3e4ec5
+09-pr-1563.patch	carry	pr-1563	a1c3a793e2b678a6255bfc273a6ef97053c63915
+10-pr-1565.patch	carry	pr-1565	d8131d4843f99f83bd01b98a87c7417aa7c0389c
+11-pr-1568.patch	carry	pr-1568	f5bfe52c0fa23993ee60dd9a575e7a5b34968dc8
+12-pr-1569.patch	carry	pr-1569	816a0079d7cfda9c57dcee99b1de3d9b6bf59bb3
+13-pr-1570.patch	carry	pr-1570	363c4c7c5e94d8b9da14c55b48e85e70ce73923c
+overlay	regenerate	-	-

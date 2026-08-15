@@ -1,0 +1,1029 @@
+diff --git a/cli/src/api/api.ts b/cli/src/api/api.ts
+index 5b3acf23b..44172b8eb 100644
+--- a/cli/src/api/api.ts
++++ b/cli/src/api/api.ts
+@@ -1,6 +1,9 @@
+ import axios from 'axios'
+ import type { AgentState, ClearOpencodeSessionCallbackRequest, ClearOpencodeSessionResponse, CreateMachineResponse, CreateSessionResponse, RunnerState, Machine, MachineMetadata, Metadata, Session } from '@/api/types'
+-import { applyHubSessionSummaryContract } from '@/modules/common/sessionSummaryInstruction'
++import {
++    applyHubSessionSummaryContract,
++    applyHubSessionSummaryLocale
++} from '@/modules/common/sessionSummaryInstruction'
+ import type { LocalResumeTarget, ResumableSession } from '@hapi/protocol'
+ import {
+     AgentStateSchema,
+@@ -88,6 +91,9 @@ export class ApiClient {
+         if (typeof parsed.data.sessionSummaryContract === 'boolean') {
+             applyHubSessionSummaryContract(parsed.data.sessionSummaryContract)
+         }
++        if (parsed.data.sessionSummaryLocale !== undefined) {
++            applyHubSessionSummaryLocale(parsed.data.sessionSummaryLocale)
++        }
+ 
+         const raw = parsed.data.session
+ 
+@@ -144,6 +150,9 @@ export class ApiClient {
+         if (typeof parsed.data.sessionSummaryContract === 'boolean') {
+             applyHubSessionSummaryContract(parsed.data.sessionSummaryContract)
+         }
++        if (parsed.data.sessionSummaryLocale !== undefined) {
++            applyHubSessionSummaryLocale(parsed.data.sessionSummaryLocale)
++        }
+ 
+         const raw = parsed.data.session
+         const metadata = (() => {
+diff --git a/cli/src/modules/common/sessionSummaryInstruction.test.ts b/cli/src/modules/common/sessionSummaryInstruction.test.ts
+index 731ebd5ab..27016eb1f 100644
+--- a/cli/src/modules/common/sessionSummaryInstruction.test.ts
++++ b/cli/src/modules/common/sessionSummaryInstruction.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, describe, expect, it } from 'vitest'
+ import {
+     applyHubSessionSummaryContract,
++    applyHubSessionSummaryLocale,
+     buildSessionSummaryInstruction,
+     isSessionSummaryContractEnabled,
+     resetSessionSummaryContractForTests,
+@@ -51,6 +52,16 @@ describe('sessionSummaryInstruction', () => {
+         expect(body.toLowerCase()).not.toContain('surveillance')
+     })
+ 
++    it('localizes the instruction while keeping the protocol line unchanged', () => {
++        applyHubSessionSummaryLocale('zh-CN')
++        const body = buildSessionSummaryInstruction()
++        expect(body).toContain('会话状态摘要：')
++        expect(body).toContain('请用中文书写 "action" 和 "summary" 的值。')
++        expect(body).toContain('action 不得超过 12 个词语。')
++        expect(body).toContain(SESSION_SUMMARY_CONTRACT_LINE)
++        expect(body).not.toContain('Session status summary:')
++    })
++
+     it('appends to an existing base prompt when enabled', () => {
+         applyHubSessionSummaryContract(true)
+         const out = withSessionSummaryInstruction('Be helpful.', {})
+diff --git a/cli/src/modules/common/sessionSummaryInstruction.ts b/cli/src/modules/common/sessionSummaryInstruction.ts
+index 64459ddf8..e32e87134 100644
+--- a/cli/src/modules/common/sessionSummaryInstruction.ts
++++ b/cli/src/modules/common/sessionSummaryInstruction.ts
+@@ -6,22 +6,29 @@
+  * this text via their existing system-prompt / developer-instructions /
+  * one-shot instruction paths when the operator opts in.
+  *
+- * Resolution order:
+- * 1. Explicit `HAPI_SESSION_SUMMARY_CONTRACT` env (0|false|off|no → off; anything else → on)
+- * 2. Hub preference applied via `applyHubSessionSummaryContract` (from session bootstrap)
+- * 3. Default: off (matches A2A RFC — emission stays optional indefinitely)
++ * The contract toggle remains opt-in. The locale is applied independently by
++ * the Hub session bootstrap and defaults to English for backward compatibility.
+  */
+ 
++import type { SupportedLocale } from '@hapi/protocol'
++
+ let hubPreference: boolean | undefined
++let hubLocale: SupportedLocale = 'en'
+ 
+ /** Apply the hub-resolved toggle from session create/get bootstrap. */
+ export function applyHubSessionSummaryContract(enabled: boolean): void {
+     hubPreference = enabled
+ }
+ 
++/** Apply the namespace-scoped UI locale from session create/get bootstrap. */
++export function applyHubSessionSummaryLocale(locale: SupportedLocale): void {
++    hubLocale = locale
++}
++
+ /** Test-only: clear hub preference between cases. */
+ export function resetSessionSummaryContractForTests(): void {
+     hubPreference = undefined
++    hubLocale = 'en'
+ }
+ 
+ export function isSessionSummaryContractEnabled(
+@@ -46,7 +53,20 @@ export const SESSION_SUMMARY_CONTRACT_LINE =
+  * Body appended to flavor system / developer instructions when enabled.
+  * Keep short — rides every session's prompt budget.
+  */
+-export function buildSessionSummaryInstruction(): string {
++export function buildSessionSummaryInstruction(locale: SupportedLocale = hubLocale): string {
++    if (locale === 'zh-CN') {
++        return [
++            '会话状态摘要：',
++            '每次回复都必须以一行机器可读的状态信息结尾（不要使用反引号）',
++            '以便工作区会话跟踪记录进度。请将该行单独放在',
++            '其他所有内容之后的最后一行：',
++            SESSION_SUMMARY_CONTRACT_LINE,
++            '请用中文书写 "action" 和 "summary" 的值。',
++            '如果不确定，请使用状态 "blocked"。当状态为 "done" 且仍有后续工作时，',
++            'action 不得超过 12 个词语。'
++        ].join('\n')
++    }
++
+     return [
+         'Session status summary:',
+         'End every response with a single machine-readable status line (no backticks)',
+diff --git a/hub/src/config/namespaceSettings.test.ts b/hub/src/config/namespaceSettings.test.ts
+new file mode 100644
+index 000000000..53a1077a9
+--- /dev/null
++++ b/hub/src/config/namespaceSettings.test.ts
+@@ -0,0 +1,67 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { mkdtemp, readFile, rm } from 'node:fs/promises'
++import { pathToFileURL } from 'node:url'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import {
++    getNamespaceSettingsFile,
++    readNamespaceLocale,
++    writeNamespaceLocale
++} from './namespaceSettings'
++
++const directories: string[] = []
++
++afterEach(async () => {
++    await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
++})
++
++describe('namespace locale persistence', () => {
++    it('defaults to English and persists locale per namespace', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-namespace-locale-'))
++        directories.push(dataDir)
++
++        expect(await readNamespaceLocale(dataDir, 'default')).toBe('en')
++        await writeNamespaceLocale(dataDir, 'default', 'zh-CN')
++        await writeNamespaceLocale(dataDir, 'tenant', 'en')
++
++        expect(await readNamespaceLocale(dataDir, 'default')).toBe('zh-CN')
++        expect(await readNamespaceLocale(dataDir, 'tenant')).toBe('en')
++        expect(await readNamespaceLocale(dataDir, 'other')).toBe('en')
++    })
++
++    it('serializes concurrent writes without losing namespaces', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-namespace-locale-race-'))
++        directories.push(dataDir)
++
++        await Promise.all([
++            writeNamespaceLocale(dataDir, 'alpha', 'zh-CN'),
++            writeNamespaceLocale(dataDir, 'beta', 'en'),
++            writeNamespaceLocale(dataDir, 'gamma', 'zh-CN')
++        ])
++
++        expect(await readNamespaceLocale(dataDir, 'alpha')).toBe('zh-CN')
++        expect(await readNamespaceLocale(dataDir, 'beta')).toBe('en')
++        expect(await readNamespaceLocale(dataDir, 'gamma')).toBe('zh-CN')
++        const raw = JSON.parse(await readFile(getNamespaceSettingsFile(dataDir), 'utf8')) as {
++            locales?: Record<string, string>
++        }
++        expect(raw.locales).toEqual({ alpha: 'zh-CN', beta: 'en', gamma: 'zh-CN' })
++    })
++
++    it('preserves the first concurrent writes from independent module instances', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-namespace-locale-independent-race-'))
++        directories.push(dataDir)
++
++        const moduleUrl = pathToFileURL(new URL('./namespaceSettings.ts', import.meta.url).pathname).href
++        const firstModule = await import(`${moduleUrl}?instance=first`)
++        const secondModule = await import(`${moduleUrl}?instance=second`)
++
++        await Promise.all([
++            firstModule.writeNamespaceLocale(dataDir, 'alpha', 'zh-CN'),
++            secondModule.writeNamespaceLocale(dataDir, 'beta', 'en')
++        ])
++
++        expect(await readNamespaceLocale(dataDir, 'alpha')).toBe('zh-CN')
++        expect(await readNamespaceLocale(dataDir, 'beta')).toBe('en')
++    })
++})
+diff --git a/hub/src/config/namespaceSettings.ts b/hub/src/config/namespaceSettings.ts
+new file mode 100644
+index 000000000..cda4449d2
+--- /dev/null
++++ b/hub/src/config/namespaceSettings.ts
+@@ -0,0 +1,109 @@
++import { existsSync } from 'node:fs'
++import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
++import { randomUUID } from 'node:crypto'
++import { dirname, join } from 'node:path'
++import { z } from 'zod'
++import {
++    SupportedLocaleSchema,
++    type SupportedLocale
++} from '@hapi/protocol'
++import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
++
++const DEFAULT_LOCALE: SupportedLocale = 'en'
++
++const NamespaceSettingsFileSchema = z.object({
++    locales: z.record(z.string().min(1), SupportedLocaleSchema).optional()
++})
++
++type NamespaceSettingsFile = z.infer<typeof NamespaceSettingsFileSchema>
++
++const updateChains = new Map<string, Promise<unknown>>()
++
++export function getNamespaceSettingsFile(dataDir: string): string {
++    return join(dataDir, 'namespace-settings.json')
++}
++
++async function readNamespaceSettingsOrThrow(settingsFile: string): Promise<NamespaceSettingsFile> {
++    if (!existsSync(settingsFile)) {
++        return {}
++    }
++
++    try {
++        const content = await readFile(settingsFile, 'utf8')
++        const parsed = NamespaceSettingsFileSchema.safeParse(JSON.parse(content))
++        if (!parsed.success) {
++            throw new Error(parsed.error.message)
++        }
++        return parsed.data
++    } catch (error) {
++        throw new Error(`Cannot read ${settingsFile}: ${error instanceof Error ? error.message : String(error)}`)
++    }
++}
++
++async function withNamespaceSettingsFileLock<T>(
++    settingsFile: string,
++    work: () => Promise<T>
++): Promise<T> {
++    await mkdir(dirname(settingsFile), { recursive: true, mode: 0o700 })
++    try {
++        await writeFile(settingsFile, '{}', { flag: 'wx', mode: 0o600 })
++    } catch (error) {
++        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
++            throw error
++        }
++    }
++    return withSettingsFileLock(settingsFile, work)
++}
++
++async function withNamespaceSettingsLock<T>(settingsFile: string, work: () => Promise<T>): Promise<T> {
++    const previous = updateChains.get(settingsFile) ?? Promise.resolve()
++    const run = previous.catch(() => undefined).then(() => withNamespaceSettingsFileLock(settingsFile, work))
++    updateChains.set(settingsFile, run.then(() => undefined, () => undefined))
++    return run
++}
++
++async function writeNamespaceSettingsUnlocked(
++    settingsFile: string,
++    settings: NamespaceSettingsFile
++): Promise<void> {
++    const dir = dirname(settingsFile)
++    if (!existsSync(dir)) {
++        await mkdir(dir, { recursive: true, mode: 0o700 })
++    }
++    await chmod(dir, 0o700).catch(() => {})
++
++    const tmpFile = join(dir, `.namespace-settings.${randomUUID()}.tmp`)
++    try {
++        await writeFile(tmpFile, JSON.stringify(settings, null, 2), { mode: 0o600 })
++        await chmod(tmpFile, 0o600).catch(() => {})
++        await rename(tmpFile, settingsFile)
++        await chmod(settingsFile, 0o600).catch(() => {})
++    } catch (error) {
++        await unlink(tmpFile).catch(() => {})
++        throw error
++    }
++}
++
++export async function readNamespaceLocale(dataDir: string, namespace: string): Promise<SupportedLocale> {
++    const settings = await readNamespaceSettingsOrThrow(getNamespaceSettingsFile(dataDir))
++    const locale = settings.locales && Object.prototype.hasOwnProperty.call(settings.locales, namespace)
++        ? settings.locales[namespace]
++        : undefined
++    return locale ?? DEFAULT_LOCALE
++}
++
++export async function writeNamespaceLocale(
++    dataDir: string,
++    namespace: string,
++    locale: SupportedLocale
++): Promise<SupportedLocale> {
++    const settingsFile = getNamespaceSettingsFile(dataDir)
++    return withNamespaceSettingsLock(settingsFile, async () => {
++        const current = await readNamespaceSettingsOrThrow(settingsFile)
++        const locales: Record<string, SupportedLocale> = Object.create(null)
++        Object.assign(locales, current.locales ?? {})
++        locales[namespace] = locale
++        await writeNamespaceSettingsUnlocked(settingsFile, { locales })
++        return locale
++    })
++}
+diff --git a/hub/src/web/routes/cli.test.ts b/hub/src/web/routes/cli.test.ts
+index f90336432..e94bef9a4 100644
+--- a/hub/src/web/routes/cli.test.ts
++++ b/hub/src/web/routes/cli.test.ts
+@@ -4,6 +4,10 @@ import type { SyncEngine } from '../../sync/syncEngine'
+ import { createConfiguration } from '../../configuration'
+ import { createCliRoutes } from './cli'
+ import { SessionIdentityConflictError } from '../../store/sessions'
++import { mkdtemp, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { writeNamespaceLocale } from '../../config/namespaceSettings'
+ 
+ function createApp(engine: Partial<SyncEngine>) {
+     const app = new Hono()
+@@ -238,6 +242,29 @@ describe('cli lazy session creation', () => {
+         )
+     })
+ 
++    it('returns the namespace locale during session bootstrap', async () => {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-cli-locale-'))
++        try {
++            await writeNamespaceLocale(dataDir, 'default', 'zh-CN')
++            const app = new Hono()
++            app.route('/cli', createCliRoutes(() => ({
++                getOrCreateSession: () => ({ id: sessionId })
++            } as never), dataDir))
++
++            const response = await app.request('/cli/sessions', {
++                method: 'POST',
++                headers: { ...authHeaders(), 'content-type': 'application/json' },
++                body: JSON.stringify({ tag: 'localized', metadata: {} })
++            })
++
++            expect(response.status).toBe(200)
++            const body = await response.json() as { sessionSummaryLocale?: string }
++            expect(body.sessionSummaryLocale).toBe('zh-CN')
++        } finally {
++            await rm(dataDir, { recursive: true, force: true })
++        }
++    })
++
+     it('rejects an embedded machine owned by another namespace', async () => {
+         const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
+         const getOrCreateSession = mock(() => ({ id: sessionId }))
+diff --git a/hub/src/web/routes/cli.ts b/hub/src/web/routes/cli.ts
+index 5e2345860..6319e6bc8 100644
+--- a/hub/src/web/routes/cli.ts
++++ b/hub/src/web/routes/cli.ts
+@@ -9,6 +9,7 @@ import {
+ } from '@hapi/protocol'
+ import { getConfiguration } from '../../configuration'
+ import { readSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
++import { readNamespaceLocale } from '../../config/namespaceSettings'
+ import { constantTimeEquals } from '../../utils/crypto'
+ import { parseAccessToken } from '../../utils/accessToken'
+ import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
+@@ -65,7 +66,10 @@ function clearErrorStatus(code: string): 403 | 404 | 409 | 500 {
+                 : 500
+ }
+ 
+-export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<CliEnv> {
++export function createCliRoutes(
++    getSyncEngine: () => SyncEngine | null,
++    dataDir?: string
++): Hono<CliEnv> {
+     const app = new Hono<CliEnv>()
+ 
+     app.use('*', async (c, next) => {
+@@ -129,10 +133,13 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+                 parsed.data.modelReasoningEffort,
+                 parsed.data.id
+             )
+-            const sessionSummaryContract = await readSessionSummaryContractEnabled(
+-                getConfiguration().dataDir
++            const resolvedDataDir = dataDir ?? getConfiguration().dataDir
++            const sessionSummaryContract = await readSessionSummaryContractEnabled(resolvedDataDir)
++            const sessionSummaryLocale = await readNamespaceLocale(
++                resolvedDataDir,
++                namespace
+             )
+-            return c.json({ session, sessionSummaryContract })
++            return c.json({ session, sessionSummaryContract, sessionSummaryLocale })
+         } catch (error) {
+             if (error instanceof SessionIdentityConflictError) {
+                 return c.json({ error: error.message }, 409)
+@@ -250,9 +257,13 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
+             return c.json({ error: resolved.error }, resolved.status)
+         }
+         const sessionSummaryContract = await readSessionSummaryContractEnabled(
+-            getConfiguration().dataDir
++            dataDir ?? getConfiguration().dataDir
++        )
++        const sessionSummaryLocale = await readNamespaceLocale(
++            dataDir ?? getConfiguration().dataDir,
++            namespace
+         )
+-        return c.json({ session: resolved.session, sessionSummaryContract })
++        return c.json({ session: resolved.session, sessionSummaryContract, sessionSummaryLocale })
+     })
+ 
+     app.get('/sessions/:id/messages', (c) => {
+diff --git a/hub/src/web/routes/namespaceSettings.test.ts b/hub/src/web/routes/namespaceSettings.test.ts
+new file mode 100644
+index 000000000..578d827ea
+--- /dev/null
++++ b/hub/src/web/routes/namespaceSettings.test.ts
+@@ -0,0 +1,66 @@
++import { afterEach, describe, expect, it } from 'bun:test'
++import { mkdtemp, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { Hono } from 'hono'
++import type { WebAppEnv } from '../middleware/auth'
++import { createNamespaceSettingsRoutes } from './namespaceSettings'
++
++const directories: string[] = []
++
++afterEach(async () => {
++    await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
++})
++
++describe('GET/PUT /api/namespace-settings', () => {
++    async function createApp(namespace = 'default') {
++        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-namespace-settings-'))
++        directories.push(dataDir)
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => {
++            c.set('namespace', namespace)
++            await next()
++        })
++        app.route('/api', createNamespaceSettingsRoutes(dataDir))
++        return { app, dataDir }
++    }
++
++    it('returns English by default and does not cache the response', async () => {
++        const { app } = await createApp()
++        const response = await app.request('/api/namespace-settings')
++        expect(response.status).toBe(200)
++        expect(response.headers.get('cache-control')).toBe('no-store')
++        expect(await response.json()).toEqual({ locale: 'en' })
++    })
++
++    it('persists a locale only for the authenticated namespace', async () => {
++        const { app, dataDir } = await createApp('alpha')
++        const put = await app.request('/api/namespace-settings', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ locale: 'zh-CN' })
++        })
++        expect(put.status).toBe(200)
++        expect(await put.json()).toEqual({ locale: 'zh-CN' })
++
++        const other = new Hono<WebAppEnv>()
++        other.use('*', async (c, next) => {
++            c.set('namespace', 'beta')
++            await next()
++        })
++        other.route('/api', createNamespaceSettingsRoutes(dataDir))
++
++        expect(await (await app.request('/api/namespace-settings')).json()).toEqual({ locale: 'zh-CN' })
++        expect(await (await other.request('/api/namespace-settings')).json()).toEqual({ locale: 'en' })
++    })
++
++    it('rejects unsupported locales', async () => {
++        const { app } = await createApp()
++        const response = await app.request('/api/namespace-settings', {
++            method: 'PUT',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ locale: 'fr' })
++        })
++        expect(response.status).toBe(400)
++    })
++})
+diff --git a/hub/src/web/routes/namespaceSettings.ts b/hub/src/web/routes/namespaceSettings.ts
+new file mode 100644
+index 000000000..91499abb6
+--- /dev/null
++++ b/hub/src/web/routes/namespaceSettings.ts
+@@ -0,0 +1,40 @@
++import { Hono } from 'hono'
++import {
++    UpdateNamespaceSettingsRequestSchema,
++    type NamespaceSettingsResponse
++} from '@hapi/protocol'
++import {
++    readNamespaceLocale,
++    writeNamespaceLocale
++} from '../../config/namespaceSettings'
++import type { WebAppEnv } from '../middleware/auth'
++
++export function createNamespaceSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
++    const app = new Hono<WebAppEnv>()
++
++    app.get('/namespace-settings', async (c) => {
++        const response: NamespaceSettingsResponse = {
++            locale: await readNamespaceLocale(dataDir, c.get('namespace'))
++        }
++        c.header('Cache-Control', 'no-store')
++        return c.json(response)
++    })
++
++    app.put('/namespace-settings', async (c) => {
++        const json = await c.req.json().catch(() => null)
++        const parsed = UpdateNamespaceSettingsRequestSchema.safeParse(json)
++        if (!parsed.success) {
++            return c.json({ error: 'Invalid body' }, 400)
++        }
++
++        const locale = await writeNamespaceLocale(
++            dataDir,
++            c.get('namespace'),
++            parsed.data.locale
++        )
++        c.header('Cache-Control', 'no-store')
++        return c.json({ locale } satisfies NamespaceSettingsResponse)
++    })
++
++    return app
++}
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 312dac633..7e4b3746a 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -30,6 +30,7 @@ import { createPushRoutes } from './routes/push'
+ import { createDevicesRoutes } from './routes/devices'
+ import { createVoiceRoutes } from './routes/voice'
+ import { createHubSettingsRoutes } from './routes/hubSettings'
++import { createNamespaceSettingsRoutes } from './routes/namespaceSettings'
+ import { createWorkGraphRoutes } from './routes/workGraph'
+ import type { SSEManager } from '../sse/sseManager'
+ import type { VisibilityTracker } from '../visibility/visibilityTracker'
+@@ -274,7 +275,7 @@ function createWebApp(options: {
+         return next()
+     })
+ 
+-    app.route('/cli', createCliRoutes(options.getSyncEngine))
++    app.route('/cli', createCliRoutes(options.getSyncEngine, configuration.dataDir))
+ 
+     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
+     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
+@@ -287,6 +288,7 @@ function createWebApp(options: {
+     app.route('/api', createMachinesRoutes(options.getSyncEngine))
+     app.route('/api', createStorageRoutes(configuration.dbPath))
+     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
++    app.route('/api', createNamespaceSettingsRoutes(configuration.dataDir))
+     app.route('/api', createUsageRoutes(options.store))
+     app.route('/api', createGitRoutes(options.getSyncEngine))
+     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 14ec99b00..b973f746f 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -16,6 +16,21 @@ import type {
+ } from './schemas'
+ import type { SessionSummary } from './sessionSummary'
+ 
++export const SupportedLocaleSchema = z.enum(['en', 'zh-CN'])
++export type SupportedLocale = z.infer<typeof SupportedLocaleSchema>
++
++export const NamespaceSettingsResponseSchema = z.object({
++    locale: SupportedLocaleSchema
++})
++
++export type NamespaceSettingsResponse = z.infer<typeof NamespaceSettingsResponseSchema>
++
++export const UpdateNamespaceSettingsRequestSchema = z.object({
++    locale: SupportedLocaleSchema
++})
++
++export type UpdateNamespaceSettingsRequest = z.infer<typeof UpdateNamespaceSettingsRequestSchema>
++
+ export const CreateOrLoadMachineRequestSchema = z.object({
+     id: z.string().min(1),
+     metadata: z.unknown(),
+@@ -52,7 +67,9 @@ export type CliMessagesResponse = z.infer<typeof CliMessagesResponseSchema>
+ export const CreateSessionResponseSchema = z.object({
+     session: SessionSchema,
+     /** Hub opt-in for AGENT_NOTIFY_SUMMARY prompt injection (default off when omitted). */
+-    sessionSummaryContract: z.boolean().optional()
++    sessionSummaryContract: z.boolean().optional(),
++    /** Namespace-scoped UI locale used to localize AGENT_NOTIFY_SUMMARY instructions. */
++    sessionSummaryLocale: SupportedLocaleSchema.optional()
+ })
+ 
+ export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index c71f5cb45..8d9226f9f 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -35,6 +35,7 @@ import { LoadingState } from '@/components/LoadingState'
+ import { ToastContainer } from '@/components/ToastContainer'
+ import { PwaUpdateProvider } from '@/lib/pwa-update-context'
+ import { ToastProvider, useToast } from '@/lib/toast-context'
++import { NamespaceLocaleSync } from '@/components/NamespaceLocaleSync'
+ import type { SyncEvent } from '@/types/api'
+ 
+ type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
+@@ -464,6 +465,7 @@ function AppInner() {
+ 
+     return (
+         <AppContextProvider value={{ api, token, baseUrl }}>
++            <NamespaceLocaleSync />
+             <VoiceProvider>
+                 <PwaUpdateBannerWithStatusOffset
+                     isSyncing={isSyncing}
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index df920910d..870c6373a 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -15,6 +15,21 @@ describe('ApiClient error mapping', () => {
+         globalThis.fetch = originalFetch
+     })
+ 
++    it('reads and updates namespace-scoped locale settings', async () => {
++        fetchMock
++            .mockResolvedValueOnce(new Response(JSON.stringify({ locale: 'zh-CN' }), { status: 200 }))
++            .mockResolvedValueOnce(new Response(JSON.stringify({ locale: 'en' }), { status: 200 }))
++
++        const api = new ApiClient('test-token')
++        await expect(api.getNamespaceSettings()).resolves.toEqual({ locale: 'zh-CN' })
++        await expect(api.updateNamespaceSettings({ locale: 'en' })).resolves.toEqual({ locale: 'en' })
++        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/namespace-settings')
++        expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
++            method: 'PUT',
++            body: JSON.stringify({ locale: 'en' })
++        })
++    })
++
+     it('prefers the stable `code` field over the human-readable `error` message in ApiError.code', async () => {
+         // Match the shape /sessions/:id/reopen actually returns on a 503.
+         fetchMock.mockResolvedValueOnce(
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 5b8234d81..69edc4759 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -50,6 +50,8 @@ import type {
+     SqliteStorageUsageResponse,
+     HubSettingsResponse,
+     UpdateHubSettingsRequest,
++    NamespaceSettingsResponse,
++    UpdateNamespaceSettingsRequest,
+     UsageSummaryResponse,
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
+@@ -745,6 +747,17 @@ export class ApiClient {
+         })
+     }
+ 
++    async getNamespaceSettings(): Promise<NamespaceSettingsResponse> {
++        return await this.request<NamespaceSettingsResponse>('/api/namespace-settings')
++    }
++
++    async updateNamespaceSettings(settings: UpdateNamespaceSettingsRequest): Promise<NamespaceSettingsResponse> {
++        return await this.request<NamespaceSettingsResponse>('/api/namespace-settings', {
++            method: 'PUT',
++            body: JSON.stringify(settings)
++        })
++    }
++
+     async getUsageSummary(
+         range: '7d' | '30d' | 'all' = '7d',
+         timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+diff --git a/web/src/components/NamespaceLocaleSync.test.tsx b/web/src/components/NamespaceLocaleSync.test.tsx
+new file mode 100644
+index 000000000..5e80fc844
+--- /dev/null
++++ b/web/src/components/NamespaceLocaleSync.test.tsx
+@@ -0,0 +1,197 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { act, render, waitFor } from '@testing-library/react'
++import { NamespaceLocaleSync } from './NamespaceLocaleSync'
++import { I18nProvider } from '@/lib/i18n-context'
++import { useTranslation } from '@/lib/use-translation'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import type { ReactNode } from 'react'
++
++const getNamespaceSettings = vi.fn()
++const updateNamespaceSettings = vi.fn()
++const api = { getNamespaceSettings, updateNamespaceSettings }
++
++function renderWithProviders(children: ReactNode) {
++    const queryClient = new QueryClient({
++        defaultOptions: {
++            queries: { retry: false },
++            mutations: { retry: false },
++        }
++    })
++    return render(
++        <QueryClientProvider client={queryClient}>
++            <I18nProvider>{children}</I18nProvider>
++        </QueryClientProvider>
++    )
++}
++
++function resetApiMocks(): void {
++    getNamespaceSettings.mockReset()
++    updateNamespaceSettings.mockReset()
++    getNamespaceSettings.mockResolvedValue({ locale: 'en' })
++    updateNamespaceSettings.mockResolvedValue({ locale: 'en' })
++}
++
++vi.mock('@/lib/app-context', () => ({
++    useAppContext: () => ({
++        api
++    })
++}))
++
++function LocaleCapture(props: { onReady: (setLocale: (locale: 'en' | 'zh-CN') => void) => void }) {
++    const { setLocale } = useTranslation()
++    props.onReady(setLocale)
++    return null
++}
++
++describe('NamespaceLocaleSync', () => {
++    afterEach(() => {
++        localStorage.clear()
++        resetApiMocks()
++    })
++
++    it('hydrates the UI from the namespace and does not echo the initial value', async () => {
++        resetApiMocks()
++        localStorage.setItem('hapi-lang', 'en')
++        getNamespaceSettings.mockResolvedValue({ locale: 'zh-CN' })
++        updateNamespaceSettings.mockResolvedValue({ locale: 'zh-CN' })
++
++        renderWithProviders(<NamespaceLocaleSync />)
++
++        await waitFor(() => expect(document.documentElement.lang).toBe('zh-CN'))
++        expect(updateNamespaceSettings).not.toHaveBeenCalled()
++    })
++
++    it('persists later UI changes after namespace hydration', async () => {
++        resetApiMocks()
++        getNamespaceSettings.mockResolvedValue({ locale: 'en' })
++        updateNamespaceSettings.mockResolvedValue({ locale: 'zh-CN' })
++        let setLocale: ((locale: 'en' | 'zh-CN') => void) | undefined
++
++        renderWithProviders(
++            <>
++                <NamespaceLocaleSync />
++                <LocaleCapture onReady={(setter) => { setLocale = setter }} />
++            </>
++        )
++
++        await waitFor(() => expect(document.documentElement.lang).toBe('en'))
++        expect(setLocale).toBeDefined()
++        act(() => setLocale?.('zh-CN'))
++        await waitFor(() => expect(updateNamespaceSettings).toHaveBeenCalledWith({ locale: 'zh-CN' }))
++    })
++
++    it('persists a UI change back to the hydrated namespace locale', async () => {
++        resetApiMocks()
++        getNamespaceSettings.mockResolvedValue({ locale: 'en' })
++        updateNamespaceSettings.mockImplementation(async ({ locale }: { locale: 'en' | 'zh-CN' }) => ({ locale }))
++        let setLocale: ((locale: 'en' | 'zh-CN') => void) | undefined
++
++        renderWithProviders(
++            <>
++                <NamespaceLocaleSync />
++                <LocaleCapture onReady={(setter) => { setLocale = setter }} />
++            </>
++        )
++
++        await waitFor(() => expect(document.documentElement.lang).toBe('en'))
++        expect(setLocale).toBeDefined()
++        act(() => setLocale?.('zh-CN'))
++        await waitFor(() => expect(updateNamespaceSettings).toHaveBeenNthCalledWith(1, { locale: 'zh-CN' }))
++        act(() => setLocale?.('en'))
++        await waitFor(() => expect(updateNamespaceSettings).toHaveBeenNthCalledWith(2, { locale: 'en' }))
++    })
++
++    it('does not persist a stale local preference before the namespace loads', async () => {
++        localStorage.setItem('hapi-lang', 'zh-CN')
++        let resolveSettings!: (value: { locale: 'en' | 'zh-CN' }) => void
++        getNamespaceSettings.mockReturnValue(new Promise((resolve) => { resolveSettings = resolve }))
++
++        let setLocale: ((locale: 'en' | 'zh-CN') => void) | undefined
++        renderWithProviders(
++            <>
++                <NamespaceLocaleSync />
++                <LocaleCapture onReady={(setter) => { setLocale = setter }} />
++            </>
++        )
++
++        act(() => setLocale?.('en'))
++        expect(updateNamespaceSettings).not.toHaveBeenCalled()
++        await act(async () => { resolveSettings({ locale: 'en' }) })
++        expect(updateNamespaceSettings).not.toHaveBeenCalled()
++    })
++
++    it('uses the latest local choice when the namespace response races a UI change', async () => {
++        let resolveSettings!: (value: { locale: 'en' | 'zh-CN' }) => void
++        getNamespaceSettings.mockReturnValue(new Promise((resolve) => { resolveSettings = resolve }))
++        let setLocale: ((locale: 'en' | 'zh-CN') => void) | undefined
++
++        renderWithProviders(
++            <>
++                <NamespaceLocaleSync />
++                <LocaleCapture onReady={(setter) => { setLocale = setter }} />
++            </>
++        )
++
++        act(() => setLocale?.('zh-CN'))
++        await act(async () => { resolveSettings({ locale: 'en' }) })
++        await waitFor(() => expect(document.documentElement.lang).toBe('en'))
++        expect(updateNamespaceSettings).not.toHaveBeenCalled()
++    })
++
++    it('retries a transient namespace read failure', async () => {
++        getNamespaceSettings
++            .mockRejectedValueOnce(new Error('temporary failure'))
++            .mockResolvedValueOnce({ locale: 'zh-CN' })
++        renderWithProviders(<NamespaceLocaleSync />)
++
++        await waitFor(() => expect(document.documentElement.lang).toBe('zh-CN'))
++        expect(getNamespaceSettings).toHaveBeenCalledTimes(2)
++    })
++
++    it('retries a transient locale write failure', async () => {
++        updateNamespaceSettings
++            .mockRejectedValueOnce(new Error('temporary failure'))
++            .mockResolvedValueOnce({ locale: 'zh-CN' })
++        let setLocale: ((locale: 'en' | 'zh-CN') => void) | undefined
++
++        renderWithProviders(
++            <>
++                <NamespaceLocaleSync />
++                <LocaleCapture onReady={(setter) => { setLocale = setter }} />
++            </>
++        )
++
++        await waitFor(() => expect(document.documentElement.lang).toBe('en'))
++        await waitFor(() => expect(getNamespaceSettings).toHaveBeenCalled())
++        act(() => setLocale?.('zh-CN'))
++        await waitFor(() => expect(updateNamespaceSettings).toHaveBeenCalledTimes(2), { timeout: 5000 })
++        expect(updateNamespaceSettings).toHaveBeenLastCalledWith({ locale: 'zh-CN' })
++    })
++
++    it('requeues the locale after all write retries fail', async () => {
++        let resolveSettings!: (value: { locale: 'en' | 'zh-CN' }) => void
++        getNamespaceSettings.mockReturnValue(new Promise((resolve) => { resolveSettings = resolve }))
++        updateNamespaceSettings
++            .mockRejectedValueOnce(new Error('temporary failure'))
++            .mockRejectedValueOnce(new Error('temporary failure'))
++            .mockRejectedValueOnce(new Error('temporary failure'))
++            .mockRejectedValueOnce(new Error('temporary failure'))
++            .mockResolvedValueOnce({ locale: 'zh-CN' })
++        let setLocale: ((locale: 'en' | 'zh-CN') => void) | undefined
++
++        renderWithProviders(
++            <>
++                <NamespaceLocaleSync />
++                <LocaleCapture onReady={(setter) => { setLocale = setter }} />
++            </>
++        )
++
++        await waitFor(() => expect(getNamespaceSettings).toHaveBeenCalled())
++        await act(async () => { resolveSettings({ locale: 'en' }) })
++        await waitFor(() => expect(document.documentElement.lang).toBe('en'))
++        act(() => setLocale?.('zh-CN'))
++        await waitFor(() => expect(updateNamespaceSettings.mock.calls.length).toBeGreaterThanOrEqual(4), { timeout: 5000 })
++        await waitFor(() => expect(updateNamespaceSettings).toHaveBeenCalledTimes(5), { timeout: 7000 })
++        expect(updateNamespaceSettings).toHaveBeenLastCalledWith({ locale: 'zh-CN' })
++    }, 15_000)
++})
+diff --git a/web/src/components/NamespaceLocaleSync.tsx b/web/src/components/NamespaceLocaleSync.tsx
+new file mode 100644
+index 000000000..4834e6c4d
+--- /dev/null
++++ b/web/src/components/NamespaceLocaleSync.tsx
+@@ -0,0 +1,127 @@
++import { useEffect, useReducer, useRef } from 'react'
++import { useMutation, useQuery } from '@tanstack/react-query'
++import { useAppContext } from '@/lib/app-context'
++import { useTranslation } from '@/lib/use-translation'
++import type { SupportedLocale } from '@hapi/protocol'
++import { queryKeys } from '@/lib/query-keys'
++
++const NAMESPACE_LOCALE_RETRY_DELAY_MS = 5_000
++
++/**
++ * Reconciles the browser's UI locale with the authenticated namespace.
++ * The namespace value is authoritative on first load; subsequent UI changes
++ * are persisted without making the prompt protocol itself locale-dependent.
++ */
++export function NamespaceLocaleSync() {
++    const { api } = useAppContext()
++    const { locale, setLocale } = useTranslation()
++    const hydratedApiRef = useRef<typeof api | null>(null)
++    const hydrationPendingRef = useRef(false)
++    const lastQueuedLocaleRef = useRef<SupportedLocale | null>(null)
++    const writeChainRef = useRef(Promise.resolve())
++    const retryTimerRef = useRef<number | null>(null)
++    const retryScheduledLocaleRef = useRef<SupportedLocale | null>(null)
++    const [writeRetry, retryWrite] = useReducer((value: number) => value + 1, 0)
++    const localeRef = useRef(locale)
++    localeRef.current = locale
++    const settingsQuery = useQuery({
++        queryKey: [...queryKeys.hubSettings, 'namespace-locale', api],
++        queryFn: () => api.getNamespaceSettings(),
++        retry: 3,
++        retryDelay: 0,
++        refetchOnReconnect: true,
++    })
++    const { mutateAsync: saveLocale } = useMutation({
++        mutationFn: (nextLocale: SupportedLocale) => api.updateNamespaceSettings({ locale: nextLocale }),
++        retry: 3,
++        retryDelay: 0,
++    })
++
++    useEffect(() => {
++        hydratedApiRef.current = null
++        hydrationPendingRef.current = false
++        lastQueuedLocaleRef.current = null
++        writeChainRef.current = Promise.resolve()
++        retryScheduledLocaleRef.current = null
++
++        if (retryTimerRef.current !== null) {
++            window.clearTimeout(retryTimerRef.current)
++            retryTimerRef.current = null
++        }
++
++        return () => {
++            hydratedApiRef.current = null
++            lastQueuedLocaleRef.current = null
++            retryScheduledLocaleRef.current = null
++            if (retryTimerRef.current !== null) {
++                window.clearTimeout(retryTimerRef.current)
++                retryTimerRef.current = null
++            }
++        }
++    }, [api])
++
++    useEffect(() => {
++        const settings = settingsQuery.data
++        if (!settings) return
++
++        const isFirstHydration = hydratedApiRef.current !== api
++        hydratedApiRef.current = api
++        if (isFirstHydration) {
++            lastQueuedLocaleRef.current = settings.locale
++            hydrationPendingRef.current = settings.locale !== localeRef.current
++        }
++        if (isFirstHydration && settings.locale !== localeRef.current) {
++            setLocale(settings.locale)
++        }
++    }, [api, setLocale, settingsQuery.data])
++
++    useEffect(() => {
++        if (hydratedApiRef.current !== api) return
++        if (retryScheduledLocaleRef.current !== null && retryScheduledLocaleRef.current !== locale) {
++            retryScheduledLocaleRef.current = null
++            if (retryTimerRef.current !== null) {
++                window.clearTimeout(retryTimerRef.current)
++                retryTimerRef.current = null
++            }
++        }
++        if (retryScheduledLocaleRef.current === locale) return
++        if (retryTimerRef.current !== null) {
++            window.clearTimeout(retryTimerRef.current)
++            retryTimerRef.current = null
++        }
++        if (hydrationPendingRef.current) {
++            if (lastQueuedLocaleRef.current === locale) {
++                hydrationPendingRef.current = false
++                return
++            }
++            hydrationPendingRef.current = false
++        }
++        if (lastQueuedLocaleRef.current === locale) {
++            return
++        }
++
++        lastQueuedLocaleRef.current = locale
++        writeChainRef.current = writeChainRef.current
++            .catch(() => undefined)
++            .then(() => saveLocale(locale).then(() => undefined))
++            .catch((error) => {
++                console.warn('Failed to save namespace locale:', error)
++                if (hydratedApiRef.current !== api || lastQueuedLocaleRef.current !== locale) {
++                    return
++                }
++                lastQueuedLocaleRef.current = null
++                retryScheduledLocaleRef.current = locale
++                retryTimerRef.current = window.setTimeout(() => {
++                    retryTimerRef.current = null
++                    if (localeRef.current !== locale) {
++                        retryScheduledLocaleRef.current = null
++                        return
++                    }
++                    retryScheduledLocaleRef.current = null
++                    retryWrite()
++                }, NAMESPACE_LOCALE_RETRY_DELAY_MS)
++            })
++    }, [api, locale, retryWrite, saveLocale, writeRetry])
++
++    return null
++}
+diff --git a/web/src/components/assistant-ui/markdown-a.test.tsx b/web/src/components/assistant-ui/markdown-a.test.tsx
+index d5c161313..94c7ed9da 100644
+--- a/web/src/components/assistant-ui/markdown-a.test.tsx
++++ b/web/src/components/assistant-ui/markdown-a.test.tsx
+@@ -54,12 +54,12 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
+         sessionId: 'session-1',
+         metadata: { path: '/home/ada/coding/hapi', host: 'local' },
+         terminalToolDisplayMode: 'compact',
++        showSessionSummaryInChat: false,
+         disabled: false,
+         onRefresh: () => {},
+         hasMoreMessages: false,
+         isSyncingTail: false,
+         isLoadingMoreMessages: false,
+-        showSessionSummaryInChat: false,
+         loadOlderMessagesPreservingScroll: async () => 'loaded',
+         ...overrides,
+     }

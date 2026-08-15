@@ -1,0 +1,6 @@
+patch	state	upstream_ref	source_commits
+# v0.27.2.5 — hotfix on v0.27.2.4 (no upstream base change; same 33 carried PRs)
+# Fix: restore MachineCache.getMachines()/getMachinesByNamespace() mapLive live-capability overlay
+#      (lost in the v0.27.2.4 rebuild → web skew banner showed every runner as "legacy runner");
+#      runner connect/keepalive identity now keeps asRunner capabilities in stored metadata.
+# No patch queue changes vs v0.27.2.4 (see tools/maintenance/releases/v0.27.2.4/).
