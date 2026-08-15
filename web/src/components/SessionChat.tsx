@@ -39,6 +39,7 @@ import { HappyThread } from '@/components/AssistantChat/HappyThread'
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { DshSessionPanels } from '@/components/DshSessionPanels'
+import { DshSubagentsModal } from '@/components/DshSubagentsModal'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { getSessionTitle } from '@/lib/sessionTitle'
@@ -105,6 +106,7 @@ import { buildCursorEffortPickerOptionsWithDefaultFirst } from '@/lib/cursorMode
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
 import { useGrokModels } from '@/hooks/queries/useGrokModels'
 import { useCopilotModels } from '@/hooks/queries/useCopilotModels'
+import { useDshModels } from '@/hooks/queries/useDshModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
 import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeReasoningEffortOptions'
@@ -561,6 +563,7 @@ function SessionChatInner(props: SessionChatProps) {
     const { codexExplorationCollapsed } = useCodexExplorationCollapse()
     const navigate = useNavigate()
     const [historyActionPending, setHistoryActionPending] = useState(false)
+    const [dshSubagentsOpen, setDshSubagentsOpen] = useState(false)
 
     const onForkConversation = useCallback(async (messageLocalId?: string) => {
         setHistoryActionPending(true)
@@ -949,6 +952,42 @@ function SessionChatInner(props: SessionChatProps) {
             ]
             : undefined
     ), [agentFlavor, copilotModelsState.availableModels])
+    // DeepSeek Harness: models are runtime-discovered from the DSH host
+    // (session.models); the picker lists every provider group flattened, and
+    // reasoning efforts follow the selected model — same pattern as Codex.
+    const dshModelsState = useDshModels({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'dsh' && props.session.active
+    })
+    const dshModelOptions = useMemo(() => {
+        if (agentFlavor !== 'dsh') {
+            return undefined
+        }
+        const options: Array<{ value: string | null; label: string }> = []
+        for (const group of dshModelsState.models?.groups ?? []) {
+            for (const model of group.models) {
+                options.push({ value: model.id, label: model.name })
+            }
+        }
+        return options.length > 0 ? options : undefined
+    }, [agentFlavor, dshModelsState.models])
+    const dshReasoningEffortOptions = useMemo(() => {
+        if (agentFlavor !== 'dsh') {
+            return undefined
+        }
+        const current = props.session.model
+        if (!current) {
+            return undefined
+        }
+        for (const group of dshModelsState.models?.groups ?? []) {
+            const model = group.models.find((m) => m.id === current)
+            if (model?.efforts && model.efforts.length > 0) {
+                return model.efforts.map((effort) => ({ value: effort.id, name: effort.name }))
+            }
+        }
+        return undefined
+    }, [agentFlavor, dshModelsState.models, props.session.model])
     const cursorModelsState = useCursorModels({
         api: props.api,
         sessionId: props.session.id,
@@ -1725,6 +1764,8 @@ function SessionChatInner(props: SessionChatProps) {
                 outlineActive={outlineOpen}
                 onToggleTerminal={canViewAgentTerminal ? () => setTerminalVisible(v => !v) : undefined}
                 terminalActive={terminalVisible}
+                onToggleDshSubagents={agentFlavor === 'dsh' ? () => setDshSubagentsOpen(v => !v) : undefined}
+                dshSubagentsActive={agentFlavor === 'dsh' ? dshSubagentsOpen : undefined}
                 api={props.api}
                 titleSuggestionAvailable={props.titleSuggestionAvailable}
                 canReopen={inactiveCanResume}
@@ -1874,6 +1915,13 @@ function SessionChatInner(props: SessionChatProps) {
                                     messages={props.messages}
                                 />
                             ) : null}
+                            {agentFlavor === 'dsh' && dshSubagentsOpen ? (
+                                <DshSubagentsModal
+                                    api={props.api}
+                                    sessionId={props.session.id}
+                                    onClose={() => setDshSubagentsOpen(false)}
+                                />
+                            ) : null}
                         </div>
 
                         <HappyComposer
@@ -1914,8 +1962,10 @@ function SessionChatInner(props: SessionChatProps) {
                                             ? grokModelOptions
                                         : agentFlavor === 'copilot'
                                             ? copilotModelOptions
-                                        // Pi gets its provider-qualified model list from the piModels prop;
-                                        // feeding piModelOptions here would make the generic Ctrl/Cmd+M
+                                        : agentFlavor === 'dsh'
+                                            ? dshModelOptions
+                                        // Pi uses its own provider-qualified picker (piModels prop).
+                                        // Feeding piModelOptions here would make the generic Ctrl/Cmd+M
                                         // cycler (getNextModelForFlavor) post a bare modelId string,
                                         // which loses the provider and can pick the wrong cached
                                         // match or throw in runPi. undefined makes the shortcut a no-op
@@ -1929,7 +1979,9 @@ function SessionChatInner(props: SessionChatProps) {
                                 ? codexReasoningEffortOptions
                                 : agentFlavor === 'opencode' && opencodeReasoningEffortState.options.length > 0
                                     ? opencodeReasoningEffortState.options
-                                    : undefined
+                                    : agentFlavor === 'dsh'
+                                        ? dshReasoningEffortOptions
+                                        : undefined
                         }
                         availableEffortOptions={
                             agentFlavor === 'grok' && grokEffortState.options.length > 0
@@ -2020,10 +2072,11 @@ function SessionChatInner(props: SessionChatProps) {
                                 : undefined
                         }
                         onModelReasoningEffortChange={
-                            (agentFlavor === 'codex' || agentFlavor === 'opencode')
+                            (agentFlavor === 'codex' || agentFlavor === 'opencode' || agentFlavor === 'dsh')
                                 && props.session.active
                                 && !controlledByUser
                                 && (agentFlavor !== 'opencode' || opencodeReasoningEffortState.options.length > 0)
+                                && (agentFlavor !== 'dsh' || Boolean(dshReasoningEffortOptions?.length))
                                 ? handleModelReasoningEffortChange
                                 : undefined
                         }
