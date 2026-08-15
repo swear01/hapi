@@ -25,7 +25,7 @@ import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { OlderLoadOutcome } from '@/lib/message-window-store'
-import { setNavigationInFlight } from '@/lib/message-window-store'
+import { beginNavigation } from '@/lib/message-window-store'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { useMachines } from '@/hooks/queries/useMachines'
 import { useMachineLabels } from '@/hooks/useMachineLabels'
@@ -1629,8 +1629,8 @@ export function HappyThread(props: {
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
-        const sessionId = sessionIdRef.current
-        setNavigationInFlight(sessionId, true)
+        const releaseNavigation = beginNavigation(sessionIdRef.current)
+        activeNavigationReleaseRef.current = releaseNavigation
         try {
             const target = await locateOutlineTargetMessage({
                 targetMessageId: item.targetMessageId,
@@ -1645,7 +1645,8 @@ export function HappyThread(props: {
             props.onOutlineItemClick?.(item)
             props.onOutlineOpenChange(false)
         } finally {
-            setNavigationInFlight(sessionId, false)
+            activeNavigationReleaseRef.current = null
+            releaseNavigation()
         }
     }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
 
@@ -1663,6 +1664,13 @@ export function HappyThread(props: {
     const [promptNavigationStatus, setPromptNavigationStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
     const [loadingPromptMessageId, setLoadingPromptMessageId] = useState<string | null>(null)
     const navigationInFlightRef = useRef(false)
+    // Release any in-flight navigation lease on unmount so a session switch
+    // mid-load cannot leave the window store in navigation mode.
+    const activeNavigationReleaseRef = useRef<(() => void) | null>(null)
+    useEffect(() => () => {
+        activeNavigationReleaseRef.current?.()
+        activeNavigationReleaseRef.current = null
+    }, [])
     const [isNavigationInFlight, setIsNavigationInFlight] = useState(false)
     const promptNavigationTimerRef = useRef<number | null>(null)
     const scrollToPromptForMessage = useCallback(async (messageId: string): Promise<boolean> => {
@@ -1711,8 +1719,8 @@ export function HappyThread(props: {
         if (navigationInFlightRef.current) return false
         navigationInFlightRef.current = true
         setIsNavigationInFlight(true)
-        const navigationSessionId = sessionIdRef.current
-        setNavigationInFlight(navigationSessionId, true)
+        const releaseNavigation = beginNavigation(sessionIdRef.current)
+        activeNavigationReleaseRef.current = releaseNavigation
         try {
             if (replyToMessageId) {
                 const scrolled = await runAfterPendingHistoryLoad(
@@ -1725,7 +1733,8 @@ export function HappyThread(props: {
         } finally {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
-            setNavigationInFlight(navigationSessionId, false)
+            activeNavigationReleaseRef.current = null
+            releaseNavigation()
         }
     }, [scrollToMessage, scrollToPromptForMessage])
 
@@ -1736,8 +1745,8 @@ export function HappyThread(props: {
         if (navigationInFlightRef.current) return false
         navigationInFlightRef.current = true
         setIsNavigationInFlight(true)
-        const navigationSessionId = sessionIdRef.current
-        setNavigationInFlight(navigationSessionId, true)
+        const releaseNavigation = beginNavigation(sessionIdRef.current)
+        activeNavigationReleaseRef.current = releaseNavigation
         if (conversationStartStatusTimerRef.current !== null) {
             window.clearTimeout(conversationStartStatusTimerRef.current)
             conversationStartStatusTimerRef.current = null
@@ -1779,7 +1788,8 @@ export function HappyThread(props: {
         } finally {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
-            setNavigationInFlight(navigationSessionId, false)
+            activeNavigationReleaseRef.current = null
+            releaseNavigation()
         }
     }, [clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom])
 

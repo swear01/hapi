@@ -27,6 +27,7 @@ export const EMPTY_STATE: MessageWindowState = {
     viewMode: 'tail',
     messagesVersion: 0,
     historyVersion: 0,
+    navigationLeaseCount: 0,
 }
 
 export function useMessages(api: ApiClient | null, sessionId: string | null): {

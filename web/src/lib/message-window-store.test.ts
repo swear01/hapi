@@ -14,8 +14,8 @@ import {
     markMessagesConsumed,
     reconcileQueuedLocalIds,
     removeOptimisticMessage,
+    beginNavigation,
     setMessageViewMode,
-    setNavigationInFlight,
     syncTailMessages,
     updateMessageStatus,
 } from '@/lib/message-window-store'
@@ -1196,7 +1196,7 @@ describe('V2 persistence boundary', () => {
 describe('explicit history navigation', () => {
     it('keeps the newest rows instead of evicting them while navigating', () => {
         const id = sessionId('navigation-keeps-tail')
-        setNavigationInFlight(id, true)
+        const releaseNavigation = beginNavigation(id)
         setMessageViewMode(id, 'history')
         ingestIncomingMessages(id, Array.from({ length: HISTORY_WINDOW_SIZE + 50 }, (_, index) =>
             makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
@@ -1206,16 +1206,17 @@ describe('explicit history navigation', () => {
         expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE + 50)
         // The newest (live tail) rows survive the otherwise-bounded window.
         expect(state.messages.at(-1)?.id).toBe(`overflow-${HISTORY_WINDOW_SIZE + 49}`)
+        releaseNavigation()
     })
 
     it('evicts the newest rows again once the navigation ends', () => {
         const id = sessionId('navigation-overflow-after')
-        setNavigationInFlight(id, true)
+        const releaseNavigation = beginNavigation(id)
         setMessageViewMode(id, 'history')
         ingestIncomingMessages(id, Array.from({ length: HISTORY_WINDOW_SIZE + 50 }, (_, index) =>
             makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
         ))
-        setNavigationInFlight(id, false)
+        releaseNavigation()
         ingestIncomingMessages(id, [
             makeAgentMessage({ id: 'one-more', seq: HISTORY_WINDOW_SIZE + 60, at: HISTORY_WINDOW_SIZE + 60 })
         ])
@@ -1228,10 +1229,10 @@ describe('explicit history navigation', () => {
     it('ignores tail-mode flips while navigating and resumes after', () => {
         const id = sessionId('navigation-pins-history')
         setMessageViewMode(id, 'history')
-        setNavigationInFlight(id, true)
+        const releaseNavigation = beginNavigation(id)
         setMessageViewMode(id, 'tail')
         expect(getMessageWindowState(id).viewMode).toBe('history')
-        setNavigationInFlight(id, false)
+        releaseNavigation()
         setMessageViewMode(id, 'tail')
         expect(getMessageWindowState(id).viewMode).toBe('tail')
     })
@@ -1242,10 +1243,10 @@ describe('explicit history navigation', () => {
             makeAgentMessage({ id: 'latest', seq: 1, at: 1 })
         ], { epoch: 1 }))
         const api = createApi(getMessages)
-        setNavigationInFlight(id, true)
+        const releaseNavigation = beginNavigation(id)
         await syncTailMessages(api, id)
         expect(getMessages).not.toHaveBeenCalled()
-        setNavigationInFlight(id, false)
+        releaseNavigation()
         await syncTailMessages(api, id)
         expect(getMessages).toHaveBeenCalledTimes(1)
     })
@@ -1256,11 +1257,31 @@ describe('explicit history navigation', () => {
             makeAgentMessage({ id: 'latest', seq: 1, at: 1 })
         ], { epoch: 1 }))
         const api = createApi(getMessages)
-        setNavigationInFlight(id, true)
+        const releaseNavigation = beginNavigation(id)
         await syncTailMessages(api, id, { ensureAfterCurrent: true })
         expect(getMessages).not.toHaveBeenCalled()
         // Ending the navigation starts the queued refresh without another call.
-        setNavigationInFlight(id, false)
+        releaseNavigation()
         await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(1))
+    })
+
+    it('keeps navigation active while any overlapping lease is held', () => {
+        const id = sessionId('navigation-overlapping-leases')
+        setMessageViewMode(id, 'history')
+        const first = beginNavigation(id)
+        const second = beginNavigation(id)
+        // One lease released: the window must still be in navigation mode.
+        first()
+        expect(getMessageWindowState(id).navigationLeaseCount).toBe(1)
+        setMessageViewMode(id, 'tail')
+        expect(getMessageWindowState(id).viewMode).toBe('history')
+        // Releasing the last lease resumes normal behavior.
+        second()
+        expect(getMessageWindowState(id).navigationLeaseCount).toBe(0)
+        setMessageViewMode(id, 'tail')
+        expect(getMessageWindowState(id).viewMode).toBe('tail')
+        // Release is idempotent.
+        second()
+        expect(getMessageWindowState(id).navigationLeaseCount).toBe(0)
     })
 })

@@ -41,7 +41,7 @@ type JumpProbe = {
     startSampling: () => void
     stopSampling: () => void
     refetch: () => Promise<void>
-    samplingRaf: number | null
+    samplingTimer: number | null
 }
 
 function messageSeq(message: DecryptedMessage): number {
@@ -259,21 +259,23 @@ window.__jumpProbe = {
     startSampling: () => {
         window.__jumpProbe.composerSamples = []
         window.__jumpProbe.statusSamples = []
+        // Low-frequency sampling: getBoundingClientRect forces a layout flush,
+        // and a per-frame flush starves the render passes on slow runners.
         const sample = () => {
             const rect = window.__jumpProbe.composerRect()
             if (rect) window.__jumpProbe.composerSamples.push(rect)
             window.__jumpProbe.statusSamples.push(window.__jumpProbe.statusText())
-            window.__jumpProbe.samplingRaf = requestAnimationFrame(sample)
+            window.__jumpProbe.samplingTimer = window.setTimeout(sample, 200)
         }
-        window.__jumpProbe.samplingRaf = requestAnimationFrame(sample)
+        window.__jumpProbe.samplingTimer = window.setTimeout(sample, 200)
     },
     stopSampling: () => {
-        if (window.__jumpProbe.samplingRaf !== null) {
-            cancelAnimationFrame(window.__jumpProbe.samplingRaf)
-            window.__jumpProbe.samplingRaf = null
+        if (window.__jumpProbe.samplingTimer !== null) {
+            window.clearTimeout(window.__jumpProbe.samplingTimer)
+            window.__jumpProbe.samplingTimer = null
         }
     },
-    samplingRaf: null
+    samplingTimer: null
 }
 
 function FixtureChat() {
