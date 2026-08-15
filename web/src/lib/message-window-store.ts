@@ -43,10 +43,12 @@ export const VISIBLE_WINDOW_SIZE = 400
 export const HISTORY_WINDOW_SIZE = 600
 const AGENT_RUN_WINDOW_SIZE = 800
 const OLDER_LOAD_WINDOW_SIZE = 800
-// While an explicit navigation is in flight the window keeps both ends of the
-// transcript — the head the jump is about to show and the live tail that feeds
-// the StatusBar — and drops the middle, so the store stays bounded on
-// pathological sessions instead of copying an ever-growing array per page.
+// While an explicit navigation is in flight the window keeps both ends of
+// the transcript — the head the jump is about to show and the live tail that
+// feeds the StatusBar — with an explicit gap marker between them, bounded so
+// pathological sessions cannot grow the window unbounded. The gap marker is a
+// synthetic user message, which also resets assistant→prompt association at
+// the boundary (a retained tail response must not link to a head prompt).
 const NAVIGATION_HEAD_LIMIT = HISTORY_WINDOW_SIZE
 const NAVIGATION_TAIL_LIMIT = VISIBLE_WINDOW_SIZE
 const PAGE_SIZE = 200
@@ -454,6 +456,30 @@ function isCodexAgentRunMessage(message: DecryptedMessage): boolean {
     return type === 'agent-run-start' || type === 'agent-run-update' || type === 'agent-run-trace'
 }
 
+function makeTranscriptGapMessage(beforeSeq: number | null, afterSeq: number | null): DecryptedMessage {
+    const missingStart = beforeSeq !== null ? beforeSeq + 1 : null
+    const missingEnd = afterSeq !== null ? afterSeq - 1 : null
+    const range = missingStart !== null && missingEnd !== null && missingEnd >= missingStart
+        ? `${missingStart}–${missingEnd}`
+        : missingStart !== null ? `from ${missingStart}` : missingEnd !== null ? `up to ${missingEnd}` : ''
+    return {
+        id: `__transcript-gap__${missingStart ?? '?'}-${missingEnd ?? '?'}`,
+        // Keep the seq inside the head range so the gap marker never skews
+        // the window bounds (null would collapse to 0 in deriveSeqBounds).
+        seq: beforeSeq !== null ? beforeSeq + 1 : null,
+        localId: null,
+        content: {
+            role: 'user',
+            content: {
+                type: 'text',
+                text: `[History not loaded: messages ${range} were skipped during this jump.]`
+            }
+        },
+        createdAt: 0,
+        invokedAt: null
+    } as DecryptedMessage
+}
+
 function trimNavigationWindow(
     messages: DecryptedMessage[]
 ): { kept: DecryptedMessage[]; dropped: DecryptedMessage[] } {
@@ -461,11 +487,17 @@ function trimNavigationWindow(
     if (messages.length <= limit) {
         return { kept: messages, dropped: [] }
     }
+    const head = messages.slice(0, NAVIGATION_HEAD_LIMIT)
+    const tail = messages.slice(messages.length - NAVIGATION_TAIL_LIMIT)
+    const headLast = head.at(-1) ?? null
+    const tailFirst = tail[0] ?? null
+    const headLastSeq = headLast?.seq ?? null
+    const tailFirstSeq = tailFirst?.seq ?? null
+    const contiguous = headLastSeq !== null && tailFirstSeq !== null && tailFirstSeq === headLastSeq + 1
     return {
-        kept: [
-            ...messages.slice(0, NAVIGATION_HEAD_LIMIT),
-            ...messages.slice(messages.length - NAVIGATION_TAIL_LIMIT)
-        ],
+        kept: contiguous
+            ? [...head, ...tail]
+            : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq), ...tail],
         dropped: messages.slice(NAVIGATION_HEAD_LIMIT, messages.length - NAVIGATION_TAIL_LIMIT)
     }
 }

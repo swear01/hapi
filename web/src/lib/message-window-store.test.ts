@@ -1443,8 +1443,8 @@ describe('explicit history navigation', () => {
         await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
     })
 
-    it('keeps both ends of the transcript while navigating past the bound', () => {
-        const id = sessionId('navigation-head-tail-bound')
+    it('keeps both ends of the transcript with an explicit gap marker', () => {
+        const id = sessionId('navigation-head-gap-tail')
         const releaseNavigation = beginNavigation(id)
         setMessageViewMode(id, 'history')
         const total = HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 50
@@ -1453,10 +1453,16 @@ describe('explicit history navigation', () => {
         ))
 
         const state = getMessageWindowState(id)
-        // The head (what the jump is about to show) and the live tail (the
-        // StatusBar's usage rows) survive; the middle is dropped.
-        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE)
+        // Head + explicit gap marker + live tail: bounded, honest, and the
+        // marker (a user-role message) resets assistant→prompt association
+        // so the first retained tail response cannot link to a head prompt.
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE + 1)
         expect(state.messages[0]?.id).toBe('overflow-0')
+        const gapIndex = state.messages.findIndex((message) => message.id.startsWith('__transcript-gap__'))
+        expect(gapIndex).toBe(HISTORY_WINDOW_SIZE)
+        expect(state.messages[gapIndex]?.content).toMatchObject({
+            role: 'user'
+        })
         expect(state.messages.at(-1)?.id).toBe(`overflow-${total - 1}`)
         releaseNavigation()
     })

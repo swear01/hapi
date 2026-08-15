@@ -309,6 +309,24 @@ describe('buildAssistantReplyTargets', () => {
         ])
     })
 
+    it('resets the prompt association at a transcript-gap marker', () => {
+        // The navigation window trims the middle of a long transcript and
+        // inserts a synthetic user-role gap marker between the retained head
+        // and tail. The first retained tail response must not link back to a
+        // head prompt (that would be a wrong jump-to-turn-input target).
+        const blocks = assignThreadMessageIds([
+            userText('head-prompt'),
+            agentText('head-answer'),
+            userText('gap-marker'),
+            agentText('tail-answer')
+        ])
+
+        expect([...buildAssistantReplyTargets(blocks)]).toEqual([
+            ['agent-text:head-answer', 'user-text:head-prompt'],
+            ['agent-text:tail-answer', 'user-text:gap-marker']
+        ])
+    })
+
     it('does not invent a target when loaded history starts with an assistant response', () => {
         const blocks = assignThreadMessageIds([agentText('answer')])
         expect(buildAssistantReplyTargets(blocks).size).toBe(0)

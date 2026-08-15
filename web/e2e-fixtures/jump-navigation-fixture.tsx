@@ -253,6 +253,7 @@ window.__jumpProbe = {
             messageCount: state.messages.length,
             oldestSeq: seqs.length ? Math.min(...seqs) : null,
             newestSeq: seqs.length ? Math.max(...seqs) : null,
+            gapPresent: state.messages.some((message) => message.id.startsWith('__transcript-gap__')),
             scrollTop: viewport ? Math.round(viewport.scrollTop) : 0
         }
     },
