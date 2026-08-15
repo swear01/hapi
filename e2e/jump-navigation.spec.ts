@@ -27,6 +27,10 @@ test('jump to conversation start reaches the top without dragging the composer o
     const before = await page.evaluate(() => window.__jumpProbe.composerRect())
     expect(before).not.toBeNull()
 
+    // Sample the composer shell and status label for the whole jump (load
+    // phase included): the shell must not move and the label must not flicker.
+    await page.evaluate(() => window.__jumpProbe.startSampling())
+
     // Hover the last assistant reply so its navigation actions appear, then
     // click its jump-to-conversation-start button. A DOM click avoids the
     // actionability dance over the 1200-message DOM on slow runners.
@@ -60,24 +64,21 @@ test('jump to conversation start reaches the top without dragging the composer o
         console.log('JUMP LANDING DUMP:', JSON.stringify(dump))
     }
     expect(landingState?.scrollTop).toBe(0)
-
-    // Sample the composer shell position every frame during the smooth scroll.
-    await page.evaluate(() => window.__jumpProbe.startSampling())
-    await page.waitForTimeout(2500)
     await page.evaluate(() => window.__jumpProbe.stopSampling())
 
     const samples = await page.evaluate(() => window.__jumpProbe.composerSamples)
-    expect(samples.length).toBeGreaterThan(10)
+    expect(samples.length).toBeGreaterThan(5)
 
     // The composer shell is a sibling below the scroll viewport: its rect must
-    // not move at any point during the animation.
+    // not move at any point during the whole jump (loading + animation).
     const topDelta = Math.max(...samples.map((s) => s.top)) - Math.min(...samples.map((s) => s.top))
     expect(topDelta).toBe(0)
 
-    // The status stats must still describe the live tail, not a stale/evicted
-    // window value.
-    const afterStatus = await page.evaluate(() => window.__jumpProbe.statusText())
-    expect(afterStatus).toBe(initialStatus)
+    // The context-stats label must not flicker while the window loads: it
+    // keeps describing the live tail usage throughout.
+    const statusSamples = await page.evaluate(() => window.__jumpProbe.statusSamples)
+    expect(statusSamples.length).toBeGreaterThan(5)
+    expect(statusSamples.every((value) => value === initialStatus)).toBe(true)
 
     // The navigation kept the newest messages (no mid-load eviction + tail
     // reset) and loaded everything…

@@ -35,6 +35,8 @@ export type MessageWindowState = {
     messagesVersion: number
     historyVersion: number
     tailRevision: number
+    /** Number of explicit history navigations currently in flight (0 when idle). */
+    navigationLeaseCount: number
 }
 
 export const VISIBLE_WINDOW_SIZE = 400
@@ -55,7 +57,7 @@ type InternalState = MessageWindowState & {
     newestPositionSeq: number | null
     requiresLatestReset: boolean
     preferLatestOnActivation: boolean
-    navigationInFlight: boolean
+    navigationLeaseCount: number
     syncGeneration: number
     olderGeneration: number
 }
@@ -243,7 +245,7 @@ function createState(sessionId: string): InternalState {
         newestPositionSeq: null,
         requiresLatestReset: false,
         preferLatestOnActivation: false,
-        navigationInFlight: false,
+        navigationLeaseCount: 0,
         syncGeneration: 0,
         olderGeneration: 0
     }
@@ -394,7 +396,7 @@ function buildState(
         | 'newestPositionSeq'
         | 'requiresLatestReset'
         | 'preferLatestOnActivation'
-        | 'navigationInFlight'
+        | 'navigationLeaseCount'
         | 'syncGeneration'
         | 'olderGeneration'
         | 'historyVersion'
@@ -506,7 +508,7 @@ function mergeIntoWindow(
         return previous
     }
     const mode = options.mode ?? (previous.viewMode === 'history' ? 'prepend' : 'append')
-    const navigationInFlight = previous.navigationInFlight
+    const navigationInFlight = previous.navigationLeaseCount > 0
     const regularLimit = options.regularLimit
         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
     const merged = mergeMessages(previous.messages, retainedIncoming)
@@ -858,7 +860,7 @@ export function syncTailMessages(
         tailSyncControllers.set(sessionId, controller)
     }
     controller.api = api
-    if (getState(sessionId).navigationInFlight) {
+    if (getState(sessionId).navigationLeaseCount > 0) {
         // A tail refresh requested during an explicit navigation must not be
         // dropped: it would bump olderGeneration and invalidate the in-flight
         // older-page loads. Queue it and let setNavigationInFlight(false)
@@ -1016,7 +1018,7 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
         // outline) pins history mode: while it runs, the scroll handler's
         // near-bottom frames must not flip back to tail mode, which would
         // trigger a tail re-sync and reset the window mid-load.
-        if (previous.navigationInFlight && mode === 'tail') {
+        if (previous.navigationLeaseCount > 0 && mode === 'tail') {
             return previous
         }
         if (mode === 'history') {
@@ -1033,21 +1035,44 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
  * tail resets, pins history mode, and pauses tail synchronization so the
  * navigation's older-page loads are not invalidated mid-flight.
  */
-export function setNavigationInFlight(sessionId: string, inFlight: boolean): void {
+/**
+ * Leases the explicit-navigation state (jump to conversation start, jump to
+ * turn input, outline selection). While any lease is held, the window keeps
+ * the newest messages instead of evicting them past the rolling caps,
+ * suppresses tail resets, pins history mode, and pauses tail synchronization
+ * so the navigation's older-page loads are not invalidated mid-flight.
+ *
+ * Leases are reference-counted so overlapping navigations (an outline click
+ * while a conversation-start load is still running) cannot clear the state
+ * early, and the returned release function is idempotent so component
+ * teardown can release safely. The queued tail refresh runs once the last
+ * lease is released.
+ */
+export function beginNavigation(sessionId: string): () => void {
     updateState(sessionId, (previous) => {
-        if (previous.navigationInFlight === inFlight) {
-            return previous
-        }
-        return buildState(previous, { navigationInFlight: inFlight })
+        return buildState(previous, { navigationLeaseCount: previous.navigationLeaseCount + 1 })
     })
-    if (inFlight) {
-        return
-    }
-    // Run any tail refresh that was queued while the navigation was in flight.
-    const controller = tailSyncControllers.get(sessionId)
-    if (controller && controller.trailingRequested && !controller.running) {
-        controller.trailingRequested = false
-        void startTailSync(sessionId, controller)
+    let released = false
+    return () => {
+        if (released) {
+            return
+        }
+        released = true
+        let lastLeaseReleased = false
+        updateState(sessionId, (previous) => {
+            const next = Math.max(0, previous.navigationLeaseCount - 1)
+            lastLeaseReleased = next === 0
+            return buildState(previous, { navigationLeaseCount: next })
+        })
+        if (!lastLeaseReleased) {
+            return
+        }
+        // Run any tail refresh that was queued while the navigation was in flight.
+        const controller = tailSyncControllers.get(sessionId)
+        if (controller && controller.trailingRequested && !controller.running) {
+            controller.trailingRequested = false
+            void startTailSync(sessionId, controller)
+        }
     }
 }
 

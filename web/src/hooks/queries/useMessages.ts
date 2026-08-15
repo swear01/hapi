@@ -28,6 +28,7 @@ export const EMPTY_STATE: MessageWindowState = {
     messagesVersion: 0,
     historyVersion: 0,
     tailRevision: 0,
+    navigationLeaseCount: 0,
 }
 
 export function useMessages(api: ApiClient | null, sessionId: string | null): {
