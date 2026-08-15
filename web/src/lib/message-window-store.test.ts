@@ -15,6 +15,7 @@ import {
     reconcileQueuedLocalIds,
     removeOptimisticMessage,
     setMessageViewMode,
+    setNavigationInFlight,
     syncTailMessages,
     updateMessageStatus,
 } from '@/lib/message-window-store'
@@ -1189,5 +1190,63 @@ describe('V2 persistence boundary', () => {
 
         expect(getMessageWindowState(id).messages[0]?.status).toBe('queued')
         expect(getQueuedReconcileCandidateLocalIds(id)).toEqual(['local-1'])
+    })
+})
+
+describe('explicit history navigation', () => {
+    it('keeps the newest rows instead of evicting them while navigating', () => {
+        const id = sessionId('navigation-keeps-tail')
+        setNavigationInFlight(id, true)
+        setMessageViewMode(id, 'history')
+        ingestIncomingMessages(id, Array.from({ length: HISTORY_WINDOW_SIZE + 50 }, (_, index) =>
+            makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
+        ))
+
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE + 50)
+        // The newest (live tail) rows survive the otherwise-bounded window.
+        expect(state.messages.at(-1)?.id).toBe(`overflow-${HISTORY_WINDOW_SIZE + 49}`)
+    })
+
+    it('evicts the newest rows again once the navigation ends', () => {
+        const id = sessionId('navigation-overflow-after')
+        setNavigationInFlight(id, true)
+        setMessageViewMode(id, 'history')
+        ingestIncomingMessages(id, Array.from({ length: HISTORY_WINDOW_SIZE + 50 }, (_, index) =>
+            makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
+        ))
+        setNavigationInFlight(id, false)
+        ingestIncomingMessages(id, [
+            makeAgentMessage({ id: 'one-more', seq: HISTORY_WINDOW_SIZE + 60, at: HISTORY_WINDOW_SIZE + 60 })
+        ])
+
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
+        expect(state.messages.at(-1)?.id).toBe(`overflow-${HISTORY_WINDOW_SIZE - 1}`)
+    })
+
+    it('ignores tail-mode flips while navigating and resumes after', () => {
+        const id = sessionId('navigation-pins-history')
+        setMessageViewMode(id, 'history')
+        setNavigationInFlight(id, true)
+        setMessageViewMode(id, 'tail')
+        expect(getMessageWindowState(id).viewMode).toBe('history')
+        setNavigationInFlight(id, false)
+        setMessageViewMode(id, 'tail')
+        expect(getMessageWindowState(id).viewMode).toBe('tail')
+    })
+
+    it('pauses tail synchronization while navigating', async () => {
+        const id = sessionId('navigation-pauses-tail-sync')
+        const getMessages = vi.fn(async () => latestResponse([
+            makeAgentMessage({ id: 'latest', seq: 1, at: 1 })
+        ], { epoch: 1 }))
+        const api = createApi(getMessages)
+        setNavigationInFlight(id, true)
+        await syncTailMessages(api, id)
+        expect(getMessages).not.toHaveBeenCalled()
+        setNavigationInFlight(id, false)
+        await syncTailMessages(api, id)
+        expect(getMessages).toHaveBeenCalledTimes(1)
     })
 })
