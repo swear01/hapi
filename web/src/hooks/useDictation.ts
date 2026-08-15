@@ -12,7 +12,6 @@ import {
     handleVoiceSendOutcome,
     VOICE_SEND_FAILED_MESSAGE,
     type DictationPendingSendOptions,
-    type DeliverVoiceSendResult,
 } from './voiceSend'
 
 
@@ -180,9 +179,10 @@ export function useDictation(config: {
                                 // surface a send error with the transcript preserved
                                 // instead of falling into the transcription-error
                                 // path, which would drop the transcribed delta.
-                                let result: DeliverVoiceSendResult
+                                let delivered = false
                                 try {
-                                    result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
+                                    const result = await deliverVoiceSend({ pendingSend, finalMessage, transcriptDelta: transcribedText, sendMsg })
+                                    delivered = result.delivered
                                     if (await handleVoiceSendOutcome({
                                         pendingSend,
                                         result,
@@ -201,10 +201,11 @@ export function useDictation(config: {
                                         return
                                     }
                                 } catch (error) {
-                                    // Unexpected rejection before/around the send: persist the
-                                    // transcript so it survives even when the composer already
-                                    // unmounted, then surface the send failure.
-                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                    // Defensive net for unexpected rejections. Once the
+                                    // message was delivered, the outcome handling owns the
+                                    // surface; never re-persist the delivered text as a
+                                    // retryable draft (that would invite a duplicate send).
+                                    if (!delivered && draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                                         saveDraft(pendingSend.sessionId, finalMessage)
                                     }
                                     if (mountedRef.current) {

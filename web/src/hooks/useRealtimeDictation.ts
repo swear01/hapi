@@ -7,7 +7,7 @@ import {
 } from '@hapi/protocol/voice'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
-import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
+import { saveDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript, deliverVoiceSend, draftUnchanged, handleVoiceSendOutcome, VOICE_SEND_FAILED_MESSAGE, type DictationPendingSendOptions } from './voiceSend'
 import {

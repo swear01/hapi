@@ -88,10 +88,12 @@ export async function notifyResolvedSession(
     sessionId: string,
 ): Promise<boolean | undefined> {
     if (!resumed) return undefined
+    const callback = pendingSend.options.onSessionResolved
+    if (!callback) return undefined
     try {
         // Callers may pass an async callback; await it so a rejection is
         // caught here instead of surfacing as an unhandled rejection.
-        await pendingSend.options.onSessionResolved?.(sessionId)
+        await callback(sessionId)
         return true
     } catch (error) {
         // Navigation/seed is a side effect of an already-decided send
