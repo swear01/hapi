@@ -452,6 +452,28 @@ export async function waitForViewportScrollEnd(viewport: HTMLElement): Promise<v
     })
 }
 
+/**
+ * Smooth-scrolls the target into view and keeps retrying until it actually
+ * lands (a canceled animation also produces a stable scrollTop, so stability
+ * alone cannot distinguish completion). Falls back to an instant scroll when
+ * the deadline expires. Callers keep their navigation lease held until this
+ * resolves so a live window mutation cannot cancel the animation mid-flight.
+ */
+export async function scrollTargetIntoView(viewport: HTMLElement, target: HTMLElement): Promise<void> {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < NAVIGATION_SCROLL_RETRY_DEADLINE_MS) {
+        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        await waitForViewportScrollEnd(viewport)
+        // scroll-mt-4 keeps a small offset; anything within ~1 row counts as
+        // landed, while a canceled scroll stops far short of the target.
+        const offset = target.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+        if (offset >= 0 && offset <= 32) {
+            return
+        }
+    }
+    target.scrollIntoView({ block: 'start', behavior: 'auto' })
+}
+
 export async function runAfterPendingHistoryLoad(
     pendingLoad: Promise<unknown> | null,
     action: () => boolean | Promise<boolean>
@@ -1685,10 +1707,8 @@ export function HappyThread(props: {
                 loadOlderPreservingScroll: loadOlderForOutline
             })
             if (target && viewportRef.current) {
-                target.scrollIntoView({ block: 'start', behavior: 'smooth' })
                 markExplicitNavigationAwayFromBottom()
-                // Keep the navigation lease until the animation lands.
-                await waitForViewportScrollEnd(viewportRef.current)
+                await scrollTargetIntoView(viewportRef.current, target)
             }
             props.onOutlineItemClick?.(item)
             props.onOutlineOpenChange(false)
@@ -1705,10 +1725,8 @@ export function HappyThread(props: {
         const target = document.getElementById(getConversationMessageAnchorId(messageId))
         const viewport = viewportRef.current
         if (!target || !viewport?.contains(target)) return false
-        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
         markExplicitNavigationAwayFromBottom()
-        // Keep the navigation lease until the animation lands.
-        await waitForViewportScrollEnd(viewport)
+        await scrollTargetIntoView(viewport, target)
         return true
     }, [clearInitialScrollTimers, markExplicitNavigationAwayFromBottom])
 
@@ -1764,9 +1782,7 @@ export function HappyThread(props: {
                 target = await findPreviousUserMessageAfterRender(viewport, messageId, assistantAnchorState)
             }
             if (!target) throw new Error('Could not find the user prompt')
-            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            // Keep the navigation lease until the animation lands.
-            await waitForViewportScrollEnd(viewport)
+            await scrollTargetIntoView(viewport, target)
             setPromptNavigationStatus('success')
             promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), 1400)
             return true
