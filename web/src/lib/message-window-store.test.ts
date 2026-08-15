@@ -1494,6 +1494,33 @@ describe('explicit history navigation', () => {
         releaseNavigation()
     })
 
+    it('keeps every regular row when queued rows push the window past the cap', () => {
+        const id = sessionId('navigation-queued-edge')
+        const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        // Exactly 1000 regular rows: at the head+tail cap.
+        const total = HISTORY_WINDOW_SIZE + VISIBLE_WINDOW_SIZE
+        const messages = Array.from({ length: total }, (_, index) =>
+            makeAgentMessage({ id: `overflow-${index}`, seq: index + 2, at: index + 2 })
+        )
+        ingestIncomingMessages(id, messages)
+        // One queued row pushes the combined window past the cap.
+        const queued = makeUserMessage({
+            id: 'queued-edge',
+            seq: total + 1,
+            localId: 'queued-edge',
+            invokedAt: null
+        })
+        ingestIncomingMessages(id, [queued])
+
+        const state = getMessageWindowState(id)
+        // Every regular row survives (tail slice must use the trimmable
+        // length, not the original array length) and no gap is introduced.
+        expect(state.messages).toHaveLength(total + 1)
+        expect(state.messages.some((message) => message.id.startsWith('__transcript-gap__'))).toBe(false)
+        releaseNavigation()
+    })
+
     it('keeps navigation active while any overlapping lease is held', () => {
         const id = sessionId('navigation-overlapping-leases')
         setMessageViewMode(id, 'history')

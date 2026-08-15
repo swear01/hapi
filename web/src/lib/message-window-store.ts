@@ -500,8 +500,11 @@ function trimNavigationWindow(
     const queued = messages.filter(isQueuedForInvocation)
     const queuedIds = new Set(queued.map((message) => message.id))
     const trimmable = messages.filter((message) => !queuedIds.has(message.id))
+    if (trimmable.length <= NAVIGATION_HEAD_LIMIT + NAVIGATION_TAIL_LIMIT) {
+        return { kept: messages, dropped: [] }
+    }
     const head = trimmable.slice(0, NAVIGATION_HEAD_LIMIT)
-    const tail = trimmable.slice(messages.length - NAVIGATION_TAIL_LIMIT)
+    const tail = trimmable.slice(-NAVIGATION_TAIL_LIMIT)
     const headLast = head.at(-1) ?? null
     const tailFirst = tail[0] ?? null
     const headLastSeq = headLast?.seq ?? null
