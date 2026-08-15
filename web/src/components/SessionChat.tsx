@@ -435,6 +435,7 @@ type SessionChatProps = {
     isLoadingMoreMessages: boolean
     isSending: boolean
     sendSettlement: SendMessageSettlement | null
+    onConsumeSendSettlement?: (attemptId: string) => void
     viewMode: 'tail' | 'history'
     messagesVersion: number
     historyVersion: number
@@ -1924,6 +1925,7 @@ function SessionChatInner(props: SessionChatProps) {
                         pendingSchedule={pendingSchedule}
                         sendAcceptance={sendAcceptance}
                         sendSettlement={props.sendSettlement}
+                        onConsumeSendSettlement={props.onConsumeSendSettlement}
                         onSchedule={updatePendingSchedule}
                         onClearSchedule={() => updatePendingSchedule(null)}
                         permissionMode={props.session.permissionMode}
