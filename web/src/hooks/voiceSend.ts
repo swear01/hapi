@@ -44,8 +44,11 @@ export type DictationPendingSendOptions = {
      * navigation is suppressed when the failed transcript could not be
      * recovered under the resumed session (the error and recovered text
      * then stay visible on the session the operator is already on).
+     *
+     * `context.error` carries the send failure so the caller can surface
+     * the root cause on the resumed session after navigation.
      */
-    onSessionResolved?: (sessionId: string) => void | Promise<void>
+    onSessionResolved?: (sessionId: string, context?: { error?: unknown }) => void | Promise<void>
 }
 
 /**
@@ -86,6 +89,7 @@ export async function notifyResolvedSession(
     pendingSend: { options: DictationPendingSendOptions },
     resumed: boolean,
     sessionId: string,
+    context?: { error?: unknown },
 ): Promise<boolean | undefined> {
     if (!resumed) return undefined
     const callback = pendingSend.options.onSessionResolved
@@ -93,7 +97,7 @@ export async function notifyResolvedSession(
     try {
         // Callers may pass an async callback; await it so a rejection is
         // caught here instead of surfacing as an unhandled rejection.
-        await callback(sessionId)
+        await callback(sessionId, context)
         return true
     } catch (error) {
         // Navigation/seed is a side effect of an already-decided send
@@ -123,7 +127,8 @@ export type DeliverVoiceSendResult = {
     /**
      * Set on success only when the session was resumed: `false` when the
      * post-delivery navigation/seed callback rejected, `undefined` when no
-     * callback ran (non-resumed send). On failure the caller navigates
+     * callback ran (non-resumed send, or a resumed send whose caller did
+     * not supply onSessionResolved). On failure the caller navigates
      * itself via notifyResolvedSession after surfacing the error.
      */
     notified?: boolean
@@ -178,6 +183,10 @@ export async function deliverVoiceSend(args: {
     let targetSessionId = args.pendingSend.sessionId
     let resumed = false
     let recoveryDraftAtStart = args.pendingSend.draftAtStart
+    // Note: api.sendMessage carries no idempotency key, so a rejection
+    // after the hub accepted the message (e.g. a response timeout) is
+    // recovered for retry and may deliver twice — the at-least-once
+    // trade-off of the whole recovery design.
     let sendAttempted = false
     try {
         if (args.pendingSend.options.resolveSessionId) {
@@ -332,7 +341,7 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
             args.setError(errorMessage)
             args.setStatusError()
         }
-        const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId)
+        const navigated = await notifyResolvedSession(args.pendingSend, args.result.shouldNotify, args.result.targetSessionId, { error: args.result.error })
         if (args.result.shouldNotify && navigated === false) {
             // The transcript was recovered under the resumed session and the
             // operator was not navigated there: make it reachable locally so
@@ -343,7 +352,7 @@ export async function handleVoiceSendOutcome(args: VoiceSendOutcomeHandling): Pr
                 }
                 // Amend the already-shown error with the navigation failure
                 // (keeping the root cause visible); no second status firing.
-                args.setError(`${VOICE_SEND_NAVIGATION_FAILED_MESSAGE}: ${errorMessage}`)
+                args.setError(`${VOICE_SEND_NAVIGATION_FAILED_MESSAGE} — ${errorMessage}`)
             } else {
                 console.warn('Voice send: failed and the resumed session could not be opened')
             }

@@ -99,7 +99,7 @@ describe('useRealtimeDictation', () => {
             expect(sendMessage).toHaveBeenCalledWith('session-C-resumed', 'initial text spoken words', undefined)
         })
         expect(resolveSessionId).toHaveBeenCalledWith('session-C')
-        expect(onSessionResolved).toHaveBeenCalledWith('session-C-resumed')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-C-resumed', undefined)
         expect(result.current.status).toBe('disconnected')
     })
 
@@ -140,7 +140,7 @@ describe('useRealtimeDictation', () => {
         // Retryable transcript lives under the resumed id, and the operator
         // is still navigated there (recovery landed on the resumed session).
         expect(getDraft('session-I-resumed')).toBe('initial text spoken words')
-        expect(onSessionResolved).toHaveBeenCalledWith('session-I-resumed')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-I-resumed', { error: expect.any(Error) })
         expect(onFinalTranscript).not.toHaveBeenCalled()
     })
 

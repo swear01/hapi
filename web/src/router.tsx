@@ -15,6 +15,7 @@ import {
 import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
 import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
+import { VOICE_SEND_FAILED_MESSAGE } from '@/hooks/voiceSend'
 import { SessionList } from '@/components/SessionList'
 import { NewSession } from '@/components/NewSession'
 import { WorkspaceBrowser } from '@/components/WorkspaceBrowser'
@@ -572,6 +573,22 @@ function SessionPage() {
         }
     }, [api, navigate, queryClient, session])
 
+    const handleVoiceSessionResolved = useCallback((resolvedSessionId: string, context?: { error?: unknown }) => {
+        if (context?.error) {
+            // A post-resume voice send failed: the source component's error
+            // banner is about to unmount, so surface the root cause on the
+            // session the operator is navigated to (where the recovered
+            // draft also lives).
+            addToast({
+                title: t('chat.sendError.fallback'),
+                body: context.error instanceof Error ? context.error.message : VOICE_SEND_FAILED_MESSAGE,
+                sessionId: resolvedSessionId,
+                url: ''
+            })
+        }
+        handleSessionResolved(resolvedSessionId)
+    }, [addToast, handleSessionResolved, t])
+
     const {
         sendMessage,
         retryMessage,
@@ -800,7 +817,7 @@ function SessionPage() {
             resolveSessionIdForUpload={async (id) => (await resolveSessionId(id)).sessionId}
             onUploadSessionResolved={handleSessionResolved}
             resolveSessionIdForVoice={resolveSessionId}
-            onVoiceSessionResolved={handleSessionResolved}
+            onVoiceSessionResolved={handleVoiceSessionResolved}
             onViewModeChange={setViewMode}
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}

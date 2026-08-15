@@ -729,7 +729,7 @@ describe('useDictation', () => {
             expect(api.sendMessage).toHaveBeenCalledWith('session-A-resumed', 'initial text voice payload', null, undefined, undefined, undefined)
         })
         expect(resolveSessionId).toHaveBeenCalledWith('session-A')
-        expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed', undefined)
     })
 
     it('does not notify when the resolver did not resume the session', async () => {
@@ -885,7 +885,7 @@ describe('useDictation', () => {
         // For a resumed send the text is NOT written back into the still-
         // mounted archived composer (it lives in the resumed session's draft).
         expect(onTextChange).not.toHaveBeenCalled()
-        expect(onSessionResolved).toHaveBeenCalledWith('session-B-resumed')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-B-resumed', { error: expect.any(Error) })
     })
 
     it('restores the transcript into the composer for a same-id resumed failure', async () => {
@@ -984,7 +984,7 @@ describe('useDictation', () => {
         })
         // The id swap is a resume even if the resolver forgot to say so:
         // navigation happens and the superseded source draft is dropped.
-        expect(onSessionResolved).toHaveBeenCalledWith('session-G-resumed')
+        expect(onSessionResolved).toHaveBeenCalledWith('session-G-resumed', undefined)
         expect(result.current.status).toBe('disconnected')
     })
 
