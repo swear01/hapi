@@ -276,7 +276,7 @@ export function isSelectAllTargetBlocked(target: EventTarget | null): boolean {
  */
 export function applyGlobalSelectAll(e: KeyboardEvent): boolean {
     if (e.defaultPrevented || e.repeat) return false
-    if (!(e.ctrlKey || e.metaKey) || e.altKey) return false
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return false
     if (e.key !== 'a' && e.key !== 'A') return false
     if (isSelectAllTargetBlocked(e.target)) return false
     // The thread container is rendered by HappyThread; its class is the

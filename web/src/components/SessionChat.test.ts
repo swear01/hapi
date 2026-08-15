@@ -404,6 +404,7 @@ describe('applyGlobalSelectAll', () => {
         for (const event of [
             new KeyboardEvent('keydown', { key: 'a' }),
             new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, altKey: true }),
+            new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, shiftKey: true }),
             new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }),
         ]) {
             expect(applyGlobalSelectAll(event)).toBe(false)
