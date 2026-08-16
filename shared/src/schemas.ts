@@ -605,6 +605,8 @@ export type SyncEvent = z.infer<typeof SyncEventSchema>
 export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
     z.object({ status: z.literal('cancelled'), localId: z.string().nullable() }),
     z.object({ status: z.literal('invoked'), message: DecryptedMessageSchema }),
+    // The row is inside an async steer: not removed, but not consumed either.
+    z.object({ status: z.literal('busy'), localId: z.string() }),
 ])
 
 export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>

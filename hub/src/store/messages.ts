@@ -655,6 +655,7 @@ export function getMaxSeq(db: Database, sessionId: string): number {
 export type CancelQueuedMessageResult =
     | { status: 'cancelled'; localId: string | null }
     | { status: 'invoked'; message: StoredMessage }
+    | { status: 'busy'; localId: string }
 
 /** Delete a queued (invoked_at IS NULL) message by session + message id.
  *

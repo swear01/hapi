@@ -499,6 +499,13 @@ export class MessageService {
 
         const ackResult = await this.requestCliCancelAck(sessionId, localId, messageId, 500)
 
+        if (ackResult === 'in-flight') {
+            // The row is inside an async steer (mid-turn delivery): it can
+            // neither be removed nor stamped invoked — the steer's eventual
+            // accept/reject decides. Report busy so the caller keeps the row.
+            return { status: 'busy', localId }
+        }
+
         if (ackResult === 'not-found' || ackResult === 'timeout') {
             // CLI could not remove the item — it was already shift()-ed or CLI is
             // offline.  Stamp invoked_at immediately so the message lands in the thread
@@ -561,7 +568,7 @@ export class MessageService {
         localId: string,
         messageId: string,
         timeoutMs: number
-    ): Promise<'removed' | 'not-found' | 'timeout'> {
+    ): Promise<'removed' | 'in-flight' | 'not-found' | 'timeout'> {
         return new Promise((resolve) => {
             const room = this.io.of('/cli').to(`session:${sessionId}`)
             // socket.io v4 BroadcastOperator: .timeout(ms).emit(event, data, ackCb)
@@ -579,14 +586,19 @@ export class MessageService {
                         localId
                     }
                 },
-                (err: Error | null, responses: Array<{ removed: boolean }>) => {
+                (err: Error | null, responses: Array<{ removed: boolean; inFlight?: boolean }>) => {
                     // Check responses before err: in a reconnect overlap or any room with
                     // multiple CLI sockets, Socket.IO may set err (one socket timed out)
                     // while still delivering successful responses from the sockets that did
-                    // ack. Any confirmed removal wins over the partial timeout.
+                    // ack. Any confirmed removal wins over the partial timeout; an explicit
+                    // in-flight report beats the not-found fallback.
                     const removed = responses?.some((r) => r.removed === true) ?? false
                     if (removed) {
                         resolve('removed')
+                        return
+                    }
+                    if (responses?.some((r) => r.inFlight === true)) {
+                        resolve('in-flight')
                         return
                     }
                     if (err) {

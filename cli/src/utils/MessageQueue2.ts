@@ -166,6 +166,9 @@ export class MessageQueue2<T> {
 
         // Clear any pending messages to ensure this message is processed in complete isolation
         this.queue = [];
+        // Reservations live outside this.queue; a steer awaiting an explicit
+        // rejection must not restore a prompt the clear command discarded.
+        this.cancelReservations();
 
         this.queue.push({
             message,
@@ -268,7 +271,7 @@ export class MessageQueue2<T> {
      * Best-effort: if the CLI is offline when cancel is issued, the message
      * may already have been collected for invocation and won't be found here.
      */
-    cancelByLocalId(localId: string): boolean {
+    cancelByLocalId(localId: string): boolean | 'in-flight' {
         if (!localId) return false;
         const idx = this.queue.findIndex(item => item.localId === localId);
         if (idx !== -1) {
@@ -277,7 +280,11 @@ export class MessageQueue2<T> {
         }
         const reservation = this.reservations.get(localId);
         if (!reservation) return false;
-        if (reservation.state === 'dispatching') return false;
+        if (reservation.state === 'dispatching') {
+            // The row is inside an async steer: it cannot be removed, but it is
+            // also NOT already consumed — the hub must not stamp invoked_at.
+            return 'in-flight';
+        }
         reservation.state = 'cancelled';
         return true;
     }
@@ -363,16 +370,20 @@ export class MessageQueue2<T> {
         this.restoreReservation(taken);
     }
 
+    private cancelReservations(): void {
+        for (const reservation of this.reservations.values()) {
+            reservation.state = 'cancelled';
+        }
+        this.reservations.clear();
+    }
+
     /**
      * Reset the queue - clears all messages and resets to empty state
      */
     reset(): void {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
-        for (const reservation of this.reservations.values()) {
-            reservation.state = 'cancelled';
-        }
-        this.reservations.clear();
+        this.cancelReservations();
         this.closed = false;
 
         // Clear waiter without calling it since we're not closing
@@ -396,10 +407,7 @@ export class MessageQueue2<T> {
     close(): void {
         logger.debug(`[MessageQueue2] close() called`);
         this.closed = true;
-        for (const reservation of this.reservations.values()) {
-            reservation.state = 'cancelled';
-        }
-        this.reservations.clear();
+        this.cancelReservations();
 
         // Notify any waiting caller
         if (this.waiter) {
