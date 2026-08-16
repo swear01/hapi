@@ -378,15 +378,13 @@ export class CodexAppServerClient extends JsonLineParser {
         params: TurnSteerParams,
         options?: { signal?: AbortSignal }
     ): Promise<{ dispatched: Promise<void>; completed: Promise<TurnSteerResponse> }> {
-        // Dispatch/complete split: turn/steer's response is turn completion,
-        // which can exceed any fixed timeout. Callers ack the hub once stdin
-        // accepted the inject and track completion in the background. No
-        // timeout: a timed-out steer must never be restored (that would
-        // re-deliver the same instruction via turn/start); completion ends on
-        // success, abort, or disconnect only.
+        // Dispatch/complete split: the caller awaits acceptance before
+        // reporting success. Bound the wait below the hub's 30s RPC timeout so
+        // a lost response cannot strand the row in dispatching — a timeout is
+        // indeterminate and funnels into thread reconciliation.
         const request = await this.sendRequestWithDispatch('turn/steer', params, {
             signal: options?.signal,
-            timeoutMs: Infinity
+            timeoutMs: 25_000
         });
         return {
             dispatched: request.dispatched,

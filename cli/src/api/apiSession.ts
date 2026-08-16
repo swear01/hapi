@@ -241,7 +241,7 @@ export class ApiSessionClient extends EventEmitter {
     private pendingMessages: { message: UserMessage; localId?: string }[] = []
     private pendingHubPromptEchoes: { text: string; localIds: string[] }[] = []
     private pendingMessageCallback: ((message: UserMessage, localId?: string) => void) | null = null
-    private cancelQueuedMessageCallback: ((localId: string) => boolean) | null = null
+    private cancelQueuedMessageCallback: ((localId: string) => boolean | 'in-flight') | null = null
     private readonly incomingFilter = new IncomingMessageFilter()
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
@@ -421,7 +421,7 @@ export class ApiSessionClient extends EventEmitter {
             this.agentTerminalActive = false
         }))
 
-        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean }) => void) => {
+        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean }) => void) => {
             try {
                 if (!data.body) return
 
@@ -431,10 +431,13 @@ export class ApiSessionClient extends EventEmitter {
                 }
 
                 if (data.body.t === 'cancel-queued-message') {
-                    const removed = (data.body.localId && this.cancelQueuedMessageCallback)
+                    const result = (data.body.localId && this.cancelQueuedMessageCallback)
                         ? this.cancelQueuedMessageCallback(data.body.localId)
                         : false
-                    ack?.({ removed })
+                    // 'in-flight' = the row is inside an async steer: not
+                    // removed, but also NOT consumed — the hub must neither
+                    // delete it nor stamp invoked_at.
+                    ack?.({ removed: result === true, inFlight: result === 'in-flight' })
                     return
                 }
 
@@ -665,7 +668,7 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    onCancelQueuedMessage(callback: (localId: string) => boolean): void {
+    onCancelQueuedMessage(callback: (localId: string) => boolean | 'in-flight'): void {
         this.cancelQueuedMessageCallback = callback
     }
 

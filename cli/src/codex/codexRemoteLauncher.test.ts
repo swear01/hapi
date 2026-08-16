@@ -1311,7 +1311,8 @@ describe('codexRemoteLauncher', () => {
         // stays reserved — neither committed (message may not have run) nor
         // restored (it may have run, so turn/start could duplicate it).
         expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
-        expect(session.queue.cancelByLocalId('local-1')).toBe(false);
+        // 'in-flight' = reserved inside the steer, not consumed and not cancellable.
+        expect(session.queue.cancelByLocalId('local-1')).toBe('in-flight');
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });
@@ -1341,6 +1342,7 @@ describe('codexRemoteLauncher', () => {
         // message, commits the row and fires the badge — no restore, no
         // duplicate.
         await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }), { timeout: 5_000 });
+        // Row committed and consumed — nothing left to cancel.
         expect(session.queue.cancelByLocalId('local-1')).toBe(false);
         session.queue.close();
     });

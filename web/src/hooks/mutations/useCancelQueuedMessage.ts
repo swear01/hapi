@@ -47,6 +47,13 @@ export function useCancelQueuedMessage(api: ApiClient | null) {
             removeOptimisticMessage(input.sessionId, input.localId)
         },
         onSuccess: (result, input) => {
+            if (result.status === 'busy') {
+                // The row is inside an async steer: the cancel cannot complete
+                // yet. Put the row back so the bar stays accurate; the steer's
+                // eventual messages-consumed or restore settles it.
+                appendOptimisticMessage(input.sessionId, input.snapshot)
+                return
+            }
             if (result.status === 'invoked') {
                 // Race: CLI consumed this message before cancel arrived.
                 // Restore using the server-validated invoked row so invokedAt is correct.
