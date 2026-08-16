@@ -401,7 +401,7 @@ describe('cursorAcpRemoteLauncher', () => {
         session.queue.push('soft steer', mode, 'steer');
         const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
         await Promise.resolve();
-        expect(session.queue.cancelByLocalId('steer')).toBe(false);
+        expect(session.queue.cancelByLocalId('steer')).toBe('in-flight');
         releaseDispatch();
         await expect(steerResult).resolves.toEqual({ steered: true });
         expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
