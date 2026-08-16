@@ -1918,6 +1918,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         }>();
         let steerReconcileTimer: ReturnType<typeof setTimeout> | null = null;
         let steerReconcileInProgress = false;
+        let shuttingDown = false;
 
         const settleReconcileEntry = (localId: string, entry: { taken: QueueReservation<EnhancedMode>; batch: QueuedMessage }): void => {
             // The hub already reported steered on dispatch; the ACK must reach
@@ -1930,7 +1931,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         const runSteerReconciliation = async (): Promise<void> => {
-            if (steerReconcileInProgress || pendingSteerReconciliations.size === 0) {
+            if (steerReconcileTimer) {
+                clearTimeout(steerReconcileTimer);
+                steerReconcileTimer = null;
+            }
+            if (shuttingDown || steerReconcileInProgress || pendingSteerReconciliations.size === 0) {
                 return;
             }
             steerReconcileInProgress = true;
@@ -1944,22 +1949,23 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             } finally {
                 steerReconcileInProgress = false;
-                if (pendingSteerReconciliations.size > 0) {
+                if (!shuttingDown && pendingSteerReconciliations.size > 0) {
                     steerReconcileTimer = setTimeout(() => {
+                        steerReconcileTimer = null;
                         void runSteerReconciliation();
                         // Wake the main loop too (it may sit in
                         // waitForTurnOrRecovery while the turn is in flight).
                         wakeLoop();
                     }, 1_000);
                     steerReconcileTimer.unref?.();
-                } else if (steerReconcileTimer) {
-                    clearTimeout(steerReconcileTimer);
-                    steerReconcileTimer = null;
                 }
             }
         };
 
         const scheduleSteerReconcileRetry = () => {
+            if (shuttingDown) {
+                return;
+            }
             if (steerReconcileTimer || steerReconcileInProgress) {
                 return;
             }
@@ -4182,6 +4188,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         clearDeferredThreadStatusFailure();
         cancelSafetyBufferingRequest('Session ended');
         cancelAllPendingThrottledAgentRunUpdates();
+        // Stop reconciliation: the launcher is leaving; no pending steer may
+        // spawn a fresh app-server after cleanup.
+        shuttingDown = true;
+        if (steerReconcileTimer) {
+            clearTimeout(steerReconcileTimer);
+            steerReconcileTimer = null;
+        }
+        pendingSteerReconciliations.clear();
     }
 
     protected async cleanup(): Promise<void> {
