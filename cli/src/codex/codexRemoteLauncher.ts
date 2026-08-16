@@ -2093,8 +2093,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
                 const steer = await trySteerActiveTurn(batch, localId);
                 if (steer) {
-                    // Register completion handling before awaiting dispatch so a
-                    // dispatch failure cannot leave the rejection unhandled.
                     const reconcileDispatchedSteer = (
                         localId: string,
                         taken: QueueReservation<EnhancedMode>,
@@ -2107,43 +2105,31 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         pendingSteerReconciliations.set(localId, { threadId, taken, batch });
                         scheduleSteerReconcileRetry();
                     };
-                    void steer.completed.then(() => {
-                        // No epoch guard on the success path: the hub already
-                        // reported steered on dispatch, so the eventual ACK must
-                        // reach it even when an abort (which resets the queue and
-                        // cancels the reservation) happened in between.
-                        session.queue.commitReservation(taken);
-                        messageBuffer.addMessage(batch.message, 'user');
-                        session.client.emitMessagesConsumed([localId], { steered: true });
-                    }, (error) => {
-                        if (isIndeterminateError(error)) {
-                            // Checked before the epoch guard: abort cancels the
-                            // request (epoch bump), but the steer may already
-                            // have been accepted — that outcome must reconcile.
-                            void reconcileDispatchedSteer(localId, taken, batch);
-                            return;
-                        }
-                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
-                            return;
-                        }
-                        // Definite app-server rejection: the instruction was not
-                        // accepted, so restoring cannot duplicate it.
-                        if (session.queue.restoreReservation(taken)) {
-                            logger.debug(`[Codex] turn/steer rejected by app-server (${error instanceof Error ? error.message : String(error)}); row restored`);
-                        }
-                    });
                     try {
                         await steer.dispatched;
+                        // Await app-server acceptance before reporting success:
+                        // an explicit JSON-RPC rejection must surface as failed
+                        // (row restored, normal turn/start delivers it later)
+                        // rather than a false steered. turn/steer's response is
+                        // the inject acceptance, not the full turn completion.
+                        await steer.completed;
                     } catch (error) {
+                        // A dispatch failure rejects both promises; make sure the
+                        // completion rejection cannot surface as unhandled.
+                        void steer.completed.catch(() => {});
+                        if (isIndeterminateError(error)) {
+                            // Transport failure after dispatch: the outcome is
+                            // unknown — keep the row reserved and reconcile the
+                            // thread once the app-server is reachable again.
+                            reconcileDispatchedSteer(localId, taken, batch);
+                            return { steered: false, error: 'Steer outcome is being reconciled' };
+                        }
                         session.queue.restoreReservation(taken);
-                        return { steered: false, error: 'Failed to steer into active turn' };
+                        return { steered: false, error: error instanceof Error ? error.message : 'Steer failed' };
                     }
-                    // The hub RPC acks on stdin acceptance, but the queue row is
-                    // committed only when the turn settles: an explicit JSON-RPC
-                    // rejection means the instruction was NOT accepted (restore
-                    // it for the normal turn/start path), while an indeterminate
-                    // transport failure (disconnect/timeout/protocol) leaves the
-                    // row reserved and schedules thread reconciliation.
+                    session.queue.commitReservation(taken);
+                    messageBuffer.addMessage(batch.message, 'user');
+                    session.client.emitMessagesConsumed([localId], { steered: true });
                     return { steered: true };
                 }
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
