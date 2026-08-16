@@ -1906,26 +1906,29 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         });
 
         // Non-interrupting mid-turn inject via app-server `turn/steer`.
-        // Returns false when the turn ended or is review/compact (not steerable).
-        const trySteerActiveTurn = async (batch: QueuedMessage): Promise<boolean> => {
+        // Returns null when the turn ended or is review/compact (not steerable).
+        const trySteerActiveTurn = async (
+            batch: QueuedMessage,
+            localId: string
+        ): Promise<{ dispatched: Promise<void>; completed: Promise<unknown> } | null> => {
             const threadId = this.currentThreadId;
             const turnId = this.currentTurnId;
             if (!threadId || !turnId || !turnInFlight) {
-                return false;
+                return null;
             }
             try {
-                await appServerClient.steerTurn({
+                return await appServerClient.steerTurn({
                     threadId,
                     input: [{ type: 'text', text: batch.message }],
-                    expectedTurnId: turnId
+                    expectedTurnId: turnId,
+                    // Echoed back as userMessage.clientId — lets an ambiguous
+                    // transport failure reconcile the thread later.
+                    clientUserMessageId: localId
                 }, { signal: this.abortController.signal });
-                messageBuffer.addMessage(batch.message, 'user');
-                logger.debug(`[Codex] Steered active turn ${turnId}`);
-                return true;
             } catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
                 logger.debug(`[Codex] turn/steer failed (${detail})`);
-                return false;
+                return null;
             }
         };
 
@@ -1968,10 +1971,28 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
-                const steered = await trySteerActiveTurn(batch);
-                if (steered) {
-                    session.queue.commitReservation(taken);
-                    session.client.emitMessagesConsumed([localId], { steered: true });
+                const steer = await trySteerActiveTurn(batch, localId);
+                if (steer) {
+                    // Ack the hub once stdin accepted the inject — not when the
+                    // concurrent turn completes (which can exceed the hub's 30s
+                    // RPC timeout and report a false failure after the inject
+                    // already started). Commit queue state only after the turn
+                    // settles; a rejected/aborted steer restores the row so the
+                    // message still delivers via the normal turn/start path.
+                    const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
+                        session.queue.commitReservation(taken);
+                        messageBuffer.addMessage(batch.message, 'user');
+                        session.client.emitMessagesConsumed([localId], { steered: true });
+                    }, (error) => {
+                        session.queue.restoreReservation(taken);
+                        logger.debug(`[Codex] turn/steer did not complete (${error instanceof Error ? error.message : String(error)})`);
+                    });
+                    try {
+                        await steer.dispatched;
+                    } catch (error) {
+                        await steerDone;
+                        return { steered: false, error: 'Failed to steer into active turn' };
+                    }
                     return { steered: true };
                 }
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
