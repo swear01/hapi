@@ -66,8 +66,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private modelApplySeq = 0;
     /** Mode hash of the prompt currently in flight; steers must match it. */
     private activePromptModeHash: string | null = null;
-    /** True while a session/prompt is in flight (steerable turn). */
-    private promptInFlight = false;
     /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
     private softSteerWaiters: Promise<void>[] = [];
     /** Invalidates soft-steer completion callbacks after abort or cleanup. */
@@ -563,7 +561,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             this.activePromptModeHash = batch.hash;
 
             try {
-                this.promptInFlight = true;
                 this.userAbortRequested = false;
                 for (let retryAttempt = 0; retryAttempt <= CURSOR_AUTO_RETRY_LIMIT; retryAttempt += 1) {
                     this.pendingRetryableError = null;
@@ -611,7 +608,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 this.pendingInlineRetryableError = false;
                 this.attemptProducedToolActivity = false;
                 session.onThinkingChange(false);
-                this.promptInFlight = false;
                 session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
                 // Soft-steers share the ACP session; wait for them before ready /
                 // the next prompt so message handlers are not swapped mid-inject.

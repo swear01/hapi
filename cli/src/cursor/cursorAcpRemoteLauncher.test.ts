@@ -19,8 +19,6 @@ const harness = vi.hoisted(() => ({
     promptMessages: [] as AgentMessage[],
     promptMessageBatches: [] as AgentMessage[][],
     promptStderrErrors: [] as Array<{ type: string; message: string; raw: string }>,
-    deferPrompt: null as Promise<void> | null,
-    releasePrompt: null as (() => void) | null,
     backendArgs: null as { command: string; args?: string[] } | null,
     setConfigOptionCalls: [] as Array<{ sessionId: string; configId: string; value: string }>,
     deferSetConfigOption: null as Promise<void> | null,
