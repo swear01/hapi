@@ -1932,6 +1932,28 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         };
 
+        // After an ambiguous transport failure (disconnect / protocol error),
+        // the instruction may already sit in the thread (echoed as
+        // userMessage.clientId). Reconcile before restoring the row so a
+        // dispatched steer is never delivered twice via turn/start.
+        const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'rejected'> => {
+            try {
+                const response = await appServerClient.readThread({ threadId, includeTurns: true });
+                for (const turn of response.thread.turns ?? []) {
+                    for (const item of turn.items ?? []) {
+                        const record = asRecord(item);
+                        if (record?.type === 'userMessage' && record.clientId === localId) {
+                            return 'accepted';
+                        }
+                    }
+                }
+                return 'rejected';
+            } catch (error) {
+                logger.debug(`[Codex] steer reconcile failed (${error instanceof Error ? error.message : String(error)})`);
+                return 'rejected';
+            }
+        };
+
         // Per-message steer from the waiting queue (web "Steer" button).
         session.client.rpcHandlerManager.registerHandler(
             RPC_METHODS.SteerQueuedMessage,
@@ -1968,6 +1990,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     hash: taken.item.modeHash
                 };
                 const steerEpoch = this.steerEpoch;
+                // Pin the thread this steer targets: reconcile must look at the
+                // steer's thread, not whichever turn is current when completion fails.
+                const steerThreadId = this.currentThreadId;
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
@@ -1983,7 +2008,19 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         session.queue.commitReservation(taken);
                         messageBuffer.addMessage(batch.message, 'user');
                         session.client.emitMessagesConsumed([localId], { steered: true });
-                    }, (error) => {
+                    }, async (error) => {
+                        // Dispatched but never completed (disconnect / protocol
+                        // failure): the instruction may already be in the thread.
+                        // Reconcile before restoring to avoid duplicate delivery.
+                        const outcome = steerThreadId
+                            ? await reconcileSteerByClientId(steerThreadId, localId)
+                            : 'rejected';
+                        if (outcome === 'accepted') {
+                            session.queue.commitReservation(taken);
+                            messageBuffer.addMessage(batch.message, 'user');
+                            session.client.emitMessagesConsumed([localId], { steered: true });
+                            return;
+                        }
                         session.queue.restoreReservation(taken);
                         logger.debug(`[Codex] turn/steer did not complete (${error instanceof Error ? error.message : String(error)})`);
                     });
