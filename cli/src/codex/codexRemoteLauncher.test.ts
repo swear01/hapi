@@ -95,6 +95,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock('./codexAppServerClient', () => {
+    const INDETERMINATE_SYMBOL = Symbol('codex-app-server-indeterminate');
     class MockCodexAppServerClient {
         private notificationHandler: ((method: string, params: unknown) => void) | null = null;
         private stderrHandler: ((text: string) => void) | null = null;
@@ -1057,7 +1058,13 @@ vi.mock('./codexAppServerClient', () => {
         async disconnect(): Promise<void> {}
     }
 
-    return { CodexAppServerClient: MockCodexAppServerClient };
+    return {
+        CodexAppServerClient: MockCodexAppServerClient,
+        INDETERMINATE_SYMBOL,
+        isIndeterminateError: (error: unknown) => Boolean(
+            error && (error as Record<symbol, unknown>)[INDETERMINATE_SYMBOL] === true
+        )
+    };
 });
 
 vi.mock('./utils/buildHapiMcpBridge', () => ({
@@ -1073,6 +1080,7 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
 }));
 
 import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
+import { INDETERMINATE_SYMBOL } from './codexAppServerClient';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
 type FakeAgentState = {
@@ -1249,9 +1257,11 @@ describe('codexRemoteLauncher', () => {
         session.queue.close();
     });
 
-    it('consumes the row on dispatch even when turn completion later fails', async () => {
+    it('restores the row when the app-server explicitly rejects after dispatch', async () => {
         harness.suppressTurnCompletion = true;
-        harness.steerCompletionError = new Error('Codex app-server disconnected');
+        // Plain Error without the indeterminate marker = definite JSON-RPC
+        // rejection: the instruction was not accepted, so restoring is safe.
+        harness.steerCompletionError = new Error('turn/steer not allowed here');
         const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
@@ -1260,11 +1270,31 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        // Dispatch succeeded — the instruction is delivered; a later completion
-        // failure must not restore the row (no duplicate via turn/start).
         expect(result).toEqual({ steered: true });
-        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
-        expect(harness.readThreadParams).toHaveLength(0);
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
+    });
+
+    it('keeps the row reserved when the steer outcome is indeterminate', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('Codex app-server disconnected');
+        Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
+        harness.steerCompletionError = indeterminate;
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        // Dispatch succeeded but the outcome is unknown: the row must stay
+        // reserved — neither committed (message may not have run) nor restored
+        // (it may have run, so turn/start could duplicate it).
+        expect(result).toEqual({ steered: true });
+        expect(session.queue.cancelByLocalId('local-1')).toBe(false);
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });
 

@@ -68,6 +68,14 @@ type PendingRequest = {
     cleanup: () => void;
 };
 
+/** Marks transport-level failures whose steer outcome is unknown. */
+export const INDETERMINATE_SYMBOL = Symbol('codex-app-server-indeterminate');
+
+export function isIndeterminateError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+        && (error as Record<symbol, unknown>)[INDETERMINATE_SYMBOL] === true;
+}
+
 type CodexAppServerClientOptions = {
     cwd?: string;
 };
@@ -497,13 +505,13 @@ export class CodexAppServerClient extends JsonLineParser {
             aborted = true;
             this.pending.delete(id);
             cleanup();
-            rejectCompleted(createAbortError());
+            rejectCompleted(this.markIndeterminate(createAbortError()));
         };
 
         if (options?.signal) {
             if (options.signal.aborted) {
                 onAbort();
-                return { dispatched: Promise.reject(createAbortError()), completed };
+                return { dispatched: Promise.reject(this.markIndeterminate(createAbortError())), completed };
             }
             options.signal.addEventListener('abort', onAbort, { once: true });
         }
@@ -513,7 +521,7 @@ export class CodexAppServerClient extends JsonLineParser {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
                     cleanup();
-                    rejectCompleted(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+                    rejectCompleted(this.markIndeterminate(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`)));
                 }
             }, timeoutMs);
             timeout.unref();
@@ -668,6 +676,15 @@ export class CodexAppServerClient extends JsonLineParser {
         pending.resolve(response.result);
     }
 
+    /** Marks transport-level failures (timeout, disconnect, spawn, protocol)
+     *  whose outcome is unknown — unlike an explicit JSON-RPC error response.
+     *  Steer completion uses this to distinguish definite rejection from
+     *  indeterminate outcomes. */
+    private markIndeterminate(error: Error): Error {
+        Object.defineProperty(error, INDETERMINATE_SYMBOL, { value: true });
+        return error;
+    }
+
     private writePayload(payload: JsonRpcLiteRequest | JsonRpcLiteNotification | JsonRpcLiteResponse): void {
         const serialized = JSON.stringify(payload);
         this.process?.stdin.write(`${serialized}\n`);
@@ -679,6 +696,7 @@ export class CodexAppServerClient extends JsonLineParser {
     }
 
     private rejectAllPending(error: Error): void {
+        error = this.markIndeterminate(error);
         for (const { reject, cleanup } of this.pending.values()) {
             cleanup();
             reject(error);
