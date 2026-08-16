@@ -174,6 +174,11 @@ function resolveCodexAppServerCommand(): string {
 export class CodexAppServerClient extends JsonLineParser {
     private process: ChildProcessWithoutNullStreams | null = null;
     private connected = false;
+
+    /** True while the app-server process is connected. */
+    isConnected(): boolean {
+        return this.connected;
+    }
     private nextId = 1;
     private readonly pending = new Map<number, PendingRequest>();
     private readonly requestHandlers = new Map<string, RequestHandler>();
