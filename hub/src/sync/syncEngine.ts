@@ -1748,6 +1748,11 @@ export class SyncEngine {
                     { touchUpdatedAt: false }
                 )
                 if (result.result === 'success') {
+                    // Finalize the archived row in cache + broadcast before
+                    // reporting success (SSE consumers follow the
+                    // supersededBySessionId navigation).
+                    this.sessionCache.refreshSession(sessionId)
+                    this.handleSessionEnd({ sid: sessionId, time: Date.now() })
                     return true
                 }
                 // CAS/version mismatch: retry once with the fresh row.
@@ -1756,9 +1761,6 @@ export class SyncEngine {
             }
         }
         return false
-        this.sessionCache.refreshSession(sessionId)
-        this.handleSessionEnd({ sid: sessionId, time: Date.now() })
-        return true
     }
 
     async archiveSession(sessionId: string): Promise<void> {
