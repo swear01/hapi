@@ -719,6 +719,18 @@ describe('MessageQueue2', () => {
             expect(queue.cancelByLocalId('id-1')).toBe(false);
         });
 
+        it('pushIsolateAndClear cancels hidden reservations so a failed steer cannot resurrect', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg1', 'local', 'id-1');
+            const taken = queue.takeByLocalId('id-1');
+
+            queue.pushIsolateAndClear('/clear', 'local', 'clear-1');
+
+            // The reserved row is gone for good: restore refuses it.
+            expect(queue.restoreReservation(taken!)).toBe(false);
+            expect(queue.pendingLocalIds()).toEqual(['clear-1']);
+        });
+
         it('reset and close cancel outstanding reservations', () => {
             const queue = new MessageQueue2<string>(mode => mode);
             queue.push('msg1', 'local', 'id-1');

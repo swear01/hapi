@@ -1608,6 +1608,37 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
+    it('rejects a steer arriving after abort started', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+        };
+
+        // Start abort; steer admission closes synchronously before the
+        // cancellation awaits complete.
+        const abortPromise = client.rpcHandlerManager.handlers.get(RPC_METHODS.Abort)?.({});
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+        const result = await steerHandler!({ localId: 'local-2' });
+
+        expect(result).toEqual({ steered: false, error: 'No active steerable turn' });
+        expect(harness.softSteerCalls).toBe(0);
+
+        await abortPromise;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
     it('rejects a second steer while another soft steer is in flight', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });

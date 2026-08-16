@@ -169,6 +169,10 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushIsolateAndClear() called with mode hash: ${modeHash} - clearing ${this.queue.length} pending messages`);
 
+        // A clearing command must also discard hidden reservations (rows taken
+        // by takeByLocalId for a pending steer): a later failed steer must not
+        // resurrect a message the clear command was meant to discard.
+        this.cancelReservations();
         // Clear any pending messages to ensure this message is processed in complete isolation
         this.queue = [];
 
@@ -290,6 +294,13 @@ export class MessageQueue2<T> {
         return true;
     }
 
+    private cancelReservations(): void {
+        for (const reservation of this.reservations.values()) {
+            reservation.state = 'cancelled';
+        }
+        this.reservations.clear();
+    }
+
     /**
      * Look up a queued item by localId without removing it.
      */
@@ -386,10 +397,7 @@ export class MessageQueue2<T> {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
         this.closed = false;
-        for (const reservation of this.reservations.values()) {
-            reservation.state = 'cancelled';
-        }
-        this.reservations.clear();
+        this.cancelReservations();
 
         // Clear waiter without calling it since we're not closing
         this.waiter = null;
@@ -412,10 +420,7 @@ export class MessageQueue2<T> {
     close(): void {
         logger.debug(`[MessageQueue2] close() called`);
         this.closed = true;
-        for (const reservation of this.reservations.values()) {
-            reservation.state = 'cancelled';
-        }
-        this.reservations.clear();
+        this.cancelReservations();
 
         // Notify any waiting caller
         if (this.waiter) {

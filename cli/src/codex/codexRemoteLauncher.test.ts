@@ -3282,6 +3282,30 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
+    it('rejects a steer arriving after abort started', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitTurnAbortedOnInterrupt = true;
+        const { session, rpcHandlers } = createSessionStub(['first message']);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('B', createMode(), 'b-local');
+
+        // Start abort; steer admission closes synchronously before the
+        // cancellation awaits complete.
+        const abortPromise = rpcHandlers.get('abort')?.({});
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+        const result = await steerHandler!({ localId: 'b-local' });
+        expect(result).toEqual({ steered: false, error: 'No active steerable turn' });
+        expect(harness.steerTurnCalls).toEqual([]);
+
+        await abortPromise;
+        // The steer stayed rejected and no turn/steer was ever attempted.
+        expect(harness.steerTurnCalls).toEqual([]);
+        queue.close();
+    });
+
     it('rejects a second steer while the first turn/steer is unresolved', async () => {
         harness.suppressTurnCompletion = true;
         let releaseSteer!: () => void;

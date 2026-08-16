@@ -1008,7 +1008,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         this.userAbortRequested = true;
         const backend = this.backend;
         const sessionId = this.session.sessionId;
+        // Close steer admission synchronously before the first await so a
+        // steer arriving during cancellation cannot capture the new epoch.
+        this.promptInFlight = false;
         this.softSteerEpoch++;
+        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
         }

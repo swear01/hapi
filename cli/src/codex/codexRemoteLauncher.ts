@@ -234,6 +234,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     private steerEpoch = 0;
     /** True once onLeavingRemote() invalidated steer handling (idempotent). */
     private leavingRemote = false;
+    /** True from abort start until a deliberate new turn begins. */
+    private steeringBlocked = false;
     private currentThreadId: string | null = null;
     private currentTurnId: string | null = null;
     private readonly activeChildTurns = new Map<string, string>();
@@ -291,8 +293,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
     private async handleAbort(): Promise<void> {
         logger.debug('[Codex] Abort requested - stopping current task');
+        // Close steer admission synchronously before the first await so a
+        // steer arriving during cancellation cannot capture the new epoch.
+        this.steeringBlocked = true;
+        this.steerEpoch++;
+        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         try {
-            this.steerEpoch++;
             await this.interruptActiveTurns('abort');
             this.currentTurnId = null;
 
@@ -3317,7 +3323,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!localId) {
                     return { steered: false, error: 'Missing localId' };
                 }
-                if (!turnInFlight || !this.currentThreadId || !this.currentTurnId) {
+                if (this.steeringBlocked || !turnInFlight || !this.currentThreadId || !this.currentTurnId) {
                     return { steered: false, error: 'No active steerable turn' };
                 }
                 // One steer at a time: concurrent reservations would both save
@@ -3915,6 +3921,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
 
                 setTurnInFlight(true);
+                this.steeringBlocked = false;
                 this.conversationHistory.setBusy(true);
                 allowAnonymousTerminalEvent = false;
                 const mode = {
