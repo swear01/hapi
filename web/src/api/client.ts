@@ -965,8 +965,11 @@ export class ApiClient {
         })
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    async deleteSession(sessionId: string, options?: { requireArchived?: boolean }): Promise<void> {
+        const params = new URLSearchParams()
+        if (options?.requireArchived) params.set('requireArchived', '1')
+        const suffix = params.size > 0 ? `?${params}` : ''
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
             method: 'DELETE'
         })
     }

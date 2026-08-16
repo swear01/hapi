@@ -882,6 +882,16 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
         }
 
+        // Bulk group-delete guard (#881): the web UI only enables "Delete
+        // Group" when every session in the group is archived, but the server
+        // re-checks so a stale client or a race cannot delete a session whose
+        // lifecycle state is no longer 'archived' (e.g. completed/imported
+        // stubs that are inactive but never formally archived).
+        if (c.req.query('requireArchived') === '1'
+            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
+            return c.json({ error: 'Session is no longer archived' }, 409)
+        }
+
         try {
             await engine.deleteSession(sessionResult.sessionId)
             return c.json({ ok: true })

@@ -876,6 +876,72 @@ describe('SessionList collapse behavior', () => {
     })
 })
 
+describe('SessionList project group context menu (tiann/hapi#881)', () => {
+    function renderList(sessions: SessionSummary[]) {
+        return renderWithProviders(
+            <SessionList
+                sessions={sessions}
+                selectedSessionId={null}
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+            />
+        )
+    }
+
+    it('opens the group menu on right-click with Copy Path / Archive All / Delete Group', () => {
+        renderList([makeSession({
+            id: 'session-1',
+            active: true,
+            metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'running' },
+        })])
+
+        const groupHeader = screen.getByTitle('/work/hapi')
+        fireEvent.contextMenu(groupHeader)
+
+        expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
+        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()
+        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeDisabled()
+    })
+
+    it('enables Delete Group only when every session in the group is archived', () => {
+        renderList([
+            makeSession({
+                id: 'session-1',
+                active: false,
+                metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'archived' },
+            }),
+            makeSession({
+                id: 'session-2',
+                active: false,
+                metadata: { path: '/work/hapi', name: 'Task 2', flavor: 'codex', lifecycleState: 'archived' },
+            }),
+        ])
+
+        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
+
+        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeEnabled()
+        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeDisabled()
+    })
+
+    it('collapses the group on a plain click and does not open the menu', () => {
+        renderList([makeSession({
+            id: 'session-1',
+            active: true,
+            metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'running' },
+        })])
+
+        const groupHeader = screen.getByTitle('/work/hapi')
+        fireEvent.click(groupHeader)
+
+        expect(screen.queryByRole('menu')).toBeNull()
+        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
+    })
+})
+
 describe('SessionList search toggle', () => {
     it('expands on icon click and keeps filtering after collapsing on blur', () => {
         const sessions = [
