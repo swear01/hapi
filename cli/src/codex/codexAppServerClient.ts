@@ -353,12 +353,24 @@ export class CodexAppServerClient extends JsonLineParser {
         return response as ThreadRollbackResponse;
     }
 
-    async steerTurn(params: TurnSteerParams, options?: { signal?: AbortSignal }): Promise<TurnSteerResponse> {
-        const response = await this.sendRequest('turn/steer', params, {
+    async steerTurn(
+        params: TurnSteerParams,
+        options?: { signal?: AbortSignal }
+    ): Promise<{ dispatched: Promise<void>; completed: Promise<TurnSteerResponse> }> {
+        // Dispatch/complete split: turn/steer's response is turn completion,
+        // which can exceed any fixed timeout. Callers ack the hub once stdin
+        // accepted the inject and track completion in the background. No
+        // timeout: a timed-out steer must never be restored (that would
+        // re-deliver the same instruction via turn/start); completion ends on
+        // success, abort, or disconnect only.
+        const request = await this.sendRequestWithDispatch('turn/steer', params, {
             signal: options?.signal,
-            timeoutMs: 30_000
+            timeoutMs: Infinity
         });
-        return response as TurnSteerResponse;
+        return {
+            dispatched: request.dispatched,
+            completed: request.completed.then((response) => response as TurnSteerResponse)
+        };
     }
 
     async compactThread(
@@ -434,6 +446,21 @@ export class CodexAppServerClient extends JsonLineParser {
         params?: unknown,
         options?: { signal?: AbortSignal; timeoutMs?: number }
     ): Promise<unknown> {
+        const request = await this.sendRequestWithDispatch(method, params, options);
+        void request.dispatched.catch(() => {});
+        return request.completed;
+    }
+
+    /**
+     * Split a request into transport dispatch (stdin accepted) and completion
+     * (JSON-RPC response). Lets callers commit queue state once stdin accepted
+     * the request without waiting for the (possibly long-running) response.
+     */
+    private async sendRequestWithDispatch(
+        method: string,
+        params?: unknown,
+        options?: { signal?: AbortSignal; timeoutMs?: number }
+    ): Promise<{ dispatched: Promise<void>; completed: Promise<unknown> }> {
         if (!this.connected) {
             await this.connect();
         }
@@ -447,60 +474,87 @@ export class CodexAppServerClient extends JsonLineParser {
 
         const timeoutMs = options?.timeoutMs ?? CodexAppServerClient.DEFAULT_TIMEOUT_MS;
 
-        return new Promise((resolve, reject) => {
-            let timeout: ReturnType<typeof setTimeout> | null = null;
-            let aborted = false;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        let resolveCompleted!: (value: unknown) => void;
+        let rejectCompleted!: (error: Error) => void;
+        const completed = new Promise<unknown>((resolve, reject) => {
+            resolveCompleted = resolve;
+            rejectCompleted = reject;
+        });
+        let aborted = false;
 
-            const cleanup = () => {
-                if (timeout) {
-                    clearTimeout(timeout);
-                }
-                if (options?.signal) {
-                    options.signal.removeEventListener('abort', onAbort);
-                }
-            };
-
-            const onAbort = () => {
-                if (aborted) return;
-                aborted = true;
-                this.pending.delete(id);
-                cleanup();
-                reject(createAbortError());
-            };
-
-            if (options?.signal) {
-                if (options.signal.aborted) {
-                    onAbort();
-                    return;
-                }
-                options.signal.addEventListener('abort', onAbort, { once: true });
+        const cleanup = () => {
+            if (timeout) {
+                clearTimeout(timeout);
             }
+            if (options?.signal) {
+                options.signal.removeEventListener('abort', onAbort);
+            }
+        };
 
-            if (Number.isFinite(timeoutMs)) {
-                timeout = setTimeout(() => {
-                    if (this.pending.has(id)) {
+        const onAbort = () => {
+            if (aborted) return;
+            aborted = true;
+            this.pending.delete(id);
+            cleanup();
+            rejectCompleted(createAbortError());
+        };
+
+        if (options?.signal) {
+            if (options.signal.aborted) {
+                onAbort();
+                return { dispatched: Promise.reject(createAbortError()), completed };
+            }
+            options.signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        if (Number.isFinite(timeoutMs) && !aborted) {
+            timeout = setTimeout(() => {
+                if (this.pending.has(id)) {
+                    this.pending.delete(id);
+                    cleanup();
+                    rejectCompleted(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+                }
+            }, timeoutMs);
+            timeout.unref();
+        }
+
+        this.pending.set(id, {
+            resolve: (value) => {
+                cleanup();
+                resolveCompleted(value);
+            },
+            reject: (error) => {
+                cleanup();
+                rejectCompleted(error);
+            },
+            cleanup
+        });
+
+        const dispatched = new Promise<void>((resolve, reject) => {
+            try {
+                const serialized = JSON.stringify(payload);
+                this.process?.stdin.write(`${serialized}\n`, (error) => {
+                    if (error) {
+                        const writeError = error instanceof Error ? error : new Error(String(error));
                         this.pending.delete(id);
                         cleanup();
-                        reject(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+                        rejectCompleted(writeError);
+                        reject(writeError);
+                        return;
                     }
-                }, timeoutMs);
-                timeout.unref();
+                    resolve();
+                });
+            } catch (error) {
+                const writeError = error instanceof Error ? error : new Error(String(error));
+                this.pending.delete(id);
+                cleanup();
+                rejectCompleted(writeError);
+                reject(writeError);
             }
-
-            this.pending.set(id, {
-                resolve: (value) => {
-                    cleanup();
-                    resolve(value);
-                },
-                reject: (error) => {
-                    cleanup();
-                    reject(error);
-                },
-                cleanup
-            });
-
-            this.writePayload(payload);
         });
+
+        return { dispatched, completed };
     }
 
     private sendNotification(method: string, params?: unknown): void {

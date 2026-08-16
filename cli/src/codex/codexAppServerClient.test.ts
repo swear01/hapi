@@ -61,4 +61,55 @@ describe('CodexAppServerClient process cwd', () => {
         );
         await client.disconnect();
     });
+
+    it('steerTurn resolves dispatch on stdin accept and completes with the turn response', async () => {
+        const child = fakeChild();
+        child.stdin.write = vi.fn((_data: unknown, cb?: (error?: Error | null) => void) => {
+            cb?.();
+            return true;
+        });
+        spawnMock.mockReturnValue(child);
+        const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+
+        await client.connect();
+        const steer = await client.steerTurn({
+            threadId: 'thread-1',
+            input: [{ type: 'text', text: 'pivot now' }],
+            expectedTurnId: 'turn-1',
+            clientUserMessageId: 'local-1'
+        });
+        await steer.dispatched;
+
+        const written = child.stdin.write.mock.calls[0]?.[0] as string;
+        const payload = JSON.parse(written);
+        expect(payload).toEqual(expect.objectContaining({
+            method: 'turn/steer',
+            params: expect.objectContaining({ clientUserMessageId: 'local-1' })
+        }));
+
+        // App-server completes the turn after the inject.
+        child.stdout.emit('data', Buffer.from(JSON.stringify({ id: payload.id, result: { turnId: 'turn-1' } }) + '\n'));
+        await expect(steer.completed).resolves.toEqual({ turnId: 'turn-1' });
+        await client.disconnect();
+    });
+
+    it('steerTurn rejects dispatch when stdin write fails', async () => {
+        const child = fakeChild();
+        child.stdin.write = vi.fn((_data: unknown, cb?: (error?: Error | null) => void) => {
+            cb?.(new Error('stdin closed'));
+            return true;
+        });
+        spawnMock.mockReturnValue(child);
+        const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+
+        await client.connect();
+        const steer = await client.steerTurn({
+            threadId: 'thread-1',
+            input: [{ type: 'text', text: 'x' }],
+            expectedTurnId: 'turn-1'
+        });
+        await expect(steer.dispatched).rejects.toThrow('stdin closed');
+        await expect(steer.completed).rejects.toThrow('stdin closed');
+        await client.disconnect();
+    });
 });
