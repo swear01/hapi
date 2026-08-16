@@ -66,6 +66,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private softSteerWaiters: Promise<void>[] = [];
     /** Invalidates soft-steer completion callbacks after abort or cleanup. */
     private softSteerEpoch = 0;
+    /** True once onLeavingRemote() invalidated steer handling (idempotent). */
+    private leavingRemote = false;
     /** True when ACP process was spawned with `--auto-review`. */
     private spawnedWithAutoReview = false;
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
@@ -426,6 +428,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 if (!this.promptInFlight || !this.acpSessionId || !this.backend) {
                     return { steered: false, error: 'No active steerable turn' };
                 }
+                if (this.softSteerWaiters.length > 0) {
+                    return { steered: false, error: 'Another steer is already in progress' };
+                }
                 const taken = session.queue.takeByLocalId(localId);
                 if (!taken) {
                     return { steered: false, error: 'Message not in queue' };
@@ -579,6 +584,23 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
+    protected onLeavingRemote(): void {
+        // Synchronous, idempotent, and runs BEFORE cleanup()'s async teardown
+        // (see RemoteLauncherBase). An in-flight soft steer settling during
+        // cancelAll/disconnect awaits must not restore into a torn-down queue
+        // or emit messages-consumed after remote-mode teardown has started.
+        if (this.leavingRemote) return;
+        this.leavingRemote = true;
+        this.promptInFlight = false;
+        this.softSteerEpoch++;
+        this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+        this.softSteerWaiters = [];
+        this.session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.SteerQueuedMessage,
+            async () => ({ steered: false, error: 'Session ending' })
+        );
+    }
+
     protected async cleanup(): Promise<void> {
         // Capture overlay before awaited teardown so a reject from
         // cancelAll/disconnect cannot leave a dead hapi-* entry in ~/.cursor/mcp.json.
@@ -609,17 +631,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 this.happyServer.stop();
                 this.happyServer = null;
             }
-
-            // Invalidate any in-flight steer; a late soft-steer settle must not
-            // restore into a torn-down queue or emit messages-consumed.
-            this.promptInFlight = false;
-            this.softSteerEpoch++;
-            this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
-            this.softSteerWaiters = [];
-            this.session.client.rpcHandlerManager.registerHandler(
-                RPC_METHODS.SteerQueuedMessage,
-                async () => ({ steered: false, error: 'Session ending' })
-            );
         } finally {
             overlay?.cleanup();
             setCursorAcpModelsSnapshot(null);

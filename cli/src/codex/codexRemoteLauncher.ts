@@ -228,6 +228,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     private abortController: AbortController = new AbortController();
     /** Invalidates queued-message steer handlers after abort or cleanup. */
     private steerEpoch = 0;
+    /** True once onLeavingRemote() invalidated steer handling (idempotent). */
+    private leavingRemote = false;
     private currentThreadId: string | null = null;
     private currentTurnId: string | null = null;
     private readonly activeChildTurns = new Map<string, string>();
@@ -3314,6 +3316,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!turnInFlight || !this.currentThreadId || !this.currentTurnId) {
                     return { steered: false, error: 'No active steerable turn' };
                 }
+                // One steer at a time: concurrent reservations would both save
+                // the same index and restore out of FIFO order on failure.
+                if (inFlightSteers.size > 0) {
+                    return { steered: false, error: 'Another steer is already in progress' };
+                }
                 // Reserve before awaiting turn/steer so the main loop cannot
                 // collect the same row for turn/start while steer is in flight.
                 const taken = session.queue.takeByLocalId(localId);
@@ -4037,6 +4044,19 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         cancelAllPendingThrottledAgentRunUpdates();
     }
 
+    protected onLeavingRemote(): void {
+        // Synchronous, idempotent, and runs BEFORE cleanup()'s async teardown
+        // (see RemoteLauncherBase). A turn/steer settling during disconnect
+        // must not restore into a torn-down queue or emit messages-consumed.
+        if (this.leavingRemote) return;
+        this.leavingRemote = true;
+        this.steerEpoch++;
+        this.session.client.rpcHandlerManager.registerHandler(
+            RPC_METHODS.SteerQueuedMessage,
+            async () => ({ steered: false, error: 'Session ending' })
+        );
+    }
+
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
         this.appServerClient.setStderrHandler(null);
@@ -4060,13 +4080,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         this.reasoningProcessor = null;
         this.diffProcessor = null;
         this.activeChildTurns.clear();
-        // Invalidate any in-flight steer handler; a late turn/steer response
-        // must not restore into a torn-down queue.
-        this.steerEpoch++;
-        this.session.client.rpcHandlerManager.registerHandler(
-            RPC_METHODS.SteerQueuedMessage,
-            async () => ({ steered: false, error: 'Session ending' })
-        );
 
         logger.debug('[codex-remote]: cleanup done');
     }

@@ -1317,6 +1317,40 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
+    it('rejects a second steer while another soft steer is in flight', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        let releaseSoftSteer!: () => void;
+        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        session.queue.push('steer me too', mode, 'local-3');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        const first = await steerHandler!({ localId: 'local-2' });
+        expect(first).toEqual({ steered: true });
+        // The first steer is still settling; the second is refused so both
+        // reservations cannot restore out of FIFO order.
+        const second = await steerHandler!({ localId: 'local-3' });
+        expect(second).toEqual({ steered: false, error: 'Another steer is already in progress' });
+        expect(session.queue.pendingLocalIds()).toContain('local-3');
+
+        releaseSoftSteer();
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
     it('does not publish consumed events when a soft steer settles after abort', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });

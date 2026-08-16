@@ -1123,6 +1123,7 @@ function createSessionStub(
             codexMessages.push(message);
         },
         sendUserMessage(_text: string) {},
+        emitMessagesConsumed(_localIds: string[]) {},
         sendClaudeSessionMessage(message: unknown) {
             summaryMessages.push(message);
         },
@@ -3213,6 +3214,51 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         expect(codexMessages).toEqual([]);
         // handleAbort reset() reopened the queue; close it so the launcher
         // winds down and exits.
+        queue.close();
+        await runPromise;
+    });
+
+    it('rejects a second steer while the first turn/steer is unresolved', async () => {
+        harness.suppressTurnCompletion = true;
+        let releaseSteer!: () => void;
+        harness.deferSteerTurn = new Promise((resolve) => { releaseSteer = resolve; });
+        const { session, rpcHandlers } = createSessionStub(['first message']);
+
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('B', createMode(), 'b-local');
+        queue.push('C', createMode(), 'c-local');
+
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+        // Do not await: turn/steer is deferred until releaseSteer().
+        const first = steerHandler!({ localId: 'b-local' });
+        await vi.waitFor(() => expect(harness.steerTurnCalls.length).toBe(1));
+
+        // The second steer is refused so both reservations cannot restore
+        // out of FIFO order; C stays queued untouched.
+        const second = await steerHandler!({ localId: 'c-local' });
+        expect(second).toEqual({ steered: false, error: 'Another steer is already in progress' });
+        expect(queue.pendingLocalIds()).toContain('c-local');
+
+        releaseSteer();
+        // The first steer succeeds against the still-in-flight turn.
+        await expect(first).resolves.toEqual({ steered: true });
+
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-1' }
+        });
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(2));
+        // B was steered into turn 1; only C remains and dispatches next.
+        expect(harness.startTurnMessages[1]).toBe('C');
+
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-2' }
+        });
         queue.close();
         await runPromise;
     });
