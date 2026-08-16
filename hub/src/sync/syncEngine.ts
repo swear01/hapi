@@ -1667,6 +1667,9 @@ export class SyncEngine {
             }
             const archived = await this.archiveDshSessionForRewind(sessionId, namespace, forked.sessionId)
             if (!archived) {
+                // Metadata CAS failed; the forked child is already live and
+                // must not be left orphaned behind a failed rewind.
+                await this.cleanupFailedForkChild(forked.sessionId, session.metadata?.machineId ?? '', true).catch(() => {})
                 return { type: 'error', message: 'DSH rewind: old session could not be archived' }
             }
             return { type: 'success' }
@@ -2483,6 +2486,7 @@ export class SyncEngine {
         if (flavor === 'kimi') return metadata.kimiSessionId ?? null
         if (flavor === 'copilot') return metadata.copilotSessionId ?? null
         if (flavor === 'pi') return metadata.piSessionId ?? null
+        if (flavor === 'dsh') return metadata.dshSessionId ?? null
 
         return metadata.claudeSessionId ?? this.recoverClaudeSessionIdFromMessages(session.id, namespace)
     }
