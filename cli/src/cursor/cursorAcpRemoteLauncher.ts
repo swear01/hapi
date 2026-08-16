@@ -459,13 +459,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
-                const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
-                    session.queue.commitReservation(taken);
-                    messageBuffer.addMessage(taken.item.message, 'user');
-                    session.client.emitMessagesConsumed([localId], { steered: true });
-                }, (error) => {
-                    session.queue.restoreReservation(taken);
-                    logger.debug('[cursor-acp] soft-steer failed', error);
+                // Completion still gates the next prompt (handler swap safety);
+                // register the waiter before awaiting dispatch so the main loop's
+                // finally cannot slip a prompt in between.
+                const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {}, (error) => {
+                    logger.debug('[cursor-acp] soft-steer completion failed after dispatch', error);
                 });
                 this.softSteerWaiters.push(steerDone);
                 const removeWaiter = () => {
@@ -475,10 +473,18 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 try {
                     await steer.dispatched;
                 } catch (error) {
+                    session.queue.restoreReservation(taken);
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
-                    await steerDone;
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
+                // Dispatch succeeded: the instruction is delivered to the ACP
+                // session. Consume the row now — waiting for the concurrent
+                // turn's completion would leave the web row queued/actionable
+                // after the RPC already reported success, and a later abort or
+                // disconnect would otherwise restore a delivered message.
+                session.queue.commitReservation(taken);
+                messageBuffer.addMessage(taken.item.message, 'user');
+                session.client.emitMessagesConsumed([localId], { steered: true });
                 return { steered: true };
             }
         );

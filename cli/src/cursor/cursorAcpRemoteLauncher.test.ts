@@ -354,7 +354,7 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
-    it('restores a queued steer when ACP rejects it after dispatch', async () => {
+    it('keeps the row consumed when ACP rejects it after dispatch', async () => {
         let releasePrompt!: () => void;
         let rejectSoftSteer!: (error: Error) => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
@@ -372,9 +372,11 @@ describe('cursorAcpRemoteLauncher', () => {
         session.queue.push('soft steer', mode, 'steer');
         await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
             .resolves.toEqual({ steered: true });
+        // Dispatch already delivered the message — a later completion rejection
+        // must not restore the row (no duplicate via the next prompt).
+        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
         rejectSoftSteer(new Error('request rejected'));
-        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
-        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(false));
 
         harness.deferPrompt = null;
         releasePrompt();
