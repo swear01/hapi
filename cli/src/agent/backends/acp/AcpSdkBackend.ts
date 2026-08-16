@@ -76,6 +76,7 @@ export class AcpSdkBackend implements AgentBackend {
     private initializeResult: AcpInitializeResult | null = null;
     private initializeInFlight: Promise<void> | null = null;
     private setModeSupported: boolean | undefined = undefined;
+    private activePromptRequests = 0;
     private isProcessingMessage = false;
     private promptRequestInFlight = false;
     private responseCompleteResolvers: Array<() => void> = [];
@@ -558,6 +559,7 @@ export class AcpSdkBackend implements AgentBackend {
             flavor: this.options.flavor,
         });
         this.isProcessingMessage = true;
+        this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
@@ -635,8 +637,7 @@ export class AcpSdkBackend implements AgentBackend {
                 }
             } finally {
                 this.promptUsageCallback = null;
-                this.isProcessingMessage = false;
-                this.notifyResponseComplete();
+                this.finishPromptRequest();
             }
         }
     }
@@ -768,7 +769,7 @@ export class AcpSdkBackend implements AgentBackend {
      * like session swap or sending task_complete.
      */
     async waitForResponseComplete(): Promise<void> {
-        if (!this.isProcessingMessage) {
+        if (this.activePromptRequests === 0) {
             return;
         }
         return new Promise<void>((resolve) => {
@@ -787,6 +788,7 @@ export class AcpSdkBackend implements AgentBackend {
         this.messageHandler?.drainBuffers();
         this.messageHandler = null;
         this.activeSessionId = null;
+        this.activePromptRequests = 0;
         this.isProcessingMessage = false;
         this.sessionModelsMetadata.clear();
         this.initialAvailableCommands.clear();
@@ -1074,6 +1076,97 @@ export class AcpSdkBackend implements AgentBackend {
             resolve();
         }
     }
+
+    private beginPromptRequest(): void {
+        this.activePromptRequests++;
+        this.isProcessingMessage = true;
+    }
+
+    private finishPromptRequest(): void {
+        this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
+        this.isProcessingMessage = this.activePromptRequests > 0;
+        if (!this.isProcessingMessage) {
+            this.notifyResponseComplete();
+        }
+    }
+
+    /**
+     * Soft-inject a follow-up `session/prompt` while another prompt is in flight.
+     *
+     * Used for Cursor mid-turn steer (GUI "Send" / next-opportune soft send).
+     * Does **not** cancel the active prompt and does **not** swap message handlers —
+     * `session/update` notifications keep flowing to the in-flight turn's handler.
+     *
+     * Awaits the full concurrent `session/prompt` JSON-RPC response (turn completion
+     * for that inject). Do **not** call this from the hub `SteerQueuedMessage` handler —
+     * that RPC uses a 30s Socket.IO timeout. Use {@link beginSoftSteerPrompt} there.
+     */
+    async softSteerPrompt(sessionId: string, content: PromptContent[]): Promise<void> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (this.activePromptRequests === 0) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        this.beginPromptRequest();
+        try {
+            await this.transport.sendRequest('session/prompt', {
+                sessionId,
+                prompt: content
+            }, { timeoutMs: Infinity });
+        } finally {
+            this.finishPromptRequest();
+        }
+    }
+
+    /**
+     * Kick off a soft steer without blocking the hub RPC on turn completion.
+     * Separates transport dispatch from prompt completion so callers can commit
+     * queue state only after stdin accepted the request without waiting for the turn.
+     */
+    beginSoftSteerPrompt(sessionId: string, content: PromptContent[]): {
+        dispatched: Promise<void>;
+        completed: Promise<void>;
+    } {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        if (this.activePromptRequests === 0) {
+            throw new Error('No active ACP prompt to soft-steer into');
+        }
+
+        const transport = this.transport;
+        this.beginPromptRequest();
+        const request = transport.sendRequestWithDispatch('session/prompt', {
+            sessionId,
+            prompt: content
+        }, { timeoutMs: Infinity });
+        const completed = (async () => {
+            try {
+                await request.completed;
+            } finally {
+                try {
+                    await this.waitForSessionUpdateQuiet(
+                        AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
+                        AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS
+                    );
+                    this.messageHandler?.drainBuffers();
+                    await this.drainLateBuffers();
+                    this.messageHandler?.drainBuffers();
+                } finally {
+                    this.finishPromptRequest();
+                }
+            }
+        })();
+
+        void completed.catch((error) => {
+            logger.warn('[ACP] soft-steer session/prompt failed', error);
+        });
+
+        return { dispatched: request.dispatched, completed };
+    }
+
 
     /**
      * Optimistically update the cached `currentModelId` for a session after a

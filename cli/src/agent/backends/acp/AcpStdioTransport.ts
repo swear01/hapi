@@ -244,10 +244,31 @@ export class AcpStdioTransport {
     static readonly DEFAULT_TIMEOUT_MS = 120_000;
 
     async sendRequest(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown> {
+        const { dispatched, completed } = this.sendRequestWithDispatch(method, params, options);
+        try {
+            await dispatched;
+        } catch (error) {
+            // `completed` carries the same rejection (closed/exited transport);
+            // swallow it so the caller sees exactly one error.
+            await completed.catch(() => {});
+            throw error;
+        }
+        return completed;
+    }
+
+    /**
+     * Send a JSON-RPC request and return separate promises for transport
+     * dispatch (stdin write accepted) and full completion. The hub steer RPC
+     * must not wait for long-running prompt completion inside a 30s Socket.IO
+     * timeout, so callers await `dispatched` and track `completed` separately.
+     */
+    sendRequestWithDispatch(method: string, params?: unknown, options?: { timeoutMs?: number }): {
+        dispatched: Promise<void>;
+        completed: Promise<unknown>;
+    } {
         if (this.closed || this.exited) {
-            return Promise.reject(
-                this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
-            );
+            const error = this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
+            return { dispatched: Promise.reject(error), completed: Promise.reject(error) };
         }
 
         const id = this.nextId++;
@@ -262,13 +283,16 @@ export class AcpStdioTransport {
 
         // Skip timeout for infinite/no-timeout requests (e.g., long-running prompts)
         if (!Number.isFinite(timeoutMs)) {
-            return new Promise<unknown>((resolve, reject) => {
-                this.pending.set(id, { resolve, reject });
-                this.writePayload(payload);
-            });
+            return {
+                dispatched: Promise.resolve(),
+                completed: new Promise<unknown>((resolve, reject) => {
+                    this.pending.set(id, { resolve, reject });
+                    this.writePayload(payload);
+                })
+            };
         }
 
-        return new Promise<unknown>((resolve, reject) => {
+        const completed = new Promise<unknown>((resolve, reject) => {
             const timer = setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
@@ -288,8 +312,13 @@ export class AcpStdioTransport {
                     reject(error);
                 }
             });
+        });
+
+        const dispatched = Promise.resolve().then(() => {
             this.writePayload(payload);
         });
+
+        return { dispatched, completed };
     }
 
     sendNotification(method: string, params?: unknown): void {

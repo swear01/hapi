@@ -193,6 +193,10 @@ export type AgentStateCompletedRequest = z.infer<typeof AgentStateCompletedReque
 
 export const AgentStateSchema = z.object({
     controlledByUser: z.boolean().nullish(),
+    // True while the launcher has an active steerable turn and can accept a
+    // queued-message steer (Codex turn/steer, Cursor ACP soft-send). Gates
+    // the web Steer button per session without a round-trip.
+    steeringActive: z.boolean().nullish(),
     // The mode the session was started in. Persisted so reopen/resume can
     // re-spawn in the same mode — notably 'pty', which has no agent terminal
     // otherwise (a reopened PTY session would silently fall back to 'remote').

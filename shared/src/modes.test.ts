@@ -8,6 +8,8 @@ import {
     getPermissionModeTone,
     getPermissionModesForFlavor,
     isPermissionModeAllowedForFlavor,
+    isSteeringSupportedForFlavor,
+    isSteeringSupportedForSession,
 } from './modes'
 
 describe('Gemini CLI sunset (read-only, not creatable)', () => {
@@ -127,5 +129,31 @@ describe('claude auto permission mode', () => {
     it('has a label and tone', () => {
         expect(getPermissionModeLabel('auto')).toBe('Auto')
         expect(getPermissionModeTone('auto')).toBe('warning')
+    })
+})
+
+describe('isSteeringSupportedForSession', () => {
+    it('supports codex regardless of cursor metadata', () => {
+        expect(isSteeringSupportedForSession({ flavor: 'codex' })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'codex', cursorSessionId: 'x' })).toBe(true)
+    })
+
+    it('supports ACP cursor sessions', () => {
+        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionProtocol: 'acp' })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'x', cursorSessionProtocol: 'acp' })).toBe(true)
+    })
+
+    it('rejects legacy stream-json cursor sessions', () => {
+        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionProtocol: 'stream-json' })).toBe(false)
+        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'x' })).toBe(false)
+    })
+
+    it('rejects other flavors and missing metadata', () => {
+        expect(isSteeringSupportedForSession({ flavor: 'pi' })).toBe(false)
+        expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
+        expect(isSteeringSupportedForSession(null)).toBe(false)
+        expect(isSteeringSupportedForSession(undefined)).toBe(false)
+        expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
+        expect(isSteeringSupportedForFlavor('pi')).toBe(false)
     })
 })

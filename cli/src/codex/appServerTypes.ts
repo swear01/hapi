@@ -282,6 +282,19 @@ export interface TurnInterruptResponse {
     [key: string]: unknown;
 }
 
+export interface TurnSteerParams {
+    threadId: string;
+    /** New user input to inject into the active turn. */
+    input: Array<{ type: 'text'; text: string }>;
+    /** Reject the steer if the turn already advanced past this id. */
+    expectedTurnId?: string;
+}
+
+export interface TurnSteerResponse {
+    ok: boolean;
+    [key: string]: unknown;
+}
+
 export interface ThreadRollbackParams {
     threadId: string;
     numTurns: number;

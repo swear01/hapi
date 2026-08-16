@@ -1043,7 +1043,7 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
     }
 }));
 
-import { codexRemoteLauncher } from './codexRemoteLauncher';
+import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
 
 type FakeAgentState = {
     requests: Record<string, unknown>;
@@ -3128,5 +3128,14 @@ describe('codexRemoteLauncher', () => {
             type: 'message',
             message: '/compact does not accept arguments'
         });
+    });
+});
+
+describe('isCurrentSteerHandler (#888)', () => {
+    it('is true only while the steer epoch matches and the session is not exiting', () => {
+        expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
+        expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
+        expect(isCurrentSteerHandler(3, 3, true)).toBe(false);
+        expect(isCurrentSteerHandler(2, 3, false)).toBe(false);
     });
 });

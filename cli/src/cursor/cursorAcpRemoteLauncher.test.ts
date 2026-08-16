@@ -23,7 +23,11 @@ const harness = vi.hoisted(() => ({
     stderrErrorHandler: null as ((error: { type: string; message: string; raw?: string }) => void) | null,
     disconnectError: null as Error | null,
     overlayCleanup: null as ReturnType<typeof vi.fn> | null,
-    agentActivityListener: null as ((thinking: boolean) => void) | null
+    agentActivityListener: null as ((thinking: boolean) => void) | null,
+    softSteerCalls: 0,
+    softSteerDispatchError: null as Error | null,
+    deferPrompt: null as Promise<void> | null,
+    releasePrompt: null as (() => void) | null
 }));
 
 const legacyLauncher = vi.hoisted(() => vi.fn());
@@ -129,6 +133,18 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
                 harness.promptCalls++;
                 harness.prompts.push(content);
+                if (harness.deferPrompt) {
+                    await harness.deferPrompt;
+                }
+            }),
+            beginSoftSteerPrompt: vi.fn(() => {
+                harness.softSteerCalls++;
+                return {
+                    dispatched: harness.softSteerDispatchError
+                        ? Promise.reject(harness.softSteerDispatchError)
+                        : Promise.resolve(),
+                    completed: Promise.resolve({ stopReason: 'end_turn' })
+                };
             }),
             cancelPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
@@ -192,6 +208,7 @@ vi.mock('@/ui/logger', () => ({
 
 import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { CursorSession } from './session';
 import { ApiSessionClient } from '@/api/apiSession';
 import {
@@ -199,7 +216,7 @@ import {
     writeSharedCursorModelsCache
 } from '@/modules/common/cursorModelsSharedCache';
 
-function makeSession(sessionId: string | null): CursorSession {
+function makeSession(sessionId: string | null, closeQueue = true): CursorSession {
     const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
     const client = makeClient();
 
@@ -218,24 +235,32 @@ function makeSession(sessionId: string | null): CursorSession {
     });
 
     session.onSessionFoundWithProtocol = vi.fn();
-    queue.close();
+    if (closeQueue) {
+        queue.close();
+    }
 
     return session;
 }
 
 function makeClient() {
+    const handlers = new Map<string, (payload?: unknown) => Promise<unknown>>();
     return {
         sessionId: 'test-session-id',
         rpcHandlerManager: {
-            registerHandler: vi.fn(),
-            unregisterHandler: vi.fn()
+            registerHandler: vi.fn((method: string, handler: (payload?: unknown) => Promise<unknown>) => {
+                handlers.set(method, handler);
+            }),
+            unregisterHandler: vi.fn(),
+            handlers
         },
         updateMetadata: vi.fn(),
         flushMetadata: vi.fn(async () => true),
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
         keepAlive: vi.fn(),
-        emitSessionReady: vi.fn()
+        emitSessionReady: vi.fn(),
+        emitMessagesConsumed: vi.fn(),
+        updateAgentState: vi.fn()
     } as unknown as ApiSessionClient;
 }
 
@@ -261,6 +286,10 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.disconnectError = null;
         harness.overlayCleanup = null;
         harness.agentActivityListener = null;
+        harness.softSteerCalls = 0;
+        harness.softSteerDispatchError = null;
+        harness.deferPrompt = null;
+        harness.releasePrompt = null;
         legacyLauncher.mockClear();
         process.stdin.isTTY = false;
         process.stdout.isTTY = false;
@@ -1171,5 +1200,116 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(JSON.stringify(harness.prompts[0])).not.toContain('$name');
         expect(JSON.stringify(harness.prompts[1])).toContain('second');
         expect(JSON.stringify(harness.prompts[1])).not.toContain('skill_lookup');
+    });
+});
+
+describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
+    beforeEach(() => {
+        harness.softSteerCalls = 0;
+        harness.softSteerDispatchError = null;
+        harness.deferPrompt = null;
+        harness.releasePrompt = null;
+        harness.promptCalls = 0;
+        harness.prompts = [];
+    });
+
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('soft-steers a queued message into the active prompt and acks the hub', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        // The first prompt stays in flight until we release it.
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        // The steer target arrives while the turn is active.
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+            updateAgentState: ReturnType<typeof vi.fn>;
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+        expect(steerHandler).toBeTypeOf('function');
+
+        const result = await steerHandler!({ localId: 'local-2' });
+
+        expect(result).toEqual({ steered: true });
+        expect(harness.softSteerCalls).toBe(1);
+        // The soft-steer backend call receives the steered message text.
+        const backend = vi.mocked(createCursorAcpBackend).mock.results[0]?.value as {
+            beginSoftSteerPrompt: ReturnType<typeof vi.fn>;
+        };
+        expect(backend.beginSoftSteerPrompt).toHaveBeenCalledWith(
+            expect.any(String),
+            [{ type: 'text', text: 'steer me' }]
+        );
+        // The steered row left the queue; only the first message's batch was
+        // consumed by the active prompt.
+        expect(session.queue.pendingLocalIds()).toEqual([]);
+        // Steer capability is reported to the hub while the prompt is in flight.
+        expect(client.updateAgentState).toHaveBeenCalledWith(expect.any(Function));
+
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('rejects steer when no prompt is in flight', async () => {
+        const session = makeSession(null, false);
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+        };
+        await vi.waitFor(() => {
+            expect(client.rpcHandlerManager.handlers.has(RPC_METHODS.SteerQueuedMessage)).toBe(true);
+        });
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+        // Nothing queued, so the launcher waits and no prompt is in flight.
+        const result = await steerHandler!({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: false, error: 'No active steerable turn' });
+        expect(harness.softSteerCalls).toBe(0);
+
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('restores the row when soft-steer dispatch fails', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.softSteerDispatchError = new Error('transport closed');
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        const result = await steerHandler!({ localId: 'local-2' });
+
+        expect(result).toEqual({ steered: false, error: 'Failed to soft-steer into active turn' });
+        // The failed steer returns the message to the queue for normal dispatch.
+        expect(session.queue.pendingLocalIds()).toContain('local-2');
+
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
     });
 });

@@ -62,3 +62,62 @@ describe('CodexAppServerClient process cwd', () => {
         await client.disconnect();
     });
 });
+
+describe('CodexAppServerClient turn/steer', () => {
+    beforeEach(() => {
+        spawnMock.mockReset();
+    });
+
+    it('sends turn/steer with thread, input, and expectedTurnId', async () => {
+        const child = fakeChild();
+        spawnMock.mockReturnValue(child);
+        const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+
+        await client.connect();
+        const writes: string[] = [];
+        (child.stdin.write as ReturnType<typeof vi.fn>).mockImplementation((chunk: string) => {
+            const line = String(chunk).trim();
+            writes.push(line);
+            let request: { id?: number; method?: string } | null = null;
+            try {
+                request = JSON.parse(line);
+            } catch {
+                return true;
+            }
+            if (request?.method === 'initialize') {
+                setTimeout(() => {
+                    (child.stdout as EventEmitter).emit('data', Buffer.from(
+                        JSON.stringify({ jsonrpc: '2.0', id: request!.id, result: { protocolVersion: 1 } }) + '\n'
+                    ));
+                }, 0);
+            }
+            if (request?.method === 'turn/steer') {
+                setTimeout(() => {
+                    (child.stdout as EventEmitter).emit('data', Buffer.from(
+                        JSON.stringify({ jsonrpc: '2.0', id: request!.id, result: { ok: true } }) + '\n'
+                    ));
+                }, 0);
+            }
+            return true;
+        });
+
+        const result = await client.steerTurn({
+            threadId: 'thread-1',
+            input: [{ type: 'text', text: 'pivot now' }],
+            expectedTurnId: 'turn-9'
+        });
+
+        expect(result).toEqual({ ok: true });
+        const steerWrite = writes.find((w) => w.includes('turn/steer'));
+        expect(steerWrite).toBeDefined();
+        expect(JSON.parse(steerWrite!)).toMatchObject({
+            method: 'turn/steer',
+            params: {
+                threadId: 'thread-1',
+                input: [{ type: 'text', text: 'pivot now' }],
+                expectedTurnId: 'turn-9'
+            }
+        });
+        await client.disconnect();
+    });
+});

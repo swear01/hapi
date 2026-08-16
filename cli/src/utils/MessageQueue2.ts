@@ -9,11 +9,23 @@ interface QueueItem<T> {
 }
 
 /**
+ * A message removed from the queue by {@link MessageQueue2.takeByLocalId}
+ * while an async operation decides whether to dispatch or restore it.
+ * The queue keeps a reservation so cancel/reset cannot double-fire on it.
+ */
+export type QueueReservation<T> = {
+    item: QueueItem<T>;
+    index: number;
+    state: 'reserved' | 'dispatching' | 'cancelled';
+};
+
+/**
  * A mode-aware message queue that stores messages with their modes.
  * Returns consistent batches of messages with the same mode.
  */
 export class MessageQueue2<T> {
     public queue: QueueItem<T>[] = []; // Made public for testing
+    private readonly reservations = new Map<string, QueueReservation<T>>();
     private waiter: ((hasMessages: boolean) => void) | null = null;
     private closed = false;
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
@@ -264,8 +276,106 @@ export class MessageQueue2<T> {
     cancelByLocalId(localId: string): boolean {
         if (!localId) return false;
         const idx = this.queue.findIndex(item => item.localId === localId);
-        if (idx === -1) return false;
-        this.queue.splice(idx, 1);
+        if (idx !== -1) {
+            this.queue.splice(idx, 1);
+            return true;
+        }
+        // A reserved (taken but not yet dispatched/restored) item is cancelled
+        // by flagging its reservation; the steer path checks the flag and
+        // aborts instead of restoring or committing it.
+        const reservation = this.reservations.get(localId);
+        if (!reservation) return false;
+        if (reservation.state === 'dispatching') return false;
+        reservation.state = 'cancelled';
+        return true;
+    }
+
+    /**
+     * Look up a queued item by localId without removing it.
+     */
+    peekByLocalId(localId: string): QueueItem<T> | null {
+        if (!localId) return null;
+        return this.queue.find(item => item.localId === localId) ?? null;
+    }
+
+    /**
+     * Remove and return a queued item by localId (with its original index),
+     * or null if not found. Pair with {@link restoreReservation} / {@link
+     * commitReservation} when an async operation may need to put the item
+     * back in order. Used by mid-turn steer to reserve a message so the main
+     * loop cannot collect the same row for turn/start while steer is in
+     * flight.
+     */
+    takeByLocalId(localId: string): QueueReservation<T> | null {
+        if (!localId) return null;
+        const idx = this.queue.findIndex(item => item.localId === localId);
+        if (idx === -1) return null;
+        const [item] = this.queue.splice(idx, 1);
+        if (!item) return null;
+        const reservation: QueueReservation<T> = { item, index: idx, state: 'reserved' };
+        if (item.localId) {
+            this.reservations.set(item.localId, reservation);
+        }
+        return reservation;
+    }
+
+    /**
+     * Re-insert an item previously removed by {@link takeByLocalId} at its
+     * original index (clamped if the queue shrank). Returns false when the
+     * reservation was cancelled in the meantime.
+     */
+    restoreReservation(reservation: QueueReservation<T>): boolean {
+        if (reservation.state === 'cancelled') {
+            return false;
+        }
+        if (this.closed) {
+            throw new Error('Cannot restore into closed queue');
+        }
+        if (reservation.item.localId) {
+            if (this.reservations.get(reservation.item.localId) !== reservation) {
+                return false;
+            }
+            this.reservations.delete(reservation.item.localId);
+        }
+        const idx = Math.max(0, Math.min(reservation.index, this.queue.length));
+        this.queue.splice(idx, 0, reservation.item);
+        if (this.waiter) {
+            const waiter = this.waiter;
+            this.waiter = null;
+            waiter(true);
+        }
+        return true;
+    }
+
+    /**
+     * Mark a reservation as dispatching (irreversible without a cancel).
+     * Only a 'reserved' reservation may transition; returns false otherwise.
+     */
+    beginReservationDispatch(reservation: QueueReservation<T>): boolean {
+        if (reservation.state !== 'reserved') {
+            return false;
+        }
+        if (reservation.item.localId
+            && this.reservations.get(reservation.item.localId) !== reservation) {
+            return false;
+        }
+        reservation.state = 'dispatching';
+        return true;
+    }
+
+    /**
+     * Drop a reservation after the item was dispatched successfully.
+     */
+    commitReservation(reservation: QueueReservation<T>): boolean {
+        if (reservation.state === 'cancelled') {
+            return false;
+        }
+        if (reservation.item.localId) {
+            if (this.reservations.get(reservation.item.localId) !== reservation) {
+                return false;
+            }
+            this.reservations.delete(reservation.item.localId);
+        }
         return true;
     }
 
@@ -276,6 +386,10 @@ export class MessageQueue2<T> {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
         this.closed = false;
+        for (const reservation of this.reservations.values()) {
+            reservation.state = 'cancelled';
+        }
+        this.reservations.clear();
 
         // Clear waiter without calling it since we're not closing
         this.waiter = null;
@@ -298,6 +412,10 @@ export class MessageQueue2<T> {
     close(): void {
         logger.debug(`[MessageQueue2] close() called`);
         this.closed = true;
+        for (const reservation of this.reservations.values()) {
+            reservation.state = 'cancelled';
+        }
+        this.reservations.clear();
 
         // Notify any waiting caller
         if (this.waiter) {
