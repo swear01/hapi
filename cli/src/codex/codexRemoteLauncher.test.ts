@@ -57,6 +57,11 @@ const harness = vi.hoisted(() => ({
     failNextCompact: false,
     deferCompactCompletion: false,
     deferThreadStatusNotifications: false,
+    steerTurnParams: [] as Array<Record<string, unknown>>,
+    steerDispatchError: null as Error | null,
+    steerCompletionError: null as Error | null,
+    readThreadParams: [] as Array<Record<string, unknown>>,
+    readThreadResponse: { thread: { turns: [] as unknown[] } } as { thread: { turns?: Array<{ items?: Array<Record<string, unknown>> }> } },
     emitStaleTaskCompleteAfterRetry: false,
     emitStaleTaskFailedAfterRetry: false,
     emitStaleThreadStatusFailureAfterRetry: false,
@@ -193,6 +198,30 @@ vi.mock('./codexAppServerClient', () => {
         async getThreadGoal(params?: { threadId?: string }): Promise<{ goal: Record<string, unknown> | null }> {
             harness.goalGetCalls.push(params ?? {});
             return { goal: harness.goal };
+        }
+
+        async steerTurn(params?: { threadId?: string; input?: unknown[]; expectedTurnId?: string; clientUserMessageId?: string }): Promise<{
+            dispatched: Promise<void>;
+            completed: Promise<unknown>;
+        }> {
+            harness.steerTurnParams.push((params ?? {}) as Record<string, unknown>);
+            if (harness.steerDispatchError) {
+                return {
+                    dispatched: Promise.reject(harness.steerDispatchError),
+                    completed: Promise.reject(harness.steerDispatchError)
+                };
+            }
+            return {
+                dispatched: Promise.resolve(),
+                completed: harness.steerCompletionError
+                    ? Promise.reject(harness.steerCompletionError)
+                    : Promise.resolve({ turnId: 'steered-turn' })
+            };
+        }
+
+        async readThread(params?: { threadId?: string; includeTurns?: boolean }): Promise<unknown> {
+            harness.readThreadParams.push((params ?? {}) as Record<string, unknown>);
+            return harness.readThreadResponse;
         }
 
         async clearThreadGoal(params?: { threadId?: string }): Promise<{ cleared: boolean }> {
@@ -1044,6 +1073,7 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
 }));
 
 import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
 type FakeAgentState = {
     requests: Record<string, unknown>;
@@ -1061,7 +1091,8 @@ function createMode(): EnhancedMode {
 function createSessionStub(
     messages = ['hello from launcher test'],
     mode = createMode(),
-    isolateMessages = false
+    isolateMessages = false,
+    closeQueue = true
 ) {
     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
     messages.forEach((message, index) => {
@@ -1073,7 +1104,9 @@ function createSessionStub(
             queue.push(message, mode);
         }
     });
-    queue.close();
+    if (closeQueue) {
+        queue.close();
+    }
 
     const sessionEvents: Array<{ type: string; [key: string]: unknown }> = [];
     const codexMessages: unknown[] = [];
@@ -1111,7 +1144,8 @@ function createSessionStub(
         },
         sendSessionEvent(event: { type: string; [key: string]: unknown }) {
             sessionEvents.push(event);
-        }
+        },
+        emitMessagesConsumed: vi.fn()
     };
 
     const session = {
@@ -1174,6 +1208,7 @@ function createSessionStub(
         foundSessionIds,
         resetThreadCalls,
         rpcHandlers,
+        emitMessagesConsumed: client.emitMessagesConsumed,
         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
             currentPermissionMode = nextMode;
         },
@@ -1190,6 +1225,69 @@ describe('codexRemoteLauncher', () => {
         expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
         expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
         expect(isCurrentSteerHandler(3, 3, true)).toBe(false);
+    });
+
+    it('steers a queued message into the active turn and acks on dispatch', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: true });
+        expect(harness.steerTurnParams).toHaveLength(1);
+        expect(harness.steerTurnParams[0]).toMatchObject({
+            expectedTurnId: 'turn-1',
+            clientUserMessageId: 'local-1'
+        });
+        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
+        // The suppressed turn never completes, so the launcher stays busy;
+        // close the queue and leave the run promise unawaited.
+        session.queue.close();
+    });
+
+    it('reconciles a dispatched steer whose completion failed (message already in thread)', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.steerCompletionError = new Error('Codex app-server disconnected');
+        harness.readThreadResponse = {
+            thread: {
+                turns: [{
+                    items: [{ type: 'userMessage', clientId: 'local-1', text: 'steer me' }]
+                }]
+            }
+        };
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: true });
+        expect(harness.readThreadParams).toHaveLength(1);
+        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
+        session.queue.close();
+    });
+
+    it('restores the queued row when a dispatched steer never lands in the thread', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.steerCompletionError = new Error('Codex app-server disconnected');
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: true });
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
     });
     afterEach(() => {
         harness.notifications = [];
@@ -1246,6 +1344,11 @@ describe('codexRemoteLauncher', () => {
         harness.failNextCompact = false;
         harness.deferCompactCompletion = false;
         harness.deferThreadStatusNotifications = false;
+        harness.steerTurnParams = [];
+        harness.steerDispatchError = null;
+        harness.steerCompletionError = null;
+        harness.readThreadParams = [];
+        harness.readThreadResponse = { thread: { turns: [] } };
         harness.emitStaleTaskCompleteAfterRetry = false;
         harness.emitStaleTaskFailedAfterRetry = false;
         harness.emitStaleThreadStatusFailureAfterRetry = false;
