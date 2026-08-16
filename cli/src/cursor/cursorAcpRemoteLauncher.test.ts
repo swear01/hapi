@@ -480,6 +480,34 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
+    it('does not hang teardown while a soft steer completion is unresolved', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        // Completion never resolves — simulates Cursor keeping the concurrent
+        // request open past Exit/Switch.
+        harness.deferSoftSteer = new Promise(() => {});
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
+            .resolves.toEqual({ steered: true });
+
+        // Exit/Switch must reach cleanup (which disconnects the transport and
+        // rejects pending ACP requests) without waiting on the soft steer.
+        harness.deferPrompt = null;
+        releasePrompt();
+        await handlers.get(RPC_METHODS.Switch)!();
+        await vi.waitFor(() => expect(runPromise).resolves.toBeDefined());
+    });
+
     it('spawns agent acp backend, not stream-json', async () => {
         const session = makeSession(null);
         await cursorAcpRemoteLauncher(session);
