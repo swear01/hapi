@@ -927,6 +927,53 @@ describe('SessionList project group context menu (tiann/hapi#881)', () => {
         expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeDisabled()
     })
 
+    it('scopes destructive actions to the full group, including hidden pinned sessions', () => {
+        // The archived row is visible; the running global-pinned row with the
+        // same directory is hidden from the directory groups. Delete Group
+        // must stay disabled because the destructive scope is the whole group.
+        renderList([
+            makeSession({
+                id: 'session-visible',
+                active: false,
+                globalPinned: false,
+                metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'archived' },
+            }),
+            makeSession({
+                id: 'session-hidden-running',
+                active: true,
+                globalPinned: true,
+                metadata: { path: '/work/hapi', name: 'Task 2', flavor: 'codex', lifecycleState: 'running' },
+            }),
+        ])
+
+        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
+
+        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeDisabled()
+        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()
+    })
+
+    it('Copy Path click does not toggle the group collapse', () => {
+        const writeText = vi.fn(async () => {})
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true
+        })
+        renderList([makeSession({
+            id: 'session-1',
+            active: true,
+            metadata: { path: '/work/hapi', name: 'Task', flavor: 'codex', lifecycleState: 'running' },
+        })])
+
+        const copyButton = screen.getByRole('button', { name: /Copy: \/work\/hapi/ })
+        fireEvent.click(copyButton)
+
+        expect(writeText).toHaveBeenCalledWith('/work/hapi')
+        // The group header stays expanded (its collapse panel remains open).
+        const panel = screen.getByTitle('/work/hapi').parentElement
+            ?.querySelector('.collapsible-panel')
+        expect(panel?.getAttribute('data-open')).toBe('true')
+    })
+
     it('collapses the group on a plain click and does not open the menu', () => {
         renderList([makeSession({
             id: 'session-1',

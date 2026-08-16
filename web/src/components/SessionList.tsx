@@ -482,7 +482,9 @@ function ProjectGroupHeader(props: {
                 <span className="font-medium text-sm truncate flex-1">
                     {groupTitle}
                 </span>
-                <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                <span {...stopRowPressPropagation}>
+                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                </span>
                 {onNewSessionInDirectory && canStartInGroupDirectory ? (
                     <button
                         type="button"
@@ -1478,6 +1480,16 @@ export function SessionList(props: {
         ),
         [machineFilteredSessions, pinInProgressSessions]
     )
+    // Destructive group actions must scope to the FULL project group, not the
+    // rendered subset: `groups` above drops global-pinned/in-progress rows and
+    // filters by search/time/unread, so a hidden running session could keep a
+    // visible archived row's "Delete Group" misleadingly enabled (#881).
+    const actionGroupsByKey = useMemo(
+        () => new Map(
+            groupSessionsByDirectory(props.sessions).map((group) => [group.key, group.sessions] as const)
+        ),
+        [props.sessions]
+    )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
@@ -1584,7 +1596,7 @@ export function SessionList(props: {
             <div key={group.key}>
                 <ProjectGroupHeader
                     group={group}
-                    actionSessions={group.sessions}
+                    actionSessions={actionGroupsByKey.get(group.key) ?? []}
                     groupTitle={groupTitle}
                     isCollapsed={isCollapsed}
                     onToggle={() => toggleGroup(group.key, isCollapsed)}
