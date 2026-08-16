@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import type { EnhancedMode } from './loop';
@@ -56,6 +56,7 @@ const harness = vi.hoisted(() => ({
     steerTurnCalls: [] as Array<Record<string, unknown>>,
     deferSteerTurn: null as Promise<void> | null,
     releaseSteerTurn: null as (() => void) | null,
+    failNextSteerTurn: false,
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
     failNextCompact: false,
@@ -1024,6 +1025,10 @@ vi.mock('./codexAppServerClient', () => {
             if (harness.deferSteerTurn) {
                 await harness.deferSteerTurn;
             }
+            if (harness.failNextSteerTurn) {
+                harness.failNextSteerTurn = false;
+                throw new Error('no active turn');
+            }
             return { turnId: (params?.expectedTurnId as string) ?? 'turn-unknown' };
         }
 
@@ -1244,6 +1249,7 @@ describe('codexRemoteLauncher', () => {
         harness.steerTurnCalls = [];
         harness.deferSteerTurn = null;
         harness.releaseSteerTurn = null;
+        harness.failNextSteerTurn = false;
         harness.emitFailedCompletionAfterThreadSystemError = false;
         harness.emitCyberPolicyAfterThreadSystemError = false;
         harness.emitSafetyBuffering = false;
@@ -3156,6 +3162,20 @@ describe('isCurrentSteerHandler (#888)', () => {
 });
 
 describe('codexRemoteLauncher mid-turn steer (#888)', () => {
+    beforeEach(() => {
+        harness.suppressTurnCompletion = false;
+        harness.emitTurnAbortedOnInterrupt = false;
+        harness.steerTurnCalls = [];
+        harness.deferSteerTurn = null;
+        harness.releaseSteerTurn = null;
+        harness.failNextSteerTurn = false;
+        harness.startThreadIds = [];
+        harness.startTurnThreadIds = [];
+        harness.startTurnParams = [];
+        harness.startTurnMessages = [];
+        harness.interruptedTurns = [];
+    });
+
     it('does not consume a steer when abort invalidates it before turn/steer resolves', async () => {
         harness.suppressTurnCompletion = true;
         // Abort interrupts the turn; the mock emits turn/completed so the
@@ -3193,6 +3213,57 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         expect(codexMessages).toEqual([]);
         // handleAbort reset() reopened the queue; close it so the launcher
         // winds down and exits.
+        queue.close();
+        await runPromise;
+    });
+
+    it('serializes dequeueing behind an unresolved steer so a rejected steer restores FIFO order', async () => {
+        harness.suppressTurnCompletion = true;
+        let releaseSteer!: () => void;
+        harness.deferSteerTurn = new Promise((resolve) => { releaseSteer = resolve; });
+        harness.failNextSteerTurn = true;
+        const { session, rpcHandlers } = createSessionStub(['first message']);
+
+        const runPromise = codexRemoteLauncher(session as never);
+        // Turn 1 is in flight (completion suppressed).
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+
+        // Rows A, B, C queue while the turn is active.
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('A', createMode(), 'a-local');
+        queue.push('B', createMode(), 'b-local');
+        queue.push('C', createMode(), 'c-local');
+
+        // Steer the middle row; turn/steer stays unresolved.
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+        const steerPromise = steerHandler!({ localId: 'b-local' });
+        await vi.waitFor(() => expect(harness.steerTurnCalls.length).toBe(1));
+
+        // The active turn completes while the steer is unresolved.
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-1' }
+        });
+
+        // The loop must not dequeue A + C while the steer is unresolved.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(harness.startTurnThreadIds).toEqual(['thread-1']);
+
+        // The steer fails; B is restored in FIFO position, and the next batch
+        // preserves the original A, B, C order.
+        releaseSteer();
+        const result = await steerPromise;
+        expect(result).toEqual({ steered: false, error: 'Active turn is not steerable' });
+
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(2));
+        expect(harness.startTurnMessages[1]).toBe('A\nB\nC');
+
+        // Complete turn 2 so the launcher winds down.
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-2' }
+        });
         queue.close();
         await runPromise;
     });

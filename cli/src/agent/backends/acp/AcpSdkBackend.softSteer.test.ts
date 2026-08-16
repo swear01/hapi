@@ -5,6 +5,7 @@ function makeBackend() {
     const backend = new AcpSdkBackend({ command: 'agent' });
     const backendInternal = backend as unknown as {
         activePromptRequests: number;
+        acceptingSoftSteers: boolean;
         transport: {
             sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => {
                 dispatched: Promise<void>;
@@ -26,6 +27,7 @@ describe('AcpSdkBackend soft steer (#888)', () => {
         const { backend, backendInternal } = makeBackend();
         const calls: Array<{ method: string; params: unknown }> = [];
         backendInternal.activePromptRequests = 1;
+        backendInternal.acceptingSoftSteers = true;
         backendInternal.transport = {
             sendRequestWithDispatch: (method, params) => {
                 calls.push({ method, params });
@@ -52,6 +54,7 @@ describe('AcpSdkBackend soft steer (#888)', () => {
     it('beginSoftSteerPrompt counts the concurrent prompt and finishes it', async () => {
         const { backend, backendInternal } = makeBackend();
         backendInternal.activePromptRequests = 1;
+        backendInternal.acceptingSoftSteers = true;
         backendInternal.transport = {
             sendRequestWithDispatch: () => ({
                 dispatched: Promise.resolve(),
@@ -81,6 +84,59 @@ describe('AcpSdkBackend soft steer (#888)', () => {
             close: async () => {}
         };
         expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'x' }]))
-            .toThrow('No active ACP prompt to soft-steer into');
+            .toThrow('No active steerable turn');
+    });
+});
+
+describe('AcpSdkBackend soft steer turn boundary (#888)', () => {
+    it('seals the turn after the main response and emits the boundary only after concurrent steers settle', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let releaseMain!: () => void;
+        let releaseSteer!: () => void;
+        const mainDeferred = new Promise<void>((resolve) => { releaseMain = resolve; });
+        const steerDeferred = new Promise<void>((resolve) => { releaseSteer = resolve; });
+
+        const transport = {
+            sendRequest: vi.fn(async () => {
+                await mainDeferred;
+                return { stopReason: 'end_turn' };
+            }),
+            sendRequestWithDispatch: vi.fn(() => ({
+                dispatched: Promise.resolve(),
+                completed: steerDeferred.then(() => ({ stopReason: 'end_turn' }))
+            })),
+            sendNotification: vi.fn(),
+            close: vi.fn(async () => {})
+        };
+        (backend as unknown as { transport: unknown }).transport = transport;
+
+        const events: string[] = [];
+        const promptPromise = backend.prompt('session-1', [{ type: 'text', text: 'main' }], (message) => {
+            events.push(message.type);
+        });
+
+        // While the main prompt is in flight, a soft steer is accepted.
+        await vi.waitFor(() => expect((backend as unknown as { activePromptRequests: number }).activePromptRequests).toBe(1));
+        const steer = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot' }]);
+        await steer.dispatched;
+        await vi.waitFor(() => expect((backend as unknown as { activePromptRequests: number }).activePromptRequests).toBe(2));
+
+        // The main response settles first; the turn seals.
+        releaseMain();
+        await vi.waitFor(() => expect((backend as unknown as { acceptingSoftSteers: boolean }).acceptingSoftSteers).toBe(false));
+
+        // Sealed: new soft steers are rejected, and the boundary is not out yet.
+        expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'late' }]))
+            .toThrow('No active steerable turn');
+        expect(events).not.toContain('turn_complete');
+
+        // Only when the concurrent steer settles does the turn boundary fire.
+        releaseSteer();
+        await steer.completed;
+        await promptPromise;
+        expect(events).toContain('turn_complete');
+        expect(events.indexOf('turn_complete')).toBeGreaterThanOrEqual(0);
+        // Both prompts fully finished.
+        expect((backend as unknown as { activePromptRequests: number }).activePromptRequests).toBe(0);
     });
 });

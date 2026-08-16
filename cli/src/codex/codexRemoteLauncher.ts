@@ -680,6 +680,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         let scheduleReadyAfterTurn: (() => void) | null = null;
         let clearReadyAfterTurnTimer: (() => void) | null = null;
         let turnInFlight = false;
+        // Unresolved turn/steer requests. The main loop must not dequeue the
+        // next batch while one is pending: takeByLocalId removed the row from
+        // the physical queue, and collecting surrounding rows first would let
+        // a rejected steer restore out of FIFO order (#888).
+        const inFlightSteers = new Set<Promise<boolean>>();
         const setTurnInFlight = (value: boolean) => {
             turnInFlight = value;
             session.client.updateAgentState?.((state) => ({ ...state, steeringActive: value }));
@@ -3335,25 +3340,31 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
-                const steered = await trySteerActiveTurn(batch);
-                if (steered) {
-                    // A success racing with abort/cleanup must not publish a
-                    // consumed event or user message for the invalidated steer.
-                    if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
-                        || !session.queue.commitReservation(taken)) {
+                const steerRequest = trySteerActiveTurn(batch);
+                inFlightSteers.add(steerRequest);
+                try {
+                    const steered = await steerRequest;
+                    if (steered) {
+                        // A success racing with abort/cleanup must not publish a
+                        // consumed event or user message for the invalidated steer.
+                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
+                            || !session.queue.commitReservation(taken)) {
+                            return { steered: false, error: 'Steer cancelled' };
+                        }
+                        messageBuffer.addMessage(batch.message, 'user');
+                        session.client.emitMessagesConsumed([localId]);
+                        return { steered: true };
+                    }
+                    if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
                         return { steered: false, error: 'Steer cancelled' };
                     }
-                    messageBuffer.addMessage(batch.message, 'user');
-                    session.client.emitMessagesConsumed([localId]);
-                    return { steered: true };
+                    if (!session.queue.restoreReservation(taken)) {
+                        return { steered: false, error: 'Steer cancelled' };
+                    }
+                    return { steered: false, error: 'Active turn is not steerable' };
+                } finally {
+                    inFlightSteers.delete(steerRequest);
                 }
-                if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
-                    return { steered: false, error: 'Steer cancelled' };
-                }
-                if (!session.queue.restoreReservation(taken)) {
-                    return { steered: false, error: 'Steer cancelled' };
-                }
-                return { steered: false, error: 'Active turn is not steerable' };
             }
         );
         try {
@@ -3767,6 +3778,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 sameThreadRetryAttempt = 0;
                 sameThreadCompactAttempt = 0;
                 activeMessage = null;
+                // Serialize dequeueing behind unresolved steers so a rejected
+                // steer can restore its row in FIFO position.
+                if (inFlightSteers.size > 0) {
+                    await Promise.allSettled([...inFlightSteers]);
+                    continue;
+                }
                 const waitSignal = this.abortController.signal;
                 const batch = await session.queue.waitForMessagesAndGetAsString(waitSignal);
                 if (!batch) {

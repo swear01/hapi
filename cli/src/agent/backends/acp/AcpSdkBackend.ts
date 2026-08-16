@@ -78,6 +78,10 @@ export class AcpSdkBackend implements AgentBackend {
     private setModeSupported: boolean | undefined = undefined;
     private activePromptRequests = 0;
     private isProcessingMessage = false;
+    /** False once the main prompt's response settled; new soft steers are then rejected. */
+    private acceptingSoftSteers = false;
+    /** Resolved by finishPromptRequest so a sealed prompt can wait for concurrent steers. */
+    private readonly promptCountChanged: Array<() => void> = [];
     private promptRequestInFlight = false;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
@@ -560,6 +564,7 @@ export class AcpSdkBackend implements AgentBackend {
         });
         this.isProcessingMessage = true;
         this.beginPromptRequest();
+        this.acceptingSoftSteers = true;
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
@@ -580,6 +585,11 @@ export class AcpSdkBackend implements AgentBackend {
             } finally {
                 this.promptRequestInFlight = false;
             }
+
+            // The main response settled: stop accepting new soft steers and
+            // wait for any already-kicked-off concurrent session/prompt to
+            // finish so its chunks drain before this turn's boundary.
+            await this.sealAndWaitForSoftSteers();
 
             stopReason = isObject(response) ? asString(response.stopReason) : null;
             promptUsage = this.extractPromptUsage(response);
@@ -790,6 +800,10 @@ export class AcpSdkBackend implements AgentBackend {
         this.activeSessionId = null;
         this.activePromptRequests = 0;
         this.isProcessingMessage = false;
+        this.acceptingSoftSteers = false;
+        for (const resolve of this.promptCountChanged.splice(0)) {
+            resolve();
+        }
         this.sessionModelsMetadata.clear();
         this.initialAvailableCommands.clear();
         this.sessionAvailableCommands.clear();
@@ -1085,8 +1099,20 @@ export class AcpSdkBackend implements AgentBackend {
     private finishPromptRequest(): void {
         this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
         this.isProcessingMessage = this.activePromptRequests > 0;
+        for (const resolve of this.promptCountChanged.splice(0)) {
+            resolve();
+        }
         if (!this.isProcessingMessage) {
             this.notifyResponseComplete();
+        }
+    }
+
+    private async sealAndWaitForSoftSteers(): Promise<void> {
+        this.acceptingSoftSteers = false;
+        // The main prompt still counts as one request; anything above that is
+        // a concurrent soft steer still streaming.
+        while (this.activePromptRequests > 1) {
+            await new Promise<void>((resolve) => this.promptCountChanged.push(resolve));
         }
     }
 
@@ -1105,8 +1131,8 @@ export class AcpSdkBackend implements AgentBackend {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
-        if (this.activePromptRequests === 0) {
-            throw new Error('No active ACP prompt to soft-steer into');
+        if (!this.acceptingSoftSteers || this.activePromptRequests === 0) {
+            throw new Error('No active steerable turn');
         }
 
         this.beginPromptRequest();
@@ -1132,8 +1158,8 @@ export class AcpSdkBackend implements AgentBackend {
         if (!this.transport) {
             throw new Error('ACP transport not initialized');
         }
-        if (this.activePromptRequests === 0) {
-            throw new Error('No active ACP prompt to soft-steer into');
+        if (!this.acceptingSoftSteers || this.activePromptRequests === 0) {
+            throw new Error('No active steerable turn');
         }
 
         const transport = this.transport;
