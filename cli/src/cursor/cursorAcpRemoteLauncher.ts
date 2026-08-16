@@ -621,16 +621,20 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 // blocks on a soft steer whose completion is unbounded.
                 if (this.softSteerWaiters.length > 0 && !this.shouldExit) {
                     const waitSignal = this.abortController.signal;
-                    await Promise.race([
-                        Promise.allSettled([...this.softSteerWaiters]),
-                        new Promise<void>((resolve) => {
-                            if (waitSignal.aborted) {
-                                resolve();
-                            } else {
-                                waitSignal.addEventListener('abort', () => resolve(), { once: true });
-                            }
-                        })
-                    ]);
+                    let releaseWait!: () => void;
+                    const abortListener = () => releaseWait();
+                    if (!waitSignal.aborted) {
+                        waitSignal.addEventListener('abort', abortListener, { once: true });
+                    }
+                    try {
+                        await Promise.race([
+                            Promise.allSettled([...this.softSteerWaiters]),
+                            new Promise<void>((resolve) => { releaseWait = resolve; })
+                        ]);
+                    } finally {
+                        // Repeated waits must not accumulate abort listeners.
+                        waitSignal.removeEventListener('abort', abortListener);
+                    }
                     this.softSteerWaiters = [];
                 }
                 this.activePromptModeHash = null;

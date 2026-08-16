@@ -521,8 +521,9 @@ export class AcpStdioTransport {
     }
 
     private rejectAllPending(error: Error): void {
+        const indeterminate = markAcpIndeterminate(error);
         for (const { reject } of this.pending.values()) {
-            reject(error);
+            reject(indeterminate);
         }
         this.pending.clear();
     }
