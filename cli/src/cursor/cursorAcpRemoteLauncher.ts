@@ -563,11 +563,21 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
                 // Soft-steers share the ACP session; wait for them before ready /
                 // the next prompt so message handlers are not swapped mid-inject.
-                // On Exit/Switch the wait would hang forever (completion is
-                // unbounded) — cleanup() disconnects the transport, which rejects
-                // pending ACP requests and settles the waiters there.
+                // An Abort (which clears the waiters) must release this wait too:
+                // race the settle against the abort signal so the launcher never
+                // blocks on a soft steer whose completion is unbounded.
                 if (this.softSteerWaiters.length > 0 && !this.shouldExit) {
-                    await Promise.allSettled(this.softSteerWaiters);
+                    const waitSignal = this.abortController.signal;
+                    await Promise.race([
+                        Promise.allSettled([...this.softSteerWaiters]),
+                        new Promise<void>((resolve) => {
+                            if (waitSignal.aborted) {
+                                resolve();
+                            } else {
+                                waitSignal.addEventListener('abort', () => resolve(), { once: true });
+                            }
+                        })
+                    ]);
                     this.softSteerWaiters = [];
                 }
                 this.activePromptModeHash = null;
