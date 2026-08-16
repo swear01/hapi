@@ -1932,28 +1932,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         };
 
-        // After an ambiguous transport failure (disconnect / protocol error),
-        // the instruction may already sit in the thread (echoed as
-        // userMessage.clientId). Reconcile before restoring the row so a
-        // dispatched steer is never delivered twice via turn/start.
-        const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'rejected'> => {
-            try {
-                const response = await appServerClient.readThread({ threadId, includeTurns: true });
-                for (const turn of response.thread.turns ?? []) {
-                    for (const item of turn.items ?? []) {
-                        const record = asRecord(item);
-                        if (record?.type === 'userMessage' && record.clientId === localId) {
-                            return 'accepted';
-                        }
-                    }
-                }
-                return 'rejected';
-            } catch (error) {
-                logger.debug(`[Codex] steer reconcile failed (${error instanceof Error ? error.message : String(error)})`);
-                return 'rejected';
-            }
-        };
-
         // Per-message steer from the waiting queue (web "Steer" button).
         session.client.rpcHandlerManager.registerHandler(
             RPC_METHODS.SteerQueuedMessage,
@@ -1990,46 +1968,30 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     hash: taken.item.modeHash
                 };
                 const steerEpoch = this.steerEpoch;
-                // Pin the thread this steer targets: reconcile must look at the
-                // steer's thread, not whichever turn is current when completion fails.
-                const steerThreadId = this.currentThreadId;
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
                 const steer = await trySteerActiveTurn(batch, localId);
                 if (steer) {
-                    // Ack the hub once stdin accepted the inject — not when the
-                    // concurrent turn completes (which can exceed the hub's 30s
-                    // RPC timeout and report a false failure after the inject
-                    // already started). Commit queue state only after the turn
-                    // settles; a rejected/aborted steer restores the row so the
-                    // message still delivers via the normal turn/start path.
-                    const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
-                        session.queue.commitReservation(taken);
-                        messageBuffer.addMessage(batch.message, 'user');
-                        session.client.emitMessagesConsumed([localId], { steered: true });
-                    }, async (error) => {
-                        // Dispatched but never completed (disconnect / protocol
-                        // failure): the instruction may already be in the thread.
-                        // Reconcile before restoring to avoid duplicate delivery.
-                        const outcome = steerThreadId
-                            ? await reconcileSteerByClientId(steerThreadId, localId)
-                            : 'rejected';
-                        if (outcome === 'accepted') {
-                            session.queue.commitReservation(taken);
-                            messageBuffer.addMessage(batch.message, 'user');
-                            session.client.emitMessagesConsumed([localId], { steered: true });
-                            return;
-                        }
-                        session.queue.restoreReservation(taken);
-                        logger.debug(`[Codex] turn/steer did not complete (${error instanceof Error ? error.message : String(error)})`);
+                    // Completion is background-only (turn completion can exceed
+                    // the hub RPC window); never leave its rejection unhandled,
+                    // even on the dispatch-failure path.
+                    void steer.completed.catch((error) => {
+                        logger.debug(`[Codex] turn/steer completion failed after dispatch (${error instanceof Error ? error.message : String(error)})`);
                     });
+                    // Ack the hub and consume the row as soon as stdin accepts
+                    // the inject — not when the concurrent turn completes. A
+                    // dispatched steer is delivered; a later completion failure
+                    // must never restore the row (no duplicate via turn/start).
                     try {
                         await steer.dispatched;
                     } catch (error) {
-                        await steerDone;
+                        session.queue.restoreReservation(taken);
                         return { steered: false, error: 'Failed to steer into active turn' };
                     }
+                    session.queue.commitReservation(taken);
+                    messageBuffer.addMessage(batch.message, 'user');
+                    session.client.emitMessagesConsumed([localId], { steered: true });
                     return { steered: true };
                 }
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
