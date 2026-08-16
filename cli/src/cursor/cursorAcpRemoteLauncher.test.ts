@@ -26,6 +26,8 @@ const harness = vi.hoisted(() => ({
     agentActivityListener: null as ((thinking: boolean) => void) | null,
     softSteerCalls: 0,
     softSteerDispatchError: null as Error | null,
+    deferSoftSteer: null as Promise<void> | null,
+    releaseSoftSteer: null as (() => void) | null,
     deferPrompt: null as Promise<void> | null,
     releasePrompt: null as (() => void) | null
 }));
@@ -143,7 +145,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                     dispatched: harness.softSteerDispatchError
                         ? Promise.reject(harness.softSteerDispatchError)
                         : Promise.resolve(),
-                    completed: Promise.resolve({ stopReason: 'end_turn' })
+                    completed: harness.deferSoftSteer ?? Promise.resolve({ stopReason: 'end_turn' })
                 };
             }),
             cancelPrompt: vi.fn(async () => {}),
@@ -1207,6 +1209,8 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
     beforeEach(() => {
         harness.softSteerCalls = 0;
         harness.softSteerDispatchError = null;
+        harness.deferSoftSteer = null;
+        harness.releaseSoftSteer = null;
         harness.deferPrompt = null;
         harness.releasePrompt = null;
         harness.promptCalls = 0;
@@ -1307,6 +1311,46 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         expect(result).toEqual({ steered: false, error: 'Failed to soft-steer into active turn' });
         // The failed steer returns the message to the queue for normal dispatch.
         expect(session.queue.pendingLocalIds()).toContain('local-2');
+
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('does not publish consumed events when a soft steer settles after abort', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        let releaseSoftSteer!: () => void;
+        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+            emitMessagesConsumed: ReturnType<typeof vi.fn>;
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+        const result = await steerHandler!({ localId: 'local-2' });
+        expect(result).toEqual({ steered: true });
+
+        // Abort invalidates the steer before its ACP completion arrives.
+        session.client.emitSessionReady();
+        const abortHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.Abort);
+        expect(abortHandler).toBeTypeOf('function');
+        await abortHandler!({});
+
+        releaseSoftSteer();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        // No consumed event for the invalidated steer (the normal prompt's
+        // batch consumption of local-1 is unrelated).
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
 
         releasePrompt();
         session.queue.close();

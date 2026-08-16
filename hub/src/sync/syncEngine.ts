@@ -7,7 +7,7 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
-import { isKnownFlavor, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
 import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
@@ -1037,8 +1037,8 @@ export class SyncEngine {
         if (!session) {
             return { status: 'failed', error: 'Session not found', localId: null }
         }
-        if (session.metadata?.flavor !== 'pi') {
-            return { status: 'failed', error: 'Steering is only supported for Pi sessions', localId: null }
+        if (session.metadata?.flavor !== 'pi' && !isSteeringSupportedForSession(session.metadata)) {
+            return { status: 'failed', error: 'Steering is not supported for this session', localId: null }
         }
         if (session.agentState?.controlledByUser === true) {
             return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }

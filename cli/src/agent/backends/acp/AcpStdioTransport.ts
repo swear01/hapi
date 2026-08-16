@@ -281,13 +281,23 @@ export class AcpStdioTransport {
 
         const timeoutMs = options?.timeoutMs ?? AcpStdioTransport.DEFAULT_TIMEOUT_MS;
 
+        // Dispatch = the stdin write (accepted or failed), shared by both
+        // timeout branches so a transport write failure always rejects
+        // `dispatched` — callers that ack at kickoff (soft steer) must not
+        // report success for a request that was never written.
+        const dispatch = (): void => {
+            this.writePayload(payload);
+            if (this.closed) {
+                throw this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
+            }
+        };
+
         // Skip timeout for infinite/no-timeout requests (e.g., long-running prompts)
         if (!Number.isFinite(timeoutMs)) {
             return {
-                dispatched: Promise.resolve(),
+                dispatched: Promise.resolve().then(dispatch),
                 completed: new Promise<unknown>((resolve, reject) => {
                     this.pending.set(id, { resolve, reject });
-                    this.writePayload(payload);
                 })
             };
         }
@@ -314,9 +324,7 @@ export class AcpStdioTransport {
             });
         });
 
-        const dispatched = Promise.resolve().then(() => {
-            this.writePayload(payload);
-        });
+        const dispatched = Promise.resolve().then(dispatch);
 
         return { dispatched, completed };
     }

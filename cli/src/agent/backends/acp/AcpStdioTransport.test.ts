@@ -603,4 +603,22 @@ describe('AcpStdioTransport closed stdin writes', () => {
         await expect(transport.sendRequest('initialize')).rejects.toThrow('WritableIterable is closed');
         await expect(transport.sendRequest('session/new')).rejects.toThrow('WritableIterable is closed');
     });
+
+    test('sendRequestWithDispatch rejects dispatched when the write fails (infinite timeout)', async () => {
+        spawnState.stdinWrite.mockImplementation(() => {
+            throw new Error('WritableIterable is closed');
+        });
+
+        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+        const request = transport.sendRequestWithDispatch(
+            'session/prompt',
+            { sessionId: 's', prompt: [] },
+            { timeoutMs: Infinity }
+        );
+
+        // The soft-steer caller acks at kickoff, so `dispatched` must reject
+        // when the write never happened — never a false `steered: true`.
+        await expect(request.dispatched).rejects.toThrow('WritableIterable is closed');
+        await expect(request.completed).rejects.toThrow('WritableIterable is closed');
+    });
 });

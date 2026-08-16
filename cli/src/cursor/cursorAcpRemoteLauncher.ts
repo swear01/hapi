@@ -64,6 +64,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private promptInFlight = false;
     /** Concurrent soft-steer session/prompt RPCs still running after kickoff. */
     private softSteerWaiters: Promise<void>[] = [];
+    /** Invalidates soft-steer completion callbacks after abort or cleanup. */
+    private softSteerEpoch = 0;
     /** True when ACP process was spawned with `--auto-review`. */
     private spawnedWithAutoReview = false;
     /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
@@ -459,8 +461,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
+                const steerEpoch = this.softSteerEpoch;
                 const steerDone = Promise.all([steer.dispatched, steer.completed]).then(() => {
-                    session.queue.commitReservation(taken);
+                    // A completion racing with abort/cleanup must not publish a
+                    // consumed event or user message for an invalidated steer:
+                    // the queue reset/close cancelled the reservation.
+                    if (steerEpoch !== this.softSteerEpoch || this.shouldExit
+                        || !session.queue.commitReservation(taken)) {
+                        return;
+                    }
                     messageBuffer.addMessage(taken.item.message, 'user');
                     session.client.emitMessagesConsumed([localId]);
                 }, (error) => {
@@ -604,6 +613,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             // Invalidate any in-flight steer; a late soft-steer settle must not
             // restore into a torn-down queue or emit messages-consumed.
             this.promptInFlight = false;
+            this.softSteerEpoch++;
             this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
             this.softSteerWaiters = [];
             this.session.client.rpcHandlerManager.registerHandler(
@@ -896,6 +906,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private async handleAbort(): Promise<void> {
         const backend = this.backend;
         const sessionId = this.session.sessionId;
+        this.softSteerEpoch++;
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
         }
