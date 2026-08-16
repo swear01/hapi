@@ -33,6 +33,7 @@ import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/c
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
+import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import {
@@ -477,14 +478,27 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
-                // Dispatch succeeded: the instruction is delivered to the ACP
-                // session. Consume the row now — waiting for the concurrent
-                // turn's completion would leave the web row queued/actionable
-                // after the RPC already reported success, and a later abort or
-                // disconnect would otherwise restore a delivered message.
-                session.queue.commitReservation(taken);
-                messageBuffer.addMessage(taken.item.message, 'user');
-                session.client.emitMessagesConsumed([localId], { steered: true });
+                // The RPC acks once stdin accepted the inject. The queue row is
+                // committed only when the concurrent prompt settles: an explicit
+                // JSON-RPC rejection means ACP never accepted the instruction
+                // (restore it for the next prompt), while a transport failure
+                // (abort/disconnect) keeps the row reserved — never re-delivered.
+                void steer.completed.then(() => {
+                    // Completion means ACP accepted the inject: the ACK must
+                    // reach the hub even when an abort reset the queue and
+                    // cancelled the reservation in between.
+                    session.queue.commitReservation(taken);
+                    messageBuffer.addMessage(taken.item.message, 'user');
+                    session.client.emitMessagesConsumed([localId], { steered: true });
+                }, (error) => {
+                    if (isAcpIndeterminateError(error)) {
+                        logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch; row stays reserved', error);
+                        return;
+                    }
+                    if (session.queue.restoreReservation(taken)) {
+                        logger.debug('[cursor-acp] soft-steer rejected by ACP; row restored', error);
+                    }
+                });
                 return { steered: true };
             }
         );

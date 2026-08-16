@@ -353,7 +353,7 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
-    it('keeps the row consumed when ACP rejects it after dispatch', async () => {
+    it('restores the row when ACP explicitly rejects after dispatch', async () => {
         let releasePrompt!: () => void;
         let rejectSoftSteer!: (error: Error) => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
@@ -371,11 +371,11 @@ describe('cursorAcpRemoteLauncher', () => {
         session.queue.push('soft steer', mode, 'steer');
         await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
             .resolves.toEqual({ steered: true });
-        // Dispatch already delivered the message — a later completion rejection
-        // must not restore the row (no duplicate via the next prompt).
-        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
+        // An explicit JSON-RPC rejection means ACP never accepted the
+        // instruction — the row is restored for the next prompt (no data loss).
         rejectSoftSteer(new Error('request rejected'));
-        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(false));
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
 
         harness.deferPrompt = null;
         releasePrompt();
@@ -469,7 +469,7 @@ describe('cursorAcpRemoteLauncher', () => {
         releaseDispatch();
 
         await expect(steerResult).resolves.toEqual({ steered: true });
-        expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true });
+        await vi.waitFor(() => expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true }));
         expect(vi.mocked(session.client.emitMessagesConsumed).mock.calls
             .filter(([ids]) => ids.includes('steer'))).toHaveLength(1);
 

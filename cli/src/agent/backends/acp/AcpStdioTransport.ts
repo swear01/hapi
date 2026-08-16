@@ -16,6 +16,20 @@ import {
 } from './agentCliGuard';
 import { matchesAcpHttp2Cancel, matchesAcpRetryBackoff } from './acpStderrErrors';
 
+/** Marks transport-level failures whose request outcome is unknown (unlike an
+ * explicit JSON-RPC error response). */
+export const ACP_INDETERMINATE_SYMBOL = Symbol('acp-indeterminate');
+
+function markAcpIndeterminate(error: Error): Error {
+    Object.defineProperty(error, ACP_INDETERMINATE_SYMBOL, { value: true });
+    return error;
+}
+
+export function isAcpIndeterminateError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+        && (error as Record<symbol, unknown>)[ACP_INDETERMINATE_SYMBOL] === true;
+}
+
 interface JsonRpcRequest {
     jsonrpc: '2.0';
     id: string | number | null;
@@ -260,7 +274,7 @@ export class AcpStdioTransport {
         options?: { timeoutMs?: number }
     ): { dispatched: Promise<void>; completed: Promise<unknown> } {
         if (this.closed || this.exited) {
-            const error = this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
+            const error = markAcpIndeterminate(this.closeError ?? this.exitError ?? new Error('ACP transport is closed'));
             return { dispatched: Promise.reject(error), completed: Promise.reject(error) };
         }
 
@@ -285,7 +299,7 @@ export class AcpStdioTransport {
             timer = setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
-                    rejectCompleted(new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`));
+                    rejectCompleted(markAcpIndeterminate(new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`)));
                 }
             }, timeoutMs);
             timer.unref();
@@ -307,7 +321,7 @@ export class AcpStdioTransport {
                 const serialized = JSON.stringify(payload);
                 this.process.stdin.write(`${serialized}\n`, (error) => {
                     if (error) {
-                        const writeError = error instanceof Error ? error : new Error(String(error));
+                        const writeError = markAcpIndeterminate(error instanceof Error ? error : new Error(String(error)));
                         this.markClosed(writeError);
                         reject(writeError);
                         return;
