@@ -1916,6 +1916,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             batch: QueuedMessage;
         }>();
 
+        // Wakes the main loop so a pending steer reconciliation is retried even
+        // while the loop sits in waitForTurnOrRecovery (turn in flight).
+        const scheduleSteerReconcileRetry = () => {
+            const timer = setTimeout(wakeLoop, 1_000);
+            timer.unref?.();
+        };
+
         // Returns 'accepted' when the thread contains the steered user message
         // (echoed as userMessage.clientId), 'rejected' when it provably does
         // not, and 'unknown' when the thread cannot be read.
@@ -1925,7 +1932,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 for (const turn of response.thread.turns ?? []) {
                     for (const item of turn.items ?? []) {
                         const record = asRecord(item);
-                        if (record?.type === 'userMessage' && record.clientId === localId) {
+                        // Accept both wire shapes the app-server has used for
+                        // user messages (see conversationHistory.ts parsing).
+                        const type = asString(record?.type) ?? asString(record?.itemType);
+                        const clientId = asString(record?.clientId) ?? asString(record?.client_id);
+                        if ((type === 'userMessage' || type === 'user_message') && clientId === localId) {
                             return 'accepted';
                         }
                     }
@@ -2011,12 +2022,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     // Register completion handling before awaiting dispatch so a
                     // dispatch failure cannot leave the rejection unhandled.
                     void steer.completed.then(() => {
-                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
-                            return;
-                        }
-                        if (!session.queue.commitReservation(taken)) {
-                            return;
-                        }
+                        // No epoch guard on the success path: the hub already
+                        // reported steered on dispatch, so the eventual ACK must
+                        // reach it even when an abort (which resets the queue and
+                        // cancels the reservation) happened in between.
+                        session.queue.commitReservation(taken);
                         messageBuffer.addMessage(batch.message, 'user');
                         session.client.emitMessagesConsumed([localId], { steered: true });
                     }, (error) => {
@@ -2045,6 +2055,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                                         taken,
                                         batch
                                     });
+                                    scheduleSteerReconcileRetry();
                                 }
                             })();
                             return;
