@@ -61,6 +61,7 @@ const harness = vi.hoisted(() => ({
     steerDispatchError: null as Error | null,
     steerCompletionError: null as Error | null,
     readThreadParams: [] as Array<Record<string, unknown>>,
+    readThreadError: null as Error | null,
     readThreadResponse: { thread: { turns: [] as unknown[] } } as { thread: { turns?: Array<{ items?: Array<Record<string, unknown>> }> } },
     emitStaleTaskCompleteAfterRetry: false,
     emitStaleTaskFailedAfterRetry: false,
@@ -222,6 +223,9 @@ vi.mock('./codexAppServerClient', () => {
 
         async readThread(params?: { threadId?: string; includeTurns?: boolean }): Promise<unknown> {
             harness.readThreadParams.push((params ?? {}) as Record<string, unknown>);
+            if (harness.readThreadError) {
+                throw harness.readThreadError;
+            }
             return harness.readThreadResponse;
         }
 
@@ -1276,11 +1280,15 @@ describe('codexRemoteLauncher', () => {
         session.queue.close();
     });
 
-    it('keeps the row reserved when the steer outcome is indeterminate', async () => {
+    it('keeps the row reserved while the steer outcome stays indeterminate', async () => {
         harness.suppressTurnCompletion = true;
         const indeterminate = new Error('Codex app-server disconnected');
         Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
         harness.steerCompletionError = indeterminate;
+        // Reconciliation cannot read the thread either — the row must stay
+        // reserved: neither committed (message may not have run) nor restored
+        // (it may have run, so turn/start could duplicate it).
+        harness.readThreadError = new Error('app-server unreachable');
         const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
@@ -1289,12 +1297,37 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        // Dispatch succeeded but the outcome is unknown: the row must stay
-        // reserved — neither committed (message may not have run) nor restored
-        // (it may have run, so turn/start could duplicate it).
         expect(result).toEqual({ steered: true });
         expect(session.queue.cancelByLocalId('local-1')).toBe(false);
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
+    });
+
+    it('reconciles an indeterminate steer to accepted once the thread shows the message', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('Codex app-server disconnected');
+        Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
+        harness.steerCompletionError = indeterminate;
+        harness.readThreadResponse = {
+            thread: {
+                turns: [{
+                    items: [{ type: 'userMessage', clientId: 'local-1', text: 'steer me' }]
+                }]
+            }
+        };
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: true });
+        // The next loop pass reconciles: the thread contains the message, so the
+        // row commits and the web badge fires — no restore, no duplicate.
+        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
+        expect(session.queue.cancelByLocalId('local-1')).toBe(false);
         session.queue.close();
     });
 
@@ -1373,6 +1406,7 @@ describe('codexRemoteLauncher', () => {
         harness.steerDispatchError = null;
         harness.steerCompletionError = null;
         harness.readThreadParams = [];
+        harness.readThreadError = null;
         harness.readThreadResponse = { thread: { turns: [] } };
         harness.emitStaleTaskCompleteAfterRetry = false;
         harness.emitStaleTaskFailedAfterRetry = false;
