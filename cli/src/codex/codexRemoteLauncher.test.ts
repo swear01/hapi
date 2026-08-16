@@ -103,6 +103,10 @@ vi.mock('./codexAppServerClient', () => {
 
         async connect(): Promise<void> {}
 
+        isConnected(): boolean {
+            return true;
+        }
+
         async initialize(params: unknown): Promise<{ protocolVersion: number }> {
             harness.initializeCalls.push(params);
             return { protocolVersion: 1 };

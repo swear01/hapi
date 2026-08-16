@@ -1923,11 +1923,31 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             timer.unref?.();
         };
 
+        // thread/read auto-connects after a disconnect, but a freshly spawned
+        // app-server must be initialized before any request — the startup block
+        // only ran for the original process.
+        const ensureAppServerInitialized = async () => {
+            if (appServerClient.isConnected()) {
+                return;
+            }
+            await appServerClient.connect();
+            await appServerClient.initialize({
+                clientInfo: {
+                    name: 'hapi-codex-client',
+                    version: '1.0.0'
+                },
+                capabilities: {
+                    experimentalApi: true
+                }
+            });
+        };
+
         // Returns 'accepted' when the thread contains the steered user message
         // (echoed as userMessage.clientId), 'rejected' when it provably does
         // not, and 'unknown' when the thread cannot be read.
         const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'rejected' | 'unknown'> => {
             try {
+                await ensureAppServerInitialized();
                 const response = await appServerClient.readThread({ threadId, includeTurns: true });
                 for (const turn of response.thread.turns ?? []) {
                     for (const item of turn.items ?? []) {
@@ -3856,8 +3876,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         pendingSteerReconciliations.delete(localId);
                         session.queue.restoreReservation(entry.taken);
                         logger.debug(`[Codex] reconciled steered message ${localId}: not in thread — row restored`);
+                    } else {
+                        // 'unknown': app-server still unreachable — schedule the
+                        // next retry so recovery without external traffic is seen.
+                        scheduleSteerReconcileRetry();
                     }
-                    // 'unknown': app-server still unreachable — retry next pass.
                 }
             }
             if (!pending && recoveryInFlight) {
