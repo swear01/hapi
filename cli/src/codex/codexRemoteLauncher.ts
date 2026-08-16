@@ -1,7 +1,7 @@
 import React from 'react';
 import { randomUUID } from 'node:crypto';
 
-import { CodexAppServerClient } from './codexAppServerClient';
+import { CodexAppServerClient, isIndeterminateError } from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
@@ -1973,25 +1973,43 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
                 const steer = await trySteerActiveTurn(batch, localId);
                 if (steer) {
-                    // Completion is background-only (turn completion can exceed
-                    // the hub RPC window); never leave its rejection unhandled,
-                    // even on the dispatch-failure path.
-                    void steer.completed.catch((error) => {
-                        logger.debug(`[Codex] turn/steer completion failed after dispatch (${error instanceof Error ? error.message : String(error)})`);
+                    // Register completion handling before awaiting dispatch so a
+                    // dispatch failure cannot leave the rejection unhandled.
+                    void steer.completed.then(() => {
+                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                            return;
+                        }
+                        if (!session.queue.commitReservation(taken)) {
+                            return;
+                        }
+                        messageBuffer.addMessage(batch.message, 'user');
+                        session.client.emitMessagesConsumed([localId], { steered: true });
+                    }, (error) => {
+                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                            return;
+                        }
+                        if (isIndeterminateError(error)) {
+                            logger.debug(`[Codex] turn/steer outcome unknown after dispatch (${error instanceof Error ? error.message : String(error)}); row stays reserved`);
+                            return;
+                        }
+                        // Definite app-server rejection: the instruction was not
+                        // accepted, so restoring cannot duplicate it.
+                        if (session.queue.restoreReservation(taken)) {
+                            logger.debug(`[Codex] turn/steer rejected by app-server (${error instanceof Error ? error.message : String(error)}); row restored`);
+                        }
                     });
-                    // Ack the hub and consume the row as soon as stdin accepts
-                    // the inject — not when the concurrent turn completes. A
-                    // dispatched steer is delivered; a later completion failure
-                    // must never restore the row (no duplicate via turn/start).
                     try {
                         await steer.dispatched;
                     } catch (error) {
                         session.queue.restoreReservation(taken);
                         return { steered: false, error: 'Failed to steer into active turn' };
                     }
-                    session.queue.commitReservation(taken);
-                    messageBuffer.addMessage(batch.message, 'user');
-                    session.client.emitMessagesConsumed([localId], { steered: true });
+                    // The hub RPC acks on stdin acceptance, but the queue row is
+                    // committed only when the turn settles: an explicit JSON-RPC
+                    // rejection means the instruction was NOT accepted (restore
+                    // it for the normal turn/start path), while an indeterminate
+                    // transport failure (disconnect/timeout/protocol) leaves the
+                    // row reserved so it can never be delivered twice.
                     return { steered: true };
                 }
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
