@@ -1919,6 +1919,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             threadId: string;
             taken: QueueReservation<EnhancedMode>;
             batch: QueuedMessage;
+            expiresAt: number;
         }>();
         let steerReconcileTimer: ReturnType<typeof setTimeout> | null = null;
         let steerReconcileInProgress = false;
@@ -1945,6 +1946,16 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             steerReconcileInProgress = true;
             try {
                 for (const [localId, entry] of Array.from(pendingSteerReconciliations.entries())) {
+                    if (Date.now() >= entry.expiresAt) {
+                        // Terminal outcome: the app-server has not proven the
+                        // inject (client ids may be dropped after restart) and
+                        // the rejection window has long passed. Mark delivered —
+                        // the instruction was dispatched and no rejection ever
+                        // arrived; silently restoring could re-run it.
+                        logger.debug(`[Codex] steer ${localId} reconciliation expired; marking delivered`);
+                        settleReconcileEntry(localId, entry);
+                        continue;
+                    }
                     const outcome = await reconcileSteerByClientId(entry.threadId, localId);
                     if (outcome === 'accepted') {
                         settleReconcileEntry(localId, entry);
@@ -2109,11 +2120,20 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         if (!threadId) {
                             return;
                         }
-                        pendingSteerReconciliations.set(localId, { threadId, taken, batch });
+                        pendingSteerReconciliations.set(localId, { threadId, taken, batch, expiresAt: Date.now() + 60_000 });
                         scheduleSteerReconcileRetry();
                     };
                     try {
                         await steer.dispatched;
+                    } catch (error) {
+                        // Dispatch failure means nothing was written — restore and
+                        // report failure. Never reconcile: no request reached the
+                        // app-server (abort before dispatch included).
+                        void steer.completed.catch(() => {});
+                        session.queue.restoreReservation(taken);
+                        return { steered: false, error: error instanceof Error ? error.message : 'Steer failed' };
+                    }
+                    try {
                         // Await app-server acceptance before reporting success:
                         // an explicit JSON-RPC rejection must surface as failed
                         // (row restored, normal turn/start delivers it later)
@@ -2121,9 +2141,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         // the inject acceptance, not the full turn completion.
                         await steer.completed;
                     } catch (error) {
-                        // A dispatch failure rejects both promises; make sure the
-                        // completion rejection cannot surface as unhandled.
-                        void steer.completed.catch(() => {});
                         if (isIndeterminateError(error)) {
                             // Transport failure after dispatch: the outcome is
                             // unknown — keep the row reserved and reconcile the

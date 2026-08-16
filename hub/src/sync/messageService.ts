@@ -590,15 +590,16 @@ export class MessageService {
                     // Check responses before err: in a reconnect overlap or any room with
                     // multiple CLI sockets, Socket.IO may set err (one socket timed out)
                     // while still delivering successful responses from the sockets that did
-                    // ack. Any confirmed removal wins over the partial timeout; an explicit
-                    // in-flight report beats the not-found fallback.
+                    // ack. An explicit in-flight report dominates: one socket may be
+                    // dispatching the steer while a stale duplicate socket reports
+                    // removed — deleting the row then would orphan the executing message.
+                    if (responses?.some((r) => r.inFlight === true)) {
+                        resolve('in-flight')
+                        return
+                    }
                     const removed = responses?.some((r) => r.removed === true) ?? false
                     if (removed) {
                         resolve('removed')
-                        return
-                    }
-                    if (responses?.some((r) => r.inFlight === true)) {
-                        resolve('in-flight')
                         return
                     }
                     if (err) {
