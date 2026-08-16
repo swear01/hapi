@@ -110,11 +110,17 @@ export class DshEventBridge {
             const subscribed = new Promise<void>((resolve) => { resolveSubscribed = resolve })
             const muxDone = this.pumpMux(mux, generation.signal, () => resolveSubscribed?.())
             const hostDone = this.pumpHost(host, generation.signal)
-            const attached = await Promise.race([
-                subscribed.then(() => true),
-                muxDone.then(() => false),
-                hostDone.then(() => false)
-            ])
+            let attached: boolean
+            try {
+                attached = await Promise.race([
+                    subscribed.then(() => true),
+                    muxDone.then(() => false),
+                    hostDone.then(() => false)
+                ])
+            } catch (attachError) {
+                logger.warn(`[${this.logTag}] stream attach error: ${attachError instanceof Error ? attachError.message : String(attachError)}`)
+                attached = false
+            }
             if (!attached) {
                 generation.abort()
                 await Promise.allSettled([muxDone, hostDone])
@@ -651,6 +657,17 @@ export class DshEventBridge {
                 .sort((a, b) => a.seq - b.seq)
                 .forEach((event) => this.handleSessionEvent(childSessionId, event, 'live', true))
         }
+        // Children sealed dynamically during recovery but absent from the
+        // discovery snapshot: release their buffers (forward live) so they
+        // are never trapped — their journal backfill retries next reconnect.
+        for (const [childSessionId, buffer] of this.childBuffers) {
+            if (this.childRecoveryReleased.has(childSessionId)) continue
+            this.childBuffers.delete(childSessionId)
+            this.childRecoveryReleased.add(childSessionId)
+            buffer
+                .sort((a, b) => a.seq - b.seq)
+                .forEach((event) => this.handleSessionEvent(childSessionId, event, 'live', true))
+        }
         return true
     }
 
@@ -685,10 +702,11 @@ export class DshEventBridge {
             }
         }
         if (key === 'goal' && isObject(value)) {
+            const goalStatus = typeof value.status === 'string' ? normalizeGoalStatus(value.status) : undefined
             const goal: DshStateSnapshot['goal'] = {
                 id: asString(value.id),
                 objective: asString(value.objective),
-                ...(typeof value.status === 'string' ? { status: normalizeGoalStatus(value.status) } : {}),
+                ...(goalStatus !== undefined ? { status: goalStatus } : {}),
                 ...(typeof value.maxGoalRounds === 'number' ? { maxGoalRounds: value.maxGoalRounds } : {}),
                 ...(typeof value.currentRound === 'number' ? { currentRound: value.currentRound } : {}),
                 ...(typeof value.revision === 'number' ? { revision: value.revision } : {})

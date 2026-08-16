@@ -61,7 +61,10 @@ async function prepareDshPromptContent(
                 logger.debug(`[dsh] image attachment read failed: ${error instanceof Error ? error.message : String(error)}`)
             }
         } else {
-            body += `\n[Attached file: ${attachment.path}]`
+            // Escape path metacharacters so the model never misparses the
+            // marker line (spaces/newlines/quotes/]).
+            const safePath = attachment.path.replace(/[\[\]\n\r\\]/g, '_')
+            body += `\n[Attached file: ${safePath}]`
         }
     }
     return [{ type: 'text', text: body }, ...parts]
@@ -71,6 +74,11 @@ export async function runDsh(opts: {
     startedBy?: 'runner' | 'terminal';
     startingMode?: 'local' | 'remote' | 'pty';
     model?: string;
+    /** Accepted by the shared CLI parser; DSH effort rides the model
+     *  selection (runtime-discovered catalog), so it is intentionally
+     *  not applied at launch. */
+    effort?: string;
+    modelReasoningEffort?: string;
     resumeSessionId?: string;
     existingSessionId?: string;
     workingDirectory?: string;

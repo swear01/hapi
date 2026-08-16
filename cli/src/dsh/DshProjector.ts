@@ -33,7 +33,7 @@ export class DshProjector {
         const key = `${turn}:${step}`
         let state = this.steps.get(key)
         if (!state) {
-            state = { turn, step, blocks: new Map() }
+            state = { turn, step, blocks: new Map(), chunkOrder: [] }
             this.steps.set(key, state)
         }
         return state
@@ -95,11 +95,15 @@ export class DshProjector {
                 // duplicating. block-end already emitted live finals with these
                 // ids; re-emitting the settled value replaces them in place.
                 message.content.forEach((block, index) => {
+                    // Final ids must equal the live chunk ids: the stream
+                    // addressed blocks by chunk.index, so map the content
+                    // position through the recorded block-start order.
+                    const chunkIndex = state.chunkOrder[index] ?? index
                     if (block.type === 'text' && block.text.length > 0) {
                         out.push({
                             type: 'text',
                             text: block.text,
-                            id: this.blockId(turn, step, index, 'text'),
+                            id: this.blockId(turn, step, chunkIndex, 'text'),
                             streamSnapshot: true,
                             dshSeq: event.seq,
                             dshMessageId: message.id
@@ -108,7 +112,7 @@ export class DshProjector {
                         out.push({
                             type: 'reasoning',
                             text: block.text,
-                            id: this.blockId(turn, step, index, 'reasoning'),
+                            id: this.blockId(turn, step, chunkIndex, 'reasoning'),
                             streamSnapshot: true,
                             dshSeq: event.seq
                         })
@@ -191,6 +195,7 @@ export class DshProjector {
         const state = this.stepState(turn, step)
         switch (chunk.type) {
             case 'block-start': {
+                state.chunkOrder.push(chunk.index)
                 const kind: BlockState['kind'] = chunk.blockType === 'text' || chunk.blockType === 'reasoning' || chunk.blockType === 'tool-call'
                     ? chunk.blockType
                     : 'text'
@@ -349,6 +354,10 @@ type StepState = {
     turn: number
     step: number
     blocks: Map<number, BlockState>
+    /** Chunk-index order of block starts: assistant/message final ids must
+     *  match the live stream's chunk.index (content array position alone can
+     *  diverge when tool blocks interleave). */
+    chunkOrder: number[]
 }
 
 function safeJsonParse(raw: string): unknown {

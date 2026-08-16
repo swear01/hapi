@@ -170,8 +170,11 @@ export async function runDoctorCommand(filter?: 'all' | 'runner'): Promise<void>
             console.log(`Runtime: ${chalk.red('❌ Not installed')} ${chalk.gray(dshBin)}`);
             console.log(chalk.gray('  First `dsh` session auto-installs it; requires Node.js on the runner.'));
         }
-        const nodeStatus = existsSync(join(configuration.happyHomeDir, 'dsh-runtime'))
-            ? 'n/a (install pending)'
+        // The runtime dir exists even when install is pending (installDshRuntime
+        // mkdirs it first), so base the check on the actual binary.
+        const dshBinExists = existsSync(dshBin)
+        const nodeStatus = dshBinExists
+            ? 'n/a (runtime installed)'
             : checkNodeAvailable()
                 ? '✓ yes'
                 : '❌ no (DSH host needs Node.js)'

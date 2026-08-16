@@ -62,7 +62,8 @@ export class DshNodeTransport extends AbstractApiClient {
             signal
         })
         if (!response.ok) {
-            throw new Error(`session.prompt HTTP ${response.status}`)
+            const detail = await response.text().catch(() => '')
+            throw new Error(`session.prompt HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`)
         }
         let parsed: {
             type: string
@@ -108,7 +109,7 @@ export class DshNodeTransport extends AbstractApiClient {
         onOpen?: () => void,
     ): AsyncGenerator<RpcRequest<F>> {
         const url = new URL(path, this.baseUrl)
-        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+        url.protocol = url.protocol === 'https:' || url.protocol === 'wss:' ? 'wss:' : 'ws:'
         const socket = new WebSocket(url)
         const inbox: Array<{ kind: 'frame'; envelope: RpcRequest<F> } | { kind: 'end' }> = []
         let wake: (() => void) | undefined

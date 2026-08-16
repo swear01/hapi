@@ -21,6 +21,7 @@ import {
 const READY_POLL_INITIAL_MS = 300
 const READY_POLL_MAX_MS = 2_000
 const STOP_TIMEOUT_MS = 10_000
+const INSTALL_TIMEOUT_MS = 5 * 60_000
 const OUTPUT_TAIL_CHARS = 4_000
 
 /** Error carrying the structured start-failure kind (spawn/timeout/exit/install). */
@@ -100,8 +101,8 @@ export async function installDshRuntime(options?: { onProgress?: (line: string) 
             // Watchdog: a stalled registry/network must not hang startup forever.
             const watchdog = setTimeout(() => {
                 child.kill('SIGKILL')
-                reject(new Error(`${command} timed out after 5 minutes: ${stderr.slice(-1_000)}`))
-            }, 5 * 60_000)
+                reject(new Error(`${command} timed out after ${INSTALL_TIMEOUT_MS / 60_000} minutes: ${stderr.slice(-1_000)}`))
+            }, INSTALL_TIMEOUT_MS)
             watchdog.unref?.()
             child.once('error', (error) => {
                 clearTimeout(watchdog)
@@ -154,6 +155,12 @@ export async function installDshRuntime(options?: { onProgress?: (line: string) 
     }
     if (!existsSync(binPath)) {
         throw new Error(`DSH runtime installed but binary missing at ${binPath}`)
+    }
+    // Guard against a mismatched install (stale cache, partial upgrade): the
+    // caller's outdated detection must not loop on a wrong-version binary.
+    const installedVersion = readDshRuntimeVersion(binPath)
+    if (installedVersion !== null && installedVersion !== DSH_RUNTIME_VERSION) {
+        throw new Error(`DSH runtime installed version ${installedVersion} does not match pinned ${DSH_RUNTIME_VERSION}`)
     }
     return binPath
 }
