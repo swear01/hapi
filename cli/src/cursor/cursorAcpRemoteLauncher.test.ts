@@ -297,11 +297,12 @@ describe('cursorAcpRemoteLauncher', () => {
         _resetSharedCursorModelsCacheForTests();
     });
 
-    it('waits for a soft steer that outlives an abort before the next prompt', async () => {
+    it('does not block the next prompt on a soft steer that outlives an abort', async () => {
         let releasePrompt!: () => void;
-        let releaseSoftSteer!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
-        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
+        // Soft-steer completion never settles — simulates Cursor keeping the
+        // concurrent request open after an ordinary Abort.
+        harness.deferSoftSteer = new Promise(() => {});
         const session = makeSession(null, false);
         const mode = { permissionMode: 'default' } as EnhancedMode;
         session.queue.push('first', mode, 'first');
@@ -317,12 +318,9 @@ describe('cursorAcpRemoteLauncher', () => {
         await handlers.get(RPC_METHODS.Abort)!();
         session.queue.push('next', mode, 'next');
 
+        // Abort drops the waiters — the next prompt must start immediately.
         harness.deferPrompt = null;
         releasePrompt();
-        await Promise.resolve();
-        expect(harness.promptCalls).toBe(1);
-
-        releaseSoftSteer();
         await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
         session.queue.close();
         await runPromise;

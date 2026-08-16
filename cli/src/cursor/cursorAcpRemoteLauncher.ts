@@ -916,6 +916,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         await this.extensionAdapter?.cancelAll('User aborted');
         this.session.queue.reset();
         this.promptInFlight = false;
+        // Abort is the hard-stop path: drop soft-steer waiters so the prompt
+        // finally cannot block the next prompt on a soft steer whose completion
+        // is unbounded and may never settle. The ACP cancel above rejects
+        // in-flight requests when the transport closes; cleanup() settles any
+        // leftovers when the session ends.
+        this.softSteerWaiters = [];
         this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         this.session.onThinkingChange(false);
         this.abortController.abort();
