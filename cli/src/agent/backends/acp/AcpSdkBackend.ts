@@ -80,6 +80,8 @@ export class AcpSdkBackend implements AgentBackend {
     private promptRequestInFlight = false;
     /** Concurrent session/prompt requests (main prompt + soft steers). */
     private activePromptRequests = 0;
+    /** Bumped by abortSoftSteers; stale finishes from cancelled requests are dropped. */
+    private promptRequestEpoch = 0;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -559,7 +561,7 @@ export class AcpSdkBackend implements AgentBackend {
             textChunkMode: this.options.textChunkMode,
             flavor: this.options.flavor,
         });
-        this.beginPromptRequest();
+        const promptRequestEpoch = this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
         this.lastForwardedUsageUpdate = null;
@@ -637,7 +639,7 @@ export class AcpSdkBackend implements AgentBackend {
                 }
             } finally {
                 this.promptUsageCallback = null;
-                this.finishPromptRequest();
+                this.finishPromptRequest(promptRequestEpoch);
             }
         }
     }
@@ -669,14 +671,14 @@ export class AcpSdkBackend implements AgentBackend {
             throw new Error('No active ACP prompt to soft-steer into');
         }
 
-        this.beginPromptRequest();
+        const promptRequestEpoch = this.beginPromptRequest();
         try {
             await this.transport.sendRequest('session/prompt', {
                 sessionId,
                 prompt: content
             }, { timeoutMs: Infinity });
         } finally {
-            this.finishPromptRequest();
+            this.finishPromptRequest(promptRequestEpoch);
         }
     }
 
@@ -697,7 +699,7 @@ export class AcpSdkBackend implements AgentBackend {
         }
 
         const transport = this.transport;
-        this.beginPromptRequest();
+        const promptRequestEpoch = this.beginPromptRequest();
         const request = transport.sendRequestWithDispatch('session/prompt', {
             sessionId,
             prompt: content
@@ -715,7 +717,7 @@ export class AcpSdkBackend implements AgentBackend {
                     await this.drainLateBuffers();
                     this.messageHandler?.drainBuffers();
                 } finally {
-                    this.finishPromptRequest();
+                    this.finishPromptRequest(promptRequestEpoch);
                 }
             }
         })();
@@ -1146,9 +1148,10 @@ export class AcpSdkBackend implements AgentBackend {
         return await responsePromise;
     }
 
-    private beginPromptRequest(): void {
+    private beginPromptRequest(): number {
         this.activePromptRequests++;
         this.isProcessingMessage = true;
+        return this.promptRequestEpoch;
     }
 
     /**
@@ -1156,10 +1159,11 @@ export class AcpSdkBackend implements AgentBackend {
      * `session/prompt` to finish. Called on abort: the in-flight turn is
      * cancelled anyway, so a pending soft steer may never complete; dropping
      * its counter keeps {@link waitForResponseComplete} from blocking the next
-     * turn. The main prompt's own `finishPromptRequest` is guarded by
-     * `Math.max(0, ...)`, so a later settle is harmless.
+     * turn. Bumps the epoch so a stale finish from a cancelled request cannot
+     * decrement a newer prompt's counter.
      */
     abortSoftSteers(): void {
+        this.promptRequestEpoch++;
         if (this.activePromptRequests > 0) {
             this.activePromptRequests = 0;
             this.isProcessingMessage = false;
@@ -1167,7 +1171,10 @@ export class AcpSdkBackend implements AgentBackend {
         }
     }
 
-    private finishPromptRequest(): void {
+    private finishPromptRequest(epoch: number): void {
+        if (epoch !== this.promptRequestEpoch) {
+            return;
+        }
         this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
         this.isProcessingMessage = this.activePromptRequests > 0;
         if (!this.isProcessingMessage) {

@@ -1250,7 +1250,7 @@ describe('AcpSdkBackend', () => {
             transport: { sendRequestWithDispatch: () => { dispatched: Promise<void>; completed: Promise<unknown> }; close: () => Promise<void> } | null;
             isProcessingMessage: boolean;
             activePromptRequests: number;
-            finishPromptRequest: () => void;
+            finishPromptRequest: (epoch: number) => void;
             waitForSessionUpdateQuiet: () => Promise<void>;
             drainLateBuffers: () => Promise<void>;
         };
@@ -1270,7 +1270,7 @@ describe('AcpSdkBackend', () => {
         let responseComplete = false;
         const responseWait = backend.waitForResponseComplete().then(() => { responseComplete = true; });
 
-        backendInternal.finishPromptRequest();
+        backendInternal.finishPromptRequest(0);
         await Promise.resolve();
         expect(backend.processingMessage).toBe(true);
         expect(responseComplete).toBe(false);
