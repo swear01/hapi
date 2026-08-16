@@ -1471,8 +1471,13 @@ export class SyncEngine {
         // A Pi native fork already carries the branch's authoritative model and
         // thinking state. Do not replay the source wrapper's current overrides
         // onto the child; the resumed child will report its own get_state.
-        const forkModel = flavor === 'pi' ? undefined : source.model ?? undefined
+        const storedForkModel = flavor === 'pi' ? undefined : source.model ?? undefined
+        const forkModel = storedForkModel
         const forkEffort = flavor === 'pi' ? undefined : source.effort ?? undefined
+        // DSH native forks carry their provider-qualified model + effort in
+        // the resumed native session; HAPI's bare model field is ambiguous
+        // across providers and must not be reapplied at launch.
+        const launchForkModel = flavor === 'dsh' ? undefined : storedForkModel
 
         let childCreated = false
         let spawnAttempted = false
@@ -1509,7 +1514,7 @@ export class SyncEngine {
                 machineId,
                 directory,
                 flavor,
-                forkModel,
+                launchForkModel,
                 source.modelReasoningEffort ?? undefined,
                 undefined,
                 'simple',
