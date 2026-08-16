@@ -2006,7 +2006,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'unknown'> => {
             try {
                 await ensureAppServerInitialized();
-                const response = await appServerClient.readThread({ threadId, includeTurns: true });
+                const response = await appServerClient.readThread(
+                    { threadId, includeTurns: true },
+                    { signal: AbortSignal.timeout(5_000) }
+                );
                 for (const turn of response.thread.turns ?? []) {
                     for (const item of turn.items ?? []) {
                         const record = asRecord(item);
