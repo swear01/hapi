@@ -1249,16 +1249,9 @@ describe('codexRemoteLauncher', () => {
         session.queue.close();
     });
 
-    it('reconciles a dispatched steer whose completion failed (message already in thread)', async () => {
+    it('consumes the row on dispatch even when turn completion later fails', async () => {
         harness.suppressTurnCompletion = true;
         harness.steerCompletionError = new Error('Codex app-server disconnected');
-        harness.readThreadResponse = {
-            thread: {
-                turns: [{
-                    items: [{ type: 'userMessage', clientId: 'local-1', text: 'steer me' }]
-                }]
-            }
-        };
         const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
@@ -1267,15 +1260,17 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
+        // Dispatch succeeded — the instruction is delivered; a later completion
+        // failure must not restore the row (no duplicate via turn/start).
         expect(result).toEqual({ steered: true });
-        expect(harness.readThreadParams).toHaveLength(1);
         await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
+        expect(harness.readThreadParams).toHaveLength(0);
         session.queue.close();
     });
 
-    it('restores the queued row when a dispatched steer never lands in the thread', async () => {
+    it('restores the queued row when stdin dispatch fails', async () => {
         harness.suppressTurnCompletion = true;
-        harness.steerCompletionError = new Error('Codex app-server disconnected');
+        harness.steerDispatchError = new Error('stdin closed');
         const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
@@ -1284,7 +1279,7 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        expect(result).toEqual({ steered: true });
+        expect(result).toEqual({ steered: false, error: 'Failed to steer into active turn' });
         await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
