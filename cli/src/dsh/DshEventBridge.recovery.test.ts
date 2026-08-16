@@ -516,10 +516,14 @@ describe('DshEventBridge recovery (P0)', () => {
             sessionId: SessionId(SESSION),
             questions: [{ id: 'q1', question: 'pick' }]
         })
+        // The resolve frame must carry the envelope rpcId the bridge saw on
+        // question/requested (fixture records it in pendingServerRequests).
+        await waitFor(() => host!.pendingServerRequests.size > 0)
+        const pendingRpcId = [...host!.pendingServerRequests.keys()][0]
         host.pushMux({
             type: 'question/resolved',
             sessionId: SessionId(SESSION),
-            questionRpcId: RpcId('rpc-1'),
+            questionRpcId: RpcId(pendingRpcId),
             outcome: 'answered'
         })
 

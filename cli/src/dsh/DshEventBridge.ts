@@ -20,9 +20,9 @@ export type DshEventBridgeOptions = {
     initialCursor?: number
     /** Forward one projected agent message (text/tool/usage/native/state…). */
     onMessage: (message: DshProjectedMessage, source: 'live' | 'backfill') => void
-    /** Called once the first generation attached and its initial backfill
-     *  completed (root subscribed + gap released). Session orchestration uses
-     *  this to gate session-ready and prompt dispatch. */
+    /** Called after every successful recovery (first generation and each
+     *  reconnect): root subscribed + gaps released. Session orchestration
+     *  uses this to gate session-ready and prompt dispatch (idempotent). */
     onReady?: () => void
     /** Persisted per-child cursor map (survives CLI restarts so subagent
      *  journals are never replayed into a fresh HAPI row). */
@@ -389,6 +389,7 @@ export class DshEventBridge {
                 break
             }
             case 'question/requested': {
+                this.pendingQuestionRpcId = rpcId
                 const items = frame.questions.map((q) => ({
                     id: q.id,
                     question: q.question,
@@ -402,6 +403,12 @@ export class DshEventBridge {
                 break
             }
             case 'question/resolved': {
+                // Ignore stale/duplicated resolve frames that do not match
+                // the pending question's rpcId.
+                if (this.pendingQuestionRpcId !== null && frame.questionRpcId !== this.pendingQuestionRpcId) {
+                    break
+                }
+                this.pendingQuestionRpcId = null
                 // Null is the durable "no pending question" value and does
                 // not render an empty blocking dialog.
                 this.emitState({ seq: this.seqOf(), questions: null })
@@ -449,6 +456,7 @@ export class DshEventBridge {
     }
 
     private subagentIds = new Set<string>()
+    private pendingQuestionRpcId: string | null = null
     private projectionsSeeded = false
     /** Highest seq ever emitted in a dsh_state snapshot: the web compares
      *  whole snapshots, so a bootstrap projection carrying an older asOfSeq
@@ -587,6 +595,15 @@ export class DshEventBridge {
         }
         try {
             const discovered = await this.options.client.subagentList(this.options.dshSessionId)
+            // Align the live subagent set with the host's durable catalog:
+            // session-removed frames missed during an outage would otherwise
+            // keep the subagentCount stale forever.
+            const discoveredIds = new Set(discovered.map((child) => child.id))
+            for (const id of this.subagentIds) {
+                if (!discoveredIds.has(id)) {
+                    this.subagentIds.delete(id)
+                }
+            }
             for (const child of discovered) {
                 known.set(child.id, child.mode)
             }
@@ -750,6 +767,10 @@ export class DshEventBridge {
 
 function waitForAbortableDelay(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
+        if (signal.aborted) {
+            resolve()
+            return
+        }
         const timer = setTimeout(() => {
             signal.removeEventListener('abort', onAbort)
             resolve()

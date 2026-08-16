@@ -1789,16 +1789,6 @@ export function NewSession(props: {
                 isDisabled={isFormDisabled}
                 onChange={setServiceTier}
             />
-<<<<<<< HEAD
-=======
-            {agent !== 'grok' && !usesCodexFamilyPermissionModes(agent) && getPermissionModesForFlavor(agent).length > 0 ? (
-                <YoloToggle
-                    yoloMode={yoloMode}
-                    isDisabled={isFormDisabled}
-                    onToggle={setYoloMode}
-                />
-            ) : null}
->>>>>>> 05ecf448 (docs(dsh): DeepSeek Harness guide + agent matrix; hide Yolo for dsh)
 
             {(error ?? spawnError) ? (
                 <div className="px-3 py-2 text-sm text-red-600">

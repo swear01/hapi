@@ -1501,19 +1501,12 @@ export function buildCliArgs(
       args.push('--resume', options.resumeSessionId);
     }
   }
-<<<<<<< HEAD
   // agy headless reuses the existing hub row on reopen/resume via the generic
   // --existing-session-id flow (no PTY special case anymore).
-=======
-  // agy PTY reuses the existing hub row directly on reopen/resume.
-  if (options.existingSessionId && agent === 'agy') {
-    args.push('--hapi-session-id', options.existingSessionId);
-  }
   // DSH reuses the existing hub row on reopen/resume (durable id mapping).
   if (options.existingSessionId && agent === 'dsh') {
     args.push('--hapi-session-id', options.existingSessionId);
   }
->>>>>>> 77be5e8d (feat(dsh): DSH session runner — event bridge, projector, typed RPC bridge)
   // Message-level Fork current for Claude: must follow --resume.
   if (options.forkSession && agentCommand === 'claude') {
     args.push('--fork-session');
@@ -1524,11 +1517,7 @@ export function buildCliArgs(
   // forks reuse the original HAPI row via --existing-session-id.
   if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
       || agent === 'opencode'
-<<<<<<< HEAD
-      || agent === 'agy'
-=======
       || agent === 'dsh'
->>>>>>> 77be5e8d (feat(dsh): DSH session runner — event bridge, projector, typed RPC bridge)
       || (agentCommand === 'claude' && options.forkSession)) {
     const existingSessionId = options.existingSessionId ?? options.sessionId;
     if (existingSessionId) {

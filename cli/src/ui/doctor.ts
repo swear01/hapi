@@ -84,9 +84,9 @@ export async function runDoctorRunner(): Promise<void> {
     return runDoctorCommand('runner');
 }
 
-function checkNodeAvailable(): boolean {
+function checkNodeAvailable(nodeBin = 'node'): boolean {
     try {
-        const result = execFileSync('node', ['--version'], { stdio: 'pipe', timeout: 5_000 })
+        const result = execFileSync(nodeBin, ['--version'], { stdio: 'pipe', timeout: 5_000 })
         return result.toString().trim().length > 0
     } catch {
         return false
@@ -173,11 +173,12 @@ export async function runDoctorCommand(filter?: 'all' | 'runner'): Promise<void>
         // The runtime dir exists even when install is pending (installDshRuntime
         // mkdirs it first), so base the check on the actual binary.
         const dshBinExists = existsSync(dshBin)
+        const nodeProbe = process.env.HAPI_DSH_NODE_PATH?.trim() || 'node'
         const nodeStatus = dshBinExists
             ? 'n/a (runtime installed)'
-            : checkNodeAvailable()
-                ? '✓ yes'
-                : '❌ no (DSH host needs Node.js)'
+            : checkNodeAvailable(nodeProbe)
+                ? `✓ yes (${nodeProbe})`
+                : `❌ no (${nodeProbe} not found — DSH host needs Node.js)`
         console.log(`Node available: ${chalk.green(nodeStatus)}`);
         console.log('');
 

@@ -329,7 +329,10 @@ export async function runDsh(opts: {
         // subscription would be replayed as backfill, which must not consume
         // its pending localId (that would corrupt fork/rewind anchors).
         let bridgeReadyResolve: (() => void) | undefined
-        const bridgeReady = new Promise<void>((resolve) => { bridgeReadyResolve = resolve })
+        let bridgeReadyResolved = false
+        const bridgeReady = new Promise<void>((resolve) => {
+            bridgeReadyResolve = () => { bridgeReadyResolved = true; resolve() }
+        })
         const initialChildCursors = (() => {
             const meta = session.getMetadata()
             const stored = meta && typeof meta === 'object'
@@ -599,7 +602,21 @@ export async function runDsh(opts: {
         // concurrent user messages (that would corrupt fork/rewind anchors).
         let promptChain: Promise<void> = Promise.resolve();
         const bridgeRun = bridge.start(bridgeAbort.signal);
+        // A host that stays alive but never completes its first recovery must
+        // not leave the session stuck in "connecting": fail the start loudly.
+        const readyTimeout = setTimeout(() => {
+            if (!bridgeReadyResolved) {
+                bridgeAbort.abort();
+                session.sendAgentMessage({
+                    type: 'error',
+                    message: 'DSH host did not become ready (stream recovery stalled)'
+                });
+            }
+        }, 60_000);
+        readyTimeout.unref?.();
         await bridgeReady;
+        bridgeReadyResolved = true;
+        clearTimeout(readyTimeout);
         session.emitSessionReady();
         session.onUserMessage((message, localId) => {
             const text = message.content.text;

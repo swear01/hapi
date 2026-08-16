@@ -68,6 +68,7 @@ const BUILTIN_DESCRIPTORS: Record<AgentFlavor, AgentConfigFieldDescriptor[]> = {
     ),
     copilot: fields({ ...MODEL, optionSource: 'directory' }, PERMISSION),
     cursor: fields({ id: 'model', section: 'model', kind: 'dependent-select', optionSource: 'machine', availability: 'both' }, PERMISSION),
+    dsh: fields({ ...MODEL, optionSource: 'machine' }, MANAGED_PERMISSION),
     gemini: fields(MODEL, PERMISSION),
     grok: fields(
         { ...MODEL, optionSource: 'directory' },
@@ -109,6 +110,7 @@ export function resolveHapiYoloPermissionMode(flavor: AgentFlavor): PermissionMo
         case 'kimi':
         case 'opencode':
             return 'yolo'
+        case 'dsh':
         case 'pi':
             return null
     }

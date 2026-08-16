@@ -13,6 +13,7 @@ import { logger } from '@/ui/logger'
 const MUX_EVENTS_PATH = '/api/events.mux'
 const HOST_EVENTS_PATH = '/api/events.host'
 const SESSION_PROMPT_PATH = '/api/session.prompt'
+const PROMPT_TIMEOUT_MS = 30_000
 
 /**
  * Node/Bun transport for the official DSH apiproxy contract.
@@ -53,8 +54,8 @@ export class DshNodeTransport extends AbstractApiClient {
         // Compose the caller's signal so a session stop cancels the in-flight
         // prompt instead of lingering up to the 30s transport timeout.
         const signal = externalSignal
-            ? AbortSignal.any([AbortSignal.timeout(30_000), externalSignal])
-            : AbortSignal.timeout(30_000)
+            ? AbortSignal.any([AbortSignal.timeout(PROMPT_TIMEOUT_MS), externalSignal])
+            : AbortSignal.timeout(PROMPT_TIMEOUT_MS)
         const response = await this.doFetch(new URL(SESSION_PROMPT_PATH, this.resolveBase()), {
             method: 'POST',
             headers: { 'content-type': 'application/json' },

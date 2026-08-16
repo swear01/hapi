@@ -217,7 +217,9 @@ export async function startDshHost(options: DshRuntimeOptions): Promise<DshHostH
         )
     }
 
-    const port = options.port ?? await probeFreePort()
+    // 0 means 'let the OS pick' — probe an ephemeral port instead of
+    // deriving a broken baseUrl from the literal 0.
+    const port = (options.port && options.port > 0) ? options.port : await probeFreePort()
     const baseUrl = `http://127.0.0.1:${port}`
 
     // The official --patch overlay must be a real file path.
