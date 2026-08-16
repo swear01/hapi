@@ -1907,27 +1907,74 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         });
 
         // Steers whose transport outcome is indeterminate (disconnect / protocol
-        // failure after dispatch). Reconciled once the app-server is reachable
-        // again: accepted → commit + consumed; rejected → restore; still
-        // indeterminate → retry on the next loop pass.
+        // failure after dispatch). Reconciled independently of the main loop by
+        // a self-rescheduling timer: accepted → commit + consumed; still
+        // unreadable or no matching client id → retry later (absence of a
+        // durable client id is NOT proof of rejection).
         const pendingSteerReconciliations = new Map<string, {
             threadId: string;
             taken: QueueReservation<EnhancedMode>;
             batch: QueuedMessage;
         }>();
+        let steerReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+        let steerReconcileInProgress = false;
 
-        // Wakes the main loop so a pending steer reconciliation is retried even
-        // while the loop sits in waitForTurnOrRecovery (turn in flight).
+        const settleReconcileEntry = (localId: string, entry: { taken: QueueReservation<EnhancedMode>; batch: QueuedMessage }): void => {
+            // The hub already reported steered on dispatch; the ACK must reach
+            // it even when an abort reset the queue and cancelled the
+            // reservation in between.
+            session.queue.commitReservation(entry.taken);
+            pendingSteerReconciliations.delete(localId);
+            messageBuffer.addMessage(entry.batch.message, 'user');
+            session.client.emitMessagesConsumed([localId], { steered: true });
+        };
+
+        const runSteerReconciliation = async (): Promise<void> => {
+            if (steerReconcileInProgress || pendingSteerReconciliations.size === 0) {
+                return;
+            }
+            steerReconcileInProgress = true;
+            try {
+                for (const [localId, entry] of Array.from(pendingSteerReconciliations.entries())) {
+                    const outcome = await reconcileSteerByClientId(entry.threadId, localId);
+                    if (outcome === 'accepted') {
+                        settleReconcileEntry(localId, entry);
+                    }
+                    // 'unknown' → keep the entry; the timer reschedules below.
+                }
+            } finally {
+                steerReconcileInProgress = false;
+                if (pendingSteerReconciliations.size > 0) {
+                    steerReconcileTimer = setTimeout(() => {
+                        void runSteerReconciliation();
+                        // Wake the main loop too (it may sit in
+                        // waitForTurnOrRecovery while the turn is in flight).
+                        wakeLoop();
+                    }, 1_000);
+                    steerReconcileTimer.unref?.();
+                } else if (steerReconcileTimer) {
+                    clearTimeout(steerReconcileTimer);
+                    steerReconcileTimer = null;
+                }
+            }
+        };
+
         const scheduleSteerReconcileRetry = () => {
-            const timer = setTimeout(wakeLoop, 1_000);
-            timer.unref?.();
+            if (steerReconcileTimer || steerReconcileInProgress) {
+                return;
+            }
+            steerReconcileTimer = setTimeout(() => {
+                steerReconcileTimer = null;
+                void runSteerReconciliation();
+            }, 1_000);
+            steerReconcileTimer.unref?.();
         };
 
         // thread/read auto-connects after a disconnect, but a freshly spawned
         // app-server must be initialized before any request — the startup block
         // only ran for the original process.
         const ensureAppServerInitialized = async () => {
-            if (appServerClient.isConnected()) {
+            if (appServerClient.isConnected() && appServerClient.isInitialized()) {
                 return;
             }
             await appServerClient.connect();
@@ -1943,9 +1990,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         // Returns 'accepted' when the thread contains the steered user message
-        // (echoed as userMessage.clientId), 'rejected' when it provably does
-        // not, and 'unknown' when the thread cannot be read.
-        const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'rejected' | 'unknown'> => {
+        // (echoed as userMessage.clientId). Absence of the id is ambiguous
+        // (client ids are not guaranteed durable), so anything unreadable or
+        // unmatched stays 'unknown' and is retried.
+        const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'unknown'> => {
             try {
                 await ensureAppServerInitialized();
                 const response = await appServerClient.readThread({ threadId, includeTurns: true });
@@ -1961,7 +2009,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         }
                     }
                 }
-                return 'rejected';
+                return 'unknown';
             } catch (error) {
                 logger.debug(`[Codex] steer reconcile unavailable (${error instanceof Error ? error.message : String(error)})`);
                 return 'unknown';
@@ -2041,6 +2089,18 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (steer) {
                     // Register completion handling before awaiting dispatch so a
                     // dispatch failure cannot leave the rejection unhandled.
+                    const reconcileDispatchedSteer = (
+                        localId: string,
+                        taken: QueueReservation<EnhancedMode>,
+                        batch: QueuedMessage
+                    ) => {
+                        const threadId = steerThreadId;
+                        if (!threadId) {
+                            return;
+                        }
+                        pendingSteerReconciliations.set(localId, { threadId, taken, batch });
+                        scheduleSteerReconcileRetry();
+                    };
                     void steer.completed.then(() => {
                         // No epoch guard on the success path: the hub already
                         // reported steered on dispatch, so the eventual ACK must
@@ -2050,34 +2110,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         messageBuffer.addMessage(batch.message, 'user');
                         session.client.emitMessagesConsumed([localId], { steered: true });
                     }, (error) => {
-                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                        if (isIndeterminateError(error)) {
+                            // Checked before the epoch guard: abort cancels the
+                            // request (epoch bump), but the steer may already
+                            // have been accepted — that outcome must reconcile.
+                            void reconcileDispatchedSteer(localId, taken, batch);
                             return;
                         }
-                        if (isIndeterminateError(error)) {
-                            logger.debug(`[Codex] turn/steer outcome unknown after dispatch (${error instanceof Error ? error.message : String(error)}); reconciling`);
-                            void (async () => {
-                                if (!steerThreadId) {
-                                    return;
-                                }
-                                const outcome = await reconcileSteerByClientId(steerThreadId, localId);
-                                if (outcome === 'accepted') {
-                                    if (session.queue.commitReservation(taken)) {
-                                        messageBuffer.addMessage(batch.message, 'user');
-                                        session.client.emitMessagesConsumed([localId], { steered: true });
-                                    }
-                                } else if (outcome === 'rejected') {
-                                    session.queue.restoreReservation(taken);
-                                } else {
-                                    // App-server still unreachable: retry from
-                                    // the main-loop top on later passes.
-                                    pendingSteerReconciliations.set(localId, {
-                                        threadId: steerThreadId,
-                                        taken,
-                                        batch
-                                    });
-                                    scheduleSteerReconcileRetry();
-                                }
-                            })();
+                        if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
                             return;
                         }
                         // Definite app-server rejection: the instruction was not
@@ -2097,7 +2137,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     // rejection means the instruction was NOT accepted (restore
                     // it for the normal turn/start path), while an indeterminate
                     // transport failure (disconnect/timeout/protocol) leaves the
-                    // row reserved so it can never be delivered twice.
+                    // row reserved and schedules thread reconciliation.
                     return { steered: true };
                 }
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
@@ -3864,24 +3904,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         while (!this.shouldExit) {
             logActiveHandles('loop-top');
             if (pendingSteerReconciliations.size > 0) {
-                for (const [localId, entry] of Array.from(pendingSteerReconciliations.entries())) {
-                    const outcome = await reconcileSteerByClientId(entry.threadId, localId);
-                    if (outcome === 'accepted') {
-                        pendingSteerReconciliations.delete(localId);
-                        if (session.queue.commitReservation(entry.taken)) {
-                            messageBuffer.addMessage(entry.batch.message, 'user');
-                            session.client.emitMessagesConsumed([localId], { steered: true });
-                        }
-                    } else if (outcome === 'rejected') {
-                        pendingSteerReconciliations.delete(localId);
-                        session.queue.restoreReservation(entry.taken);
-                        logger.debug(`[Codex] reconciled steered message ${localId}: not in thread — row restored`);
-                    } else {
-                        // 'unknown': app-server still unreachable — schedule the
-                        // next retry so recovery without external traffic is seen.
-                        scheduleSteerReconcileRetry();
-                    }
-                }
+                await runSteerReconciliation();
             }
             if (!pending && recoveryInFlight) {
                 await waitForTurnOrRecovery(this.abortController.signal);

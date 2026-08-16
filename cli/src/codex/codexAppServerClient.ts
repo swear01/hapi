@@ -174,10 +174,16 @@ function resolveCodexAppServerCommand(): string {
 export class CodexAppServerClient extends JsonLineParser {
     private process: ChildProcessWithoutNullStreams | null = null;
     private connected = false;
+    private initialized = false;
 
     /** True while the app-server process is connected. */
     isConnected(): boolean {
         return this.connected;
+    }
+
+    /** True after a successful initialize round-trip on the current process. */
+    isInitialized(): boolean {
+        return this.initialized;
     }
     private nextId = 1;
     private readonly pending = new Map<number, PendingRequest>();
@@ -232,6 +238,7 @@ export class CodexAppServerClient extends JsonLineParser {
             logger.debug(message);
             this.rejectAllPending(new Error(message));
             this.connected = false;
+            this.initialized = false;
             this.resetParserState();
             this.process = null;
         });
@@ -263,6 +270,7 @@ export class CodexAppServerClient extends JsonLineParser {
     async initialize(params: InitializeParams): Promise<InitializeResponse> {
         const response = await this.sendRequest('initialize', params, { timeoutMs: 30_000 });
         this.sendNotification('initialized');
+        this.initialized = true;
         return response as InitializeResponse;
     }
 
@@ -448,6 +456,7 @@ export class CodexAppServerClient extends JsonLineParser {
         } finally {
             this.rejectAllPending(new Error('Codex app-server disconnected'));
             this.connected = false;
+            this.initialized = false;
             this.resetParserState();
         }
 
