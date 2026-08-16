@@ -79,7 +79,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private pendingRetryableFromStderr = false;
     private pendingInlineRetryableError = false;
     private attemptProducedToolActivity = false;
-    private promptInFlight = false;
     private userAbortRequested = false;
 
     constructor(session: CursorSession) {
