@@ -918,9 +918,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         this.promptInFlight = false;
         // Abort is the hard-stop path: drop soft-steer waiters so the prompt
         // finally cannot block the next prompt on a soft steer whose completion
-        // is unbounded and may never settle. The ACP cancel above rejects
-        // in-flight requests when the transport closes; cleanup() settles any
-        // leftovers when the session ends.
+        // is unbounded and may never settle, and force-settle the backend's
+        // prompt counter so waitForResponseComplete() cannot block the next
+        // turn either. The ACP cancel above rejects in-flight requests when
+        // the transport closes; cleanup() settles any leftovers on exit.
+        this.backend?.abortSoftSteers();
         this.softSteerWaiters = [];
         this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         this.session.onThinkingChange(false);

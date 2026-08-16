@@ -1728,3 +1728,31 @@ describe('AcpSdkBackend', () => {
         await pending;
     });
 });
+
+describe('AcpSdkBackend abortSoftSteers', () => {
+    it('releases processingMessage without waiting for the concurrent prompt', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            isProcessingMessage: boolean;
+            activePromptRequests: number;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.activePromptRequests = 2;
+
+        backend.abortSoftSteers();
+
+        expect(backend.processingMessage).toBe(false);
+        expect(backendInternal.activePromptRequests).toBe(0);
+    });
+
+    it('is a no-op when nothing is in flight', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            activePromptRequests: number;
+        };
+        backendInternal.activePromptRequests = 0;
+
+        expect(() => backend.abortSoftSteers()).not.toThrow();
+        expect(backend.processingMessage).toBe(false);
+    });
+});

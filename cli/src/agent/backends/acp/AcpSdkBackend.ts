@@ -1151,6 +1151,22 @@ export class AcpSdkBackend implements AgentBackend {
         this.isProcessingMessage = true;
     }
 
+    /**
+     * Force-settle soft-steer bookkeeping without waiting for the concurrent
+     * `session/prompt` to finish. Called on abort: the in-flight turn is
+     * cancelled anyway, so a pending soft steer may never complete; dropping
+     * its counter keeps {@link waitForResponseComplete} from blocking the next
+     * turn. The main prompt's own `finishPromptRequest` is guarded by
+     * `Math.max(0, ...)`, so a later settle is harmless.
+     */
+    abortSoftSteers(): void {
+        if (this.activePromptRequests > 0) {
+            this.activePromptRequests = 0;
+            this.isProcessingMessage = false;
+            this.notifyResponseComplete();
+        }
+    }
+
     private finishPromptRequest(): void {
         this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
         this.isProcessingMessage = this.activePromptRequests > 0;
