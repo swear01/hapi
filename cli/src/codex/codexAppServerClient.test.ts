@@ -94,7 +94,7 @@ describe('CodexAppServerClient turn/steer', () => {
             if (request?.method === 'turn/steer') {
                 setTimeout(() => {
                     (child.stdout as EventEmitter).emit('data', Buffer.from(
-                        JSON.stringify({ jsonrpc: '2.0', id: request!.id, result: { ok: true } }) + '\n'
+                        JSON.stringify({ jsonrpc: '2.0', id: request!.id, result: { turnId: 'turn-9' } }) + '\n'
                     ));
                 }, 0);
             }
@@ -107,7 +107,7 @@ describe('CodexAppServerClient turn/steer', () => {
             expectedTurnId: 'turn-9'
         });
 
-        expect(result).toEqual({ ok: true });
+        expect(result).toEqual({ turnId: 'turn-9' });
         const steerWrite = writes.find((w) => w.includes('turn/steer'));
         expect(steerWrite).toBeDefined();
         expect(JSON.parse(steerWrite!)).toMatchObject({

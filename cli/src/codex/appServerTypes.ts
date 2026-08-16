@@ -286,12 +286,13 @@ export interface TurnSteerParams {
     threadId: string;
     /** New user input to inject into the active turn. */
     input: Array<{ type: 'text'; text: string }>;
-    /** Reject the steer if the turn already advanced past this id. */
-    expectedTurnId?: string;
+    /** Must match the active turn id; the server rejects the steer otherwise. */
+    expectedTurnId: string;
 }
 
 export interface TurnSteerResponse {
-    ok: boolean;
+    /** The active turn that accepted the steer. */
+    turnId: string;
     [key: string]: unknown;
 }
 

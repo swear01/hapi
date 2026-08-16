@@ -3287,7 +3287,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     input: [{ type: 'text', text: batch.message }],
                     expectedTurnId: turnId
                 }, { signal: this.abortController.signal });
-                messageBuffer.addMessage(batch.message, 'user');
                 logger.debug(`[Codex] Steered active turn ${turnId}`);
                 return true;
             } catch (error) {
@@ -3338,7 +3337,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
                 const steered = await trySteerActiveTurn(batch);
                 if (steered) {
-                    session.queue.commitReservation(taken);
+                    // A success racing with abort/cleanup must not publish a
+                    // consumed event or user message for the invalidated steer.
+                    if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
+                        || !session.queue.commitReservation(taken)) {
+                        return { steered: false, error: 'Steer cancelled' };
+                    }
+                    messageBuffer.addMessage(batch.message, 'user');
                     session.client.emitMessagesConsumed([localId]);
                     return { steered: true };
                 }

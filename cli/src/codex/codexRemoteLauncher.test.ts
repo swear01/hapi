@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import type { EnhancedMode } from './loop';
 
 const harness = vi.hoisted(() => ({
@@ -52,6 +53,9 @@ const harness = vi.hoisted(() => ({
     safetyBufferingFasterModel: null as string | null,
     emitModelSafetyNotices: false,
     startTurnMessages: [] as string[],
+    steerTurnCalls: [] as Array<Record<string, unknown>>,
+    deferSteerTurn: null as Promise<void> | null,
+    releaseSteerTurn: null as (() => void) | null,
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
     failNextCompact: false,
@@ -1015,6 +1019,14 @@ vi.mock('./codexAppServerClient', () => {
             return {};
         }
 
+        async steerTurn(params?: Record<string, unknown>): Promise<{ turnId: string }> {
+            harness.steerTurnCalls.push(params ?? {});
+            if (harness.deferSteerTurn) {
+                await harness.deferSteerTurn;
+            }
+            return { turnId: (params?.expectedTurnId as string) ?? 'turn-unknown' };
+        }
+
         async rollbackThread(params?: { threadId?: string; numTurns?: number }): Promise<{ thread: { id: string } }> {
             const threadId = params?.threadId ?? 'thread-unknown';
             harness.rollbackCalls.push({ threadId, numTurns: params?.numTurns ?? 0 });
@@ -1229,6 +1241,9 @@ describe('codexRemoteLauncher', () => {
         harness.goal = null;
         harness.suppressGoalNotifications = false;
         harness.suppressTurnCompletion = false;
+        harness.steerTurnCalls = [];
+        harness.deferSteerTurn = null;
+        harness.releaseSteerTurn = null;
         harness.emitFailedCompletionAfterThreadSystemError = false;
         harness.emitCyberPolicyAfterThreadSystemError = false;
         harness.emitSafetyBuffering = false;
@@ -3137,5 +3152,48 @@ describe('isCurrentSteerHandler (#888)', () => {
         expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
         expect(isCurrentSteerHandler(3, 3, true)).toBe(false);
         expect(isCurrentSteerHandler(2, 3, false)).toBe(false);
+    });
+});
+
+describe('codexRemoteLauncher mid-turn steer (#888)', () => {
+    it('does not consume a steer when abort invalidates it before turn/steer resolves', async () => {
+        harness.suppressTurnCompletion = true;
+        // Abort interrupts the turn; the mock emits turn/completed so the
+        // launcher can wind down and exit once the queue is closed.
+        harness.emitTurnAbortedOnInterrupt = true;
+        let releaseSteer!: () => void;
+        harness.deferSteerTurn = new Promise((resolve) => { releaseSteer = resolve; });
+        const { session, rpcHandlers, codexMessages } = createSessionStub(['first message']);
+
+        const runPromise = codexRemoteLauncher(session as never);
+        // Turn 1 is in flight (completion suppressed).
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+        expect(harness.steerTurnCalls).toEqual([]);
+
+        // Queue a steer target while the turn is active.
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('steer me', createMode(), 'steer-local');
+
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+        expect(steerHandler).toBeTypeOf('function');
+        const steerPromise = steerHandler!({ localId: 'steer-local' });
+
+        // turn/steer is in flight; abort invalidates the steer epoch.
+        await vi.waitFor(() => expect(harness.steerTurnCalls.length).toBe(1));
+        console.log('DBG abort start');
+        await rpcHandlers.get('abort')?.({});
+        console.log('DBG abort done');
+
+        releaseSteer();
+        const result = await steerPromise;
+
+        expect(result).toEqual({ steered: false, error: 'Steer cancelled' });
+        // The invalidated steer never surfaces as a user message.
+        expect(codexMessages).toEqual([]);
+        // handleAbort reset() reopened the queue; close it so the launcher
+        // winds down and exits.
+        queue.close();
+        await runPromise;
     });
 });
