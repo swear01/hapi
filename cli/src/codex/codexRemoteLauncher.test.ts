@@ -1282,7 +1282,9 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        expect(result).toEqual({ steered: true });
+        // Explicit rejection surfaces as failed (not a false steered), and the
+        // row is restored so the normal turn/start path delivers it later.
+        expect(result).toEqual({ steered: false, error: 'turn/steer not allowed here' });
         await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
@@ -1305,7 +1307,10 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        expect(result).toEqual({ steered: true });
+        // Transport failure after dispatch: reported as reconciling, the row
+        // stays reserved — neither committed (message may not have run) nor
+        // restored (it may have run, so turn/start could duplicate it).
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
         expect(session.queue.cancelByLocalId('local-1')).toBe(false);
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
@@ -1331,7 +1336,7 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        expect(result).toEqual({ steered: true });
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
         // The scheduled reconciliation (1s timer) reads the thread, finds the
         // message, commits the row and fires the badge — no restore, no
         // duplicate.
@@ -1351,7 +1356,7 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        expect(result).toEqual({ steered: false, error: 'Failed to steer into active turn' });
+        expect(result).toEqual({ steered: false, error: 'stdin closed' });
         await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
