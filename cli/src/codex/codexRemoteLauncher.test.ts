@@ -107,6 +107,10 @@ vi.mock('./codexAppServerClient', () => {
             return true;
         }
 
+        isInitialized(): boolean {
+            return true;
+        }
+
         async initialize(params: unknown): Promise<{ protocolVersion: number }> {
             harness.initializeCalls.push(params);
             return { protocolVersion: 1 };
@@ -1328,9 +1332,10 @@ describe('codexRemoteLauncher', () => {
         const result = await handler({ localId: 'local-1' });
 
         expect(result).toEqual({ steered: true });
-        // The next loop pass reconciles: the thread contains the message, so the
-        // row commits and the web badge fires — no restore, no duplicate.
-        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
+        // The scheduled reconciliation (1s timer) reads the thread, finds the
+        // message, commits the row and fires the badge — no restore, no
+        // duplicate.
+        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }), { timeout: 5_000 });
         expect(session.queue.cancelByLocalId('local-1')).toBe(false);
         session.queue.close();
     });
