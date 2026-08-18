@@ -471,10 +471,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.client.emitSteerIndeterminate([localId]);
                     return { steered: false, error: 'Steer state is indeterminate' };
                 }
-                const restoreQueuedState = async () => {
-                    if (taken.originIndeterminate) return;
-                    const restored = await session.client.setSteerDeliveryState([localId], 'queued');
-                    if (!restored) session.client.emitSteerIndeterminate([localId]);
+                const restoreQueuedReservation = async (): Promise<boolean> => {
+                    if (!taken.originIndeterminate) {
+                        const persisted = await session.client.setSteerDeliveryState([localId], 'queued');
+                        if (!persisted) {
+                            session.client.emitSteerIndeterminate([localId]);
+                            return false;
+                        }
+                    }
+                    if (taken.state !== 'dispatching' || !session.queue.restoreReservation(taken)) {
+                        session.client.emitSteerIndeterminate([localId]);
+                        return false;
+                    }
+                    return true;
                 };
                 if (taken.state !== 'dispatching') {
                     session.client.emitSteerIndeterminate([localId]);
@@ -484,9 +493,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     || this.backend !== backend
                     || this.acpSessionId !== acpSessionId
                     || backend.getPromptGeneration() !== targetPromptGeneration) {
-                    await restoreQueuedState();
-                    session.queue.restoreReservation(taken);
-                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    await restoreQueuedReservation();
                     return { steered: false, error: 'Active turn changed' };
                 }
                 let steer: { dispatched: Promise<void>; completed: Promise<void> };
@@ -504,9 +511,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         return { steered: false, error: 'Steer outcome is being reconciled' };
                     }
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
-                    await restoreQueuedState();
-                    session.queue.restoreReservation(taken);
-                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    await restoreQueuedReservation();
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
                 // Completion still gates the next prompt (handler swap safety);
@@ -530,9 +535,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         logger.debug('[cursor-acp] soft-steer dispatch outcome unknown', error);
                         return { steered: false, error: 'Steer outcome is being reconciled' };
                     }
-                    await restoreQueuedState();
-                    session.queue.restoreReservation(taken);
-                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    await restoreQueuedReservation();
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
@@ -559,12 +562,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch; row held for explicit resolution', error);
                         return;
                     }
-                    void restoreQueuedState().then(() => {
-                        if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    void restoreQueuedReservation().then((restored) => {
+                        if (restored) {
+                            logger.debug('[cursor-acp] soft-steer rejected by ACP; row restored', error);
+                        }
                     });
-                    if (session.queue.restoreReservation(taken)) {
-                        logger.debug('[cursor-acp] soft-steer rejected by ACP; row restored', error);
-                    }
                 });
                 return { steered: true };
             }
