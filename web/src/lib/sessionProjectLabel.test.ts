@@ -21,4 +21,11 @@ describe('session project labels', () => {
         expect(getSessionProjectPath({ path: '   ' })).toBeNull()
         expect(getSessionProjectPath(null)).toBeNull()
     })
+
+    it('does not treat a worktree with no base path as a simple session', () => {
+        expect(getSessionProjectPath({
+            path: '/work/hapi-worktrees/fix-resume',
+            worktree: { basePath: '   ' },
+        })).toBeNull()
+    })
 })
