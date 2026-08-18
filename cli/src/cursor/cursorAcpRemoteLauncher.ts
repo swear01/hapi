@@ -1069,7 +1069,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         }
         await this.permissionAdapter?.cancelAll('User aborted');
         await this.extensionAdapter?.cancelAll('User aborted');
-        this.session.queue.reset();
+        // A soft steer may settle after Abort; preserve its reservation until
+        // the completion callback records accepted or indeterminate.
+        this.session.queue.reset({ preserveDispatchingReservations: true });
         this.promptInFlight = false;
         // Abort is the hard-stop path: drop soft-steer waiters so the prompt
         // finally cannot block the next prompt on a soft steer whose completion
