@@ -956,6 +956,7 @@ class ChatViewModel(
                 store.appendOptimistic(invokedMessage.asWindowMessage(MessageStatus.Sent))
             } else if (response.status == "busy") {
                 store.appendOptimistic(row.copy(status = MessageStatus.Indeterminate))
+                runCatching { store.reconcileQueuedState() }
             }
             response.status
         } catch (cancellation: CancellationException) {
