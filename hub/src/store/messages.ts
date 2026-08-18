@@ -758,7 +758,7 @@ export function lookupQueuedMessage(
         return { status: 'invoked' as const, message: toStoredMessage(row) }
     }
 
-    if (row.delivery_state === 'indeterminate') {
+    if (row.delivery_state && row.delivery_state !== 'queued') {
         return { status: 'indeterminate' as const, localId: row.local_id, resolvedId: row.id, scheduledAt: row.scheduled_at }
     }
 
