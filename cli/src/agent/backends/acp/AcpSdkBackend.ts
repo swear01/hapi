@@ -82,6 +82,8 @@ export class AcpSdkBackend implements AgentBackend {
     private activePromptRequests = 0;
     /** Bumped by abortSoftSteers; stale finishes from cancelled requests are dropped. */
     private promptRequestEpoch = 0;
+    /** Incremented for each foreground prompt turn, including retry-wrapped turns. */
+    private promptGeneration = 0;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -561,6 +563,7 @@ export class AcpSdkBackend implements AgentBackend {
             textChunkMode: this.options.textChunkMode,
             flavor: this.options.flavor,
         });
+        this.promptGeneration++;
         const promptRequestEpoch = this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
@@ -835,6 +838,10 @@ export class AcpSdkBackend implements AgentBackend {
 
     isPromptRequestInFlight(): boolean {
         return this.promptRequestInFlight;
+    }
+
+    getPromptGeneration(): number {
+        return this.promptGeneration;
     }
 
     getLastSessionUpdateAt(): number {

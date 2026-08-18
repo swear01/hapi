@@ -149,6 +149,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 if (error) throw error;
             }),
             cancelPrompt: vi.fn(async () => {}),
+            getPromptGeneration: vi.fn(() => 1),
             beginSoftSteerPrompt: vi.fn(() => ({
                 dispatched: harness.softSteerDispatchError
                     ? Promise.reject(harness.softSteerDispatchError)

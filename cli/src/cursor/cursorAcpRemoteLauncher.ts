@@ -433,9 +433,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 if (!localId) {
                     return { steered: false, error: 'Missing localId' };
                 }
-                if (!this.promptInFlight || !this.acpSessionId || !this.backend) {
+                const backend = this.backend;
+                const acpSessionId = this.acpSessionId;
+                if (!this.promptInFlight || !acpSessionId || !backend) {
                     return { steered: false, error: 'No active steerable turn' };
                 }
+                const targetPromptGeneration = backend.getPromptGeneration();
                 const taken = session.queue.takeByLocalId(localId);
                 if (!taken) {
                     return { steered: false, error: 'Message not in queue' };
@@ -470,9 +473,18 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     const restored = await session.client.setSteerDeliveryState([localId], 'queued');
                     if (!restored) session.client.emitSteerIndeterminate([localId]);
                 };
+                if (!this.promptInFlight
+                    || this.backend !== backend
+                    || this.acpSessionId !== acpSessionId
+                    || backend.getPromptGeneration() !== targetPromptGeneration) {
+                    await restoreQueuedState();
+                    session.queue.restoreReservation(taken);
+                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    return { steered: false, error: 'Active turn changed' };
+                }
                 let steer: { dispatched: Promise<void>; completed: Promise<void> };
                 try {
-                    steer = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
+                    steer = backend.beginSoftSteerPrompt(acpSessionId, [{
                         type: 'text',
                         text: taken.item.message
                     }]);
