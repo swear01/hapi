@@ -93,6 +93,31 @@ describe('CodexAppServerClient process cwd', () => {
         await client.disconnect();
     });
 
+    it('times out a stalled stdin dispatch instead of leaving it pending', async () => {
+        vi.useFakeTimers();
+        try {
+            const child = fakeChild();
+            child.stdin.write = vi.fn(() => true);
+            spawnMock.mockReturnValue(child);
+            const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+
+            await client.connect();
+            const steer = await client.steerTurn({
+                threadId: 'thread-1',
+                input: [{ type: 'text', text: 'x' }],
+                expectedTurnId: 'turn-1'
+            });
+            const dispatched = expect(steer.dispatched).rejects.toThrow("timed out after 25000ms");
+            const completed = expect(steer.completed).rejects.toThrow("timed out after 25000ms");
+            await vi.advanceTimersByTimeAsync(25_000);
+            await dispatched;
+            await completed;
+            await client.disconnect();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('steerTurn rejects dispatch when stdin write fails', async () => {
         const child = fakeChild();
         child.stdin.write = vi.fn((_data: unknown, cb?: (error?: Error | null) => void) => {

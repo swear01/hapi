@@ -2120,6 +2120,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 // Pin the thread this steer targets: reconciliation must look at
                 // the steer's thread, not whichever turn is current later.
                 const steerThreadId = this.currentThreadId;
+                const steerTurnId = this.currentTurnId;
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
@@ -2133,6 +2134,15 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     const restored = await session.client.setSteerDeliveryState([localId], 'queued');
                     if (!restored) session.client.emitSteerIndeterminate([localId]);
                 };
+                if (!turnInFlight
+                    || this.currentThreadId !== steerThreadId
+                    || this.currentTurnId !== steerTurnId
+                    || !isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                    await restoreQueuedState();
+                    session.queue.restoreReservation(taken);
+                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    return { steered: false, error: 'Active turn changed' };
+                }
                 const steer = await trySteerActiveTurn(batch, localId);
                 if (steer) {
                     const reconcileDispatchedSteer = (
