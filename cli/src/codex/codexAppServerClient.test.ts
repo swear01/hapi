@@ -120,4 +120,35 @@ describe('CodexAppServerClient turn/steer', () => {
         });
         await client.disconnect();
     });
+
+    it('does not timeout a steer while its app-server response is delayed', async () => {
+        vi.useFakeTimers();
+        try {
+            const child = fakeChild();
+            spawnMock.mockReturnValue(child);
+            const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+            await client.connect();
+
+            const steerPromise = client.steerTurn({
+                threadId: 'thread-1',
+                input: [{ type: 'text', text: 'pivot now' }],
+                expectedTurnId: 'turn-1'
+            });
+            await vi.advanceTimersByTimeAsync(30_001);
+            expect(spawnMock).toHaveBeenCalledTimes(1);
+
+            const write = (child.stdin.write as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+            const request = JSON.parse(write) as { id: number };
+            child.stdout.emit('data', Buffer.from(JSON.stringify({
+                jsonrpc: '2.0',
+                id: request.id,
+                result: { turnId: 'turn-1' }
+            }) + '\n'));
+
+            await expect(steerPromise).resolves.toEqual({ turnId: 'turn-1' });
+            await client.disconnect();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });
