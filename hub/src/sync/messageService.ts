@@ -452,8 +452,14 @@ export class MessageService {
             // The native request may have reached the agent while the cancel
             // round-trip was pending. Never delete a live dispatch; hold it as
             // unknown and let the user explicitly retry or discard afterwards.
-            this.store.messages.setMessagesDeliveryState(sessionId, [localId], 'indeterminate')
-            this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
+            const changed = this.store.messages.setMessagesDeliveryState(sessionId, [localId], 'indeterminate')
+            if (changed === 0) {
+                const settled = this.store.messages.lookupQueuedMessage(sessionId, resolvedId)
+                if (settled.status === 'invoked') return settled
+                if (settled.status === 'absent') return { status: 'cancelled', localId }
+            } else {
+                this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
+            }
             return { status: 'busy', localId }
         }
 

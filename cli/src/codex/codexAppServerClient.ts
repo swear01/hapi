@@ -210,7 +210,7 @@ export class CodexAppServerClient extends JsonLineParser {
 
         const codexCommand = resolveCodexAppServerCommand();
         logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
-        this.process = spawn(codexCommand, ['app-server'], {
+        const child = spawn(codexCommand, ['app-server'], {
             cwd: this.options.cwd,
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];
@@ -221,12 +221,16 @@ export class CodexAppServerClient extends JsonLineParser {
             shell: process.platform === 'win32',
             windowsHide: process.platform === 'win32'
         });
+        this.process = child;
 
-        this.process.stdout.setEncoding('utf8');
-        this.process.stdout.on('data', (chunk) => this.feed(chunk));
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => {
+            if (this.process === child) this.feed(chunk);
+        });
 
-        this.process.stderr.setEncoding('utf8');
-        this.process.stderr.on('data', (chunk) => {
+        child.stderr.setEncoding('utf8');
+        child.stderr.on('data', (chunk) => {
+            if (this.process !== child) return;
             const text = chunk.toString().trim();
             if (text.length > 0) {
                 logger.debug(`[CodexAppServer][stderr] ${text}`);
@@ -234,7 +238,8 @@ export class CodexAppServerClient extends JsonLineParser {
             }
         });
 
-        this.process.on('exit', (code, signal) => {
+        child.on('exit', (code, signal) => {
+            if (this.process !== child) return;
             const message = `Codex app-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
             logger.debug(message);
             this.rejectAllPending(new Error(message));
@@ -244,7 +249,8 @@ export class CodexAppServerClient extends JsonLineParser {
             this.process = null;
         });
 
-        this.process.on('error', (error) => {
+        child.on('error', (error) => {
+            if (this.process !== child) return;
             logger.debug('[CodexAppServer] Process error', error);
             const message = error instanceof Error ? error.message : String(error);
             this.rejectAllPending(new Error(
@@ -526,7 +532,7 @@ export class CodexAppServerClient extends JsonLineParser {
             this.connected = false;
             this.initialized = false;
             try {
-                child?.stdin.destroy(error);
+                child?.stdin.destroy();
             } catch (destroyError) {
                 logger.debug('[CodexAppServer] Error destroying stalled stdin', destroyError);
             }
