@@ -33,6 +33,7 @@ const harness = vi.hoisted(() => ({
     softSteerDispatchError: null as Error | null,
     deferSoftSteer: null as Promise<void> | null,
     releaseSoftSteer: null as (() => void) | null,
+    rejectSoftSteer: null as ((error: Error) => void) | null,
     deferPrompt: null as Promise<void> | null,
     releasePrompt: null as (() => void) | null
 }));
@@ -1502,6 +1503,7 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         harness.softSteerDispatchError = null;
         harness.deferSoftSteer = null;
         harness.releaseSoftSteer = null;
+        harness.rejectSoftSteer = null;
         harness.deferPrompt = null;
         harness.releasePrompt = null;
         harness.promptCalls = 0;
@@ -1673,11 +1675,13 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
-    it('does not publish consumed events when a soft steer settles after abort', async () => {
+    it('commits a dispatched steer before abort and does not restore it on late failure', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
-        let releaseSoftSteer!: () => void;
-        harness.deferSoftSteer = new Promise((resolve) => { releaseSoftSteer = resolve; });
+        harness.deferSoftSteer = new Promise((resolve, reject) => {
+            harness.releaseSoftSteer = resolve;
+            harness.rejectSoftSteer = reject;
+        });
         const session = makeSession(null, false);
         const mode = { permissionMode: 'default' } as EnhancedMode;
         session.queue.push('first message', mode, 'local-1');
@@ -1694,19 +1698,22 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
         const result = await steerHandler!({ localId: 'local-2' });
         expect(result).toEqual({ steered: true });
+        expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-2']);
+        expect(session.queue.pendingLocalIds()).not.toContain('local-2');
 
-        // Abort invalidates the steer before its ACP completion arrives.
+        // Abort after ACP accepted the write; a later completion failure must
+        // not restore or emit the already-consumed row a second time.
         session.client.emitSessionReady();
         const abortHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.Abort);
         expect(abortHandler).toBeTypeOf('function');
         await abortHandler!({});
 
-        releaseSoftSteer();
+        harness.rejectSoftSteer!(new Error('ACP disconnected'));
         await new Promise((resolve) => setTimeout(resolve, 20));
 
-        // No consumed event for the invalidated steer (the normal prompt's
-        // batch consumption of local-1 is unrelated).
-        expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
+        expect(client.emitMessagesConsumed.mock.calls.filter(([localIds]) =>
+            Array.isArray(localIds) && localIds.includes('local-2'))).toHaveLength(1);
+        expect(session.queue.pendingLocalIds()).not.toContain('local-2');
 
         releasePrompt();
         session.queue.close();
