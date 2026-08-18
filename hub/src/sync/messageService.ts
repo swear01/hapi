@@ -104,6 +104,7 @@ function getNormalizedDeliveryMode(
 export type RetryIndeterminateMessageResult =
     | { status: 'retried'; localId: string }
     | { status: 'already-queued'; localId: string | null }
+    | { status: 'retry-unavailable'; localId: string }
     | { status: 'invoked'; message: DecryptedMessage }
     | { status: 'not-found' }
 
@@ -619,8 +620,27 @@ export class MessageService {
                 }
             }
         }
-        if (!this.store.isOpenCodeClearDeliveryGated(sessionId)) {
-            this.io.of('/cli').to(`session:${sessionId}`).emit('update', update)
+        const room = this.io.of('/cli').to(`session:${sessionId}`)
+        const cliCount = this.io.of('/cli').adapter.rooms.get(`session:${sessionId}`)?.size ?? 0
+        if (this.store.isOpenCodeClearDeliveryGated(sessionId) || cliCount === 0) {
+            this.store.messages.setMessagesDeliveryState(sessionId, [message.localId], 'indeterminate')
+            this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [message.localId] })
+            return { status: 'retry-unavailable', localId: message.localId }
+        }
+
+        const accepted = await new Promise<boolean>((resolve) => {
+            room.timeout(500).emit(
+                'update',
+                update,
+                (_err: Error | null, responses: Array<{ accepted?: boolean }>) => {
+                    resolve(responses?.some((response) => response.accepted === true) ?? false)
+                }
+            )
+        })
+        if (!accepted) {
+            this.store.messages.setMessagesDeliveryState(sessionId, [message.localId], 'indeterminate')
+            this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [message.localId] })
+            return { status: 'retry-unavailable', localId: message.localId }
         }
         this.publisher.emit({ type: 'messages-requeued', sessionId, localIds: [message.localId] })
         return { status: 'retried', localId: message.localId }

@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import { markMessagesRequeued } from '@/lib/message-window-store'
+import { markMessagesConsumed, markMessagesRequeued } from '@/lib/message-window-store'
 
 type RetryIndeterminateMessageInput = {
     sessionId: string
@@ -16,6 +16,9 @@ export function useRetryIndeterminateMessage(api: ApiClient | null) {
         onSuccess: (result, input) => {
             if (result.status === 'retried' || result.status === 'already-queued') {
                 markMessagesRequeued(input.sessionId, result.localId ? [result.localId] : [])
+            }
+            if (result.status === 'invoked' && result.message.localId && typeof result.message.invokedAt === 'number') {
+                markMessagesConsumed(input.sessionId, [result.message.localId], result.message.invokedAt)
             }
         },
     })

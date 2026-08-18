@@ -421,7 +421,7 @@ export class ApiSessionClient extends EventEmitter {
             this.agentTerminalActive = false
         }))
 
-        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean }) => void) => {
+        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean; accepted?: boolean }) => void) => {
             try {
                 if (!data.body) return
 
@@ -433,11 +433,15 @@ export class ApiSessionClient extends EventEmitter {
                 if (data.body.t === 'retry-queued-message') {
                     // Explicit user retry: release any held in-memory
                     // reservation and bypass the normal message-id dedup.
+                    let accepted = true
                     if (data.body.localId && this.cancelQueuedMessageCallback) {
                         const cancelled = this.cancelQueuedMessageCallback(data.body.localId)
-                        if (cancelled === 'in-flight') return
+                        accepted = cancelled !== 'in-flight'
                     }
-                    this.handleIncomingMessage(data.body.message, true)
+                    if (accepted) {
+                        this.handleIncomingMessage(data.body.message, true)
+                    }
+                    ack?.({ removed: false, accepted })
                     return
                 }
 

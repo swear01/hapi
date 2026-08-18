@@ -65,6 +65,7 @@ type RequestHandler = (params: unknown) => Promise<unknown> | unknown;
 type PendingRequest = {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
+    rejectDispatched: (error: Error) => void;
     cleanup: () => void;
 };
 
@@ -495,13 +496,20 @@ export class CodexAppServerClient extends JsonLineParser {
         const timeoutMs = options?.timeoutMs ?? CodexAppServerClient.DEFAULT_TIMEOUT_MS;
 
         let timeout: ReturnType<typeof setTimeout> | null = null;
+        let resolveDispatched!: () => void;
+        let rejectDispatched!: (error: Error) => void;
         let resolveCompleted!: (value: unknown) => void;
         let rejectCompleted!: (error: Error) => void;
+        const dispatched = new Promise<void>((resolve, reject) => {
+            resolveDispatched = resolve;
+            rejectDispatched = reject;
+        });
         const completed = new Promise<unknown>((resolve, reject) => {
             resolveCompleted = resolve;
             rejectCompleted = reject;
         });
         let aborted = false;
+        let dispatchSettled = false;
 
         const cleanup = () => {
             if (timeout) {
@@ -512,18 +520,26 @@ export class CodexAppServerClient extends JsonLineParser {
             }
         };
 
+        const failRequest = (error: Error) => {
+            this.pending.delete(id);
+            cleanup();
+            if (!dispatchSettled) {
+                dispatchSettled = true;
+                rejectDispatched(error);
+            }
+            rejectCompleted(error);
+        };
+
         const onAbort = () => {
             if (aborted) return;
             aborted = true;
-            this.pending.delete(id);
-            cleanup();
-            rejectCompleted(this.markIndeterminate(createAbortError()));
+            failRequest(this.markIndeterminate(createAbortError()));
         };
 
         if (options?.signal) {
             if (options.signal.aborted) {
                 onAbort();
-                return { dispatched: Promise.reject(this.markIndeterminate(createAbortError())), completed };
+                return { dispatched, completed };
             }
             options.signal.addEventListener('abort', onAbort, { once: true });
         }
@@ -531,9 +547,7 @@ export class CodexAppServerClient extends JsonLineParser {
         if (Number.isFinite(timeoutMs) && !aborted) {
             timeout = setTimeout(() => {
                 if (this.pending.has(id)) {
-                    this.pending.delete(id);
-                    cleanup();
-                    rejectCompleted(this.markIndeterminate(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`)));
+                    failRequest(this.markIndeterminate(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`)));
                 }
             }, timeoutMs);
             timeout.unref();
@@ -548,31 +562,32 @@ export class CodexAppServerClient extends JsonLineParser {
                 cleanup();
                 rejectCompleted(error);
             },
+            rejectDispatched: (error) => {
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    rejectDispatched(error);
+                }
+            },
             cleanup
         });
 
-        const dispatched = new Promise<void>((resolve, reject) => {
-            try {
-                const serialized = JSON.stringify(payload);
-                this.process?.stdin.write(`${serialized}\n`, (error) => {
-                    if (error) {
-                        const writeError = error instanceof Error ? error : new Error(String(error));
-                        this.pending.delete(id);
-                        cleanup();
-                        rejectCompleted(writeError);
-                        reject(writeError);
-                        return;
-                    }
-                    resolve();
-                });
-            } catch (error) {
-                const writeError = error instanceof Error ? error : new Error(String(error));
-                this.pending.delete(id);
-                cleanup();
-                rejectCompleted(writeError);
-                reject(writeError);
-            }
-        });
+        try {
+            const serialized = JSON.stringify(payload);
+            this.process?.stdin.write(`${serialized}\n`, (error) => {
+                if (error) {
+                    const writeError = error instanceof Error ? error : new Error(String(error));
+                    failRequest(writeError);
+                    return;
+                }
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    resolveDispatched();
+                }
+            });
+        } catch (error) {
+            const writeError = error instanceof Error ? error : new Error(String(error));
+            failRequest(writeError);
+        }
 
         return { dispatched, completed };
     }
@@ -709,8 +724,9 @@ export class CodexAppServerClient extends JsonLineParser {
 
     private rejectAllPending(error: Error): void {
         error = this.markIndeterminate(error);
-        for (const { reject, cleanup } of this.pending.values()) {
+        for (const { reject, rejectDispatched, cleanup } of this.pending.values()) {
             cleanup();
+            rejectDispatched(error);
             reject(error);
         }
         this.pending.clear();
