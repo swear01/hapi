@@ -179,6 +179,12 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushIsolateAndClear() called with mode hash: ${modeHash} - clearing ${this.queue.length} pending messages`);
 
+        // A clearing command must acknowledge steers whose dispatch already
+        // started before discarding the remaining hidden reservations.
+        const dispatchedLocalIds = this.commitDispatchingReservations();
+        if (dispatchedLocalIds.length > 0) {
+            this.onBatchConsumed?.(dispatchedLocalIds);
+        }
         // A clearing command must also discard hidden reservations (rows taken
         // by takeByLocalId for a pending steer): a later failed steer must not
         // resurrect a message the clear command was meant to discard.

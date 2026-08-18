@@ -756,6 +756,21 @@ describe('MessageQueue2', () => {
             expect(queue.pendingLocalIds()).toEqual(['clear-1']);
         });
 
+        it('acknowledges dispatched reservations before isolate-and-clear cancels the rest', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            const consumed: string[] = [];
+            queue.onBatchConsumed = (localIds) => consumed.push(...localIds);
+            queue.push('msg1', 'local', 'id-1');
+            const taken = queue.takeByLocalId('id-1');
+            queue.beginReservationDispatch(taken!);
+
+            queue.pushIsolateAndClear('/clear', 'local', 'clear-1');
+
+            expect(consumed).toEqual(['id-1']);
+            expect(queue.restoreReservation(taken!)).toBe(false);
+            expect(queue.pendingLocalIds()).toEqual(['clear-1']);
+        });
+
         it('reset and close cancel outstanding reservations', () => {
             const queue = new MessageQueue2<string>(mode => mode);
             queue.push('msg1', 'local', 'id-1');
