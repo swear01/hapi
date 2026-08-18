@@ -16,6 +16,19 @@ import {
 } from './agentCliGuard';
 import { matchesAcpHttp2Cancel, matchesAcpRetryBackoff } from './acpStderrErrors';
 
+/** Transport failures leave delivery outcome unknown; JSON-RPC errors are explicit rejection. */
+export const ACP_INDETERMINATE_SYMBOL = Symbol('acp-indeterminate');
+
+function markAcpIndeterminate(error: Error): Error {
+    Object.defineProperty(error, ACP_INDETERMINATE_SYMBOL, { value: true });
+    return error;
+}
+
+export function isAcpIndeterminateError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+        && (error as Record<symbol, unknown>)[ACP_INDETERMINATE_SYMBOL] === true;
+}
+
 interface JsonRpcRequest {
     jsonrpc: '2.0';
     id: string | number | null;
@@ -273,7 +286,9 @@ export class AcpStdioTransport {
         completed: Promise<unknown>;
     } {
         if (this.closed || this.exited) {
-            const error = this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
+            const error = markAcpIndeterminate(
+                this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
+            );
             return { dispatched: Promise.reject(error), completed: Promise.reject(error) };
         }
 
@@ -302,7 +317,7 @@ export class AcpStdioTransport {
             const timer = setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
-                    reject(new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`));
+                    reject(markAcpIndeterminate(new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`)));
                 }
             }, timeoutMs);
             // Don't let timer keep Node alive if process wants to exit
@@ -485,14 +500,16 @@ export class AcpStdioTransport {
 
     private dispatchPayload(payload: JsonRpcRequest): Promise<void> {
         if (this.closed || this.exited) {
-            return Promise.reject(this.closeError ?? this.exitError ?? new Error('ACP transport is closed'));
+            return Promise.reject(markAcpIndeterminate(
+                this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
+            ));
         }
 
         let serialized: string;
         try {
             serialized = JSON.stringify(payload);
         } catch (error) {
-            const writeError = error instanceof Error ? error : new Error(String(error));
+            const writeError = markAcpIndeterminate(error instanceof Error ? error : new Error(String(error)));
             this.markClosed(writeError);
             return Promise.reject(writeError);
         }
@@ -501,19 +518,21 @@ export class AcpStdioTransport {
             try {
                 this.process.stdin.write(`${serialized}\n`, (error?: Error | null) => {
                     if (error) {
-                        const writeError = error instanceof Error ? error : new Error(String(error));
+                        const writeError = markAcpIndeterminate(error instanceof Error ? error : new Error(String(error)));
                         this.markClosed(writeError);
                         reject(writeError);
                         return;
                     }
                     if (this.closed || this.exited) {
-                        reject(this.closeError ?? this.exitError ?? new Error('ACP transport is closed'));
+                        reject(markAcpIndeterminate(
+                            this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
+                        ));
                         return;
                     }
                     resolve();
                 });
             } catch (error) {
-                const writeError = error instanceof Error ? error : new Error(String(error));
+                const writeError = markAcpIndeterminate(error instanceof Error ? error : new Error(String(error)));
                 this.markClosed(writeError);
                 reject(writeError);
             }
@@ -540,8 +559,9 @@ export class AcpStdioTransport {
         }
 
         this.closed = true;
-        this.closeError = error;
-        this.rejectAllPending(error);
+        const indeterminate = markAcpIndeterminate(error);
+        this.closeError = indeterminate;
+        this.rejectAllPending(indeterminate);
     }
 
     private rejectAllPending(error: Error): void {

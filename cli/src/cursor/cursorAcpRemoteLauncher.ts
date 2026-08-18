@@ -34,6 +34,7 @@ import { cursorPassThroughStatusMessage, parseCursorSpecialCommand } from './cur
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { isAcpIndeterminateError } from '@/agent/backends/acp/AcpStdioTransport';
 import type { AcpStderrError } from '@/agent/backends/acp/AcpStdioTransport';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 import {
@@ -477,14 +478,30 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
                 const steerEpoch = this.softSteerEpoch;
-                // Keep the launcher busy until the full ACP response settles,
-                // but commit the row as soon as dispatch is accepted. A later
-                // cancel/teardown must not turn an already-injected message
-                // back into a normal queued prompt.
-                const steerDone = Promise.all([steer.dispatched, steer.completed]).then(
-                    () => undefined,
+                // Keep the launcher busy until the full ACP response settles.
+                // Explicit JSON-RPC rejection restores the row; transport
+                // failure leaves delivery indeterminate instead of replaying a
+                // request that may have reached ACP.
+                const steerDone = steer.dispatched.then(
+                    () => steer.completed.then(
+                        () => {
+                            session.queue.commitReservation(taken);
+                            messageBuffer.addMessage(taken.item.message, 'user');
+                            session.client.emitMessagesConsumed([localId]);
+                        },
+                        (error) => {
+                            if (isAcpIndeterminateError(error)) {
+                                logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch', error);
+                                return;
+                            }
+                            if (steerEpoch === this.softSteerEpoch && !this.shouldExit
+                                && session.queue.restoreReservation(taken)) {
+                                logger.debug('[cursor-acp] soft-steer rejected by ACP; row restored', error);
+                            }
+                        }
+                    ),
                     (error) => {
-                        logger.debug('[cursor-acp] soft-steer failed after dispatch', error);
+                        logger.debug('[cursor-acp] soft-steer failed to start', error);
                     }
                 );
                 this.softSteerWaiters.push(steerDone);
@@ -502,12 +519,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     }
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
-                if (steerEpoch !== this.softSteerEpoch || this.shouldExit
-                    || !session.queue.commitReservation(taken)) {
-                    return { steered: false, error: 'Steer cancelled' };
-                }
-                messageBuffer.addMessage(taken.item.message, 'user');
-                session.client.emitMessagesConsumed([localId]);
                 return { steered: true };
             }
         );
