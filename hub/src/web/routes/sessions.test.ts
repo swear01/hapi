@@ -1431,6 +1431,20 @@ describe('sessions routes', () => {
             })
             expect(response.status).toBe(400)
         })
+
+        it('rejects malformed member IDs without invoking deletion', async () => {
+            const calls: string[][] = []
+            const { app } = createApp(createSession({ active: false }), {
+                deleteArchivedSessions: async (sessionIds) => { calls.push(sessionIds) }
+            })
+            const response = await app.request('/api/sessions/delete-archived', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionIds: ['session-1', ''], requireAllArchived: true })
+            })
+            expect(response.status).toBe(400)
+            expect(calls).toEqual([])
+        })
     })
 
     describe('DELETE /sessions/:id (requireArchived guard, tiann/hapi#881)', () => {

@@ -60,6 +60,11 @@ describe('isSessionArchived', () => {
         expect(isSessionArchived(archived('a'))).toBe(true)
         expect(isSessionArchived(running('b'))).toBe(false)
         expect(isSessionArchived(completedStub('c'))).toBe(false)
+        expect(isSessionArchived(makeSession({
+            id: 'split-brain',
+            active: true,
+            metadata: { path: '/p', lifecycleState: 'archived' }
+        }))).toBe(false)
         expect(isSessionArchived(makeSession({ id: 'd', active: false }))).toBe(false)
     })
 })

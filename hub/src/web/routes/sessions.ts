@@ -26,6 +26,7 @@ import {
 } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
+import { DeleteArchivedSessionsRequestSchema } from '@hapi/protocol/schemas'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
@@ -873,16 +874,14 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return engine
         }
 
-        const body = await c.req.json().catch(() => null) as { sessionIds?: unknown; requireAllArchived?: unknown } | null
-        const sessionIds = Array.isArray(body?.sessionIds)
-            ? body.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
-            : []
-        if (sessionIds.length === 0 || body?.requireAllArchived !== true) {
-            return c.json({ error: 'sessionIds and requireAllArchived are required' }, 400)
+        const body = await c.req.json().catch(() => null)
+        const parsed = DeleteArchivedSessionsRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body' }, 400)
         }
 
         try {
-            await engine.deleteArchivedSessions(sessionIds, c.get('namespace'))
+            await engine.deleteArchivedSessions(parsed.data.sessionIds, c.get('namespace'))
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'

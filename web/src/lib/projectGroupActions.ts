@@ -11,7 +11,7 @@ import type { SessionSummary } from '@hapi/protocol/types'
  *  `active === false` alone is not enough (imported/completed stubs are
  *  inactive but never formally archived). */
 export function isSessionArchived(session: SessionSummary): boolean {
-    return session.metadata?.lifecycleState === 'archived'
+    return !session.active && session.metadata?.lifecycleState === 'archived'
 }
 
 /** A session can be archived when it is live, or split-brain (inactive cache
