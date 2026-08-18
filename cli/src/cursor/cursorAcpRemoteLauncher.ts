@@ -581,7 +581,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             session.onThinkingChange(true);
             this.promptInFlight = true;
             session.client.updateAgentState?.((state) => ({ ...state, steeringActive: true }));
-            this.activePromptModeHash = batch.hash;
+            this.activePromptModeHash = session.queue.modeHasher(batch.mode);
 
             try {
                 this.userAbortRequested = false;

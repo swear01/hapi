@@ -288,6 +288,8 @@ export interface TurnSteerParams {
     input: Array<{ type: 'text'; text: string }>;
     /** Must match the active turn id; the server rejects the steer otherwise. */
     expectedTurnId: string;
+    /** HAPI local id echoed in native history for fork/rewind mapping. */
+    clientUserMessageId?: string;
 }
 
 export interface TurnSteerResponse {

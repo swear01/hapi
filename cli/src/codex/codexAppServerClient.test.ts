@@ -104,7 +104,8 @@ describe('CodexAppServerClient turn/steer', () => {
         const result = await client.steerTurn({
             threadId: 'thread-1',
             input: [{ type: 'text', text: 'pivot now' }],
-            expectedTurnId: 'turn-9'
+            expectedTurnId: 'turn-9',
+            clientUserMessageId: 'local-9'
         });
 
         expect(result).toEqual({ turnId: 'turn-9' });
@@ -115,7 +116,8 @@ describe('CodexAppServerClient turn/steer', () => {
             params: {
                 threadId: 'thread-1',
                 input: [{ type: 'text', text: 'pivot now' }],
-                expectedTurnId: 'turn-9'
+                expectedTurnId: 'turn-9',
+                clientUserMessageId: 'local-9'
             }
         });
         await client.disconnect();
