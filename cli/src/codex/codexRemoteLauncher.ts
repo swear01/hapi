@@ -1900,7 +1900,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         appServerClient.setTransportAbandonedHandler(() => {
             // The old process is gone; its foreground turn cannot deliver more
             // notifications. Let the loop recover on a fresh app-server.
-            turnInFlight = false;
+            setTurnInFlight(false);
+            this.conversationHistory.setBusy(false);
+            if (session.thinking) session.onThinkingChange(false);
             recoveryInFlight = false;
             activeMessage = null;
             this.currentTurnId = null;
