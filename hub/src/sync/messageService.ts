@@ -457,6 +457,15 @@ export class MessageService {
                 return { status: 'busy', localId }
             }
             this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)
+            const recheck = this.store.messages.lookupQueuedMessage(sessionId, resolvedId)
+            if (recheck.status === 'invoked') {
+                // The steer won the race while the cancel ACK was in flight;
+                // never broadcast cancellation over a delivered row.
+                return recheck
+            }
+            if (recheck.status !== 'absent') {
+                return { status: 'busy', localId }
+            }
             this.publisher.emit({ type: 'message-cancelled', sessionId, messageId, localId })
             return { status: 'cancelled', localId }
         }
