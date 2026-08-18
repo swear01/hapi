@@ -315,10 +315,11 @@ export class MessageQueue2<T> {
             return 'in-flight';
         }
         if (reservation.state === 'indeterminate') {
-            // Preserve the held reservation while the hub decides whether the
-            // explicit cancel is safe; a dispatching→indeterminate race must
-            // never look like a confirmed removal.
-            return 'indeterminate';
+            // Explicit Cancel/ Edit is the user's resolution of an unknown
+            // outcome; release the held reservation so it cannot settle later.
+            reservation.state = 'cancelled';
+            this.reservations.delete(localId);
+            return true;
         }
         reservation.state = 'cancelled';
         this.reservations.delete(localId);

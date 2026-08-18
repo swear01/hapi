@@ -448,15 +448,10 @@ export class MessageService {
         // A live dispatch is not cancellable by timeout. Convert it to the
         // durable unknown state and require a second explicit resolution.
         if (isDispatching) {
-            const ackResult = await this.requestCliCancelAck(sessionId, localId, messageId, 500)
-            if (ackResult === 'removed') {
-                this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)
-                const recheck = this.store.messages.lookupQueuedMessage(sessionId, resolvedId)
-                if (recheck.status === 'invoked') return recheck
-                if (recheck.status !== 'absent') return { status: 'busy', localId }
-                this.publisher.emit({ type: 'message-cancelled', sessionId, messageId, localId })
-                return { status: 'cancelled', localId }
-            }
+            await this.requestCliCancelAck(sessionId, localId, messageId, 500)
+            // The native request may have reached the agent while the cancel
+            // round-trip was pending. Never delete a live dispatch; hold it as
+            // unknown and let the user explicitly retry or discard afterwards.
             this.store.messages.setMessagesDeliveryState(sessionId, [localId], 'indeterminate')
             this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
             return { status: 'busy', localId }
