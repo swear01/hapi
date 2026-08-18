@@ -1926,13 +1926,24 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         let shuttingDown = false;
 
         const settleReconcileEntry = (localId: string, entry: { taken: QueueReservation<EnhancedMode>; batch: QueuedMessage }): void => {
-            // The hub already reported steered on dispatch; the ACK must reach
-            // it even when an abort reset the queue and cancelled the
-            // reservation in between.
-            session.queue.commitReservation(entry.taken);
+            // An explicit retry/cancel may have superseded this poll while its
+            // readThread request was in flight.
+            if (pendingSteerReconciliations.get(localId) !== entry) return;
+            // The hub already knows this row is indeterminate. Only a positive
+            // thread/read match may stamp it delivered.
+            const committed = session.queue.commitReservation(entry.taken);
             pendingSteerReconciliations.delete(localId);
+            if (!committed) return;
             messageBuffer.addMessage(entry.batch.message, 'user');
             session.client.emitMessagesConsumed([localId], { steered: true });
+        };
+
+        const markReconcileEntryIndeterminate = (localId: string, entry: { taken: QueueReservation<EnhancedMode>; batch: QueuedMessage }): void => {
+            // Keep the reservation out of the automatic queue, but leave an
+            // explicit retry/cancel path. The hub persists the same state so a
+            // runner restart cannot replay an unproven steer.
+            session.queue.markReservationIndeterminate(entry.taken);
+            session.client.emitSteerIndeterminate([localId]);
         };
 
         const runSteerReconciliation = async (): Promise<void> => {
@@ -1946,14 +1957,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             steerReconcileInProgress = true;
             try {
                 for (const [localId, entry] of Array.from(pendingSteerReconciliations.entries())) {
+                    if (pendingSteerReconciliations.get(localId) !== entry) continue;
                     if (Date.now() >= entry.expiresAt) {
-                        // Terminal outcome: the app-server has not proven the
-                        // inject (client ids may be dropped after restart) and
-                        // the rejection window has long passed. Mark delivered —
-                        // the instruction was dispatched and no rejection ever
-                        // arrived; silently restoring could re-run it.
-                        logger.debug(`[Codex] steer ${localId} reconciliation expired; marking delivered`);
-                        settleReconcileEntry(localId, entry);
+                        // Terminal outcome: keep the durable indeterminate state.
+                        // Never convert missing client-id evidence into a
+                        // messages-consumed ACK; the user must explicitly retry
+                        // or cancel the held row.
+                        logger.debug(`[Codex] steer ${localId} reconciliation expired; keeping indeterminate`);
+                        pendingSteerReconciliations.delete(localId);
                         continue;
                     }
                     const outcome = await reconcileSteerByClientId(entry.threadId, localId);
@@ -2086,6 +2097,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!taken) {
                     return { steered: false, error: 'Message not in queue' };
                 }
+                // An explicit retry supersedes any old reconciliation poll for
+                // the same held row.
+                pendingSteerReconciliations.delete(localId);
                 const isControlCommand = Boolean(taken.item.isolate)
                     || Boolean(parseCodexSpecialCommand(taken.item.message).type);
                 if (isControlCommand) {
@@ -2118,9 +2132,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     ) => {
                         const threadId = steerThreadId;
                         if (!threadId) {
+                            session.queue.markReservationIndeterminate(taken);
+                            session.client.emitSteerIndeterminate([localId]);
                             return;
                         }
-                        pendingSteerReconciliations.set(localId, { threadId, taken, batch, expiresAt: Date.now() + 60_000 });
+                        const entry = { threadId, taken, batch, expiresAt: Date.now() + 60_000 };
+                        pendingSteerReconciliations.set(localId, entry);
+                        markReconcileEntryIndeterminate(localId, entry);
                         scheduleSteerReconcileRetry();
                     };
                     try {

@@ -1203,6 +1203,15 @@ export class ApiSessionClient extends EventEmitter {
         this.emitOrQueue(() => this.socket.emit('messages-consumed', payload))
     }
 
+    /** Persist a steer whose transport completed ambiguously; no consumed ACK. */
+    emitSteerIndeterminate(localIds: string[]): void {
+        if (localIds.length === 0) return
+        this.emitOrQueue(() => this.socket.emit('messages-indeterminate', {
+            sid: this.sessionId,
+            localIds
+        }))
+    }
+
     sendSessionDeath(reason?: SessionEndReason): void {
         if (this.state === 'active') {
             void cleanupUploadDir(this.sessionId)

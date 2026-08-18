@@ -573,6 +573,45 @@ describe('MessageQueue2', () => {
         });
     });
 
+    it('restores a reserved item relative to surviving neighbors', async () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('a', 'A', 'a');
+        queue.push('b', 'B', 'b');
+        queue.push('c', 'B', 'c');
+
+        const reservation = queue.takeByLocalId('b');
+        expect(reservation).not.toBeNull();
+        expect(queue.cancelByLocalId('a')).toBe(true);
+        expect(queue.restoreReservation(reservation!)).toBe(true);
+        expect(queue.queue.map((item) => item.localId)).toEqual(['b', 'c']);
+    });
+
+    it('retries an indeterminate reservation without automatic replay', () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('b', 'B', 'b');
+        const reservation = queue.takeByLocalId('b');
+        expect(reservation).not.toBeNull();
+        expect(queue.beginReservationDispatch(reservation!)).toBe(true);
+        expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
+        expect(queue.size()).toBe(0);
+        expect(queue.takeByLocalId('b')).toBe(reservation);
+        expect(queue.beginReservationDispatch(reservation!)).toBe(true);
+        expect(queue.restoreReservation(reservation!)).toBe(true);
+        expect(queue.takeByLocalId('b')).toBe(reservation);
+    });
+
+    it('does not restore an indeterminate reservation after clear', () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('b', 'B', 'b');
+        const reservation = queue.takeByLocalId('b');
+        expect(reservation).not.toBeNull();
+        expect(queue.beginReservationDispatch(reservation!)).toBe(true);
+        expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
+        queue.pushIsolateAndClear('clear', 'B');
+        expect(queue.restoreReservation(reservation!)).toBe(false);
+        expect(queue.queue.map((item) => item.message)).toEqual(['clear']);
+    });
+
     it('should differentiate between pushImmediate and pushIsolateAndClear behavior', async () => {
         const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
         

@@ -24,6 +24,7 @@ import {
     minFutureScheduledAtBySessionIds,
     countMessages,
     markMessagesInvoked,
+    markMessagesIndeterminate,
     markUninvokedImmediateMessages,
     mergeSessionMessages,
     moveUninvokedScheduledMessages,
@@ -57,7 +58,7 @@ export class MessageStore {
 
     copyMessageToSession(
         sessionId: string,
-        message: Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'>
+        message: Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'deliveryState'>
     ): StoredMessage {
         // 中文注释：重复会话合并时需要保留源消息的时间戳和排队信息，因此走专门的复制入口而不是普通 addMessage。
         return copyStoredMessageToSession(this.db, sessionId, message)
@@ -65,7 +66,7 @@ export class MessageStore {
 
     copyMessagesToSession(
         sessionId: string,
-        messages: Array<Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'>>
+        messages: Array<Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'deliveryState'>>
     ): number {
         return copyStoredMessagesToSession(this.db, sessionId, messages)
     }
@@ -123,8 +124,8 @@ export class MessageStore {
         return getLocalMessageStates(this.db, sessionId, localIds)
     }
 
-    getUninvokedLocalMessages(sessionId: string): StoredMessage[] {
-        return getUninvokedLocalMessages(this.db, sessionId)
+    getUninvokedLocalMessages(sessionId: string, options?: { deliverableOnly?: boolean }): StoredMessage[] {
+        return getUninvokedLocalMessages(this.db, sessionId, options)
     }
 
     getMatureScheduledMessages(beforeTime: number): StoredMessage[] {
@@ -165,6 +166,10 @@ export class MessageStore {
 
     markMessagesInvoked(sessionId: string, localIds: string[], invokedAt: number): number {
         return markMessagesInvoked(this.db, sessionId, localIds, invokedAt)
+    }
+
+    markMessagesIndeterminate(sessionId: string, localIds: string[]): number {
+        return markMessagesIndeterminate(this.db, sessionId, localIds)
     }
 
     markUninvokedImmediateMessages(sessionId: string, invokedAt: number): string[] {

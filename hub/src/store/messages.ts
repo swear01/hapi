@@ -15,6 +15,7 @@ type DbMessageRow = {
     local_id: string | null
     invoked_at: number | null
     scheduled_at: number | null
+    delivery_state: string | null
 }
 
 export type MessagePosition = {
@@ -85,13 +86,14 @@ function toStoredMessage(row: DbMessageRow): StoredMessage {
         seq: row.seq,
         localId: row.local_id,
         invokedAt: row.invoked_at ?? null,
-        scheduledAt: row.scheduled_at ?? null
+        scheduledAt: row.scheduled_at ?? null,
+        ...(row.delivery_state === 'indeterminate' ? { deliveryState: 'indeterminate' as const } : {})
     }
 }
 
 export type CopyStoredMessageInput = Pick<
     StoredMessage,
-    'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'
+    'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'deliveryState'
 >
 
 export function addMessage(
@@ -199,9 +201,9 @@ export function copyMessageToSession(
     const id = randomUUID()
     db.prepare(`
         INSERT INTO messages (
-            id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at
+            id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at, delivery_state
         ) VALUES (
-            @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at
+            @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at, @delivery_state
         )
     `).run({
         id,
@@ -213,7 +215,8 @@ export function copyMessageToSession(
         seq: nextSeq,
         local_id: localId ?? null,
         invoked_at: invokedAt ?? null,
-        scheduled_at: message.scheduledAt ?? null
+        scheduled_at: message.scheduledAt ?? null,
+        delivery_state: message.deliveryState ?? 'queued'
     })
 
     const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as DbMessageRow | undefined
@@ -243,9 +246,9 @@ export function copyMessagesToSession(
         let nextSeq = getMaxSeq(db, sessionId) + 1
         const insert = db.prepare(`
             INSERT INTO messages (
-                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at
+                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at, delivery_state
             ) VALUES (
-                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at
+                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at, @delivery_state
             )
         `)
         const collisionCheck = db.prepare(
@@ -273,7 +276,8 @@ export function copyMessagesToSession(
                 seq: nextSeq,
                 local_id: localId ?? null,
                 invoked_at: invokedAt ?? null,
-                scheduled_at: message.scheduledAt ?? null
+                scheduled_at: message.scheduledAt ?? null,
+                delivery_state: message.deliveryState ?? 'queued'
             })
             nextSeq += 1
         }
@@ -369,6 +373,7 @@ export function getDeliverableMessagesAfter(
         WHERE session_id = ?
           AND seq > ?
           AND (scheduled_at IS NULL OR scheduled_at <= ?)
+          AND delivery_state = 'queued'
         ORDER BY seq ASC
         LIMIT ?
     `).all(sessionId, safeAfterSeq, now, safeLimit) as DbMessageRow[]
@@ -476,10 +481,12 @@ export function bumpMessageEpoch(db: Database, sessionId: string): number {
  *  (including scheduled) for the Web floating bar on refresh / secondary clients. */
 export function getUninvokedLocalMessages(
     db: Database,
-    sessionId: string
+    sessionId: string,
+    options?: { deliverableOnly?: boolean }
 ): StoredMessage[] {
+    const deliverableClause = options?.deliverableOnly ? " AND delivery_state = 'queued'" : ''
     const rows = db.prepare(
-        'SELECT * FROM messages WHERE session_id = ? AND invoked_at IS NULL AND local_id IS NOT NULL ORDER BY seq ASC'
+        `SELECT * FROM messages WHERE session_id = ? AND invoked_at IS NULL AND local_id IS NOT NULL${deliverableClause} ORDER BY seq ASC`
     ).all(sessionId) as DbMessageRow[]
     return rows.map(toStoredMessage)
 }
@@ -521,7 +528,7 @@ export function getMatureScheduledMessages(
     beforeTime: number
 ): StoredMessage[] {
     const rows = db.prepare(
-        'SELECT * FROM messages WHERE scheduled_at IS NOT NULL AND scheduled_at <= ? AND invoked_at IS NULL ORDER BY scheduled_at ASC'
+        "SELECT * FROM messages WHERE scheduled_at IS NOT NULL AND scheduled_at <= ? AND invoked_at IS NULL AND delivery_state = 'queued' ORDER BY scheduled_at ASC"
     ).all(beforeTime) as DbMessageRow[]
     return rows.map(toStoredMessage)
 }
@@ -549,6 +556,7 @@ export function getImmediateQueuedLocalMessages(
           AND invoked_at IS NULL
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
+          AND delivery_state = 'queued'
         ORDER BY seq ASC
     `).all(sessionId) as DbMessageRow[]
     return rows.map(toStoredMessage)
@@ -583,6 +591,7 @@ export function countFutureScheduledLocalMessages(
           AND local_id IS NOT NULL
           AND scheduled_at IS NOT NULL
           AND scheduled_at > ?
+          AND delivery_state = 'queued'
     `).get(sessionId, now) as { count: number } | undefined
     return row?.count ?? 0
 }
@@ -607,6 +616,7 @@ export function countFutureScheduledBySessionIds(
           AND local_id IS NOT NULL
           AND scheduled_at IS NOT NULL
           AND scheduled_at > ?
+          AND delivery_state = 'queued'
         GROUP BY session_id
     `).all(...sessionIds, now) as { session_id: string; count: number }[]
 
@@ -636,6 +646,7 @@ export function minFutureScheduledAtBySessionIds(
           AND local_id IS NOT NULL
           AND scheduled_at IS NOT NULL
           AND scheduled_at > ?
+          AND delivery_state = 'queued'
         GROUP BY session_id
     `).all(...sessionIds, now) as { session_id: string; next_at: number }[]
 
@@ -715,6 +726,7 @@ export type LookupQueuedMessageResult =
     | { status: 'absent' }
     | { status: 'invoked'; message: StoredMessage }
     | { status: 'queued'; localId: string | null; resolvedId: string; scheduledAt: number | null }
+    | { status: 'indeterminate'; localId: string | null; resolvedId: string; scheduledAt: number | null }
 
 /** Look up a queued message without deleting it.
  *
@@ -742,6 +754,10 @@ export function lookupQueuedMessage(
 
     if (row.invoked_at !== null) {
         return { status: 'invoked' as const, message: toStoredMessage(row) }
+    }
+
+    if (row.delivery_state === 'indeterminate') {
+        return { status: 'indeterminate' as const, localId: row.local_id, resolvedId: row.id, scheduledAt: row.scheduled_at }
     }
 
     return { status: 'queued' as const, localId: row.local_id, resolvedId: row.id, scheduledAt: row.scheduled_at }
@@ -785,11 +801,29 @@ export function markMessagesInvoked(
     const placeholders = localIds.map(() => '?').join(', ')
     return db.prepare(
         `UPDATE messages
-         SET invoked_at = ?
+         SET invoked_at = ?, delivery_state = 'queued'
          WHERE session_id = ?
            AND local_id IN (${placeholders})
            AND invoked_at IS NULL`
     ).run(invokedAt, sessionId, ...localIds).changes
+}
+
+/** Hold an ambiguous steer out of automatic replay without claiming delivery. */
+export function markMessagesIndeterminate(
+    db: Database,
+    sessionId: string,
+    localIds: string[]
+): number {
+    if (localIds.length === 0) return 0
+    const placeholders = localIds.map(() => '?').join(', ')
+    return db.prepare(
+        `UPDATE messages
+         SET delivery_state = 'indeterminate'
+         WHERE session_id = ?
+           AND local_id IN (${placeholders})
+           AND invoked_at IS NULL
+           AND delivery_state = 'queued'`
+    ).run(sessionId, ...localIds).changes
 }
 
 /** Settle immediate queued rows on an archived clear source without touching
@@ -805,6 +839,7 @@ export function markUninvokedImmediateMessages(
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
           AND invoked_at IS NULL
+          AND delivery_state = 'queued'
         ORDER BY seq ASC
     `).all(sessionId) as Array<{ local_id: string }>
     if (rows.length === 0) return []
@@ -816,6 +851,7 @@ export function markUninvokedImmediateMessages(
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
           AND invoked_at IS NULL
+          AND delivery_state = 'queued'
     `).run(invokedAt, sessionId)
     return rows.map((row) => row.local_id)
 }

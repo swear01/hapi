@@ -42,7 +42,8 @@ function toDecryptedMessage(message: StoredMessageForDelivery): DecryptedMessage
         content: message.content,
         createdAt: message.createdAt,
         invokedAt: message.invokedAt,
-        scheduledAt: message.scheduledAt
+        scheduledAt: message.scheduledAt,
+        ...(message.deliveryState ? { deliveryState: message.deliveryState } : {})
     }
 }
 
@@ -399,7 +400,8 @@ export class MessageService {
             content: contentForDeferredDelivery(message.content),
             createdAt: message.createdAt,
             invokedAt: message.invokedAt,
-            scheduledAt: message.scheduledAt
+            scheduledAt: message.scheduledAt,
+            ...(message.deliveryState ? { deliveryState: message.deliveryState } : {})
         }))
     }
 
@@ -423,15 +425,33 @@ export class MessageService {
             return lookup
         }
 
-        // Phase 2: row is still queued.  Ask the CLI whether it already shifted the item
+        // Phase 2: row is still queued. Ask the CLI whether it already shifted the item
         // (race window between collectBatch() shift and messages-consumed ack).
         const { localId, resolvedId, scheduledAt } = lookup
+        const isIndeterminate = lookup.status === 'indeterminate'
 
         if (!localId) {
             // No localId — row exists but has no cancel path; treat as cancelled.
             this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)
             this.publisher.emit({ type: 'message-cancelled', sessionId, messageId })
             return { status: 'cancelled', localId: null }
+        }
+
+        // An indeterminate steer is never converted to invoked by a cancel
+        // timeout. Explicit cancel resolves it by discarding the durable row;
+        // an online CLI still gets a chance to remove its held reservation.
+        if (isIndeterminate) {
+            const roomName = `session:${sessionId}`
+            const cliCount = this.io.of('/cli').adapter.rooms.get(roomName)?.size ?? 0
+            const ackResult = cliCount > 0
+                ? await this.requestCliCancelAck(sessionId, localId, messageId, 500)
+                : 'timeout' as const
+            if (ackResult === 'in-flight') {
+                return { status: 'busy', localId }
+            }
+            this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)
+            this.publisher.emit({ type: 'message-cancelled', sessionId, messageId, localId })
+            return { status: 'cancelled', localId }
         }
 
         // Phase 2b: future-scheduled messages were never emitted to the CLI, so they
@@ -670,6 +690,7 @@ export class MessageService {
         const cliContent = inserted.inserted
             ? msg.content
             : contentForDeferredDelivery(msg.content)
+        const shouldEmitToCli = msg.deliveryState !== 'indeterminate'
         this.onSessionActivity?.(actualSessionId, msg.createdAt)
 
         // Only emit to CLI if the message is not scheduled for the future.
@@ -679,7 +700,7 @@ export class MessageService {
         // the pre-insert `now` capture could misclassify a borderline scheduledAt
         // as future when it has already become past by the time we check.
         const isFutureScheduled = msg.scheduledAt !== null && msg.scheduledAt > Date.now()
-        if (!isFutureScheduled && !this.store.isOpenCodeClearDeliveryGated(actualSessionId)) {
+        if (shouldEmitToCli && !isFutureScheduled && !this.store.isOpenCodeClearDeliveryGated(actualSessionId)) {
             const update = {
                 id: msg.id,
                 seq: msg.seq,
@@ -710,7 +731,8 @@ export class MessageService {
                 content: msg.content,
                 createdAt: msg.createdAt,
                 invokedAt: msg.invokedAt,
-                scheduledAt: msg.scheduledAt
+                scheduledAt: msg.scheduledAt,
+                ...(msg.deliveryState ? { deliveryState: msg.deliveryState } : {})
             }
         })
         return { actualSessionId, createdAt: msg.createdAt }
@@ -776,7 +798,7 @@ export class MessageService {
     /** Release a completed clear handoff in finalized seq order. */
     releaseDeliverableQueuedMessages(sessionId: string, now: number = Date.now()): number {
         if (this.store.isOpenCodeClearDeliveryGated(sessionId)) return 0
-        const queued = this.store.messages.getUninvokedLocalMessages(sessionId)
+        const queued = this.store.messages.getUninvokedLocalMessages(sessionId, { deliverableOnly: true })
             .filter((msg) => msg.scheduledAt === null || msg.scheduledAt <= now)
         for (const msg of queued) {
             const update = {
