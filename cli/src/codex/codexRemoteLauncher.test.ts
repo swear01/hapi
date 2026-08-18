@@ -1343,8 +1343,29 @@ describe('codexRemoteLauncher', () => {
         // message, commits the row and fires the badge — no restore, no
         // duplicate.
         await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }), { timeout: 5_000 });
-        // Row committed and consumed — nothing left to cancel.
-        expect(session.queue.cancelByLocalId('local-1')).toBe(false);
+        // Row committed and consumed — the tombstone blocks a stale retry.
+        expect(session.queue.cancelByLocalId('local-1')).toBe('consumed');
+        session.queue.close();
+    });
+
+    it('reconciles when stdin dispatch fails indeterminately', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('stdin callback timed out');
+        Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
+        harness.steerDispatchError = indeterminate;
+        harness.readThreadError = new Error('app-server unreachable');
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
+        expect(session.queue.cancelByLocalId('local-1')).toBe(true);
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });
 

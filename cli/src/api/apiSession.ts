@@ -241,7 +241,7 @@ export class ApiSessionClient extends EventEmitter {
     private pendingMessages: { message: UserMessage; localId?: string }[] = []
     private pendingHubPromptEchoes: { text: string; localIds: string[] }[] = []
     private pendingMessageCallback: ((message: UserMessage, localId?: string) => void) | null = null
-    private cancelQueuedMessageCallback: ((localId: string) => boolean | 'in-flight') | null = null
+    private cancelQueuedMessageCallback: ((localId: string) => boolean | 'in-flight' | 'consumed') | null = null
     private readonly incomingFilter = new IncomingMessageFilter()
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
@@ -436,7 +436,7 @@ export class ApiSessionClient extends EventEmitter {
                     let accepted = true
                     if (data.body.localId && this.cancelQueuedMessageCallback) {
                         const cancelled = this.cancelQueuedMessageCallback(data.body.localId)
-                        accepted = cancelled !== 'in-flight'
+                        accepted = cancelled !== 'in-flight' && cancelled !== 'consumed'
                     }
                     if (accepted) {
                         this.handleIncomingMessage(data.body.message, true)
@@ -683,7 +683,7 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    onCancelQueuedMessage(callback: (localId: string) => boolean | 'in-flight'): void {
+    onCancelQueuedMessage(callback: (localId: string) => boolean | 'in-flight' | 'consumed'): void {
         this.cancelQueuedMessageCallback = callback
     }
 

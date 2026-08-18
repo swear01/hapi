@@ -614,6 +614,16 @@ export class MessageService {
             return { status: 'retry-unavailable', localId: lookup.localId }
         }
 
+        const cancelResult = await this.requestCliCancelAck(sessionId, lookup.localId, messageId, 500)
+        if (cancelResult === 'in-flight' || cancelResult === 'timeout') {
+            return { status: 'retry-unavailable', localId: lookup.localId }
+        }
+        const refreshed = this.store.messages.lookupQueuedMessage(sessionId, messageId)
+        if (refreshed.status === 'invoked') {
+            return { status: 'invoked', message: toDecryptedMessage(refreshed.message) }
+        }
+        if (refreshed.status === 'absent') return { status: 'not-found' }
+
         const message = this.store.messages.requeueIndeterminateMessage(sessionId, messageId)
         if (!message || !message.localId) return { status: 'not-found' }
 
