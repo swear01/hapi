@@ -475,6 +475,9 @@ public final class ChatInteractor {
                 if response.status == "invoked", let message = response.message,
                    let localId = message.localId, let invokedAt = message.invokedAt {
                     await (windowController()).markConsumed(localIds: [localId], invokedAt: invokedAt)
+                } else if response.status == "retried" || response.status == "already-queued",
+                          let localId = response.localId {
+                    await (windowController()).markRequeued(localIds: [localId])
                 }
             } catch {
                 emit(.notice(Self.errorMessage(error, fallback: "Failed to retry message")))

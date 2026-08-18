@@ -973,12 +973,16 @@ class ChatViewModel(
         scope.launch {
             try {
                 val response = api.retryIndeterminateMessage(sessionId, messageId)
-                if (response.status == "invoked" && response.message != null) {
-                    val localId = response.message.localId
-                    val invokedAt = response.message.invokedAtOrNull
+                val message = response.message
+                if (response.status == "invoked" && message != null) {
+                    val localId = message.localId
+                    val invokedAt = message.invokedAtOrNull
                     if (localId != null && invokedAt != null) {
                         awaitWindowStore().markConsumed(listOf(localId), invokedAt)
                     }
+                }
+                if (response.status == "retried" || response.status == "already-queued") {
+                    response.localId?.let { awaitWindowStore().markRequeued(listOf(it)) }
                 }
             } catch (error: Exception) {
                 _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed(error.message)))
