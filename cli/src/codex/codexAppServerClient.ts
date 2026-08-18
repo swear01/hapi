@@ -636,10 +636,13 @@ export class CodexAppServerClient extends JsonLineParser {
         try {
             this.process?.stdin.write(`${serialized}\n`);
         } catch (error) {
-            const writeError = markCodexAppServerIndeterminate(
-                error instanceof Error ? error : new Error(String(error))
-            );
-            this.rejectAllPending(writeError);
+            const writeError = error instanceof Error ? error : new Error(String(error));
+            if ('id' in payload && typeof payload.id === 'number') {
+                const current = this.pending.get(payload.id);
+                this.pending.delete(payload.id);
+                current?.reject(writeError);
+            }
+            this.rejectAllPending(new Error(writeError.message, { cause: writeError }));
             throw writeError;
         }
     }

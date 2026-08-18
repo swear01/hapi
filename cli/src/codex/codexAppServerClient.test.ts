@@ -28,7 +28,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn() }
 }));
 
-import { CodexAppServerClient } from './codexAppServerClient';
+import { CodexAppServerClient, isCodexAppServerIndeterminateError } from './codexAppServerClient';
 
 function fakeStream(): EventEmitter & { setEncoding: ReturnType<typeof vi.fn> } {
     return Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
@@ -120,6 +120,26 @@ describe('CodexAppServerClient turn/steer', () => {
                 clientUserMessageId: 'local-9'
             }
         });
+        await client.disconnect();
+    });
+
+    it('keeps synchronous stdin write failures determinate', async () => {
+        const child = fakeChild();
+        child.stdin.write = vi.fn(() => {
+            throw new Error('stdin closed before write');
+        });
+        spawnMock.mockReturnValue(child);
+        const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+        await client.connect();
+
+        const error = await client.steerTurn({
+            threadId: 'thread-1',
+            input: [{ type: 'text', text: 'pivot now' }],
+            expectedTurnId: 'turn-1'
+        }).then(() => null, (reason: unknown) => reason);
+
+        expect(error).toMatchObject({ message: 'stdin closed before write' });
+        expect(isCodexAppServerIndeterminateError(error)).toBe(false);
         await client.disconnect();
     });
 
