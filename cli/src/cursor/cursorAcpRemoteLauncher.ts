@@ -52,6 +52,8 @@ import {
     stripRetryableCursorError
 } from './cursorAutoRetry';
 
+const CURSOR_ABORT_DRAIN_TIMEOUT_MS = 5_000;
+
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
     private backend: ReturnType<typeof createCursorAcpBackend> | null = null;
@@ -1082,6 +1084,24 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const sessionId = this.acpSessionId ?? this.session.sessionId;
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
+            if (!this.shouldExit) {
+                let timeout: ReturnType<typeof setTimeout> | null = null;
+                const drained = await Promise.race([
+                    backend.waitForResponseComplete().then(() => true),
+                    new Promise<boolean>((resolve) => {
+                        timeout = setTimeout(() => resolve(false), CURSOR_ABORT_DRAIN_TIMEOUT_MS);
+                        timeout.unref?.();
+                    })
+                ]);
+                if (timeout) clearTimeout(timeout);
+                if (!drained) {
+                    // An ACP request that ignores cancel cannot safely share a
+                    // handler with the next prompt. End the launcher instead
+                    // of allowing late updates to cross the turn boundary.
+                    logger.warn('[cursor-acp] abort drain timed out; ending session to isolate late ACP updates');
+                    this.shouldExit = true;
+                }
+            }
         }
         await this.permissionAdapter?.cancelAll('User aborted');
         await this.extensionAdapter?.cancelAll('User aborted');

@@ -158,6 +158,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             })),
             softSteerPrompt: vi.fn(async () => {}),
             abortSoftSteers: vi.fn(),
+            waitForResponseComplete: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
             onStderrError: vi.fn((handler) => {
                 harness.stderrErrorHandler = handler ?? null;
