@@ -281,24 +281,14 @@ export class AcpStdioTransport {
 
         const timeoutMs = options?.timeoutMs ?? AcpStdioTransport.DEFAULT_TIMEOUT_MS;
 
-        // Dispatch = the stdin write (accepted or failed), shared by both
-        // timeout branches so a transport write failure always rejects
-        // `dispatched` — callers that ack at kickoff (soft steer) must not
-        // report success for a request that was never written.
-        const dispatch = (): void => {
-            this.writePayload(payload);
-            if (this.closed) {
-                throw this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
-            }
-        };
-
         // Skip timeout for infinite/no-timeout requests (e.g., long-running prompts)
         if (!Number.isFinite(timeoutMs)) {
+            const completed = new Promise<unknown>((resolve, reject) => {
+                this.pending.set(id, { resolve, reject });
+            });
             return {
-                dispatched: Promise.resolve().then(dispatch),
-                completed: new Promise<unknown>((resolve, reject) => {
-                    this.pending.set(id, { resolve, reject });
-                })
+                dispatched: this.dispatchPayload(payload),
+                completed
             };
         }
 
@@ -324,7 +314,7 @@ export class AcpStdioTransport {
             });
         });
 
-        const dispatched = Promise.resolve().then(dispatch);
+        const dispatched = this.dispatchPayload(payload);
 
         return { dispatched, completed };
     }
@@ -485,6 +475,43 @@ export class AcpStdioTransport {
         }
 
         pending.resolve(response.result);
+    }
+
+    private dispatchPayload(payload: JsonRpcRequest): Promise<void> {
+        if (this.closed || this.exited) {
+            return Promise.reject(this.closeError ?? this.exitError ?? new Error('ACP transport is closed'));
+        }
+
+        let serialized: string;
+        try {
+            serialized = JSON.stringify(payload);
+        } catch (error) {
+            const writeError = error instanceof Error ? error : new Error(String(error));
+            this.markClosed(writeError);
+            return Promise.reject(writeError);
+        }
+
+        return new Promise<void>((resolve, reject) => {
+            try {
+                this.process.stdin.write(`${serialized}\n`, (error?: Error | null) => {
+                    if (error) {
+                        const writeError = error instanceof Error ? error : new Error(String(error));
+                        this.markClosed(writeError);
+                        reject(writeError);
+                        return;
+                    }
+                    if (this.closed || this.exited) {
+                        reject(this.closeError ?? this.exitError ?? new Error('ACP transport is closed'));
+                        return;
+                    }
+                    resolve();
+                });
+            } catch (error) {
+                const writeError = error instanceof Error ? error : new Error(String(error));
+                this.markClosed(writeError);
+                reject(writeError);
+            }
+        });
     }
 
     private writePayload(payload: JsonRpcRequest | JsonRpcNotification | JsonRpcResponse): void {

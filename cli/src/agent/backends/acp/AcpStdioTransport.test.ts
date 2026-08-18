@@ -21,6 +21,7 @@ const spawnState = vi.hoisted(() => ({
     stdoutDataHandlers: [] as Array<(chunk: string) => void>,
     stdinEnd: vi.fn(),
     stdinWrite: vi.fn<(chunk: string) => boolean>(() => true),
+    deferStdinWriteCallback: null as ((callback: (error?: Error | null) => void) => void) | null,
     kill: vi.fn(),
     exitCode: null as number | null,
     pid: 424242 as number | undefined,
@@ -74,7 +75,17 @@ vi.mock('node:child_process', () => ({
             },
             stdin: {
                 end: (...args: unknown[]) => spawnState.stdinEnd(...args),
-                write: (chunk: string) => spawnState.stdinWrite(chunk)
+                write: (chunk: string, callback?: (error?: Error | null) => void) => {
+                    const result = spawnState.stdinWrite(chunk);
+                    if (callback) {
+                        if (spawnState.deferStdinWriteCallback) {
+                            spawnState.deferStdinWriteCallback(callback);
+                        } else {
+                            callback();
+                        }
+                    }
+                    return result;
+                }
             },
             on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
                 if (event === 'exit') {
@@ -126,6 +137,7 @@ describe('AcpStdioTransport agent CLI guard', () => {
         spawnState.exitHandlers = [];
         spawnState.closeHandlers = [];
         spawnState.stdoutDataHandlers = [];
+        spawnState.deferStdinWriteCallback = null;
     });
 
     test('registers cross-process guard only for Cursor agent command', async () => {
@@ -185,6 +197,7 @@ describe('AcpStdioTransport plain-text stdout', () => {
         spawnState.exitHandlers = [];
         spawnState.closeHandlers = [];
         spawnState.stdoutDataHandlers = [];
+        spawnState.deferStdinWriteCallback = null;
     });
 
     test('ignores Cursor worktree banner and keeps JSON-RPC session alive', async () => {
@@ -263,6 +276,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
         spawnState.exitHandlers = [];
         spawnState.closeHandlers = [];
         spawnState.stdoutDataHandlers = [];
+        spawnState.deferStdinWriteCallback = null;
     });
 
     test('rejects new requests after process exit before close without writing stdin', async () => {
@@ -620,5 +634,26 @@ describe('AcpStdioTransport closed stdin writes', () => {
         // when the write never happened — never a false `steered: true`.
         await expect(request.dispatched).rejects.toThrow('WritableIterable is closed');
         await expect(request.completed).rejects.toThrow('WritableIterable is closed');
+    });
+
+    test('sendRequestWithDispatch waits for an asynchronous stdin write error', async () => {
+        let finishWrite!: (error?: Error | null) => void;
+        spawnState.deferStdinWriteCallback = (callback) => {
+            finishWrite = callback;
+        };
+
+        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+        const request = transport.sendRequestWithDispatch(
+            'session/prompt',
+            { sessionId: 's', prompt: [] },
+            { timeoutMs: Infinity }
+        );
+
+        expect(spawnState.stdinWrite).toHaveBeenCalledTimes(1);
+        expect(finishWrite).toBeTypeOf('function');
+        finishWrite(new Error('EPIPE'));
+
+        await expect(request.dispatched).rejects.toThrow('EPIPE');
+        await expect(request.completed).rejects.toThrow('EPIPE');
     });
 });
