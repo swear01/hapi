@@ -728,6 +728,7 @@ export type LookupQueuedMessageResult =
     | { status: 'absent' }
     | { status: 'invoked'; message: StoredMessage }
     | { status: 'queued'; localId: string | null; resolvedId: string; scheduledAt: number | null }
+    | { status: 'dispatching'; localId: string | null; resolvedId: string; scheduledAt: number | null }
     | { status: 'indeterminate'; localId: string | null; resolvedId: string; scheduledAt: number | null }
 
 /** Look up a queued message without deleting it.
@@ -758,7 +759,10 @@ export function lookupQueuedMessage(
         return { status: 'invoked' as const, message: toStoredMessage(row) }
     }
 
-    if (row.delivery_state && row.delivery_state !== 'queued') {
+    if (row.delivery_state === 'dispatching') {
+        return { status: 'dispatching' as const, localId: row.local_id, resolvedId: row.id, scheduledAt: row.scheduled_at }
+    }
+    if (row.delivery_state === 'indeterminate') {
         return { status: 'indeterminate' as const, localId: row.local_id, resolvedId: row.id, scheduledAt: row.scheduled_at }
     }
 
