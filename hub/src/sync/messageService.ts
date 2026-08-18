@@ -101,6 +101,12 @@ function getNormalizedDeliveryMode(
  * provenance for Web diagnostics, but make deferred CLI delivery an ordinary
  * queue item so it cannot steer a later generation.
  */
+export type RetryIndeterminateMessageResult =
+    | { status: 'retried'; localId: string }
+    | { status: 'already-queued'; localId: string | null }
+    | { status: 'invoked'; message: DecryptedMessage }
+    | { status: 'not-found' }
+
 function contentForDeferredDelivery(content: unknown): unknown {
     if (!isObject(content) || content.role !== 'user' || !isObject(content.meta)) {
         return content
@@ -573,6 +579,51 @@ export class MessageService {
         })
 
         return { status: 'cancelled', localId }
+    }
+
+    async retryIndeterminateMessage(
+        sessionId: string,
+        messageId: string
+    ): Promise<RetryIndeterminateMessageResult> {
+        const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
+        if (lookup.status === 'absent') return { status: 'not-found' }
+        if (lookup.status === 'invoked') {
+            return {
+                status: 'invoked',
+                message: toDecryptedMessage(lookup.message)
+            }
+        }
+        if (lookup.status === 'queued') {
+            return { status: 'already-queued', localId: lookup.localId }
+        }
+        if (!lookup.localId) return { status: 'not-found' }
+
+        const message = this.store.messages.requeueIndeterminateMessage(sessionId, messageId)
+        if (!message || !message.localId) return { status: 'not-found' }
+
+        const update = {
+            id: message.id,
+            seq: message.seq,
+            createdAt: message.createdAt,
+            body: {
+                t: 'retry-queued-message' as const,
+                sid: sessionId,
+                messageId: message.id,
+                localId: message.localId,
+                message: {
+                    id: message.id,
+                    seq: message.seq,
+                    createdAt: message.createdAt,
+                    localId: message.localId,
+                    content: contentForDeferredDelivery(message.content)
+                }
+            }
+        }
+        if (!this.store.isOpenCodeClearDeliveryGated(sessionId)) {
+            this.io.of('/cli').to(`session:${sessionId}`).emit('update', update)
+        }
+        this.publisher.emit({ type: 'messages-requeued', sessionId, localIds: [message.localId] })
+        return { status: 'retried', localId: message.localId }
     }
 
     /**

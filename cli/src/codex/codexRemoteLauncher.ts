@@ -2123,6 +2123,16 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
+                const dispatchStatePersisted = await session.client.setSteerDeliveryState([localId], 'dispatching');
+                if (!dispatchStatePersisted) {
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Could not persist steer state' };
+                }
+                const restoreQueuedState = async () => {
+                    if (taken.originIndeterminate) return;
+                    const restored = await session.client.setSteerDeliveryState([localId], 'queued');
+                    if (!restored) session.client.emitSteerIndeterminate([localId]);
+                };
                 const steer = await trySteerActiveTurn(batch, localId);
                 if (steer) {
                     const reconcileDispatchedSteer = (
@@ -2148,7 +2158,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         // report failure. Never reconcile: no request reached the
                         // app-server (abort before dispatch included).
                         void steer.completed.catch(() => {});
+                        await restoreQueuedState();
                         session.queue.restoreReservation(taken);
+                        if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
                         return { steered: false, error: error instanceof Error ? error.message : 'Steer failed' };
                     }
                     try {
@@ -2166,7 +2178,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                             reconcileDispatchedSteer(localId, taken, batch);
                             return { steered: false, error: 'Steer outcome is being reconciled' };
                         }
+                        await restoreQueuedState();
                         session.queue.restoreReservation(taken);
+                        if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
                         return { steered: false, error: error instanceof Error ? error.message : 'Steer failed' };
                     }
                     session.queue.commitReservation(taken);
@@ -2177,9 +2191,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
+                await restoreQueuedState();
                 if (!session.queue.restoreReservation(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
+                if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
                 return { steered: false, error: 'Active turn is not steerable' };
             }
         );

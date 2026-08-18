@@ -432,6 +432,40 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         onWebappEvent?.({ type: 'messages-indeterminate', sessionId: data.sid, localIds })
     })
 
+    socket.on('messages-steer-state', (
+        data: { sid: string; localIds: string[]; state: 'queued' | 'dispatching' },
+        ack: (response: { ok: boolean }) => void
+    ) => {
+        if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)
+            || (data.state !== 'queued' && data.state !== 'dispatching')) {
+            ack({ ok: false })
+            return
+        }
+        const localIds = data.localIds.filter((id): id is string => typeof id === 'string')
+        if (localIds.length === 0) {
+            ack({ ok: false })
+            return
+        }
+        const sessionAccess = resolveSessionAccess(data.sid)
+        if (!sessionAccess.ok) {
+            emitAccessError('session', data.sid, sessionAccess.reason)
+            ack({ ok: false })
+            return
+        }
+        try {
+            const ok = store.recordSteerDeliveryState(
+                data.sid,
+                localIds,
+                data.state,
+                sessionAccess.value.namespace
+            )
+            ack({ ok })
+        } catch (err) {
+            console.error('recordSteerDeliveryState failed', err)
+            ack({ ok: false })
+        }
+    })
+
     socket.on('session-end', (data: SessionEndPayload) => {
         if (!data || typeof data.sid !== 'string' || typeof data.time !== 'number') {
             return

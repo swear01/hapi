@@ -6,6 +6,8 @@ export interface QueueItem<T> {
     modeHash: string;
     localId?: string;
     isolate?: boolean; // If true, this message must be processed alone
+    /** Stable FIFO key used when an async reservation is restored later. */
+    enqueueOrder?: number;
 }
 
 export type QueueReservation<T> = {
@@ -30,6 +32,8 @@ export class MessageQueue2<T> {
     onBatchConsumed: ((localIds: string[]) => void) | null = null;
     modeHasher: (mode: T) => string;
     private readonly reservations = new Map<string, QueueReservation<T>>();
+    private nextEnqueueOrder = 0;
+    private previousEnqueueOrder = -1;
 
     constructor(
         modeHasher: (mode: T) => string,
@@ -58,13 +62,16 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] push() called with mode hash: ${modeHash}`);
 
-        this.queue.push({
+        const item = {
             message,
             mode,
             modeHash,
             localId,
-            isolate: false
-        });
+            isolate: false,
+            enqueueOrder: this.nextEnqueueOrder++
+        };
+        Object.defineProperty(item, 'enqueueOrder', { value: item.enqueueOrder, enumerable: false, writable: true });
+        this.queue.push(item);
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -94,13 +101,16 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushImmediate() called with mode hash: ${modeHash}`);
 
-        this.queue.push({
+        const item = {
             message,
             mode,
             modeHash,
             localId,
-            isolate: false
-        });
+            isolate: false,
+            enqueueOrder: this.nextEnqueueOrder++
+        };
+        Object.defineProperty(item, 'enqueueOrder', { value: item.enqueueOrder, enumerable: false, writable: true });
+        this.queue.push(item);
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -133,13 +143,16 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushIsolated() called with mode hash: ${modeHash} - preserving ${this.queue.length} pending messages`);
 
-        this.queue.push({
+        const item = {
             message,
             mode,
             modeHash,
             localId,
-            isolate: true
-        });
+            isolate: true,
+            enqueueOrder: this.nextEnqueueOrder++
+        };
+        Object.defineProperty(item, 'enqueueOrder', { value: item.enqueueOrder, enumerable: false, writable: true });
+        this.queue.push(item);
 
         if (this.onMessageHandler) {
             this.onMessageHandler(message, mode);
@@ -174,13 +187,16 @@ export class MessageQueue2<T> {
         // rejection must not restore a prompt the clear command discarded.
         this.cancelReservations();
 
-        this.queue.push({
+        const item = {
             message,
             mode,
             modeHash,
             localId,
-            isolate: true
-        });
+            isolate: true,
+            enqueueOrder: this.nextEnqueueOrder++
+        };
+        Object.defineProperty(item, 'enqueueOrder', { value: item.enqueueOrder, enumerable: false, writable: true });
+        this.queue.push(item);
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -209,13 +225,16 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] unshift() called with mode hash: ${modeHash}`);
 
-        this.queue.unshift({
+        const item = {
             message,
             mode,
             modeHash,
             localId,
-            isolate: false
-        });
+            isolate: false,
+            enqueueOrder: this.previousEnqueueOrder--
+        };
+        Object.defineProperty(item, 'enqueueOrder', { value: item.enqueueOrder, enumerable: false, writable: true });
+        this.queue.unshift(item);
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -248,13 +267,16 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] unshiftIsolated() called with mode hash: ${modeHash}`);
 
-        this.queue.unshift({
+        const item = {
             message,
             mode,
             modeHash,
             localId,
-            isolate: true
-        });
+            isolate: true,
+            enqueueOrder: this.previousEnqueueOrder--
+        };
+        Object.defineProperty(item, 'enqueueOrder', { value: item.enqueueOrder, enumerable: false, writable: true });
+        this.queue.unshift(item);
 
         if (this.onMessageHandler) {
             this.onMessageHandler(message, mode);
@@ -359,17 +381,23 @@ export class MessageQueue2<T> {
             }
             this.reservations.delete(reservation.item.localId);
         }
+        const order = reservation.item.enqueueOrder;
+        const orderedIndex = order === undefined
+            ? -1
+            : this.queue.findIndex((item) => item.enqueueOrder !== undefined && item.enqueueOrder > order);
         const nextIndex = reservation.nextItem
             ? this.queue.indexOf(reservation.nextItem)
             : -1;
         const previousIndex = reservation.previousItem
             ? this.queue.indexOf(reservation.previousItem)
             : -1;
-        const idx = nextIndex >= 0
-            ? nextIndex
-            : previousIndex >= 0
-                ? previousIndex + 1
-                : Math.max(0, Math.min(reservation.index, this.queue.length));
+        const idx = orderedIndex >= 0
+            ? orderedIndex
+            : nextIndex >= 0
+                ? nextIndex
+                : previousIndex >= 0
+                    ? previousIndex + 1
+                    : this.queue.length;
         this.queue.splice(idx, 0, reservation.item);
         if (this.waiter) {
             const waiter = this.waiter;

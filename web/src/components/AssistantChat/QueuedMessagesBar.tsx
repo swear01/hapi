@@ -8,6 +8,7 @@ import { normalizeDecryptedMessage } from '@/chat/normalize'
 import type { DecryptedMessage } from '@/types/api'
 import { useCancelQueuedMessage } from '@/hooks/mutations/useCancelQueuedMessage'
 import { useSteerQueuedMessage } from '@/hooks/mutations/useSteerQueuedMessage'
+import { useRetryIndeterminateMessage } from '@/hooks/mutations/useRetryIndeterminateMessage'
 import { useTranslation } from '@/lib/use-translation'
 import { useToast } from '@/lib/toast-context'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
@@ -221,6 +222,7 @@ export function QueuedMessagesBar({
     const composerText = useAuiState((state) => state.composer.text)
     const cancelMutation = useCancelQueuedMessage(api)
     const steerMutation = useSteerQueuedMessage(api)
+    const retryMutation = useRetryIndeterminateMessage(api)
     const { t } = useTranslation()
     const { addToast } = useToast()
     const pendingScheduleRef = useRef(pendingSchedule)
@@ -391,6 +393,22 @@ export function QueuedMessagesBar({
                             })
                         }
 
+                        const retryPending = retryMutation.isPending
+                            && retryMutation.variables?.messageId === msg.id
+                        const handleRetry = () => {
+                            if (msg.deliveryState !== 'indeterminate' || !canCancel) return
+                            const token = beginQueuedOperation(sessionId)
+                            if (!token) return
+                            void retryMutation.mutateAsync({
+                                sessionId,
+                                messageId: msg.id,
+                            }).catch(() => {
+                                // The row remains held if the explicit retry fails.
+                            }).finally(() => {
+                                endQueuedOperation(sessionId, token)
+                            })
+                        }
+
                         const handleEdit = async () => {
                             if (!canCancel) return
                             // Edit = cancel + restore composer (text + schedule).
@@ -515,6 +533,19 @@ export function QueuedMessagesBar({
                                     )}
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
+                                    {msg.deliveryState === 'indeterminate' ? (
+                                        <button
+                                            type="button"
+                                            aria-label={t('queuedMessages.retryOutcome')}
+                                            title={t('queuedMessages.retryOutcome')}
+                                            disabled={!canCancel || retryPending}
+                                            onClick={handleRetry}
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            className="flex h-6 w-6 items-center justify-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                            <span aria-hidden="true">↻</span>
+                                        </button>
+                                    ) : null}
                                     {canSteerRow ? (
                                         <button
                                             type="button"

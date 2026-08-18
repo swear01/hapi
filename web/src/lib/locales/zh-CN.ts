@@ -637,6 +637,7 @@ export default {
   'queuedMessages.steer': '立即插入当前回合',
   'queuedMessages.steerFailed': '插入失败，消息仍在队列中',
   'queuedMessages.steerOutcomeUnknown': '发送结果未知，请明确重试或取消',
+  'queuedMessages.retryOutcome': '重试不确定的消息发送',
   'queuedMessages.steeredBadge': '↳ 已介入',
   'queuedMessages.steeredBadgeTitle': '已介入当前进行中的回合',
 

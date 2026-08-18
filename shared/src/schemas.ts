@@ -592,6 +592,10 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
         localIds: z.array(z.string())
     }),
     SessionChangedSchema.extend({
+        type: z.literal('messages-requeued'),
+        localIds: z.array(z.string())
+    }),
+    SessionChangedSchema.extend({
         type: z.literal('message-cancelled'),
         messageId: z.string(),
         localId: z.string().optional()
