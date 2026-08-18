@@ -286,9 +286,8 @@ export class AcpStdioTransport {
         completed: Promise<unknown>;
     } {
         if (this.closed || this.exited) {
-            const error = markAcpIndeterminate(
-                this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
-            );
+            const cause = this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
+            const error = new Error(cause.message, { cause });
             return { dispatched: Promise.reject(error), completed: Promise.reject(error) };
         }
 
@@ -500,17 +499,16 @@ export class AcpStdioTransport {
 
     private dispatchPayload(payload: JsonRpcRequest): Promise<void> {
         if (this.closed || this.exited) {
-            return Promise.reject(markAcpIndeterminate(
-                this.closeError ?? this.exitError ?? new Error('ACP transport is closed')
-            ));
+            const cause = this.closeError ?? this.exitError ?? new Error('ACP transport is closed');
+            return Promise.reject(new Error(cause.message, { cause }));
         }
 
         let serialized: string;
         try {
             serialized = JSON.stringify(payload);
         } catch (error) {
-            const writeError = markAcpIndeterminate(error instanceof Error ? error : new Error(String(error)));
-            this.markClosed(writeError);
+            const writeError = error instanceof Error ? error : new Error(String(error));
+            this.markClosed(new Error(writeError.message, { cause: writeError }));
             return Promise.reject(writeError);
         }
 
@@ -532,8 +530,8 @@ export class AcpStdioTransport {
                     resolve();
                 });
             } catch (error) {
-                const writeError = markAcpIndeterminate(error instanceof Error ? error : new Error(String(error)));
-                this.markClosed(writeError);
+                const writeError = error instanceof Error ? error : new Error(String(error));
+                this.markClosed(new Error(writeError.message, { cause: writeError }));
                 reject(writeError);
             }
         });

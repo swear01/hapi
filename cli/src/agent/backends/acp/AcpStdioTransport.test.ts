@@ -102,7 +102,7 @@ vi.mock('node:child_process', () => ({
     })
 }));
 
-import { AcpStdioTransport } from './AcpStdioTransport';
+import { AcpStdioTransport, isAcpIndeterminateError } from './AcpStdioTransport';
 import { killProcessByChildProcess } from '@/utils/process';
 
 function emitStdout(chunk: string): void {
@@ -632,7 +632,9 @@ describe('AcpStdioTransport closed stdin writes', () => {
 
         // The soft-steer caller acks at kickoff, so `dispatched` must reject
         // when the write never happened — never a false `steered: true`.
-        await expect(request.dispatched).rejects.toThrow('WritableIterable is closed');
+        const dispatchError = await request.dispatched.then(() => null, (error: unknown) => error);
+        expect(dispatchError).toMatchObject({ message: 'WritableIterable is closed' });
+        expect(isAcpIndeterminateError(dispatchError)).toBe(false);
         await expect(request.completed).rejects.toThrow('WritableIterable is closed');
     });
 
