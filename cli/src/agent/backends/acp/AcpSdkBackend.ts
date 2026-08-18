@@ -586,14 +586,13 @@ export class AcpSdkBackend implements AgentBackend {
                 this.promptRequestInFlight = false;
             }
 
-            // The main response settled: stop accepting new soft steers and
-            // wait for any already-kicked-off concurrent session/prompt to
-            // finish so its chunks drain before this turn's boundary.
-            await this.sealAndWaitForSoftSteers();
-
             stopReason = isObject(response) ? asString(response.stopReason) : null;
             promptUsage = this.extractPromptUsage(response);
         } finally {
+            // Seal on both success and rejection. Otherwise a failed main
+            // prompt leaves the concurrent soft-steer window open while the
+            // response buffers and cleanup are still draining.
+            await this.sealAndWaitForSoftSteers();
             await this.waitForSessionUpdateQuiet(
                 AcpSdkBackend.UPDATE_QUIET_PERIOD_MS,
                 AcpSdkBackend.UPDATE_DRAIN_TIMEOUT_MS

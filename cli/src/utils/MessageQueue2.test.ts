@@ -426,7 +426,8 @@ describe('MessageQueue2', () => {
             message: 'isolated',
             mode: { type: 'A' },
             modeHash: 'A',
-            isolate: true
+            isolate: true,
+            order: 2
         });
         
         // Add more regular messages
@@ -658,6 +659,18 @@ describe('MessageQueue2', () => {
 
             expect(queue.restoreReservation(taken!)).toBe(true);
             expect(queue.queue.map(i => i.message)).toEqual(['msg2']);
+        });
+
+        it('restores by stable queue order after an earlier sibling is removed', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg1', 'local', 'id-1');
+            queue.push('msg2', 'local', 'id-2');
+            queue.push('msg3', 'local', 'id-3');
+            const taken = queue.takeByLocalId('id-2');
+
+            expect(queue.cancelByLocalId('id-1')).toBe(true);
+            expect(queue.restoreReservation(taken!)).toBe(true);
+            expect(queue.queue.map((item) => item.message)).toEqual(['msg2', 'msg3']);
         });
 
         it('wakes a waiter when an item is restored', async () => {

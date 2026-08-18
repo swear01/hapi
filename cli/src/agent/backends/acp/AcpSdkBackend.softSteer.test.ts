@@ -86,6 +86,40 @@ describe('AcpSdkBackend soft steer (#888)', () => {
         expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'x' }]))
             .toThrow('No active steerable turn');
     });
+
+    it('seals soft-steer admission when the main prompt rejects', async () => {
+        const { backend, backendInternal } = makeBackend();
+        let releaseDrain!: () => void;
+        const drainDeferred = new Promise<void>((resolve) => { releaseDrain = resolve; });
+        let quietCalls = 0;
+        backendInternal.waitForSessionUpdateQuiet = vi.fn(async () => {
+            quietCalls += 1;
+            if (quietCalls === 2) {
+                await drainDeferred;
+            }
+        });
+        backendInternal.drainLateBuffers = vi.fn(async () => {});
+        backendInternal.messageHandler = { drainBuffers: vi.fn() };
+        (backend as unknown as { transport: unknown }).transport = {
+            sendRequest: vi.fn(async () => {
+                throw new Error('main failed');
+            }),
+            sendRequestWithDispatch: vi.fn(),
+            sendNotification: vi.fn(),
+            close: vi.fn(async () => {})
+        };
+
+        const promptPromise = backend.prompt('session-1', [{ type: 'text', text: 'main' }], vi.fn())
+            .catch((error: unknown) => error);
+        await vi.waitFor(() => expect(quietCalls).toBe(2));
+
+        expect(backendInternal.acceptingSoftSteers).toBe(false);
+        expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'late' }]))
+            .toThrow('No active steerable turn');
+
+        releaseDrain();
+        await expect(promptPromise).resolves.toMatchObject({ message: 'main failed' });
+    });
 });
 
 describe('AcpSdkBackend soft steer turn boundary (#888)', () => {

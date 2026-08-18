@@ -6,6 +6,8 @@ interface QueueItem<T> {
     modeHash: string;
     localId?: string;
     isolate?: boolean; // If true, this message must be processed alone
+    /** Stable FIFO position; defined non-enumerably on queue-owned items. */
+    order: number;
 }
 
 /**
@@ -15,6 +17,7 @@ interface QueueItem<T> {
  */
 export type QueueReservation<T> = {
     item: QueueItem<T>;
+    /** Physical index at reservation time, retained for diagnostics. */
     index: number;
     state: 'reserved' | 'dispatching' | 'cancelled';
 };
@@ -28,6 +31,8 @@ export class MessageQueue2<T> {
     private readonly reservations = new Map<string, QueueReservation<T>>();
     private waiter: ((hasMessages: boolean) => void) | null = null;
     private closed = false;
+    private nextHeadOrder = -1;
+    private nextTailOrder = 0;
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
     onBatchConsumed: ((localIds: string[]) => void) | null = null;
     modeHasher: (mode: T) => string;
@@ -39,6 +44,11 @@ export class MessageQueue2<T> {
         this.modeHasher = modeHasher;
         this.onMessageHandler = onMessageHandler;
         logger.debug(`[MessageQueue2] Initialized`);
+    }
+
+    private withOrder(item: Omit<QueueItem<T>, 'order'>, order: number): QueueItem<T> {
+        Object.defineProperty(item, 'order', { value: order, enumerable: false });
+        return item as QueueItem<T>;
     }
 
     /**
@@ -59,13 +69,13 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] push() called with mode hash: ${modeHash}`);
 
-        this.queue.push({
+        this.queue.push(this.withOrder({
             message,
             mode,
             modeHash,
             localId,
             isolate: false
-        });
+        }, this.nextTailOrder++));
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -95,13 +105,13 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushImmediate() called with mode hash: ${modeHash}`);
 
-        this.queue.push({
+        this.queue.push(this.withOrder({
             message,
             mode,
             modeHash,
             localId,
             isolate: false
-        });
+        }, this.nextTailOrder++));
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -134,13 +144,13 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushIsolated() called with mode hash: ${modeHash} - preserving ${this.queue.length} pending messages`);
 
-        this.queue.push({
+        this.queue.push(this.withOrder({
             message,
             mode,
             modeHash,
             localId,
             isolate: true
-        });
+        }, this.nextTailOrder++));
 
         if (this.onMessageHandler) {
             this.onMessageHandler(message, mode);
@@ -173,16 +183,18 @@ export class MessageQueue2<T> {
         // by takeByLocalId for a pending steer): a later failed steer must not
         // resurrect a message the clear command was meant to discard.
         this.cancelReservations();
+        this.nextHeadOrder = -1;
+        this.nextTailOrder = 0;
         // Clear any pending messages to ensure this message is processed in complete isolation
         this.queue = [];
 
-        this.queue.push({
+        this.queue.push(this.withOrder({
             message,
             mode,
             modeHash,
             localId,
             isolate: true
-        });
+        }, this.nextTailOrder++));
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -211,13 +223,13 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] unshift() called with mode hash: ${modeHash}`);
 
-        this.queue.unshift({
+        this.queue.unshift(this.withOrder({
             message,
             mode,
             modeHash,
             localId,
             isolate: false
-        });
+        }, this.nextHeadOrder--));
 
         // Trigger message handler if set
         if (this.onMessageHandler) {
@@ -250,13 +262,13 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] unshiftIsolated() called with mode hash: ${modeHash}`);
 
-        this.queue.unshift({
+        this.queue.unshift(this.withOrder({
             message,
             mode,
             modeHash,
             localId,
             isolate: true
-        });
+        }, this.nextHeadOrder--));
 
         if (this.onMessageHandler) {
             this.onMessageHandler(message, mode);
@@ -331,9 +343,9 @@ export class MessageQueue2<T> {
     }
 
     /**
-     * Re-insert an item previously removed by {@link takeByLocalId} at its
-     * original index (clamped if the queue shrank). Returns false when the
-     * reservation was cancelled in the meantime.
+     * Re-insert an item previously removed by {@link takeByLocalId} according
+     * to its stable FIFO order. Returns false when the reservation was
+     * cancelled in the meantime.
      */
     restoreReservation(reservation: QueueReservation<T>): boolean {
         if (reservation.state === 'cancelled') {
@@ -348,8 +360,8 @@ export class MessageQueue2<T> {
             }
             this.reservations.delete(reservation.item.localId);
         }
-        const idx = Math.max(0, Math.min(reservation.index, this.queue.length));
-        this.queue.splice(idx, 0, reservation.item);
+        const idx = this.queue.findIndex((item) => item.order > reservation.item.order);
+        this.queue.splice(idx === -1 ? this.queue.length : idx, 0, reservation.item);
         if (this.waiter) {
             const waiter = this.waiter;
             this.waiter = null;
@@ -397,6 +409,8 @@ export class MessageQueue2<T> {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
         this.closed = false;
+        this.nextHeadOrder = -1;
+        this.nextTailOrder = 0;
         this.cancelReservations();
 
         // Clear waiter without calling it since we're not closing
