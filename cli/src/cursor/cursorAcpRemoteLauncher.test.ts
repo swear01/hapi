@@ -424,7 +424,7 @@ describe('cursorAcpRemoteLauncher', () => {
         await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
             .resolves.toEqual({ steered: true });
         rejectSoftSteer(indeterminate);
-        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe('indeterminate'));
         expect(session.client.emitSteerIndeterminate).toHaveBeenCalledWith(['steer']);
         expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
 
@@ -454,7 +454,7 @@ describe('cursorAcpRemoteLauncher', () => {
         await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
             .resolves.toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
         expect(session.client.emitSteerIndeterminate).toHaveBeenCalledWith(['steer']);
-        expect(session.queue.cancelByLocalId('steer')).toBe(true);
+        expect(session.queue.cancelByLocalId('steer')).toBe('indeterminate');
 
         harness.deferPrompt = null;
         releasePrompt();
