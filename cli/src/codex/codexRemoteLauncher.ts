@@ -1,7 +1,10 @@
 import React from 'react';
 import { randomUUID } from 'node:crypto';
 
-import { CodexAppServerClient } from './codexAppServerClient';
+import {
+    CodexAppServerClient,
+    isCodexAppServerIndeterminateError
+} from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
@@ -696,7 +699,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         // next batch while one is pending: takeByLocalId removed the row from
         // the physical queue, and collecting surrounding rows first would let
         // a rejected steer restore out of FIFO order (#888).
-        const inFlightSteers = new Set<Promise<boolean>>();
+        const inFlightSteers = new Set<Promise<'accepted' | 'rejected' | 'indeterminate'>>();
         const setTurnInFlight = (value: boolean) => {
             turnInFlight = value;
             session.client.updateAgentState?.((state) => ({ ...state, steeringActive: value }));
@@ -3291,12 +3294,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             return await this.conversationHistory.rewind((payload as { messageLocalId: string }).messageLocalId)
         })
         // Non-interrupting mid-turn inject via app-server `turn/steer` (#888).
-        // Returns false when the turn ended or is review/compact (not steerable).
-        const trySteerActiveTurn = async (batch: QueuedMessage): Promise<boolean> => {
+        // Transport failures are indeterminate: the app-server may have
+        // accepted the write even though its response was lost.
+        type SteerOutcome = 'accepted' | 'rejected' | 'indeterminate';
+        const trySteerActiveTurn = async (batch: QueuedMessage): Promise<SteerOutcome> => {
             const threadId = this.currentThreadId;
             const turnId = this.currentTurnId;
             if (!threadId || !turnId || !turnInFlight) {
-                return false;
+                return 'rejected';
             }
             try {
                 await appServerClient.steerTurn({
@@ -3305,11 +3310,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     expectedTurnId: turnId
                 }, { signal: this.abortController.signal });
                 logger.debug(`[Codex] Steered active turn ${turnId}`);
-                return true;
+                return 'accepted';
             } catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
                 logger.debug(`[Codex] turn/steer failed (${detail})`);
-                return false;
+                return isCodexAppServerIndeterminateError(error) ? 'indeterminate' : 'rejected';
             }
         };
 
@@ -3360,10 +3365,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const steerRequest = trySteerActiveTurn(batch);
                 inFlightSteers.add(steerRequest);
                 try {
-                    const steered = await steerRequest;
-                    if (steered) {
-                        // A success racing with abort/cleanup must not publish a
-                        // consumed event or user message for the invalidated steer.
+                    const outcome = await steerRequest;
+                    if (outcome === 'accepted' || outcome === 'indeterminate') {
+                        // An indeterminate transport failure may follow a
+                        // successful app-server write; consume it at most once.
                         if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
                             || !session.queue.commitReservation(taken)) {
                             return { steered: false, error: 'Steer cancelled' };

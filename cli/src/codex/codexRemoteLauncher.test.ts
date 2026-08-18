@@ -56,6 +56,7 @@ const harness = vi.hoisted(() => ({
     steerTurnCalls: [] as Array<Record<string, unknown>>,
     deferSteerTurn: null as Promise<void> | null,
     releaseSteerTurn: null as (() => void) | null,
+    steerTurnError: null as Error | null,
     failNextSteerTurn: false,
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
@@ -1025,6 +1026,11 @@ vi.mock('./codexAppServerClient', () => {
             if (harness.deferSteerTurn) {
                 await harness.deferSteerTurn;
             }
+            const steerTurnError = harness.steerTurnError;
+            harness.steerTurnError = null;
+            if (steerTurnError) {
+                throw steerTurnError;
+            }
             if (harness.failNextSteerTurn) {
                 harness.failNextSteerTurn = false;
                 throw new Error('no active turn');
@@ -1045,7 +1051,14 @@ vi.mock('./codexAppServerClient', () => {
         async disconnect(): Promise<void> {}
     }
 
-    return { CodexAppServerClient: MockCodexAppServerClient };
+    const indeterminateSymbol = Symbol('codex-app-server-indeterminate');
+    return {
+        CodexAppServerClient: MockCodexAppServerClient,
+        CODEX_APP_SERVER_INDETERMINATE_SYMBOL: indeterminateSymbol,
+        isCodexAppServerIndeterminateError: (error: unknown) =>
+            typeof error === 'object' && error !== null
+            && (error as Record<symbol, unknown>)[indeterminateSymbol] === true
+    };
 });
 
 vi.mock('./utils/buildHapiMcpBridge', () => ({
@@ -1061,6 +1074,7 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
 }));
 
 import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
+import { CODEX_APP_SERVER_INDETERMINATE_SYMBOL } from './codexAppServerClient';
 
 type FakeAgentState = {
     requests: Record<string, unknown>;
@@ -1250,6 +1264,7 @@ describe('codexRemoteLauncher', () => {
         harness.steerTurnCalls = [];
         harness.deferSteerTurn = null;
         harness.releaseSteerTurn = null;
+        harness.steerTurnError = null;
         harness.failNextSteerTurn = false;
         harness.emitFailedCompletionAfterThreadSystemError = false;
         harness.emitCyberPolicyAfterThreadSystemError = false;
@@ -3233,6 +3248,7 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         harness.steerTurnCalls = [];
         harness.deferSteerTurn = null;
         harness.releaseSteerTurn = null;
+        harness.steerTurnError = null;
         harness.failNextSteerTurn = false;
         harness.startThreadIds = [];
         harness.startTurnThreadIds = [];
@@ -3304,6 +3320,31 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         // The steer stayed rejected and no turn/steer was ever attempted.
         expect(harness.steerTurnCalls).toEqual([]);
         queue.close();
+    });
+
+    it('consumes an indeterminate steer at most once', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('Codex app-server exited after accepting steer');
+        Object.defineProperty(indeterminate, CODEX_APP_SERVER_INDETERMINATE_SYMBOL, { value: true });
+        harness.steerTurnError = indeterminate;
+        const { session, rpcHandlers } = createSessionStub(['first message']);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('steer me', createMode(), 'steer-local');
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        await expect(steerHandler!({ localId: 'steer-local' })).resolves.toEqual({ steered: true });
+        expect(queue.pendingLocalIds()).not.toContain('steer-local');
+
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-1' }
+        });
+        queue.close();
+        await runPromise;
     });
 
     it('rejects a second steer while the first turn/steer is unresolved', async () => {

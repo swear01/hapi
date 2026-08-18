@@ -79,6 +79,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
 }
 
+/** Transport failures leave steer delivery outcome unknown; JSON-RPC errors are explicit rejection. */
+export const CODEX_APP_SERVER_INDETERMINATE_SYMBOL = Symbol('codex-app-server-indeterminate');
+
+function markCodexAppServerIndeterminate(error: Error): Error {
+    Object.defineProperty(error, CODEX_APP_SERVER_INDETERMINATE_SYMBOL, { value: true });
+    return error;
+}
+
+export function isCodexAppServerIndeterminateError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+        && (error as Record<symbol, unknown>)[CODEX_APP_SERVER_INDETERMINATE_SYMBOL] === true;
+}
+
 function createAbortError(): Error {
     const error = new Error('Request aborted');
     error.name = 'AbortError';
@@ -468,7 +481,7 @@ export class CodexAppServerClient extends JsonLineParser {
                 aborted = true;
                 this.pending.delete(id);
                 cleanup();
-                reject(createAbortError());
+                reject(markCodexAppServerIndeterminate(createAbortError()));
             };
 
             if (options?.signal) {
@@ -484,7 +497,9 @@ export class CodexAppServerClient extends JsonLineParser {
                     if (this.pending.has(id)) {
                         this.pending.delete(id);
                         cleanup();
-                        reject(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+                        reject(markCodexAppServerIndeterminate(
+                            new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`)
+                        ));
                     }
                 }, timeoutMs);
                 timeout.unref();
@@ -619,7 +634,15 @@ export class CodexAppServerClient extends JsonLineParser {
 
     private writePayload(payload: JsonRpcLiteRequest | JsonRpcLiteNotification | JsonRpcLiteResponse): void {
         const serialized = JSON.stringify(payload);
-        this.process?.stdin.write(`${serialized}\n`);
+        try {
+            this.process?.stdin.write(`${serialized}\n`);
+        } catch (error) {
+            const writeError = markCodexAppServerIndeterminate(
+                error instanceof Error ? error : new Error(String(error))
+            );
+            this.rejectAllPending(writeError);
+            throw writeError;
+        }
     }
 
     private resetParserState(): void {
@@ -628,9 +651,10 @@ export class CodexAppServerClient extends JsonLineParser {
     }
 
     private rejectAllPending(error: Error): void {
+        const indeterminate = markCodexAppServerIndeterminate(error);
         for (const { reject, cleanup } of this.pending.values()) {
             cleanup();
-            reject(error);
+            reject(indeterminate);
         }
         this.pending.clear();
     }
