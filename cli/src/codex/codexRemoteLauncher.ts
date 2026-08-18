@@ -231,6 +231,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     private abortController: AbortController = new AbortController();
     /** Invalidates queued-message steer handlers after abort or cleanup. */
     private steerEpoch = 0;
+    private abortInProgress = false;
     private currentThreadId: string | null = null;
     private currentTurnId: string | null = null;
     private readonly activeChildTurns = new Map<string, string>();
@@ -287,6 +288,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     }
 
     private async handleAbort(): Promise<void> {
+        this.abortInProgress = true;
         this.steerEpoch++;
         logger.debug('[Codex] Abort requested - stopping current task');
         try {
@@ -305,6 +307,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             logger.debug('[Codex] Error during abort:', error);
         } finally {
             this.abortController = new AbortController();
+            this.abortInProgress = false;
         }
     }
 
@@ -2090,7 +2093,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!localId) {
                     return { steered: false, error: 'Missing localId' };
                 }
-                if (!turnInFlight || !this.currentThreadId || !this.currentTurnId) {
+                if (this.abortInProgress || !turnInFlight || !this.currentThreadId || !this.currentTurnId) {
                     return { steered: false, error: 'No active steerable turn' };
                 }
                 // Reserve before awaiting turn/steer so the main loop cannot

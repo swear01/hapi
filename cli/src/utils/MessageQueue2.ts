@@ -32,6 +32,7 @@ export class MessageQueue2<T> {
     onBatchConsumed: ((localIds: string[]) => void) | null = null;
     modeHasher: (mode: T) => string;
     private readonly reservations = new Map<string, QueueReservation<T>>();
+    private readonly consumedReservations = new Set<string>();
     private nextEnqueueOrder = 0;
     private previousEnqueueOrder = -1;
 
@@ -297,7 +298,7 @@ export class MessageQueue2<T> {
      * Best-effort: if the CLI is offline when cancel is issued, the message
      * may already have been collected for invocation and won't be found here.
      */
-    cancelByLocalId(localId: string): boolean | 'in-flight' {
+    cancelByLocalId(localId: string): boolean | 'in-flight' | 'consumed' {
         if (!localId) return false;
         const idx = this.queue.findIndex(item => item.localId === localId);
         if (idx !== -1) {
@@ -305,7 +306,9 @@ export class MessageQueue2<T> {
             return true;
         }
         const reservation = this.reservations.get(localId);
-        if (!reservation) return false;
+        if (!reservation) {
+            return this.consumedReservations.has(localId) ? 'consumed' : false;
+        }
         if (reservation.state === 'dispatching') {
             // The row is inside an async steer: it cannot be removed, but it is
             // also NOT already consumed — the hub must not stamp invoked_at.
@@ -416,6 +419,7 @@ export class MessageQueue2<T> {
                 return false;
             }
             this.reservations.delete(reservation.item.localId);
+            this.rememberConsumedReservation(reservation.item.localId);
         }
         return true;
     }
@@ -444,6 +448,16 @@ export class MessageQueue2<T> {
         reservation.originIndeterminate = true;
         reservation.state = 'indeterminate';
         return true;
+    }
+
+    private rememberConsumedReservation(localId: string): void {
+        this.consumedReservations.delete(localId);
+        this.consumedReservations.add(localId);
+        while (this.consumedReservations.size > 256) {
+            const oldest = this.consumedReservations.values().next().value;
+            if (oldest === undefined) break;
+            this.consumedReservations.delete(oldest);
+        }
     }
 
     private cancelReservations(preserveDispatching = false): void {
