@@ -656,4 +656,14 @@ describe('AcpStdioTransport closed stdin writes', () => {
         await expect(request.dispatched).rejects.toThrow('EPIPE');
         await expect(request.completed).rejects.toThrow('EPIPE');
     });
+
+    test('sendRequest still honors finite timeout when stdin callback stalls', async () => {
+        spawnState.deferStdinWriteCallback = () => {};
+        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+
+        await expect(transport.sendRequest('initialize', undefined, { timeoutMs: 10 }))
+            .rejects.toThrow("ACP request 'initialize' timed out after 10ms");
+
+        await transport.close();
+    });
 });

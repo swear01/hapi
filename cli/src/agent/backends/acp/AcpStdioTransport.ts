@@ -246,10 +246,16 @@ export class AcpStdioTransport {
     async sendRequest(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown> {
         const { dispatched, completed } = this.sendRequestWithDispatch(method, params, options);
         try {
-            await dispatched;
+            // A stalled stdin callback must not bypass the request timeout.
+            await Promise.race([
+                dispatched,
+                completed.then(() => undefined)
+            ]);
         } catch (error) {
             // `completed` carries the same rejection (closed/exited transport);
-            // swallow it so the caller sees exactly one error.
+            // swallow it so the caller sees exactly one error. Do not leave a
+            // late dispatch rejection unobserved when completion timed out.
+            void dispatched.catch(() => {});
             await completed.catch(() => {});
             throw error;
         }
