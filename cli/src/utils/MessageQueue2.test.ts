@@ -609,6 +609,7 @@ describe('MessageQueue2', () => {
         expect(queue.beginReservationDispatch(reservation!)).toBe(true);
         expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
         expect(queue.size()).toBe(0);
+        expect(queue.cancelByLocalId('b')).toBe('indeterminate');
         expect(queue.takeByLocalId('b')).toBe(reservation);
         expect(queue.beginReservationDispatch(reservation!)).toBe(true);
         expect(queue.restoreReservation(reservation!)).toBe(true);

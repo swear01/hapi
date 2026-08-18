@@ -471,7 +471,7 @@ export class MessageService {
             const ackResult = cliCount > 0
                 ? await this.requestCliCancelAck(sessionId, localId, messageId, 500)
                 : 'timeout' as const
-            if (ackResult === 'in-flight') {
+            if (ackResult === 'in-flight' || ackResult === 'indeterminate' || (ackResult === 'timeout' && cliCount > 0)) {
                 return { status: 'busy', localId }
             }
             this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)

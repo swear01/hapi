@@ -460,6 +460,9 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 sessionAccess.value.namespace
             )
             ack({ ok })
+            if (ok && data.state === 'queued') {
+                onWebappEvent?.({ type: 'messages-requeued', sessionId: data.sid, localIds })
+            }
         } catch (err) {
             console.error('recordSteerDeliveryState failed', err)
             ack({ ok: false })
