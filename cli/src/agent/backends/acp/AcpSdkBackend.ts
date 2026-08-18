@@ -1170,6 +1170,7 @@ export class AcpSdkBackend implements AgentBackend {
      * decrement a newer prompt's counter.
      */
     abortSoftSteers(): void {
+        this.messageHandler?.deactivate?.();
         this.promptRequestEpoch++;
         if (this.activePromptRequests > 0) {
             this.activePromptRequests = 0;
