@@ -599,6 +599,12 @@ export class MessageService {
         }
         if (!lookup.localId) return { status: 'not-found' }
 
+        const roomName = `session:${sessionId}`
+        const cliCount = this.io.of('/cli').adapter.rooms.get(roomName)?.size ?? 0
+        if (this.store.isOpenCodeClearDeliveryGated(sessionId) || cliCount !== 1) {
+            return { status: 'retry-unavailable', localId: lookup.localId }
+        }
+
         const message = this.store.messages.requeueIndeterminateMessage(sessionId, messageId)
         if (!message || !message.localId) return { status: 'not-found' }
 
@@ -620,14 +626,7 @@ export class MessageService {
                 }
             }
         }
-        const room = this.io.of('/cli').to(`session:${sessionId}`)
-        const cliCount = this.io.of('/cli').adapter.rooms.get(`session:${sessionId}`)?.size ?? 0
-        if (this.store.isOpenCodeClearDeliveryGated(sessionId) || cliCount === 0) {
-            this.store.messages.setMessagesDeliveryState(sessionId, [message.localId], 'indeterminate')
-            this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [message.localId] })
-            return { status: 'retry-unavailable', localId: message.localId }
-        }
-
+        const room = this.io.of('/cli').to(roomName)
         const accepted = await new Promise<boolean>((resolve) => {
             room.timeout(500).emit(
                 'update',

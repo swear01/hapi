@@ -615,6 +615,18 @@ describe('MessageQueue2', () => {
         expect(queue.takeByLocalId('b')).toBe(reservation);
     });
 
+    it('preserves a dispatched reservation across an abort reset', () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('b', 'B', 'b');
+        const reservation = queue.takeByLocalId('b');
+        expect(reservation).not.toBeNull();
+        expect(queue.beginReservationDispatch(reservation!)).toBe(true);
+        queue.reset({ preserveDispatchingReservations: true });
+        expect(queue.cancelByLocalId('b')).toBe('in-flight');
+        expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
+        expect(queue.commitReservation(reservation!)).toBe(true);
+    });
+
     it('does not restore an indeterminate reservation after clear', () => {
         const queue = new MessageQueue2<string>(mode => mode);
         queue.push('b', 'B', 'b');

@@ -294,7 +294,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             this.currentTurnId = null;
 
             this.abortController.abort();
-            this.session.queue.reset();
+            // A dispatched steer may still reconcile after Abort; preserve its
+            // reservation so a positive thread/read result can acknowledge it.
+            this.session.queue.reset({ preserveDispatchingReservations: true });
             this.permissionHandler?.reset();
             this.reasoningProcessor?.abort();
             this.diffProcessor?.reset();
@@ -2164,10 +2166,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     try {
                         await steer.dispatched;
                     } catch (error) {
-                        // Dispatch failure means nothing was written — restore and
-                        // report failure. Never reconcile: no request reached the
-                        // app-server (abort before dispatch included).
+                        // A stalled/aborted stdin callback is indeterminate: the
+                        // bytes may have reached Codex even though dispatch did
+                        // not report success. Reconcile instead of replaying.
                         void steer.completed.catch(() => {});
+                        if (isIndeterminateError(error)) {
+                            reconcileDispatchedSteer(localId, taken, batch);
+                            return { steered: false, error: 'Steer outcome is being reconciled' };
+                        }
                         await restoreQueuedState();
                         session.queue.restoreReservation(taken);
                         if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
