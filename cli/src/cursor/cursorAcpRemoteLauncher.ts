@@ -475,6 +475,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     if (!taken.originIndeterminate) {
                         const persisted = await session.client.setSteerDeliveryState([localId], 'queued');
                         if (!persisted) {
+                            session.queue.markReservationIndeterminate(taken);
                             session.client.emitSteerIndeterminate([localId]);
                             return false;
                         }
