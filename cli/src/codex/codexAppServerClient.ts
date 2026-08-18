@@ -190,6 +190,7 @@ export class CodexAppServerClient extends JsonLineParser {
     private readonly pending = new Map<number, PendingRequest>();
     private readonly requestHandlers = new Map<string, RequestHandler>();
     private notificationHandler: ((method: string, params: unknown) => void) | null = null;
+    private transportAbandonedHandler: (() => void) | null = null;
     private stderrHandler: ((text: string) => void) | null = null;
     private protocolError: Error | null = null;
 
@@ -268,6 +269,10 @@ export class CodexAppServerClient extends JsonLineParser {
 
     setNotificationHandler(handler: ((method: string, params: unknown) => void) | null): void {
         this.notificationHandler = handler;
+    }
+
+    setTransportAbandonedHandler(handler: (() => void) | null): void {
+        this.transportAbandonedHandler = handler;
     }
 
     registerRequestHandler(method: string, handler: RequestHandler): void {
@@ -538,6 +543,7 @@ export class CodexAppServerClient extends JsonLineParser {
             }
             this.rejectAllPending(error);
             this.resetParserState();
+            this.transportAbandonedHandler?.();
         };
 
         const failRequest = (error: Error, abandon = false) => {
@@ -586,10 +592,18 @@ export class CodexAppServerClient extends JsonLineParser {
         this.pending.set(id, {
             resolve: (value) => {
                 cleanup();
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    resolveDispatched();
+                }
                 resolveCompleted(value);
             },
             reject: (error) => {
                 cleanup();
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    resolveDispatched();
+                }
                 rejectCompleted(error);
             },
             rejectDispatched: (error) => {

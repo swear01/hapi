@@ -1897,6 +1897,16 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             waiter();
         };
 
+        appServerClient.setTransportAbandonedHandler(() => {
+            // The old process is gone; its foreground turn cannot deliver more
+            // notifications. Let the loop recover on a fresh app-server.
+            turnInFlight = false;
+            recoveryInFlight = false;
+            activeMessage = null;
+            this.currentTurnId = null;
+            wakeLoop();
+        });
+
         const waitForTurnOrRecovery = (signal: AbortSignal): Promise<void> => new Promise((resolve) => {
             if (!turnInFlight && !recoveryInFlight) {
                 resolve();
@@ -4268,6 +4278,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
+        this.appServerClient.setTransportAbandonedHandler(null);
         this.appServerClient.setStderrHandler(null);
         try {
             await this.appServerClient.disconnect();
