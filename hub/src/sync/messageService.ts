@@ -435,6 +435,7 @@ export class MessageService {
         // Phase 2: row is still queued. Ask the CLI whether it already shifted the item
         // (race window between collectBatch() shift and messages-consumed ack).
         const { localId, resolvedId, scheduledAt } = lookup
+        const isDispatching = lookup.status === 'dispatching'
         const isIndeterminate = lookup.status === 'indeterminate'
 
         if (!localId) {
@@ -442,6 +443,17 @@ export class MessageService {
             this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)
             this.publisher.emit({ type: 'message-cancelled', sessionId, messageId })
             return { status: 'cancelled', localId: null }
+        }
+
+        // A live dispatch is not cancellable by timeout. Convert it to the
+        // durable unknown state and require a second explicit resolution.
+        if (isDispatching) {
+            const ackResult = await this.requestCliCancelAck(sessionId, localId, messageId, 500)
+            if (ackResult === 'in-flight' || ackResult === 'timeout' || ackResult === 'not-found' || ackResult === 'removed') {
+                this.store.messages.setMessagesDeliveryState(sessionId, [localId], 'indeterminate')
+                this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
+                return { status: 'busy', localId }
+            }
         }
 
         // An indeterminate steer is never converted to invoked by a cancel
