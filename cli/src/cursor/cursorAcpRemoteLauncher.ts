@@ -521,9 +521,17 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 } catch (error) {
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     await steerDone;
-                    if (steerEpoch === this.softSteerEpoch && !this.shouldExit) {
-                        session.queue.restoreReservation(taken);
+                    if (steerEpoch !== this.softSteerEpoch || this.shouldExit) {
+                        return { steered: false, error: 'Steer cancelled' };
                     }
+                    if (isAcpIndeterminateError(error)) {
+                        if (session.queue.commitReservation(taken)) {
+                            messageBuffer.addMessage(taken.item.message, 'user');
+                            session.client.emitMessagesConsumed([localId]);
+                        }
+                        return { steered: true };
+                    }
+                    session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
                 return { steered: true };
