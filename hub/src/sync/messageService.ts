@@ -449,11 +449,17 @@ export class MessageService {
         // durable unknown state and require a second explicit resolution.
         if (isDispatching) {
             const ackResult = await this.requestCliCancelAck(sessionId, localId, messageId, 500)
-            if (ackResult === 'in-flight' || ackResult === 'timeout' || ackResult === 'not-found' || ackResult === 'removed') {
-                this.store.messages.setMessagesDeliveryState(sessionId, [localId], 'indeterminate')
-                this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
-                return { status: 'busy', localId }
+            if (ackResult === 'removed') {
+                this.store.messages.deleteQueuedMessageById(sessionId, resolvedId)
+                const recheck = this.store.messages.lookupQueuedMessage(sessionId, resolvedId)
+                if (recheck.status === 'invoked') return recheck
+                if (recheck.status !== 'absent') return { status: 'busy', localId }
+                this.publisher.emit({ type: 'message-cancelled', sessionId, messageId, localId })
+                return { status: 'cancelled', localId }
             }
+            this.store.messages.setMessagesDeliveryState(sessionId, [localId], 'indeterminate')
+            this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
+            return { status: 'busy', localId }
         }
 
         // An indeterminate steer is never converted to invoked by a cancel
