@@ -446,20 +446,23 @@ export class MessageQueue2<T> {
         return true;
     }
 
-    private cancelReservations(): void {
-        for (const reservation of this.reservations.values()) {
+    private cancelReservations(preserveDispatching = false): void {
+        for (const [localId, reservation] of this.reservations) {
+            if (preserveDispatching && (reservation.state === 'dispatching' || reservation.state === 'indeterminate')) {
+                continue;
+            }
             reservation.state = 'cancelled';
+            this.reservations.delete(localId);
         }
-        this.reservations.clear();
     }
 
     /**
      * Reset the queue - clears all messages and resets to empty state
      */
-    reset(): void {
+    reset(options?: { preserveDispatchingReservations?: boolean }): void {
         logger.debug(`[MessageQueue2] reset() called. Clearing ${this.queue.length} messages`);
         this.queue = [];
-        this.cancelReservations();
+        this.cancelReservations(options?.preserveDispatchingReservations === true);
         this.closed = false;
 
         // Clear waiter without calling it since we're not closing
