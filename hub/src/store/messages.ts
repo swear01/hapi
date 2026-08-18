@@ -781,21 +781,22 @@ export function claimIndeterminateMessage(
     messageId: string
 ): StoredMessage | null {
     return db.transaction(() => {
-        const row = db.prepare(`
+        const claimed = db.prepare(`
+            UPDATE messages
+            SET delivery_state = 'dispatching'
+            WHERE session_id = ?
+              AND (id = ? OR local_id = ?)
+              AND invoked_at IS NULL
+              AND delivery_state = 'indeterminate'
+        `).run(sessionId, messageId, messageId)
+        if (claimed.changes === 0) return null
+        const updated = db.prepare(`
             SELECT * FROM messages
             WHERE session_id = ? AND (id = ? OR local_id = ?)
               AND invoked_at IS NULL
-              AND delivery_state != 'queued'
+              AND delivery_state = 'dispatching'
             LIMIT 1
         `).get(sessionId, messageId, messageId) as DbMessageRow | undefined
-        if (!row) return null
-        db.prepare(`
-            UPDATE messages
-            SET delivery_state = 'dispatching'
-            WHERE session_id = ? AND id = ? AND invoked_at IS NULL
-              AND delivery_state != 'queued'
-        `).run(sessionId, row.id)
-        const updated = db.prepare('SELECT * FROM messages WHERE id = ?').get(row.id) as DbMessageRow | undefined
         return updated ? toStoredMessage(updated) : null
     })()
 }

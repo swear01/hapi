@@ -642,6 +642,10 @@ export class MessageService {
             return { status: 'invoked', message: toDecryptedMessage(refreshed.message) }
         }
         if (refreshed.status === 'absent') return { status: 'not-found' }
+        if (refreshed.status === 'dispatching') {
+            const changed = this.store.messages.setMessagesDeliveryState(sessionId, [lookup.localId], 'indeterminate')
+            if (changed === 0) return { status: 'retry-unavailable', localId: lookup.localId }
+        }
 
         const message = this.store.messages.claimIndeterminateMessage(sessionId, messageId)
         if (!message || !message.localId) return { status: 'not-found' }
