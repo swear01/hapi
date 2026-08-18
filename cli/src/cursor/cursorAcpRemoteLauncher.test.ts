@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type { EnhancedMode } from './loop';
 import type { AgentMessage } from '@/agent/types';
+import { ACP_INDETERMINATE_SYMBOL } from '@/agent/backends/acp/AcpStdioTransport';
 
 const harness = vi.hoisted(() => ({
     initializeError: null as Error | null,
@@ -267,6 +268,7 @@ function makeClient() {
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
         emitMessagesConsumed: vi.fn(),
+        emitSteerIndeterminate: vi.fn(),
         sendClaudeSessionMessage: vi.fn(),
         keepAlive: vi.fn(),
         emitSessionReady: vi.fn()
@@ -391,6 +393,37 @@ describe('cursorAcpRemoteLauncher', () => {
         // instruction — the row is restored for the next prompt (no data loss).
         rejectSoftSteer(new Error('request rejected'));
         await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
+        expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('holds a transport-ambiguous steer for explicit retry or cancel', async () => {
+        let releasePrompt!: () => void;
+        let rejectSoftSteer!: (error: Error) => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        harness.deferSoftSteer = new Promise((_, reject) => { rejectSoftSteer = reject; });
+        const indeterminate = new Error('ACP transport closed');
+        Object.defineProperty(indeterminate, ACP_INDETERMINATE_SYMBOL, { value: true });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
+            .resolves.toEqual({ steered: true });
+        rejectSoftSteer(indeterminate);
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('steer')).toBe(true));
+        expect(session.client.emitSteerIndeterminate).toHaveBeenCalledWith(['steer']);
         expect(session.client.emitMessagesConsumed).not.toHaveBeenCalledWith(['steer'], { steered: true });
 
         harness.deferPrompt = null;

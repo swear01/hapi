@@ -503,7 +503,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     session.client.emitMessagesConsumed([localId], { steered: true });
                 }, (error) => {
                     if (isAcpIndeterminateError(error)) {
-                        logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch; row stays reserved', error);
+                        // Do not leave the reservation dispatching forever. Hold
+                        // it outside automatic replay and persist the ambiguous
+                        // outcome; a later explicit Steer retries this same row.
+                        session.queue.markReservationIndeterminate(taken);
+                        session.client.emitSteerIndeterminate([localId]);
+                        logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch; row held for explicit resolution', error);
                         return;
                     }
                     if (session.queue.restoreReservation(taken)) {
