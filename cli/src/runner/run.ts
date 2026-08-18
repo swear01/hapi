@@ -1517,6 +1517,7 @@ export function buildCliArgs(
   // forks reuse the original HAPI row via --existing-session-id.
   if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
       || agent === 'opencode'
+      || agent === 'agy'
       || agent === 'dsh'
       || (agentCommand === 'claude' && options.forkSession)) {
     const existingSessionId = options.existingSessionId ?? options.sessionId;
