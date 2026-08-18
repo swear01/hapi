@@ -174,7 +174,7 @@ public enum NewSessionLogic {
             modelReasoningEffort: (agent == .codex && form.modelReasoningEffort != "default")
                 ? form.modelReasoningEffort
                 : nil,
-            yolo: (isGrok || codexFamily) ? nil : form.yolo,
+            yolo: (agent == .dsh || isGrok || codexFamily) ? nil : form.yolo,
             permissionMode: (isGrok || codexFamily) ? form.permissionMode : nil,
             sessionType: form.sessionType,
             worktreeName: (form.sessionType == .worktree && !trimmedWorktreeName.isEmpty)

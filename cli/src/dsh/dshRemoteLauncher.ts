@@ -64,7 +64,6 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
             onAbort: () => this.handleAbort(),
             onSwitch: () => this.handleExitFromUi()
         })
-        this.session.sendSessionEvent({ type: 'ready' })
 
         while (!this.shouldExit) {
             const batch = await this.session.queue.waitForMessagesAndGetAsString(this.abortController.signal)
@@ -86,6 +85,9 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
             } finally {
                 this.session.onThinkingChange(false)
                 await this.permissionHandler?.cancelAll('Prompt finished')
+                if (this.session.queue.size() === 0 && !this.shouldExit) {
+                    this.session.sendSessionEvent({ type: 'ready' })
+                }
             }
         }
     }
