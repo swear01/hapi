@@ -154,6 +154,8 @@ data class QueuedRowUi(
     val canAct: Boolean,
     /** Steer offered: turn active, not future-scheduled, actionable. */
     val canSteer: Boolean,
+    /** Native delivery outcome is unknown; show explicit retry instead of normal Steer. */
+    val indeterminate: Boolean = false,
 )
 
 /** Session config sheet model (M3b switching). */
@@ -952,6 +954,8 @@ class ChatViewModel(
             val invokedMessage = response.message
             if (response.status == "invoked" && invokedMessage != null) {
                 store.appendOptimistic(invokedMessage.asWindowMessage(MessageStatus.Sent))
+            } else if (response.status == "busy") {
+                store.appendOptimistic(row.copy(status = MessageStatus.Indeterminate))
             }
             response.status
         } catch (cancellation: CancellationException) {
@@ -962,6 +966,27 @@ class ChatViewModel(
             null
         } finally {
             queuedOpPending.value = false
+        }
+    }
+
+    fun retryIndeterminateMessage(messageId: String) {
+        scope.launch {
+            try {
+                val response = api.retryIndeterminateMessage(sessionId, messageId)
+                val message = response.message
+                if (response.status == "invoked" && message != null) {
+                    val localId = message.localId
+                    val invokedAt = message.invokedAtOrNull
+                    if (localId != null && invokedAt != null) {
+                        awaitWindowStore().markConsumed(listOf(localId), invokedAt)
+                    }
+                }
+                if (response.status == "retried" || response.status == "already-queued") {
+                    response.localId?.let { awaitWindowStore().markRequeued(listOf(it)) }
+                }
+            } catch (error: Exception) {
+                _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed(error.message)))
+            }
         }
     }
 
@@ -1063,7 +1088,9 @@ class ChatViewModel(
                 attachmentNames = preview.attachmentNames,
                 scheduledAt = row.wire.scheduledAt,
                 canAct = canAct,
-                canSteer = canAct && thinking && row.wire.scheduledAt == null,
+                canSteer = canAct && thinking && row.wire.scheduledAt == null
+                    && row.status != MessageStatus.Indeterminate,
+                indeterminate = row.status == MessageStatus.Indeterminate,
             )
         }
     }

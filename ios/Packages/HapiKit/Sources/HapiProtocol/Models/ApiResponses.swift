@@ -157,12 +157,19 @@ extension SpawnResponse: Decodable {
 
 // MARK: - Message queue operations
 
+public struct RetryIndeterminateMessageResponse: Decodable, Equatable, Sendable {
+    public let status: String
+    public let localId: String?
+    public let message: DecryptedMessage?
+}
+
 /// Body of `DELETE /api/sessions/:id/messages/:messageId`, discriminated on
 /// `status`. `invoked` means the cancel arrived too late — the message was
 /// already handed to the agent.
 public enum CancelMessageResponse: Equatable, Sendable {
     case cancelled(localId: String?)
     case invoked(message: DecryptedMessage)
+    case busy(localId: String)
 }
 
 extension CancelMessageResponse: Decodable {
@@ -180,6 +187,8 @@ extension CancelMessageResponse: Decodable {
             self = .cancelled(localId: try container.decodeIfPresent(String.self, forKey: .localId))
         case "invoked":
             self = .invoked(message: try container.decode(DecryptedMessage.self, forKey: .message))
+        case "busy":
+            self = .busy(localId: try container.decode(String.self, forKey: .localId))
         default:
             throw DecodingError.dataCorrupted(DecodingError.Context(
                 codingPath: decoder.codingPath,

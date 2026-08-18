@@ -643,7 +643,7 @@ export class MessageService {
         }
         if (refreshed.status === 'absent') return { status: 'not-found' }
 
-        const message = this.store.messages.requeueIndeterminateMessage(sessionId, messageId)
+        const message = this.store.messages.claimIndeterminateMessage(sessionId, messageId)
         if (!message || !message.localId) return { status: 'not-found' }
 
         const update = {
@@ -677,6 +677,12 @@ export class MessageService {
         if (!accepted) {
             this.store.messages.setMessagesDeliveryState(sessionId, [message.localId], 'indeterminate')
             this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [message.localId] })
+            return { status: 'retry-unavailable', localId: message.localId }
+        }
+        const requeued = this.store.messages.setMessagesDeliveryState(sessionId, [message.localId], 'queued')
+        if (requeued === 0) {
+            const settled = this.store.messages.lookupQueuedMessage(sessionId, message.id)
+            if (settled.status === 'invoked') return { status: 'invoked', message: toDecryptedMessage(settled.message) }
             return { status: 'retry-unavailable', localId: message.localId }
         }
         this.publisher.emit({ type: 'messages-requeued', sessionId, localIds: [message.localId] })

@@ -774,8 +774,8 @@ export function lookupQueuedMessage(
  * This is the "confirmed DELETE" step after the service layer has received a
  * CLI ack with removed:true.  Uses the same first-write-wins guard as the
  * original cancelQueuedMessage. */
-/** Explicitly requeue a durable unknown-delivery row for a user-requested retry. */
-export function requeueIndeterminateMessage(
+/** Claim a durable unknown-delivery row for an explicit retry. */
+export function claimIndeterminateMessage(
     db: Database,
     sessionId: string,
     messageId: string
@@ -791,8 +791,9 @@ export function requeueIndeterminateMessage(
         if (!row) return null
         db.prepare(`
             UPDATE messages
-            SET delivery_state = 'queued'
+            SET delivery_state = 'dispatching'
             WHERE session_id = ? AND id = ? AND invoked_at IS NULL
+              AND delivery_state != 'queued'
         `).run(sessionId, row.id)
         const updated = db.prepare('SELECT * FROM messages WHERE id = ?').get(row.id) as DbMessageRow | undefined
         return updated ? toStoredMessage(updated) : null

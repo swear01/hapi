@@ -493,8 +493,14 @@ export class CodexAppServerClient extends JsonLineParser {
         params?: unknown,
         options?: { signal?: AbortSignal; timeoutMs?: number }
     ): Promise<{ dispatched: Promise<void>; completed: Promise<unknown> }> {
+        if (options?.signal?.aborted) {
+            throw createAbortError();
+        }
         if (!this.connected) {
             await this.connect();
+        }
+        if (options?.signal?.aborted) {
+            throw createAbortError();
         }
 
         const id = this.nextId++;

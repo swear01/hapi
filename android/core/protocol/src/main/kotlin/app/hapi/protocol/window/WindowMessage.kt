@@ -31,6 +31,7 @@ enum class MessageStatus(val wire: String) {
     Sending("sending"),
     Sent("sent"),
     Failed("failed"),
+    Indeterminate("indeterminate"),
     ;
 
     companion object {
