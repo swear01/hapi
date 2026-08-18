@@ -981,6 +981,13 @@ export class ApiClient {
         })
     }
 
+    async deleteArchivedSessions(options: { sessionIds: string[]; requireAllArchived: true }): Promise<void> {
+        await this.request('/api/sessions/delete-archived', {
+            method: 'POST',
+            body: JSON.stringify(options)
+        })
+    }
+
     /*
      * Scratchlist v2 (tiann/hapi#893).
      *

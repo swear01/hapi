@@ -1864,6 +1864,10 @@ export class SyncEngine {
         await this.sessionCache.deleteSession(sessionId)
     }
 
+    async deleteArchivedSessions(sessionIds: string[]): Promise<void> {
+        await this.sessionCache.deleteArchivedSessions(sessionIds)
+    }
+
     async applySessionConfig(
         sessionId: string,
         config: {

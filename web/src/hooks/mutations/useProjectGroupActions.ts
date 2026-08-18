@@ -8,10 +8,8 @@ import { isSessionArchivable } from '@/lib/projectGroupActions'
 /**
  * Bulk actions over every session in a sidebar project group (tiann/hapi#881).
  *
- * There is no atomic bulk route, so the operations fan out to the existing
- * per-session endpoints sequentially. A mid-loop rejection (e.g. a 409 from a
- * session that became active) aborts the run, mirroring single-session
- * behaviour; React Query surfaces it to the caller.
+ * Group deletion uses the server-side all-or-nothing archived bulk route so a
+ * race cannot partially delete a confirmed group.
  */
 export function useProjectGroupActions(
     api: ApiClient | null,
@@ -42,12 +40,10 @@ export function useProjectGroupActions(
             if (!api) {
                 throw new Error('Session unavailable')
             }
-            // requireArchived re-checks server-side: every session must still be
-            // lifecycle-archived, otherwise the delete is refused with 409 so a
-            // stale client cannot delete active/completed sessions (#881).
-            for (const session of sessions) {
-                await api.deleteSession(session.id, { requireArchived: true })
-            }
+            await api.deleteArchivedSessions({
+                sessionIds: sessions.map(({ id }) => id),
+                requireAllArchived: true,
+            })
         },
         onSuccess: async () => {
             for (const session of sessions) {

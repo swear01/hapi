@@ -78,9 +78,9 @@ describe('useProjectGroupActions', () => {
         expect(archive).toHaveBeenNthCalledWith(2, 'c')
     })
 
-    it('deletes every session with requireArchived so the server re-checks', async () => {
+    it('deletes the group through the atomic archived bulk route', async () => {
         const deleteFn = vi.fn(async () => {})
-        const api = { deleteSession: deleteFn } as unknown as ApiClient
+        const api = { deleteArchivedSessions: deleteFn } as unknown as ApiClient
         const sessions = [archivedSession('a'), archivedSession('b')]
 
         const { result } = renderHook(
@@ -92,9 +92,10 @@ describe('useProjectGroupActions', () => {
             await result.current.deleteGroup()
         })
 
-        expect(deleteFn).toHaveBeenCalledTimes(2)
-        expect(deleteFn).toHaveBeenNthCalledWith(1, 'a', { requireArchived: true })
-        expect(deleteFn).toHaveBeenNthCalledWith(2, 'b', { requireArchived: true })
+        expect(deleteFn).toHaveBeenCalledWith({
+            sessionIds: ['a', 'b'],
+            requireAllArchived: true,
+        })
     })
 
     it('throws when api is missing', async () => {

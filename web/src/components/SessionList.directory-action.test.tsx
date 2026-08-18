@@ -605,9 +605,7 @@ describe('SessionList collapse behavior', () => {
         // The directory header survives as an action-only header (copy-path /
         // new-session-in-directory) even though every row floated.
         expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
-        expect(screen.getByTitle('/work/hapi').nextElementSibling).toBeNull()
         expect(screen.getByTitle('/work/other')).toBeInTheDocument()
-        expect(screen.getByTitle('/work/other').nextElementSibling).toBeNull()
     })
 
     it('keeps new-session-in-directory actions for projects whose rows all floated', () => {
@@ -637,8 +635,7 @@ describe('SessionList collapse behavior', () => {
 
         expect(screen.getByTitle('Active sessions')).toBeInTheDocument()
         // The project header survives as an action-only header.
-        const header = screen.getByTitle('/work/hapi')
-        expect(header.nextElementSibling).toBeNull()
+        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
 
         fireEvent.click(screen.getByRole('button', { name: 'New session in this directory' }))
         expect(onNewSessionInDirectory).toHaveBeenCalledWith({
@@ -982,6 +979,21 @@ describe('SessionList project group context menu (tiann/hapi#881)', () => {
 
         const groupHeader = screen.getByTitle('/work/hapi')
         fireEvent.contextMenu(groupHeader)
+
+        expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
+        expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()
+        expect(screen.getByRole('menuitem', { name: /Delete Group/ })).toBeDisabled()
+    })
+
+    it('opens the group menu for an action-only pinned group header', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        renderList([makeSession({
+            id: 'session-pinned',
+            active: true,
+            metadata: { path: '/work/hapi', name: 'Pinned task', flavor: 'codex', lifecycleState: 'running' },
+        })])
+
+        fireEvent.contextMenu(screen.getByTitle('/work/hapi'))
 
         expect(screen.getByRole('menuitem', { name: /Copy Path/ })).toBeInTheDocument()
         expect(screen.getByRole('menuitem', { name: /Archive All Sessions/ })).toBeEnabled()

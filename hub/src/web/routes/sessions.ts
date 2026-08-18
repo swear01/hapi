@@ -867,6 +867,32 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         return c.json({ ok: true })
     })
 
+    app.post('/sessions/delete-archived', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const body = await c.req.json().catch(() => null) as { sessionIds?: unknown; requireAllArchived?: unknown } | null
+        const sessionIds = Array.isArray(body?.sessionIds)
+            ? body.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+            : []
+        if (sessionIds.length === 0 || body?.requireAllArchived !== true) {
+            return c.json({ error: 'sessionIds and requireAllArchived are required' }, 400)
+        }
+
+        try {
+            await engine.deleteArchivedSessions(sessionIds)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'
+            if (message.includes('archived')) {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
+    })
+
     app.delete('/sessions/:id', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {

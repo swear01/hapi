@@ -427,12 +427,13 @@ function ProjectGroupHeader(props: {
     groupTitle: string
     isCollapsed: boolean
     onToggle: () => void
+    collapsible?: boolean
     onNewSessionInDirectory?: (args: { machineId: string | null; directory: string }) => void
     api: ApiClient | null
 }) {
     const { t } = useTranslation()
     const { haptic } = usePlatform()
-    const { group, actionSessions, groupTitle, isCollapsed, onToggle, onNewSessionInDirectory, api } = props
+    const { group, actionSessions, groupTitle, isCollapsed, onToggle, collapsible = true, onNewSessionInDirectory, api } = props
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState({ x: 0, y: 0 })
     const [archiveAllOpen, setArchiveAllOpen] = useState(false)
@@ -447,7 +448,7 @@ function ProjectGroupHeader(props: {
             setMenuOpen(true)
         },
         onClick: () => {
-            if (!menuOpen) onToggle()
+            if (collapsible && !menuOpen) onToggle()
         },
         threshold: 500
     })
@@ -482,7 +483,7 @@ function ProjectGroupHeader(props: {
                 style={{ WebkitTouchCallout: 'none' }}
                 title={group.directory}
             >
-                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
+                <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={collapsible && isCollapsed} />
                 <span className="font-medium text-sm truncate flex-1">
                     {groupTitle}
                 </span>
@@ -1693,34 +1694,17 @@ export function SessionList(props: {
             ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
             : group.displayName
         return (
-            <div key={group.key}>
-                <div
-                    className="group/project sticky top-0 z-10 flex items-center gap-2 bg-[var(--app-bg)] py-1.5 pl-2 pr-2 text-left rounded-lg transition-colors hover:bg-[var(--app-secondary-bg)] min-w-0 w-full select-none"
-                    title={group.directory}
-                >
-                    <span className="font-medium text-sm truncate flex-1">
-                        {groupTitle}
-                    </span>
-                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
-                    {onNewSessionInDirectory && group.directory !== 'Other' ? (
-                        <button
-                            type="button"
-                            onClick={(event) => {
-                                event.stopPropagation()
-                                onNewSessionInDirectory({
-                                    machineId: group.machineId,
-                                    directory: group.directory
-                                })
-                            }}
-                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] opacity-70 transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-link)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
-                            title={t('sessions.group.new')}
-                            aria-label={t('sessions.group.new')}
-                        >
-                            <PlusIcon className="h-3.5 w-3.5" />
-                        </button>
-                    ) : null}
-                </div>
-            </div>
+            <ProjectGroupHeader
+                key={group.key}
+                group={group}
+                actionSessions={actionGroupsByKey.get(group.key) ?? []}
+                groupTitle={groupTitle}
+                isCollapsed={false}
+                onToggle={() => {}}
+                collapsible={false}
+                onNewSessionInDirectory={onNewSessionInDirectory}
+                api={api}
+            />
         )
     }
 

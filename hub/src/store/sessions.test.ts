@@ -944,4 +944,55 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
 
         store.close()
     })
+
+    it('deletes an archived group atomically', () => {
+        const store = makeStore()
+        const archivedIds = ['atomic-a', 'atomic-b']
+        for (const id of archivedIds) {
+            const session = store.sessions.getOrCreateSession(
+                id,
+                { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+                null,
+                'default',
+                undefined,
+                undefined,
+                undefined,
+                id
+            )
+        }
+
+        const deleted = store.sessions.deleteArchivedSessions(archivedIds, 'default')
+        expect(deleted?.map((session) => session.id).sort()).toEqual(archivedIds.sort())
+        expect(store.sessions.getSession('atomic-a')).toBeNull()
+        expect(store.sessions.getSession('atomic-b')).toBeNull()
+        store.close()
+    })
+
+    it('leaves every member when one archived-group member is invalid', () => {
+        const store = makeStore()
+        const archived = store.sessions.getOrCreateSession(
+            'atomic-valid',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-valid'
+        )
+        const running = store.sessions.getOrCreateSession(
+            'atomic-invalid',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'running' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-invalid'
+        )
+        expect(store.sessions.deleteArchivedSessions([archived.id, running.id], 'default')).toBeNull()
+        expect(store.sessions.getSession(archived.id)).not.toBeNull()
+        expect(store.sessions.getSession(running.id)).not.toBeNull()
+        store.close()
+    })
 })
