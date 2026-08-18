@@ -359,7 +359,7 @@ export class CodexAppServerClient extends JsonLineParser {
             signal: options?.signal,
             // Bound the wait below the hub RPC timeout; timeout is classified
             // as indeterminate so the launcher consumes at most once.
-            timeoutMs: 30_000
+            timeoutMs: 25_000
         });
         return response as TurnSteerResponse;
     }
