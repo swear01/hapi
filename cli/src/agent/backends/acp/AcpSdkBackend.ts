@@ -80,6 +80,8 @@ export class AcpSdkBackend implements AgentBackend {
     private promptRequestInFlight = false;
     /** Concurrent session/prompt requests (main prompt + soft steers). */
     private activePromptRequests = 0;
+    /** Foreground prompt only; soft steers are excluded after Abort. */
+    private foregroundPromptRequests = 0;
     /** Bumped by abortSoftSteers; stale finishes from cancelled requests are dropped. */
     private promptRequestEpoch = 0;
     /** Incremented for each foreground prompt turn, including retry-wrapped turns. */
@@ -564,6 +566,7 @@ export class AcpSdkBackend implements AgentBackend {
             flavor: this.options.flavor,
         });
         this.promptGeneration++;
+        this.foregroundPromptRequests++;
         const promptRequestEpoch = this.beginPromptRequest();
         this.lastSessionUpdateAt = Date.now();
         this.latestUsageUpdate = null;
@@ -642,7 +645,14 @@ export class AcpSdkBackend implements AgentBackend {
                 }
             } finally {
                 this.promptUsageCallback = null;
-                this.finishPromptRequest(promptRequestEpoch);
+                this.foregroundPromptRequests = Math.max(0, this.foregroundPromptRequests - 1);
+                if (promptRequestEpoch !== this.promptRequestEpoch) {
+                    this.activePromptRequests = Math.max(0, this.activePromptRequests - 1);
+                    this.isProcessingMessage = this.activePromptRequests > 0;
+                    if (!this.isProcessingMessage) this.notifyResponseComplete();
+                } else {
+                    this.finishPromptRequest(promptRequestEpoch);
+                }
             }
         }
     }
@@ -875,6 +885,7 @@ export class AcpSdkBackend implements AgentBackend {
         this.messageHandler = null;
         this.activeSessionId = null;
         this.activePromptRequests = 0;
+        this.foregroundPromptRequests = 0;
         this.isProcessingMessage = false;
         this.sessionModelsMetadata.clear();
         this.initialAvailableCommands.clear();
@@ -1172,9 +1183,9 @@ export class AcpSdkBackend implements AgentBackend {
     abortSoftSteers(): void {
         this.messageHandler?.deactivate?.();
         this.promptRequestEpoch++;
-        if (this.activePromptRequests > 0) {
-            this.activePromptRequests = 0;
-            this.isProcessingMessage = false;
+        this.activePromptRequests = this.foregroundPromptRequests;
+        this.isProcessingMessage = this.activePromptRequests > 0;
+        if (!this.isProcessingMessage) {
             this.notifyResponseComplete();
         }
     }

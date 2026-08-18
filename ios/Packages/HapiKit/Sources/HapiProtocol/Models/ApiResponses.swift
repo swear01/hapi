@@ -157,6 +157,12 @@ extension SpawnResponse: Decodable {
 
 // MARK: - Message queue operations
 
+public struct RetryIndeterminateMessageResponse: Decodable, Equatable, Sendable {
+    public let status: String
+    public let localId: String?
+    public let message: DecryptedMessage?
+}
+
 /// Body of `DELETE /api/sessions/:id/messages/:messageId`, discriminated on
 /// `status`. `invoked` means the cancel arrived too late — the message was
 /// already handed to the agent.

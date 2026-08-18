@@ -119,6 +119,13 @@ data class CancelMessageResponse(
     val message: DecryptedMessage? = null,
 )
 
+@Serializable
+data class RetryIndeterminateMessageResponse(
+    val status: String,
+    val localId: String? = null,
+    val message: DecryptedMessage? = null,
+)
+
 /**
  * `POST /api/sessions/:id/messages/:messageId/steer`
  * (`SteerQueuedMessageResponseSchema` — discriminated on [status]):

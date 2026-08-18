@@ -417,7 +417,8 @@ public final class ChatInteractor {
                 attachmentNames: preview.attachmentNames,
                 scheduledAt: row.scheduledAt,
                 canAct: canAct,
-                canSteer: canAct && thinking && row.scheduledAt == nil
+                canSteer: canAct && thinking && row.scheduledAt == nil && row.status != .indeterminate,
+                indeterminate: row.status == .indeterminate
             )
         }
     }
@@ -463,6 +464,21 @@ public final class ChatInteractor {
             await store.appendOptimistic(row)
             emit(.notice(Self.errorMessage(error, fallback: "Failed to cancel queued message")))
             return nil
+        }
+    }
+
+    public func retryIndeterminateMessage(_ messageId: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let response = try await api.retryIndeterminateMessage(sessionId: sessionId, messageId: messageId)
+                if response.status == "invoked", let message = response.message,
+                   let localId = message.localId, let invokedAt = message.invokedAt {
+                    await (windowController()).markConsumed(localIds: [localId], invokedAt: invokedAt)
+                }
+            } catch {
+                emit(.notice(Self.errorMessage(error, fallback: "Failed to retry message")))
+            }
         }
     }
 

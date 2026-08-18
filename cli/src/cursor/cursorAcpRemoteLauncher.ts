@@ -1090,6 +1090,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const sessionId = this.acpSessionId ?? this.session.sessionId;
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
+            // Drop only soft-steer bookkeeping first; the foreground prompt
+            // remains counted while its cancellation drains.
+            backend.abortSoftSteers();
             if (!this.shouldExit) {
                 let timeout: ReturnType<typeof setTimeout> | null = null;
                 const drained = await Promise.race([
@@ -1117,11 +1120,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         this.promptInFlight = false;
         // Abort is the hard-stop path: drop soft-steer waiters so the prompt
         // finally cannot block the next prompt on a soft steer whose completion
-        // is unbounded and may never settle, and force-settle the backend's
-        // prompt counter so waitForResponseComplete() cannot block the next
-        // turn either. The ACP cancel above rejects in-flight requests when
-        // the transport closes; cleanup() settles any leftovers on exit.
-        this.backend?.abortSoftSteers();
+        // is unbounded and may never settle. Soft counters were already reset
+        // above; only the foreground prompt was drained before continuing.
         this.softSteerWaiters = [];
         this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
         this.session.onThinkingChange(false);

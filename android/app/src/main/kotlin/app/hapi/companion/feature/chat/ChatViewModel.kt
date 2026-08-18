@@ -154,6 +154,8 @@ data class QueuedRowUi(
     val canAct: Boolean,
     /** Steer offered: turn active, not future-scheduled, actionable. */
     val canSteer: Boolean,
+    /** Native delivery outcome is unknown; show explicit retry instead of normal Steer. */
+    val indeterminate: Boolean = false,
 )
 
 /** Session config sheet model (M3b switching). */
@@ -967,6 +969,23 @@ class ChatViewModel(
         }
     }
 
+    fun retryIndeterminateMessage(messageId: String) {
+        scope.launch {
+            try {
+                val response = api.retryIndeterminateMessage(sessionId, messageId)
+                if (response.status == "invoked" && response.message != null) {
+                    val localId = response.message.localId
+                    val invokedAt = response.message.invokedAtOrNull
+                    if (localId != null && invokedAt != null) {
+                        awaitWindowStore().markConsumed(listOf(localId), invokedAt)
+                    }
+                }
+            } catch (error: Exception) {
+                _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed(error.message)))
+            }
+        }
+    }
+
     /** Edit = cancel + prefill composer (kept when the operator typed meanwhile). */
     fun editQueuedMessage(messageId: String) {
         scope.launch {
@@ -1065,7 +1084,9 @@ class ChatViewModel(
                 attachmentNames = preview.attachmentNames,
                 scheduledAt = row.wire.scheduledAt,
                 canAct = canAct,
-                canSteer = canAct && thinking && row.wire.scheduledAt == null,
+                canSteer = canAct && thinking && row.wire.scheduledAt == null
+                    && row.status != MessageStatus.Indeterminate,
+                indeterminate = row.status == MessageStatus.Indeterminate,
             )
         }
     }
