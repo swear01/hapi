@@ -1739,9 +1739,11 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         expect(abortHandler).toBeTypeOf('function');
         await abortHandler!({});
 
-        harness.rejectSoftSteer!(new Error('ACP disconnected'));
+        harness.releaseSoftSteer!();
         await new Promise((resolve) => setTimeout(resolve, 20));
 
+        // The successful completion is stale after abort and must not publish
+        // a user message or consumed event.
         expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
         expect(session.queue.pendingLocalIds()).not.toContain('local-2');
 

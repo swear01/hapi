@@ -485,7 +485,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 const steerDone = steer.dispatched.then(
                     () => steer.completed.then(
                         () => {
-                            session.queue.commitReservation(taken);
+                            if (steerEpoch !== this.softSteerEpoch || this.shouldExit
+                                || !session.queue.commitReservation(taken)) {
+                                return;
+                            }
                             messageBuffer.addMessage(taken.item.message, 'user');
                             session.client.emitMessagesConsumed([localId]);
                         },
