@@ -1548,7 +1548,7 @@ export function buildCliArgs(
   }
   // Pi RPC mode has no permission switching; never pass these flags to it
   // (the Pi parser rejects --permission-mode and ignores --yolo).
-  if (agent !== 'pi') {
+  if (agent !== 'pi' && agent !== 'dsh') {
     if (options.permissionMode && (PERMISSION_MODES as readonly string[]).includes(options.permissionMode)) {
       args.push('--permission-mode', options.permissionMode);
     } else if (yolo) {

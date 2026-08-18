@@ -355,19 +355,18 @@ describe('buildCliArgs', () => {
         expect(args).not.toContain('--hapi-session-id')
     })
 
-    it('builds a remote DSH ACP runner command against the existing HAPI row', () => {
+    it('builds a remote DSH ACP runner command without unsupported policy flags', () => {
         const args = buildCliArgs('dsh', {
             directory: '/tmp',
             existingSessionId: 'existing-hub-id',
             startingMode: 'remote',
             permissionMode: 'read-only'
-        })
+        }, true)
         expect(args).toEqual([
             'dsh',
             '--hapi-starting-mode', 'remote',
             '--started-by', 'runner',
-            '--existing-session-id', 'existing-hub-id',
-            '--permission-mode', 'read-only'
+            '--existing-session-id', 'existing-hub-id'
         ])
     })
 
