@@ -434,22 +434,23 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
 
     socket.on('messages-steer-state', (
         data: { sid: string; localIds: string[]; state: 'queued' | 'dispatching' },
-        ack: (response: { ok: boolean }) => void
+        ack?: (response: { ok: boolean }) => void
     ) => {
+        const reply = typeof ack === 'function' ? ack : () => {}
         if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)
             || (data.state !== 'queued' && data.state !== 'dispatching')) {
-            ack({ ok: false })
+            reply({ ok: false })
             return
         }
         const localIds = data.localIds.filter((id): id is string => typeof id === 'string')
         if (localIds.length === 0) {
-            ack({ ok: false })
+            reply({ ok: false })
             return
         }
         const sessionAccess = resolveSessionAccess(data.sid)
         if (!sessionAccess.ok) {
             emitAccessError('session', data.sid, sessionAccess.reason)
-            ack({ ok: false })
+            reply({ ok: false })
             return
         }
         try {
@@ -459,13 +460,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 data.state,
                 sessionAccess.value.namespace
             )
-            ack({ ok })
+            reply({ ok })
             if (ok && data.state === 'queued') {
                 onWebappEvent?.({ type: 'messages-requeued', sessionId: data.sid, localIds })
             }
         } catch (err) {
             console.error('recordSteerDeliveryState failed', err)
-            ack({ ok: false })
+            reply({ ok: false })
         }
     })
 
