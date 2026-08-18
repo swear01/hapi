@@ -609,7 +609,6 @@ describe('MessageQueue2', () => {
         expect(queue.beginReservationDispatch(reservation!)).toBe(true);
         expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
         expect(queue.size()).toBe(0);
-        expect(queue.cancelByLocalId('b')).toBe('indeterminate');
         expect(queue.takeByLocalId('b')).toBe(reservation);
         expect(queue.beginReservationDispatch(reservation!)).toBe(true);
         expect(queue.restoreReservation(reservation!)).toBe(true);
@@ -626,6 +625,18 @@ describe('MessageQueue2', () => {
         expect(queue.cancelByLocalId('b')).toBe('in-flight');
         expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
         expect(queue.commitReservation(reservation!)).toBe(true);
+    });
+
+    it('releases an indeterminate reservation on explicit cancel', () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('old', 'B', 'b');
+        const reservation = queue.takeByLocalId('b');
+        expect(reservation).not.toBeNull();
+        expect(queue.beginReservationDispatch(reservation!)).toBe(true);
+        expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
+        expect(queue.cancelByLocalId('b')).toBe(true);
+        queue.push('replacement', 'B', 'b');
+        expect(queue.takeByLocalId('b')?.item.message).toBe('replacement');
     });
 
     it('does not restore an indeterminate reservation after clear', () => {

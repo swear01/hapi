@@ -1313,7 +1313,7 @@ describe('codexRemoteLauncher', () => {
         // ambiguous state, and remove it from the automatic queue.
         expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
         expect(emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
-        expect(session.queue.cancelByLocalId('local-1')).toBe('indeterminate');
+        expect(session.queue.cancelByLocalId('local-1')).toBe(true);
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });
@@ -1364,7 +1364,7 @@ describe('codexRemoteLauncher', () => {
 
         expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
         expect(emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
-        expect(session.queue.cancelByLocalId('local-1')).toBe('indeterminate');
+        expect(session.queue.cancelByLocalId('local-1')).toBe(true);
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });
