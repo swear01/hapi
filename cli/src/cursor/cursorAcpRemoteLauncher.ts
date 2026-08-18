@@ -489,6 +489,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         text: taken.item.message
                     }]);
                 } catch (error) {
+                    if (isAcpIndeterminateError(error)) {
+                        if (session.queue.markReservationIndeterminate(taken)) {
+                            session.client.emitSteerIndeterminate([localId]);
+                        }
+                        logger.debug('[cursor-acp] soft-steer dispatch outcome unknown', error);
+                        return { steered: false, error: 'Steer outcome is being reconciled' };
+                    }
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     await restoreQueuedState();
                     session.queue.restoreReservation(taken);
@@ -509,6 +516,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 try {
                     await steer.dispatched;
                 } catch (error) {
+                    if (isAcpIndeterminateError(error)) {
+                        if (session.queue.markReservationIndeterminate(taken)) {
+                            session.client.emitSteerIndeterminate([localId]);
+                        }
+                        logger.debug('[cursor-acp] soft-steer dispatch outcome unknown', error);
+                        return { steered: false, error: 'Steer outcome is being reconciled' };
+                    }
                     await restoreQueuedState();
                     session.queue.restoreReservation(taken);
                     if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
@@ -532,8 +546,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         // Do not leave the reservation dispatching forever. Hold
                         // it outside automatic replay and persist the ambiguous
                         // outcome; a later explicit Steer retries this same row.
-                        session.queue.markReservationIndeterminate(taken);
-                        session.client.emitSteerIndeterminate([localId]);
+                        if (session.queue.markReservationIndeterminate(taken)) {
+                            session.client.emitSteerIndeterminate([localId]);
+                        }
                         logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch; row held for explicit resolution', error);
                         return;
                     }

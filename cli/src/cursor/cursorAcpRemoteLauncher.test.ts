@@ -434,6 +434,34 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
+    it('holds an indeterminate dispatch failure instead of restoring it', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        const indeterminate = new Error('ACP write callback failed');
+        Object.defineProperty(indeterminate, ACP_INDETERMINATE_SYMBOL, { value: true });
+        harness.softSteerDispatchError = indeterminate;
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first', mode, 'first');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        const handlers = (session.client as unknown as {
+            rpcHandlerManager: { handlers: Map<string, (payload?: unknown) => Promise<unknown>> };
+        }).rpcHandlerManager.handlers;
+
+        session.queue.push('soft steer', mode, 'steer');
+        await expect(handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' }))
+            .resolves.toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
+        expect(session.client.emitSteerIndeterminate).toHaveBeenCalledWith(['steer']);
+        expect(session.queue.cancelByLocalId('steer')).toBe(true);
+
+        harness.deferPrompt = null;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
     it('prevents cancellation once ACP steer dispatch starts', async () => {
         let releasePrompt!: () => void;
         let releaseDispatch!: () => void;
