@@ -269,6 +269,7 @@ function makeClient() {
         sendAgentMessage: vi.fn(),
         emitMessagesConsumed: vi.fn(),
         emitSteerIndeterminate: vi.fn(),
+        setSteerDeliveryState: vi.fn(async () => true),
         sendClaudeSessionMessage: vi.fn(),
         keepAlive: vi.fn(),
         emitSessionReady: vi.fn()

@@ -460,6 +460,16 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
                 }
+                const dispatchStatePersisted = await session.client.setSteerDeliveryState([localId], 'dispatching');
+                if (!dispatchStatePersisted) {
+                    session.queue.restoreReservation(taken);
+                    return { steered: false, error: 'Could not persist steer state' };
+                }
+                const restoreQueuedState = async () => {
+                    if (taken.originIndeterminate) return;
+                    const restored = await session.client.setSteerDeliveryState([localId], 'queued');
+                    if (!restored) session.client.emitSteerIndeterminate([localId]);
+                };
                 let steer: { dispatched: Promise<void>; completed: Promise<void> };
                 try {
                     steer = this.backend.beginSoftSteerPrompt(this.acpSessionId, [{
@@ -468,7 +478,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     }]);
                 } catch (error) {
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
+                    await restoreQueuedState();
                     session.queue.restoreReservation(taken);
+                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
                 // Completion still gates the next prompt (handler swap safety);
@@ -485,7 +497,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 try {
                     await steer.dispatched;
                 } catch (error) {
+                    await restoreQueuedState();
                     session.queue.restoreReservation(taken);
+                    if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
                     logger.debug('[cursor-acp] soft-steer failed to start', error);
                     return { steered: false, error: 'Failed to soft-steer into active turn' };
                 }
@@ -511,6 +525,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch; row held for explicit resolution', error);
                         return;
                     }
+                    void restoreQueuedState().then(() => {
+                        if (taken.originIndeterminate) session.client.emitSteerIndeterminate([localId]);
+                    });
                     if (session.queue.restoreReservation(taken)) {
                         logger.debug('[cursor-acp] soft-steer rejected by ACP; row restored', error);
                     }
