@@ -615,6 +615,17 @@ describe('MessageQueue2', () => {
         expect(queue.takeByLocalId('b')).toBe(reservation);
     });
 
+    it('allows a positive reconciliation after a queue reset', () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('steer', 'B', 'steer');
+        const reservation = queue.takeByLocalId('steer');
+        expect(reservation).not.toBeNull();
+        expect(queue.beginReservationDispatch(reservation!)).toBe(true);
+        expect(queue.markReservationIndeterminate(reservation!)).toBe(true);
+        queue.reset();
+        expect(queue.commitReservation(reservation!)).toBe(true);
+    });
+
     it('preserves a dispatched reservation across an abort reset', () => {
         const queue = new MessageQueue2<string>(mode => mode);
         queue.push('b', 'B', 'b');
