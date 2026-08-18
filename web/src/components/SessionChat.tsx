@@ -857,7 +857,7 @@ function SessionChatInner(props: SessionChatProps) {
     // soft-send; the CLI reports steeringActive only while a steerable turn is
     // actually in flight). Legacy Cursor stream-json and other flavors never
     // support steer.
-    const canSteerQueuedMessage = (
+    const canSteerQueuedMessage = props.session.active && (
         (agentFlavor === 'pi' && props.session.thinking)
         || (isSteeringSupportedForSession(props.session.metadata)
             && props.session.agentState?.steeringActive === true)
