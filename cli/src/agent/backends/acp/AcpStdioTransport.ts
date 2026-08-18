@@ -330,7 +330,13 @@ export class AcpStdioTransport {
         if (Number.isFinite(dispatchTimeoutMs)) {
             dispatchTimer = setTimeout(() => {
                 if (this.pending.has(id) && !dispatchSettled) {
-                    failRequest(markAcpIndeterminate(new Error(`ACP request '${method}' dispatch timed out after ${dispatchTimeoutMs}ms`)));
+                    const error = markAcpIndeterminate(new Error(`ACP request '${method}' dispatch timed out after ${dispatchTimeoutMs}ms`));
+                    try {
+                        this.process.stdin.destroy(error);
+                    } catch (destroyError) {
+                        logger.debug('[ACP] Error destroying stalled stdin', destroyError);
+                    }
+                    this.markClosed(error);
                 }
             }, dispatchTimeoutMs);
             dispatchTimer.unref();

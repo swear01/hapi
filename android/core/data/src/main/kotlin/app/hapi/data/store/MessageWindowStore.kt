@@ -371,6 +371,8 @@ class MessageWindowStore(
         when (event) {
             is SyncEvent.MessageReceived -> ingestSseMessages(listOf(event.message.asWindowMessage()))
             is SyncEvent.MessagesConsumed -> markConsumed(event.localIds, event.invokedAt)
+            is SyncEvent.MessagesIndeterminate -> markIndeterminate(event.localIds)
+            is SyncEvent.MessagesRequeued -> markRequeued(event.localIds)
             is SyncEvent.MessageCancelled -> removeMessage(event.messageId)
             is SyncEvent.MessagesInvalidated -> {
                 clear()
@@ -392,6 +394,16 @@ class MessageWindowStore(
     suspend fun markConsumed(localIds: List<String>, invokedAt: Long) {
         if (localIds.isEmpty()) return
         update { MessageWindowLogic.markConsumed(it, localIds, invokedAt) }
+        persist()
+    }
+
+    suspend fun markIndeterminate(localIds: List<String>) {
+        update { MessageWindowLogic.markIndeterminate(it, localIds) }
+        persist()
+    }
+
+    suspend fun markRequeued(localIds: List<String>) {
+        update { MessageWindowLogic.markRequeued(it, localIds) }
         persist()
     }
 

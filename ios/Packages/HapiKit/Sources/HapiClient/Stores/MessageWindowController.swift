@@ -434,6 +434,12 @@ public actor MessageWindowController {
         case .messagesConsumed(_, let eventSessionId, let localIds, let invokedAt)
             where eventSessionId == sessionId:
             markConsumed(localIds: localIds, invokedAt: invokedAt)
+        case .messagesIndeterminate(_, let eventSessionId, let localIds)
+            where eventSessionId == sessionId:
+            markIndeterminate(localIds: localIds)
+        case .messagesRequeued(_, let eventSessionId, let localIds)
+            where eventSessionId == sessionId:
+            markRequeued(localIds: localIds)
         case .messageCancelled(_, let eventSessionId, let messageId, _) where eventSessionId == sessionId:
             removeMessage(localIdOrId: messageId)
         case .messagesInvalidated(_, let eventSessionId) where eventSessionId == sessionId:
@@ -457,6 +463,16 @@ public actor MessageWindowController {
     public func markConsumed(localIds: [String], invokedAt: Int) {
         guard !localIds.isEmpty else { return }
         update { MessageWindowLogic.markConsumed($0, localIds: localIds, invokedAt: invokedAt) }
+        persist()
+    }
+
+    public func markIndeterminate(localIds: [String]) {
+        update { MessageWindowLogic.markIndeterminate($0, localIds: localIds) }
+        persist()
+    }
+
+    public func markRequeued(localIds: [String]) {
+        update { MessageWindowLogic.markRequeued($0, localIds: localIds) }
         persist()
     }
 

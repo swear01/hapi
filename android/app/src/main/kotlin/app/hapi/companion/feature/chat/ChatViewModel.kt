@@ -952,6 +952,8 @@ class ChatViewModel(
             val invokedMessage = response.message
             if (response.status == "invoked" && invokedMessage != null) {
                 store.appendOptimistic(invokedMessage.asWindowMessage(MessageStatus.Sent))
+            } else if (response.status == "busy") {
+                store.appendOptimistic(row.copy(status = MessageStatus.Indeterminate))
             }
             response.status
         } catch (cancellation: CancellationException) {

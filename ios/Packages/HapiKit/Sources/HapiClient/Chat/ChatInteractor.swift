@@ -434,6 +434,7 @@ public final class ChatInteractor {
     private enum CancelVerdict {
         case cancelled
         case invoked
+        case busy
     }
 
     /// The cancel verdict, or nil on guard/error.
@@ -454,6 +455,9 @@ public final class ChatInteractor {
             case .invoked(let message):
                 await store.applyCancelInvoked(localId: localId, message: WindowMessage(wire: message))
                 return .invoked
+            case .busy:
+                await store.appendOptimistic(row.withDeliveryState("indeterminate"))
+                return .busy
             }
         } catch {
             await store.appendOptimistic(row)
@@ -485,6 +489,8 @@ public final class ChatInteractor {
                 }
             case .invoked:
                 self.emit(.notice("Already delivered to the agent"))
+            case .busy:
+                self.emit(.notice("Delivery outcome is unknown; message remains queued"))
             case nil:
                 break
             }
