@@ -468,8 +468,11 @@ public final class ChatInteractor {
     }
 
     public func retryIndeterminateMessage(_ messageId: String) {
+        guard !queuedOpPending else { return }
+        queuedOpPending = true
         Task { [weak self] in
             guard let self else { return }
+            defer { self.queuedOpPending = false }
             do {
                 let response = try await api.retryIndeterminateMessage(sessionId: sessionId, messageId: messageId)
                 if response.status == "invoked", let message = response.message,

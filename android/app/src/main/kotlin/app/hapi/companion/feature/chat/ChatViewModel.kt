@@ -970,6 +970,7 @@ class ChatViewModel(
     }
 
     fun retryIndeterminateMessage(messageId: String) {
+        if (!queuedOpPending.compareAndSet(expect = false, update = true)) return
         scope.launch {
             try {
                 val response = api.retryIndeterminateMessage(sessionId, messageId)
@@ -986,6 +987,8 @@ class ChatViewModel(
                 }
             } catch (error: Exception) {
                 _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed(error.message)))
+            } finally {
+                queuedOpPending.value = false
             }
         }
     }
