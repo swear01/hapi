@@ -520,7 +520,25 @@ export class CodexAppServerClient extends JsonLineParser {
             }
         };
 
-        const failRequest = (error: Error) => {
+        const abandonUnconfirmedDispatch = (error: Error) => {
+            const child = this.process;
+            this.process = null;
+            this.connected = false;
+            this.initialized = false;
+            try {
+                child?.stdin.destroy(error);
+            } catch (destroyError) {
+                logger.debug('[CodexAppServer] Error destroying stalled stdin', destroyError);
+            }
+            this.rejectAllPending(error);
+            this.resetParserState();
+        };
+
+        const failRequest = (error: Error, abandon = false) => {
+            if (abandon) {
+                abandonUnconfirmedDispatch(error);
+                return;
+            }
             this.pending.delete(id);
             cleanup();
             if (!dispatchSettled) {
@@ -533,7 +551,12 @@ export class CodexAppServerClient extends JsonLineParser {
         const onAbort = () => {
             if (aborted) return;
             aborted = true;
-            failRequest(this.markIndeterminate(createAbortError()));
+            const error = this.markIndeterminate(createAbortError());
+            if (dispatchSettled) {
+                failRequest(error);
+            } else {
+                failRequest(error, true);
+            }
         };
 
         if (options?.signal) {
@@ -547,7 +570,8 @@ export class CodexAppServerClient extends JsonLineParser {
         if (Number.isFinite(timeoutMs) && !aborted) {
             timeout = setTimeout(() => {
                 if (this.pending.has(id)) {
-                    failRequest(this.markIndeterminate(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`)));
+                    const error = this.markIndeterminate(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+                    failRequest(error, !dispatchSettled);
                 }
             }, timeoutMs);
             timeout.unref();
@@ -576,7 +600,7 @@ export class CodexAppServerClient extends JsonLineParser {
             this.process?.stdin.write(`${serialized}\n`, (error) => {
                 if (error) {
                     const writeError = error instanceof Error ? error : new Error(String(error));
-                    failRequest(this.markIndeterminate(writeError));
+                    failRequest(this.markIndeterminate(writeError), !dispatchSettled);
                     return;
                 }
                 if (!dispatchSettled) {

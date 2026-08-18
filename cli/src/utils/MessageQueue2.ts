@@ -17,6 +17,7 @@ export type QueueReservation<T> = {
     nextItem: QueueItem<T> | null;
     /** Once ambiguous, retries must remain held unless explicitly committed. */
     originIndeterminate: boolean;
+    cancelReason?: 'explicit' | 'queue-reset';
     state: 'reserved' | 'dispatching' | 'indeterminate' | 'cancelled';
 };
 
@@ -317,10 +318,12 @@ export class MessageQueue2<T> {
         if (reservation.state === 'indeterminate') {
             // Explicit Cancel/ Edit is the user's resolution of an unknown
             // outcome; release the held reservation so it cannot settle later.
+            reservation.cancelReason = 'explicit';
             reservation.state = 'cancelled';
             this.reservations.delete(localId);
             return true;
         }
+        reservation.cancelReason = 'explicit';
         reservation.state = 'cancelled';
         this.reservations.delete(localId);
         return true;
@@ -418,14 +421,16 @@ export class MessageQueue2<T> {
     }
 
     commitReservation(reservation: QueueReservation<T>): boolean {
-        if (reservation.state === 'cancelled') {
+        if (reservation.state === 'cancelled' && reservation.cancelReason !== 'queue-reset') {
             return false;
         }
         if (reservation.item.localId) {
-            if (this.reservations.get(reservation.item.localId) !== reservation) {
+            const active = this.reservations.get(reservation.item.localId);
+            if (active === reservation) {
+                this.reservations.delete(reservation.item.localId);
+            } else if (reservation.cancelReason !== 'queue-reset') {
                 return false;
             }
-            this.reservations.delete(reservation.item.localId);
             this.rememberConsumedReservation(reservation.item.localId);
         }
         return true;
@@ -450,6 +455,7 @@ export class MessageQueue2<T> {
     releaseIndeterminateReservation(localId: string): boolean {
         const reservation = this.reservations.get(localId);
         if (!reservation || reservation.state !== 'indeterminate') return false;
+        reservation.cancelReason = 'explicit';
         reservation.state = 'cancelled';
         this.reservations.delete(localId);
         return true;
@@ -481,6 +487,7 @@ export class MessageQueue2<T> {
             if (preserveDispatching && (reservation.state === 'dispatching' || reservation.state === 'indeterminate')) {
                 continue;
             }
+            reservation.cancelReason = 'queue-reset';
             reservation.state = 'cancelled';
             this.reservations.delete(localId);
         }
