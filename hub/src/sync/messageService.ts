@@ -695,7 +695,7 @@ export class MessageService {
         localId: string,
         messageId: string,
         timeoutMs: number
-    ): Promise<'removed' | 'in-flight' | 'not-found' | 'timeout'> {
+    ): Promise<'removed' | 'in-flight' | 'indeterminate' | 'not-found' | 'timeout'> {
         return new Promise((resolve) => {
             const room = this.io.of('/cli').to(`session:${sessionId}`)
             // socket.io v4 BroadcastOperator: .timeout(ms).emit(event, data, ackCb)
@@ -713,13 +713,17 @@ export class MessageService {
                         localId
                     }
                 },
-                (err: Error | null, responses: Array<{ removed: boolean; inFlight?: boolean }>) => {
+                (err: Error | null, responses: Array<{ removed: boolean; inFlight?: boolean; indeterminate?: boolean }>) => {
                     // Check responses before err: in a reconnect overlap or any room with
                     // multiple CLI sockets, Socket.IO may set err (one socket timed out)
                     // while still delivering successful responses from the sockets that did
                     // ack. An explicit in-flight report dominates: one socket may be
                     // dispatching the steer while a stale duplicate socket reports
                     // removed — deleting the row then would orphan the executing message.
+                    if (responses?.some((r) => r.indeterminate === true)) {
+                        resolve('indeterminate')
+                        return
+                    }
                     if (responses?.some((r) => r.inFlight === true)) {
                         resolve('in-flight')
                         return
