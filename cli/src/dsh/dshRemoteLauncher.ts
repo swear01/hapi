@@ -83,7 +83,6 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
                 logger.warn('[dsh-acp] prompt failed', { message })
                 this.session.sendSessionEvent({ type: 'message', message: `DSH prompt failed: ${message}` })
                 this.messageBuffer.addMessage(`DSH prompt failed: ${message}`, 'status')
-                throw error
             } finally {
                 this.session.onThinkingChange(false)
                 await this.permissionHandler?.cancelAll('Prompt finished')
