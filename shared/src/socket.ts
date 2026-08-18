@@ -163,7 +163,10 @@ export const UpdateCancelQueuedMessageBodySchema = z.object({
 export type UpdateCancelQueuedMessageBody = z.infer<typeof UpdateCancelQueuedMessageBodySchema>
 
 export const CancelQueuedMessageAckSchema = z.object({
-    removed: z.boolean()
+    removed: z.boolean(),
+    inFlight: z.boolean().optional(),
+    indeterminate: z.boolean().optional(),
+    accepted: z.boolean().optional()
 })
 
 export type CancelQueuedMessageAck = z.infer<typeof CancelQueuedMessageAckSchema>

@@ -298,7 +298,7 @@ export class MessageQueue2<T> {
      * Best-effort: if the CLI is offline when cancel is issued, the message
      * may already have been collected for invocation and won't be found here.
      */
-    cancelByLocalId(localId: string): boolean | 'in-flight' | 'consumed' {
+    cancelByLocalId(localId: string): boolean | 'in-flight' | 'indeterminate' | 'consumed' {
         if (!localId) return false;
         const idx = this.queue.findIndex(item => item.localId === localId);
         if (idx !== -1) {
@@ -313,6 +313,12 @@ export class MessageQueue2<T> {
             // The row is inside an async steer: it cannot be removed, but it is
             // also NOT already consumed — the hub must not stamp invoked_at.
             return 'in-flight';
+        }
+        if (reservation.state === 'indeterminate') {
+            // Preserve the held reservation while the hub decides whether the
+            // explicit cancel is safe; a dispatching→indeterminate race must
+            // never look like a confirmed removal.
+            return 'indeterminate';
         }
         reservation.state = 'cancelled';
         this.reservations.delete(localId);
@@ -437,6 +443,15 @@ export class MessageQueue2<T> {
 
     restoreTakenItem(taken: QueueReservation<T>): void {
         this.restoreReservation(taken);
+    }
+
+    /** Release a held reservation only for the explicit retry path. */
+    releaseIndeterminateReservation(localId: string): boolean {
+        const reservation = this.reservations.get(localId);
+        if (!reservation || reservation.state !== 'indeterminate') return false;
+        reservation.state = 'cancelled';
+        this.reservations.delete(localId);
+        return true;
     }
 
     /** Hold a dispatched steer for explicit retry/cancel without replaying it. */

@@ -241,7 +241,8 @@ export class ApiSessionClient extends EventEmitter {
     private pendingMessages: { message: UserMessage; localId?: string }[] = []
     private pendingHubPromptEchoes: { text: string; localIds: string[] }[] = []
     private pendingMessageCallback: ((message: UserMessage, localId?: string) => void) | null = null
-    private cancelQueuedMessageCallback: ((localId: string) => boolean | 'in-flight' | 'consumed') | null = null
+    private cancelQueuedMessageCallback: ((localId: string) => boolean | 'in-flight' | 'indeterminate' | 'consumed') | null = null
+    private retryQueuedMessageCallback: ((localId: string) => boolean) | null = null
     private readonly incomingFilter = new IncomingMessageFilter()
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
@@ -421,7 +422,7 @@ export class ApiSessionClient extends EventEmitter {
             this.agentTerminalActive = false
         }))
 
-        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean; accepted?: boolean }) => void) => {
+        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean; indeterminate?: boolean; accepted?: boolean }) => void) => {
             try {
                 if (!data.body) return
 
@@ -437,6 +438,9 @@ export class ApiSessionClient extends EventEmitter {
                     if (data.body.localId && this.cancelQueuedMessageCallback) {
                         const cancelled = this.cancelQueuedMessageCallback(data.body.localId)
                         accepted = cancelled !== 'in-flight' && cancelled !== 'consumed'
+                        if (cancelled === 'indeterminate') {
+                            accepted = this.retryQueuedMessageCallback?.(data.body.localId) === true
+                        }
                     }
                     if (accepted) {
                         this.handleIncomingMessage(data.body.message, true)
@@ -452,7 +456,11 @@ export class ApiSessionClient extends EventEmitter {
                     // 'in-flight' = the row is inside an async steer: not
                     // removed, but also NOT consumed — the hub must neither
                     // delete it nor stamp invoked_at.
-                    ack?.({ removed: result === true, inFlight: result === 'in-flight' })
+                    ack?.({
+                        removed: result === true,
+                        inFlight: result === 'in-flight',
+                        indeterminate: result === 'indeterminate'
+                    })
                     return
                 }
 
@@ -683,8 +691,12 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    onCancelQueuedMessage(callback: (localId: string) => boolean | 'in-flight' | 'consumed'): void {
+    onCancelQueuedMessage(callback: (localId: string) => boolean | 'in-flight' | 'indeterminate' | 'consumed'): void {
         this.cancelQueuedMessageCallback = callback
+    }
+
+    onRetryQueuedMessage(callback: (localId: string) => boolean): void {
+        this.retryQueuedMessageCallback = callback
     }
 
     private enqueueUserMessage(message: UserMessage, localId?: string): void {
