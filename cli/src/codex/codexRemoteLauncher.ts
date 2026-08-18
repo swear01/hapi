@@ -1867,6 +1867,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         let activeMessage: QueuedMessage | null = null;
+        let activeTurnModeHash: string | null = null;
         let sameThreadRetryAttempt = 0;
         let sameThreadCompactAttempt = 0;
         let recoveryInFlight = false;
@@ -3354,7 +3355,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Control commands cannot be steered' };
                 }
-                if (activeMessage?.hash !== taken.item.modeHash) {
+                if (activeTurnModeHash !== taken.item.modeHash) {
                     session.queue.restoreReservation(taken);
                     return { steered: false, error: 'Queued message mode differs from the active turn' };
                 }
@@ -3820,6 +3821,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 sameThreadRetryAttempt = 0;
                 sameThreadCompactAttempt = 0;
                 activeMessage = null;
+                activeTurnModeHash = null;
                 // Serialize dequeueing behind unresolved steers so a rejected
                 // steer can restore its row in FIFO position.
                 if (inFlightSteers.size > 0) {
@@ -3953,6 +3955,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     ...message.mode,
                     model: session.getModel() ?? message.mode.model
                 };
+                activeTurnModeHash = session.queue.modeHasher(mode);
                 usageModel = typeof mode.model === 'string' && mode.model.trim()
                     ? mode.model.trim()
                     : null;
