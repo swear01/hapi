@@ -885,7 +885,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'
-            if (message.includes('archived')) {
+            if (message === 'Sessions are no longer archived') {
                 return c.json({ error: message }, 409)
             }
             return c.json({ error: message }, 500)

@@ -1445,6 +1445,20 @@ describe('sessions routes', () => {
             expect(response.status).toBe(400)
             expect(calls).toEqual([])
         })
+
+        it('maps transactional delete failures to 500', async () => {
+            const { app } = createApp(createSession({ active: false }), {
+                deleteArchivedSessions: async () => {
+                    throw new Error('Failed to delete archived sessions')
+                }
+            })
+            const response = await app.request('/api/sessions/delete-archived', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionIds: ['session-1'], requireAllArchived: true })
+            })
+            expect(response.status).toBe(500)
+        })
     })
 
     describe('DELETE /sessions/:id (requireArchived guard, tiann/hapi#881)', () => {
