@@ -751,7 +751,8 @@ export class ApiSessionClient extends EventEmitter {
         message: { id?: string; seq?: number; localId?: string | null; content: unknown },
         force = false
     ): void {
-        if (!force && !this.incomingFilter.accept({ id: message.id, seq: message.seq })) {
+        const accepted = this.incomingFilter.accept({ id: message.id, seq: message.seq })
+        if (!force && !accepted) {
             return
         }
 
