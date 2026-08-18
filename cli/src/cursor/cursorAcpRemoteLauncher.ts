@@ -494,7 +494,11 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                         },
                         (error) => {
                             if (isAcpIndeterminateError(error)) {
-                                logger.debug('[cursor-acp] soft-steer outcome unknown after dispatch', error);
+                                if (steerEpoch === this.softSteerEpoch && !this.shouldExit
+                                    && session.queue.commitReservation(taken)) {
+                                    messageBuffer.addMessage(taken.item.message, 'user');
+                                    session.client.emitMessagesConsumed([localId]);
+                                }
                                 return;
                             }
                             if (steerEpoch === this.softSteerEpoch && !this.shouldExit
