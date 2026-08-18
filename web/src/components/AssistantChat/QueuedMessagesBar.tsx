@@ -374,6 +374,7 @@ export function QueuedMessagesBar({
                         // (the hub rejects those).
                         const canSteerRow = Boolean(
                             canSteer
+                            && msg.deliveryState !== 'indeterminate'
                             && msg.scheduledAt == null
                             && canCancel
                         )
