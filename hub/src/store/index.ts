@@ -157,6 +157,27 @@ export class Store {
         })()
     }
 
+    /** Persist a steer delivery state before/after the native request. */
+    recordSteerDeliveryState(
+        sessionId: string,
+        localIds: string[],
+        state: 'queued' | 'dispatching' | 'indeterminate',
+        namespace: string
+    ): boolean {
+        return this.db.transaction(() => {
+            const changes = this.messages.setMessagesDeliveryState(sessionId, localIds, state)
+            const now = Date.now()
+            if (changes > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, now, namespace)
+            }
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after steer delivery transition')
+            }
+            return changes > 0
+        })()
+    }
+
     /** Persist an ambiguous agent steer without stamping it delivered. */
     recordMessagesIndeterminate(
         sessionId: string,

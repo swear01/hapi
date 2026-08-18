@@ -586,6 +586,21 @@ describe('MessageQueue2', () => {
         expect(queue.queue.map((item) => item.localId)).toEqual(['b', 'c']);
     });
 
+    it('restores multiple reservations in FIFO order regardless of completion order', () => {
+        const queue = new MessageQueue2<string>(mode => mode);
+        queue.push('a', 'A', 'a');
+        queue.push('b', 'A', 'b');
+        queue.push('c', 'A', 'c');
+        queue.push('d', 'A', 'd');
+        const b = queue.takeByLocalId('b');
+        const c = queue.takeByLocalId('c');
+        expect(b).not.toBeNull();
+        expect(c).not.toBeNull();
+        expect(queue.restoreReservation(c!)).toBe(true);
+        expect(queue.restoreReservation(b!)).toBe(true);
+        expect(queue.queue.map((item) => item.localId)).toEqual(['a', 'b', 'c', 'd']);
+    });
+
     it('retries an indeterminate reservation without automatic replay', () => {
         const queue = new MessageQueue2<string>(mode => mode);
         queue.push('b', 'B', 'b');

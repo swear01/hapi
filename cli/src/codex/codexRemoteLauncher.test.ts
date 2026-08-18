@@ -1166,7 +1166,8 @@ function createSessionStub(
             sessionEvents.push(event);
         },
         emitMessagesConsumed: vi.fn(),
-        emitSteerIndeterminate: vi.fn()
+        emitSteerIndeterminate: vi.fn(),
+        setSteerDeliveryState: vi.fn(async () => true)
     };
 
     const session = {

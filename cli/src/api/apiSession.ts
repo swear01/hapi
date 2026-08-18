@@ -430,6 +430,17 @@ export class ApiSessionClient extends EventEmitter {
                     return
                 }
 
+                if (data.body.t === 'retry-queued-message') {
+                    // Explicit user retry: release any held in-memory
+                    // reservation and bypass the normal message-id dedup.
+                    if (data.body.localId && this.cancelQueuedMessageCallback) {
+                        const cancelled = this.cancelQueuedMessageCallback(data.body.localId)
+                        if (cancelled === 'in-flight') return
+                    }
+                    this.handleIncomingMessage(data.body.message, true)
+                    return
+                }
+
                 if (data.body.t === 'cancel-queued-message') {
                     const result = (data.body.localId && this.cancelQueuedMessageCallback)
                         ? this.cancelQueuedMessageCallback(data.body.localId)
@@ -736,8 +747,11 @@ export class ApiSessionClient extends EventEmitter {
         return true
     }
 
-    private handleIncomingMessage(message: { id?: string; seq?: number; localId?: string | null; content: unknown }): void {
-        if (!this.incomingFilter.accept({ id: message.id, seq: message.seq })) {
+    private handleIncomingMessage(
+        message: { id?: string; seq?: number; localId?: string | null; content: unknown },
+        force = false
+    ): void {
+        if (!force && !this.incomingFilter.accept({ id: message.id, seq: message.seq })) {
             return
         }
 
@@ -1201,6 +1215,22 @@ export class ApiSessionClient extends EventEmitter {
             payload.steered = true
         }
         this.emitOrQueue(() => this.socket.emit('messages-consumed', payload))
+    }
+
+    /** Persist the durable pre-dispatch/restore state with a hub ACK. */
+    async setSteerDeliveryState(localIds: string[], state: 'queued' | 'dispatching'): Promise<boolean> {
+        if (localIds.length === 0 || this.state !== 'active') return false
+        try {
+            const response = await this.socket.timeout(5_000).emitWithAck('messages-steer-state', {
+                sid: this.sessionId,
+                localIds,
+                state
+            })
+            return response?.ok === true
+        } catch (error) {
+            logger.debug('[API] Failed to persist steer delivery state', error)
+            return false
+        }
     }
 
     /** Persist a steer whose transport completed ambiguously; no consumed ACK. */

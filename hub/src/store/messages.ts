@@ -23,6 +23,8 @@ export type MessagePosition = {
     seq: number
 }
 
+export type SteerDeliveryState = 'queued' | 'dispatching' | 'indeterminate'
+
 export class ImportedMessageConflictError extends Error {
     constructor(readonly localId: string) {
         super(`Imported message content changed for localId: ${localId}`)
@@ -87,7 +89,7 @@ function toStoredMessage(row: DbMessageRow): StoredMessage {
         localId: row.local_id,
         invokedAt: row.invoked_at ?? null,
         scheduledAt: row.scheduled_at ?? null,
-        ...(row.delivery_state === 'indeterminate' ? { deliveryState: 'indeterminate' as const } : {})
+        ...(row.delivery_state && row.delivery_state !== 'queued' ? { deliveryState: 'indeterminate' as const } : {})
     }
 }
 
@@ -768,6 +770,31 @@ export function lookupQueuedMessage(
  * This is the "confirmed DELETE" step after the service layer has received a
  * CLI ack with removed:true.  Uses the same first-write-wins guard as the
  * original cancelQueuedMessage. */
+/** Explicitly requeue a durable unknown-delivery row for a user-requested retry. */
+export function requeueIndeterminateMessage(
+    db: Database,
+    sessionId: string,
+    messageId: string
+): StoredMessage | null {
+    return db.transaction(() => {
+        const row = db.prepare(`
+            SELECT * FROM messages
+            WHERE session_id = ? AND (id = ? OR local_id = ?)
+              AND invoked_at IS NULL
+              AND delivery_state != 'queued'
+            LIMIT 1
+        `).get(sessionId, messageId, messageId) as DbMessageRow | undefined
+        if (!row) return null
+        db.prepare(`
+            UPDATE messages
+            SET delivery_state = 'queued'
+            WHERE session_id = ? AND id = ? AND invoked_at IS NULL
+        `).run(sessionId, row.id)
+        const updated = db.prepare('SELECT * FROM messages WHERE id = ?').get(row.id) as DbMessageRow | undefined
+        return updated ? toStoredMessage(updated) : null
+    })()
+}
+
 export function deleteQueuedMessageById(
     db: Database,
     sessionId: string,
@@ -808,22 +835,37 @@ export function markMessagesInvoked(
     ).run(invokedAt, sessionId, ...localIds).changes
 }
 
+/** Move an uninvoked steer through its durable delivery states. */
+export function setMessagesDeliveryState(
+    db: Database,
+    sessionId: string,
+    localIds: string[],
+    state: SteerDeliveryState
+): number {
+    if (localIds.length === 0) return 0
+    const placeholders = localIds.map(() => '?').join(', ')
+    const fromStates = state === 'queued'
+        ? "'dispatching', 'indeterminate'"
+        : state === 'dispatching'
+            ? "'queued', 'indeterminate'"
+            : "'queued', 'dispatching'"
+    return db.prepare(
+        `UPDATE messages
+         SET delivery_state = ?
+         WHERE session_id = ?
+           AND local_id IN (${placeholders})
+           AND invoked_at IS NULL
+           AND delivery_state IN (${fromStates})`
+    ).run(state, sessionId, ...localIds).changes
+}
+
 /** Hold an ambiguous steer out of automatic replay without claiming delivery. */
 export function markMessagesIndeterminate(
     db: Database,
     sessionId: string,
     localIds: string[]
 ): number {
-    if (localIds.length === 0) return 0
-    const placeholders = localIds.map(() => '?').join(', ')
-    return db.prepare(
-        `UPDATE messages
-         SET delivery_state = 'indeterminate'
-         WHERE session_id = ?
-           AND local_id IN (${placeholders})
-           AND invoked_at IS NULL
-           AND delivery_state = 'queued'`
-    ).run(sessionId, ...localIds).changes
+    return setMessagesDeliveryState(db, sessionId, localIds, 'indeterminate')
 }
 
 /** Settle immediate queued rows on an archived clear source without touching

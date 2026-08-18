@@ -547,6 +547,22 @@ describe('content codec integration', () => {
         expect(delivered.content.text).toBe(text)
     })
 
+    it('requeues an indeterminate delivery only on explicit request', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'requeue-indeterminate')
+        const msg = store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'retry me' } },
+            'lid-retry'
+        )
+        expect(store.messages.setMessagesDeliveryState(session.id, ['lid-retry'], 'dispatching')).toBe(1)
+        expect(store.messages.getDeliverableMessagesAfter(session.id, 0, Date.now())).toHaveLength(0)
+        const requeued = store.messages.requeueIndeterminateMessage(session.id, msg.id)
+        expect(requeued).toMatchObject({ id: msg.id, invokedAt: null })
+        expect(requeued?.deliveryState).toBeUndefined()
+        expect(store.messages.getDeliverableMessagesAfter(session.id, 0, Date.now())).toHaveLength(1)
+    })
+
     it('holds indeterminate delivery out of replay without stamping invoked_at', () => {
         const store = makeStore()
         const session = makeSession(store, 'indeterminate')

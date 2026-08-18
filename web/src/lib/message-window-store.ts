@@ -1156,6 +1156,23 @@ export function markMessagesIndeterminate(sessionId: string, localIds: string[])
     }, true)
 }
 
+export function markMessagesRequeued(sessionId: string, localIds: string[]): void {
+    if (localIds.length === 0) return
+    const idSet = new Set(localIds)
+    updateState(sessionId, (previous) => {
+        let changed = false
+        const messages = previous.messages.map((message) => {
+            if (!message.localId || !idSet.has(message.localId) || message.deliveryState === undefined) {
+                return message
+            }
+            changed = true
+            const { deliveryState: _deliveryState, ...requeued } = message
+            return requeued
+        })
+        return changed ? buildState(previous, { messages }) : previous
+    }, true)
+}
+
 export function markMessagesConsumed(
     sessionId: string,
     localIds: string[],

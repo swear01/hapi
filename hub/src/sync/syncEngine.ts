@@ -27,7 +27,7 @@ import { CursorLegacyMigrator, type CursorLegacyMigratorOptions } from '../curso
 
 import { EventPublisher, type SyncEventListener } from './eventPublisher'
 import { MachineCache, type Machine } from './machineCache'
-import { MessageService } from './messageService'
+import { MessageService, type RetryIndeterminateMessageResult } from './messageService'
 import { createTitleSuggestionService, type TitleSuggestionService } from './titleSuggestion'
 import { selectForkTranscriptPrefix } from './forkTranscript'
 import {
@@ -1025,6 +1025,13 @@ export class SyncEngine {
         messageId: string
     ): Promise<CancelQueuedMessageResult> {
         return this.messageService.cancelQueuedMessage(sessionId, messageId)
+    }
+
+    async retryIndeterminateMessage(
+        sessionId: string,
+        messageId: string
+    ): Promise<RetryIndeterminateMessageResult> {
+        return this.messageService.retryIndeterminateMessage(sessionId, messageId)
     }
 
     /**

@@ -555,6 +555,13 @@ export class ApiClient {
         return response as SteerQueuedMessageResponse
     }
 
+    async retryIndeterminateMessage(sessionId: string, messageId: string): Promise<{ status: string; localId?: string | null }> {
+        return await this.request<{ status: string; localId?: string | null }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/retry`,
+            { method: 'POST' }
+        )
+    }
+
     async abortSession(sessionId: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
             method: 'POST',
