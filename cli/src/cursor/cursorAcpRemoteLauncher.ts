@@ -476,6 +476,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     const restored = await session.client.setSteerDeliveryState([localId], 'queued');
                     if (!restored) session.client.emitSteerIndeterminate([localId]);
                 };
+                if (taken.state !== 'dispatching') {
+                    session.client.emitSteerIndeterminate([localId]);
+                    return { steered: false, error: 'Steer cancelled' };
+                }
                 if (!this.promptInFlight
                     || this.backend !== backend
                     || this.acpSessionId !== acpSessionId
