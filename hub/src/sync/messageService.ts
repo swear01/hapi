@@ -125,6 +125,7 @@ function contentForDeferredDelivery(content: unknown): unknown {
 export class MessageService {
     /** One scheduled-matured SSE per localId per hub process (cleared on cancel/consume paths here). */
     private readonly scheduledMatureNotifiedLocalIds = new Set<string>()
+    private readonly activeIndeterminateRetries = new Set<string>()
 
     constructor(
         private readonly store: Store,
@@ -626,7 +627,13 @@ export class MessageService {
             return { status: 'already-queued', localId: lookup.localId }
         }
         if (!lookup.localId) return { status: 'not-found' }
+        const retryKey = `${sessionId}:${lookup.localId}`
+        if (this.activeIndeterminateRetries.has(retryKey)) {
+            return { status: 'retry-unavailable', localId: lookup.localId }
+        }
+        this.activeIndeterminateRetries.add(retryKey)
 
+        try {
         const roomName = `session:${sessionId}`
         const cliCount = this.io.of('/cli').adapter.rooms.get(roomName)?.size ?? 0
         if (this.store.isOpenCodeClearDeliveryGated(sessionId) || cliCount !== 1) {
@@ -691,6 +698,9 @@ export class MessageService {
         }
         this.publisher.emit({ type: 'messages-requeued', sessionId, localIds: [message.localId] })
         return { status: 'retried', localId: message.localId }
+        } finally {
+            this.activeIndeterminateRetries.delete(retryKey)
+        }
     }
 
     /**
