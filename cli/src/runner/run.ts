@@ -1481,11 +1481,13 @@ export function buildCliArgs(
             ? 'copilot'
             : agent === 'opencode'
             ? 'opencode'
-            : agent === 'pi'
-              ? 'pi'
-              : agent === 'agy'
-                ? 'agy'
-                : 'claude';
+            : agent === 'dsh'
+              ? 'dsh'
+              : agent === 'pi'
+                ? 'pi'
+                : agent === 'agy'
+                  ? 'agy'
+                  : 'claude';
   const args = [agentCommand];
   if (options.resumeSessionId) {
     if (agent === 'codex') {
@@ -1512,6 +1514,7 @@ export function buildCliArgs(
   if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
       || agent === 'opencode'
       || agent === 'agy'
+      || agent === 'dsh'
       || (agentCommand === 'claude' && options.forkSession)) {
     const existingSessionId = options.existingSessionId ?? options.sessionId;
     if (existingSessionId) {

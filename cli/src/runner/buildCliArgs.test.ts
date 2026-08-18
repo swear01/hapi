@@ -355,6 +355,22 @@ describe('buildCliArgs', () => {
         expect(args).not.toContain('--hapi-session-id')
     })
 
+    it('builds a remote DSH ACP runner command against the existing HAPI row', () => {
+        const args = buildCliArgs('dsh', {
+            directory: '/tmp',
+            existingSessionId: 'existing-hub-id',
+            startingMode: 'remote',
+            permissionMode: 'read-only'
+        })
+        expect(args).toEqual([
+            'dsh',
+            '--hapi-starting-mode', 'remote',
+            '--started-by', 'runner',
+            '--existing-session-id', 'existing-hub-id',
+            '--permission-mode', 'read-only'
+        ])
+    })
+
     it('does not emit --hapi-session-id for a non-pty flavor', () => {
         const args = buildCliArgs('opencode', {
             directory: '/tmp',

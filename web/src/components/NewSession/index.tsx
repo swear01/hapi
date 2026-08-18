@@ -1634,7 +1634,7 @@ export function NewSession(props: {
                     onClear={() => setSelectedPiImportSessionId(null)}
                 />
             ) : null}
-            {agent === 'agy' ? (
+            {agent === 'dsh' ? null : agent === 'agy' ? (
                 <AgyModelSelector
                     machineId={machineId}
                     isLoading={agyModelsState.isLoading}
