@@ -2140,6 +2140,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     const restored = await session.client.setSteerDeliveryState([localId], 'queued');
                     if (!restored) session.client.emitSteerIndeterminate([localId]);
                 };
+                if (taken.state !== 'dispatching') {
+                    session.client.emitSteerIndeterminate([localId]);
+                    return { steered: false, error: 'Steer cancelled' };
+                }
                 if (!turnInFlight
                     || this.currentThreadId !== steerThreadId
                     || this.currentTurnId !== steerTurnId
