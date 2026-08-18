@@ -1768,8 +1768,8 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         expect(result).toEqual({ steered: true });
         expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
 
-        // Abort invalidates the in-flight steer before its ACP completion
-        // arrives; a later failure must not restore or emit it.
+        // Abort finalizes the already-dispatched steer before resetting the
+        // queue; its later completion must not emit a second acknowledgement.
         session.client.emitSessionReady();
         const abortHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.Abort);
         expect(abortHandler).toBeTypeOf('function');
@@ -1779,8 +1779,9 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
 
         // The successful completion is stale after abort and must not publish
-        // a user message or consumed event.
-        expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
+        // a second consumed event.
+        expect(client.emitMessagesConsumed.mock.calls.filter(([localIds]) =>
+            Array.isArray(localIds) && localIds.includes('local-2'))).toHaveLength(1);
         expect(session.queue.pendingLocalIds()).not.toContain('local-2');
 
         releasePrompt();

@@ -301,6 +301,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         this.steeringBlocked = true;
         this.steerEpoch++;
         this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+        const committedLocalIds = this.session.queue.commitDispatchingReservations();
+        if (committedLocalIds.length > 0) {
+            this.session.client.emitMessagesConsumed(committedLocalIds);
+        }
         try {
             await this.interruptActiveTurns('abort');
             this.currentTurnId = null;

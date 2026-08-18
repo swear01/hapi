@@ -1036,6 +1036,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         this.promptInFlight = false;
         this.softSteerEpoch++;
         this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+        const committedLocalIds = this.session.queue.commitDispatchingReservations();
+        if (committedLocalIds.length > 0) {
+            this.session.client.emitMessagesConsumed(committedLocalIds);
+        }
         if (backend && sessionId) {
             await backend.cancelPrompt(sessionId);
         }

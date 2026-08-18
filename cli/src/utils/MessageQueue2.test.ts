@@ -703,6 +703,18 @@ describe('MessageQueue2', () => {
             expect(queue.size()).toBe(0);
         });
 
+        it('commits dispatching rows before an abort reset', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg1', 'local', 'id-1');
+            queue.push('msg2', 'local', 'id-2');
+            const taken = queue.takeByLocalId('id-1');
+            queue.beginReservationDispatch(taken!);
+
+            expect(queue.commitDispatchingReservations()).toEqual(['id-1']);
+            expect(queue.commitDispatchingReservations()).toEqual([]);
+            expect(queue.pendingLocalIds()).toEqual(['id-2']);
+        });
+
         it('cannot begin dispatch twice', () => {
             const queue = new MessageQueue2<string>(mode => mode);
             queue.push('msg1', 'local', 'id-1');

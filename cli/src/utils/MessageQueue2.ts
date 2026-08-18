@@ -403,6 +403,24 @@ export class MessageQueue2<T> {
     }
 
     /**
+     * Commit rows whose dispatch has started before a destructive abort/reset.
+     * The caller emits the returned ids as consumed so an accepted steer is
+     * never replayed after its reservation is cleared.
+     */
+    commitDispatchingReservations(): string[] {
+        const localIds: string[] = []
+        for (const reservation of this.reservations.values()) {
+            if (reservation.state !== 'dispatching' || !reservation.item.localId) {
+                continue
+            }
+            if (this.commitReservation(reservation)) {
+                localIds.push(reservation.item.localId)
+            }
+        }
+        return localIds
+    }
+
+    /**
      * Reset the queue - clears all messages and resets to empty state
      */
     reset(): void {
