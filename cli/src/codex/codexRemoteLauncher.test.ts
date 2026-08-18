@@ -3282,9 +3282,7 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
 
         // turn/steer is in flight; abort invalidates the steer epoch.
         await vi.waitFor(() => expect(harness.steerTurnCalls.length).toBe(1));
-        console.log('DBG abort start');
         await rpcHandlers.get('abort')?.({});
-        console.log('DBG abort done');
 
         releaseSteer();
         const result = await steerPromise;
