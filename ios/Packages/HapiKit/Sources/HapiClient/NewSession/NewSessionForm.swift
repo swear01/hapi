@@ -159,7 +159,6 @@ public enum NewSessionLogic {
         let agent = form.agent
         let codexFamily = usesCodexFamilyPermissionModes(agent)
         let isGrok = agent == .grok
-        let isDsh = agent == .dsh
         // v1 model pickers: claude (static presets) and codex (machine
         // catalog). Other flavors' discovery endpoints are TODO(M4+), so
         // their model is never sent.
@@ -175,8 +174,8 @@ public enum NewSessionLogic {
             modelReasoningEffort: (agent == .codex && form.modelReasoningEffort != "default")
                 ? form.modelReasoningEffort
                 : nil,
-            yolo: (isGrok || codexFamily || isDsh) ? nil : form.yolo,
-            permissionMode: (isGrok || codexFamily || isDsh) ? nil : form.permissionMode,
+            yolo: (isGrok || codexFamily) ? nil : form.yolo,
+            permissionMode: (isGrok || codexFamily) ? form.permissionMode : nil,
             sessionType: form.sessionType,
             worktreeName: (form.sessionType == .worktree && !trimmedWorktreeName.isEmpty)
                 ? trimmedWorktreeName
