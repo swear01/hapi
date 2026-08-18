@@ -882,7 +882,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         try {
-            await engine.deleteArchivedSessions(sessionIds)
+            await engine.deleteArchivedSessions(sessionIds, c.get('namespace'))
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'

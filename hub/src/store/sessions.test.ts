@@ -949,7 +949,7 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
         const store = makeStore()
         const archivedIds = ['atomic-a', 'atomic-b']
         for (const id of archivedIds) {
-            const session = store.sessions.getOrCreateSession(
+            store.sessions.getOrCreateSession(
                 id,
                 { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
                 null,
@@ -965,6 +965,35 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
         expect(deleted?.map((session) => session.id).sort()).toEqual(archivedIds.sort())
         expect(store.sessions.getSession('atomic-a')).toBeNull()
         expect(store.sessions.getSession('atomic-b')).toBeNull()
+        store.close()
+    })
+
+    it('rejects a cross-namespace member without deleting either row', () => {
+        const store = makeStore()
+        const local = store.sessions.getOrCreateSession(
+            'atomic-local',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-local'
+        )
+        const foreign = store.sessions.getOrCreateSession(
+            'atomic-foreign',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'other',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-foreign'
+        )
+
+        expect(store.sessions.deleteArchivedSessions([local.id, foreign.id], 'default')).toBeNull()
+        expect(store.sessions.getSession(local.id)).not.toBeNull()
+        expect(store.sessions.getSession(foreign.id)).not.toBeNull()
         store.close()
     })
 

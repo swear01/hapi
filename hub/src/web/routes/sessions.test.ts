@@ -64,7 +64,7 @@ function createApp(session: Session, opts?: {
     sessionExists?: boolean
     archiveSession?: (sessionId: string) => Promise<void>
     deleteSession?: (sessionId: string) => Promise<void>
-    deleteArchivedSessions?: (sessionIds: string[]) => Promise<void>
+    deleteArchivedSessions?: (sessionIds: string[], namespace: string) => Promise<void>
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
     forkConversation?: SyncEngine['forkConversation']
@@ -1406,7 +1406,9 @@ describe('sessions routes', () => {
                 lifecycleState: 'archived'
             } })
             const { app } = createApp(session, {
-                deleteArchivedSessions: async (sessionIds) => { calls.push(sessionIds) }
+                deleteArchivedSessions: async (sessionIds, namespace) => {
+                    calls.push([...sessionIds, namespace])
+                }
             })
 
             const response = await app.request('/api/sessions/delete-archived', {
@@ -1417,7 +1419,7 @@ describe('sessions routes', () => {
 
             expect(response.status).toBe(200)
             expect(await response.json()).toEqual({ ok: true })
-            expect(calls).toEqual([['session-1', 'session-2']])
+            expect(calls).toEqual([['session-1', 'session-2', 'default']])
         })
 
         it('requires the all-archived guard flag', async () => {

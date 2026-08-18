@@ -1085,16 +1085,12 @@ export class SessionCache {
         this.publisher.emit({ type: 'session-removed', sessionId, namespace: session.namespace })
     }
 
-    async deleteArchivedSessions(sessionIds: string[]): Promise<void> {
+    async deleteArchivedSessions(sessionIds: string[], namespace: string): Promise<void> {
         const ids = [...new Set(sessionIds)]
         if (ids.length === 0) return
-        const sessions = ids.map((id) => this.sessions.get(id))
+        const sessions = ids.map((id) => this.getSessionByNamespace(id, namespace))
         if (sessions.some((session): session is undefined => !session)) {
-            throw new Error('Session not found')
-        }
-        const namespace = sessions[0]!.namespace
-        if (sessions.some((session) => session!.namespace !== namespace)) {
-            throw new Error('Sessions belong to different namespaces')
+            throw new Error('Session access denied')
         }
         const scratchlistAttachments = new Map(
             sessions.map((session) => [
