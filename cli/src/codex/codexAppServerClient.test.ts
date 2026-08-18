@@ -28,7 +28,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn() }
 }));
 
-import { CodexAppServerClient } from './codexAppServerClient';
+import { CodexAppServerClient, isIndeterminateError } from './codexAppServerClient';
 
 function fakeStream(): EventEmitter & { setEncoding: ReturnType<typeof vi.fn> } {
     return Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
@@ -133,7 +133,14 @@ describe('CodexAppServerClient process cwd', () => {
             input: [{ type: 'text', text: 'x' }],
             expectedTurnId: 'turn-1'
         });
-        await expect(steer.dispatched).rejects.toThrow('stdin closed');
+        let dispatchedError: unknown;
+        try {
+            await steer.dispatched;
+        } catch (error) {
+            dispatchedError = error;
+        }
+        expect(dispatchedError).toBeInstanceOf(Error);
+        expect(isIndeterminateError(dispatchedError)).toBe(true);
         await expect(steer.completed).rejects.toThrow('stdin closed');
         await client.disconnect();
     });

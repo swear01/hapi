@@ -576,7 +576,7 @@ export class CodexAppServerClient extends JsonLineParser {
             this.process?.stdin.write(`${serialized}\n`, (error) => {
                 if (error) {
                     const writeError = error instanceof Error ? error : new Error(String(error));
-                    failRequest(writeError);
+                    failRequest(this.markIndeterminate(writeError));
                     return;
                 }
                 if (!dispatchSettled) {
