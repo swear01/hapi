@@ -960,11 +960,15 @@ export class Store {
         }
     }
 
-    /** Persist the explicit unknown-delivery state for mid-turn steers. */
+    /** v23→v24: durable steer state and iOS push envelope key. */
     private migrateFromV23ToV24(): void {
-        const columns = this.getMessageColumnNames()
-        if (columns.size > 0 && !columns.has('delivery_state')) {
+        const messageColumns = this.getMessageColumnNames()
+        if (messageColumns.size > 0 && !messageColumns.has('delivery_state')) {
             this.db.exec("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'")
+        }
+        const fcmColumns = this.db.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        if (fcmColumns.length > 0 && !fcmColumns.some((column) => column.name === 'push_key')) {
+            this.db.exec('ALTER TABLE fcm_devices ADD COLUMN push_key TEXT')
         }
     }
 
@@ -1024,25 +1028,6 @@ export class Store {
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
         `)
-    }
-
-    /**
-     * iOS push (P1, PUSH SPEC v1): `fcm_devices.push_key` stores the
-     * device-generated 32-byte E2E envelope key (base64) for `platform =
-     * 'ios'` rows; phone/wear rows keep NULL. Nullable ALTER keeps existing
-     * Android registrations untouched.
-     *
-     * Rollback: `ALTER TABLE fcm_devices DROP COLUMN push_key` (SQLite
-     * 3.35+) or leave the column unused; `PRAGMA user_version = 23`.
-     */
-    private migrateFromV23ToV24(): void {
-        const columns = this.db.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
-        // Legacy branch may reach this step before fcm_devices exists;
-        // createSchema afterwards builds the table with the column included.
-        if (columns.length === 0) return
-        if (!columns.some((col) => col.name === 'push_key')) {
-            this.db.exec('ALTER TABLE fcm_devices ADD COLUMN push_key TEXT')
-        }
     }
 
     private getSessionColumnNames(): Set<string> {
