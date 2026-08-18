@@ -1165,7 +1165,8 @@ function createSessionStub(
         sendSessionEvent(event: { type: string; [key: string]: unknown }) {
             sessionEvents.push(event);
         },
-        emitMessagesConsumed: vi.fn()
+        emitMessagesConsumed: vi.fn(),
+        emitSteerIndeterminate: vi.fn()
     };
 
     const session = {
@@ -1229,6 +1230,7 @@ function createSessionStub(
         resetThreadCalls,
         rpcHandlers,
         emitMessagesConsumed: client.emitMessagesConsumed,
+        emitSteerIndeterminate: client.emitSteerIndeterminate,
         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
             currentPermissionMode = nextMode;
         },
@@ -1290,16 +1292,15 @@ describe('codexRemoteLauncher', () => {
         session.queue.close();
     });
 
-    it('keeps the row reserved while the steer outcome stays indeterminate', async () => {
+    it('holds an indeterminate steer for explicit retry or cancel', async () => {
         harness.suppressTurnCompletion = true;
         const indeterminate = new Error('Codex app-server disconnected');
         Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
         harness.steerCompletionError = indeterminate;
-        // Reconciliation cannot read the thread either — the row must stay
-        // reserved: neither committed (message may not have run) nor restored
-        // (it may have run, so turn/start could duplicate it).
+        // Reconciliation cannot read the thread either. The row is held out of
+        // automatic replay and the user can explicitly retry or cancel it.
         harness.readThreadError = new Error('app-server unreachable');
-        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first'], createMode(), false, false);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
 
@@ -1307,12 +1308,11 @@ describe('codexRemoteLauncher', () => {
         const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
         const result = await handler({ localId: 'local-1' });
 
-        // Transport failure after dispatch: reported as reconciling, the row
-        // stays reserved — neither committed (message may not have run) nor
-        // restored (it may have run, so turn/start could duplicate it).
+        // Transport failure after dispatch: report reconciliation, persist the
+        // ambiguous state, and remove it from the automatic queue.
         expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
-        // 'in-flight' = reserved inside the steer, not consumed and not cancellable.
-        expect(session.queue.cancelByLocalId('local-1')).toBe('in-flight');
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
+        expect(session.queue.cancelByLocalId('local-1')).toBe(true);
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });

@@ -17,6 +17,7 @@ import { WorkGraphStore } from './workGraphStore'
 export type {
     StoredMachine,
     StoredMessage,
+    MessageDeliveryState,
     StoredPushSubscription,
     StoredFcmDevice,
     StoredScratchlistEntry,
@@ -40,7 +41,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 23
+const SCHEMA_VERSION: number = 24
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -152,6 +153,26 @@ export class Store {
                 throw new Error('session activity was not persisted after messages-consumed transition')
             }
 
+            return session.updatedAt
+        })()
+    }
+
+    /** Persist an ambiguous agent steer without stamping it delivered. */
+    recordMessagesIndeterminate(
+        sessionId: string,
+        localIds: string[],
+        namespace: string
+    ): number {
+        return this.db.transaction(() => {
+            const changes = this.messages.markMessagesIndeterminate(sessionId, localIds)
+            const now = Date.now()
+            if (changes > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, now, namespace)
+            }
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after indeterminate transition')
+            }
             return session.updatedAt
         })()
     }
@@ -302,6 +323,7 @@ export class Store {
             20: () => this.migrateFromV20ToV21(),
             21: () => this.migrateFromV21ToV22(),
             22: () => this.migrateFromV22ToV23(),
+            23: () => this.migrateFromV23ToV24(),
         })
 
         if (currentVersion === 0) {
@@ -401,6 +423,7 @@ export class Store {
                 local_id TEXT,
                 invoked_at INTEGER,
                 scheduled_at INTEGER,
+                delivery_state TEXT NOT NULL DEFAULT 'queued',
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
@@ -911,6 +934,14 @@ export class Store {
         }
         if (!columns.has('global_pinned')) {
             this.db.exec('ALTER TABLE sessions ADD COLUMN global_pinned INTEGER NOT NULL DEFAULT 0')
+        }
+    }
+
+    /** Persist the explicit unknown-delivery state for mid-turn steers. */
+    private migrateFromV23ToV24(): void {
+        const columns = this.getMessageColumnNames()
+        if (columns.size > 0 && !columns.has('delivery_state')) {
+            this.db.exec("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'")
         }
     }
 

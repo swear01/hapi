@@ -486,6 +486,11 @@ export function QueuedMessagesBar({
                                             {text}
                                         </span>
                                     ) : null}
+                                    {msg.deliveryState === 'indeterminate' ? (
+                                        <div className="mt-1 text-xs text-[var(--app-warning-text)]">
+                                            {t('queuedMessages.steerOutcomeUnknown')}
+                                        </div>
+                                    ) : null}
                                     {hasAttachments ? (
                                         <div className={text ? 'mt-1 flex flex-wrap gap-1' : 'flex flex-wrap gap-1'}>
                                             {attachmentNames.map((name, index) => (

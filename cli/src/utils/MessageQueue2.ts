@@ -11,7 +11,11 @@ export interface QueueItem<T> {
 export type QueueReservation<T> = {
     item: QueueItem<T>;
     index: number;
-    state: 'reserved' | 'dispatching' | 'cancelled';
+    previousItem: QueueItem<T> | null;
+    nextItem: QueueItem<T> | null;
+    /** Once ambiguous, retries must remain held unless explicitly committed. */
+    originIndeterminate: boolean;
+    state: 'reserved' | 'dispatching' | 'indeterminate' | 'cancelled';
 };
 
 /**
@@ -286,6 +290,7 @@ export class MessageQueue2<T> {
             return 'in-flight';
         }
         reservation.state = 'cancelled';
+        this.reservations.delete(localId);
         return true;
     }
 
@@ -304,11 +309,29 @@ export class MessageQueue2<T> {
      */
     takeByLocalId(localId: string): QueueReservation<T> | null {
         if (!localId) return null;
+
+        // An indeterminate steer is deliberately held outside the normal queue.
+        // A later explicit Steer retries that same reservation; automatic queue
+        // drains never see it.
+        const existing = this.reservations.get(localId);
+        if (existing) {
+            if (existing.state !== 'indeterminate') return null;
+            existing.state = 'reserved';
+            return existing;
+        }
+
         const idx = this.queue.findIndex(item => item.localId === localId);
         if (idx === -1) return null;
         const [item] = this.queue.splice(idx, 1);
         if (!item) return null;
-        const reservation: QueueReservation<T> = { item, index: idx, state: 'reserved' };
+        const reservation: QueueReservation<T> = {
+            item,
+            index: idx,
+            previousItem: this.queue[idx - 1] ?? null,
+            nextItem: this.queue[idx] ?? null,
+            originIndeterminate: false,
+            state: 'reserved'
+        };
         if (item.localId) {
             this.reservations.set(item.localId, reservation);
         }
@@ -323,6 +346,10 @@ export class MessageQueue2<T> {
         if (reservation.state === 'cancelled') {
             return false;
         }
+        if (reservation.originIndeterminate) {
+            reservation.state = 'indeterminate';
+            return true;
+        }
         if (this.closed) {
             throw new Error('Cannot restore into closed queue');
         }
@@ -332,7 +359,17 @@ export class MessageQueue2<T> {
             }
             this.reservations.delete(reservation.item.localId);
         }
-        const idx = Math.max(0, Math.min(reservation.index, this.queue.length));
+        const nextIndex = reservation.nextItem
+            ? this.queue.indexOf(reservation.nextItem)
+            : -1;
+        const previousIndex = reservation.previousItem
+            ? this.queue.indexOf(reservation.previousItem)
+            : -1;
+        const idx = nextIndex >= 0
+            ? nextIndex
+            : previousIndex >= 0
+                ? previousIndex + 1
+                : Math.max(0, Math.min(reservation.index, this.queue.length));
         this.queue.splice(idx, 0, reservation.item);
         if (this.waiter) {
             const waiter = this.waiter;
@@ -368,6 +405,17 @@ export class MessageQueue2<T> {
 
     restoreTakenItem(taken: QueueReservation<T>): void {
         this.restoreReservation(taken);
+    }
+
+    /** Hold a dispatched steer for explicit retry/cancel without replaying it. */
+    markReservationIndeterminate(reservation: QueueReservation<T>): boolean {
+        if (reservation.state !== 'dispatching') return false;
+        if (reservation.item.localId && this.reservations.get(reservation.item.localId) !== reservation) {
+            return false;
+        }
+        reservation.originIndeterminate = true;
+        reservation.state = 'indeterminate';
+        return true;
     }
 
     private cancelReservations(): void {

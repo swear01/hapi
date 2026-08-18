@@ -412,6 +412,26 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt, ...(data.steered === true ? { steered: true } : {}) })
     })
 
+    socket.on('messages-indeterminate', (data: { sid: string; localIds: string[] }) => {
+        if (!data || typeof data.sid !== 'string' || !Array.isArray(data.localIds)) {
+            return
+        }
+        const localIds = data.localIds.filter((id): id is string => typeof id === 'string')
+        if (localIds.length === 0) return
+        const sessionAccess = resolveSessionAccess(data.sid)
+        if (!sessionAccess.ok) {
+            emitAccessError('session', data.sid, sessionAccess.reason)
+            return
+        }
+        try {
+            store.recordMessagesIndeterminate(data.sid, localIds, sessionAccess.value.namespace)
+        } catch (err) {
+            console.error('recordMessagesIndeterminate failed', err)
+            return
+        }
+        onWebappEvent?.({ type: 'messages-indeterminate', sessionId: data.sid, localIds })
+    })
+
     socket.on('session-end', (data: SessionEndPayload) => {
         if (!data || typeof data.sid !== 'string' || typeof data.time !== 'number') {
             return

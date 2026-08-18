@@ -260,6 +260,7 @@ export interface ClientToServerEvents {
     'session-ready': (data: { sid: string; time: number }) => void
     'session-end': (data: { sid: string; time: number; reason?: SessionEndReason }) => void
     'messages-consumed': (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => void
+    'messages-indeterminate': (data: { sid: string; localIds: string[] }) => void
     'update-metadata': (data: { sid: string; expectedVersion: number; metadata: unknown }, cb: (answer: UpdateMetadataAck) => void) => void
     'update-state': (data: { sid: string; expectedVersion: number; agentState: unknown | null }, cb: (answer: UpdateStateAck) => void) => void
     'machine-alive': (data: { machineId: string; time: number; health?: unknown }) => void
