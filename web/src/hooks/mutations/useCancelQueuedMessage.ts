@@ -3,6 +3,7 @@ import type { ApiClient } from '@/api/client'
 import type { DecryptedMessage } from '@/types/api'
 import {
     appendOptimisticMessage,
+    markMessagesConsumed,
     removeOptimisticMessage,
 } from '@/lib/message-window-store'
 import { usePlatform } from '@/hooks/usePlatform'
@@ -46,12 +47,26 @@ export function useCancelQueuedMessage(api: ApiClient | null) {
             // Optimistic: remove from the floating bar immediately.
             removeOptimisticMessage(input.sessionId, input.localId)
         },
-        onSuccess: (result, input) => {
+        onSuccess: async (result, input) => {
             if (result.status === 'busy') {
-                // The row is inside an async steer: the cancel cannot complete
-                // yet. Put the row back so the bar stays accurate; the steer's
-                // eventual messages-consumed or restore settles it.
-                appendOptimisticMessage(input.sessionId, input.snapshot)
+                // The row is inside an async steer: restore a held copy, not a
+                // normal FIFO row. A concurrent consumed ACK may have arrived
+                // while the optimistic row was absent, so reconcile once.
+                appendOptimisticMessage(input.sessionId, {
+                    ...input.snapshot,
+                    deliveryState: 'indeterminate',
+                })
+                if (api) {
+                    try {
+                        const state = await api.getQueuedState(input.sessionId, [input.localId])
+                        const invoked = state.invokedLocalMessages.find((item) => item.localId === input.localId)
+                        if (invoked) {
+                            markMessagesConsumed(input.sessionId, [input.localId], invoked.invokedAt)
+                        }
+                    } catch {
+                        // SSE / the next reconnect will reconcile the held row.
+                    }
+                }
                 return
             }
             if (result.status === 'invoked') {
