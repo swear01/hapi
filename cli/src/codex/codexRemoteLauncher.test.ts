@@ -121,6 +121,8 @@ vi.mock('./codexAppServerClient', () => {
             harness.dispatchNotification = handler;
         }
 
+        setTransportAbandonedHandler(_handler: (() => void) | null): void {}
+
         setStderrHandler(handler: ((text: string) => void) | null): void {
             this.stderrHandler = handler;
         }
