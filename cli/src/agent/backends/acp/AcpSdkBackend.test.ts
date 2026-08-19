@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage } from '@/agent/types';
 import { AcpSdkBackend } from './AcpSdkBackend';
+import { AcpMessageHandler } from './AcpMessageHandler';
 import { buildAcpStdioSpawnOptions } from './AcpStdioTransport';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
 
@@ -1730,6 +1731,32 @@ describe('AcpSdkBackend', () => {
 });
 
 describe('AcpSdkBackend abortSoftSteers', () => {
+    it('drains buffered foreground output before suppressing late updates', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const updates: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => updates.push(message));
+        const backendInternal = backend as unknown as {
+            messageHandler: AcpMessageHandler | null;
+        };
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: { type: 'text', text: 'partial answer' }
+        });
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'partial thought' }
+        });
+        backendInternal.messageHandler = handler;
+
+        backend.abortSoftSteers();
+
+        expect(updates).toEqual([
+            { type: 'reasoning', text: 'partial thought' },
+            { type: 'text', text: 'partial answer' }
+        ]);
+    });
+
     it('releases processingMessage without waiting for the concurrent prompt', () => {
         const backend = new AcpSdkBackend({ command: 'agent' });
         const backendInternal = backend as unknown as {
