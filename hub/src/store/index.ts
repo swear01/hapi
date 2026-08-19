@@ -15,8 +15,10 @@ import { UsageStore } from './usageStore'
 import { WorkGraphStore } from './workGraphStore'
 
 export type {
+    NativeDevicePlatform,
     StoredMachine,
     StoredMessage,
+    MessageDeliveryState,
     StoredPushSubscription,
     StoredFcmDevice,
     StoredScratchlistEntry,
@@ -40,7 +42,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 24
+const SCHEMA_VERSION: number = 25
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -152,6 +154,47 @@ export class Store {
                 throw new Error('session activity was not persisted after messages-consumed transition')
             }
 
+            return session.updatedAt
+        })()
+    }
+
+    /** Persist a steer delivery state before/after the native request. */
+    recordSteerDeliveryState(
+        sessionId: string,
+        localIds: string[],
+        state: 'queued' | 'dispatching' | 'indeterminate',
+        namespace: string
+    ): boolean {
+        return this.db.transaction(() => {
+            const changes = this.messages.setMessagesDeliveryState(sessionId, localIds, state)
+            const now = Date.now()
+            if (changes > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, now, namespace)
+            }
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after steer delivery transition')
+            }
+            return changes > 0
+        })()
+    }
+
+    /** Persist an ambiguous agent steer without stamping it delivered. */
+    recordMessagesIndeterminate(
+        sessionId: string,
+        localIds: string[],
+        namespace: string
+    ): number {
+        return this.db.transaction(() => {
+            const changes = this.messages.markMessagesIndeterminate(sessionId, localIds)
+            const now = Date.now()
+            if (changes > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, now, namespace)
+            }
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after indeterminate transition')
+            }
             return session.updatedAt
         })()
     }
@@ -303,6 +346,7 @@ export class Store {
             21: () => this.migrateFromV21ToV22(),
             22: () => this.migrateFromV22ToV23(),
             23: () => this.migrateFromV23ToV24(),
+            24: () => this.migrateFromV24ToV25(),
         })
 
         if (currentVersion === 0) {
@@ -402,6 +446,7 @@ export class Store {
                 local_id TEXT,
                 invoked_at INTEGER,
                 scheduled_at INTEGER,
+                delivery_state TEXT NOT NULL DEFAULT 'queued',
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
@@ -446,6 +491,7 @@ export class Store {
                 token TEXT NOT NULL,
                 platform TEXT NOT NULL,
                 device_id TEXT NOT NULL,
+                push_key TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(namespace, device_id, platform)
@@ -925,6 +971,52 @@ export class Store {
         }
     }
 
+    /** v23→v24: add the iOS push envelope key. */
+    private migrateFromV23ToV24(): void {
+        const fcmColumns = this.db.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        if (fcmColumns.length > 0 && !fcmColumns.some((column) => column.name === 'push_key')) {
+            this.db.exec('ALTER TABLE fcm_devices ADD COLUMN push_key TEXT')
+        }
+    }
+
+    /** v24→v25: complete the merged v24 schema and add durable steer state. */
+    private migrateFromV24ToV25(): void {
+        // v24 was produced by parallel upstream/PR branches; complete either
+        // shape before recording v25.
+        const usageColumns = new Set(
+            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        let rebuildUsage = false
+        if (!usageColumns.has('context_only')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
+            rebuildUsage = true
+        }
+        if (!usageColumns.has('cost')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
+            rebuildUsage = true
+        }
+        if (!usageColumns.has('cost_currency')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
+            rebuildUsage = true
+        }
+        if (rebuildUsage) {
+            this.db.exec(`
+                DELETE FROM usage_events;
+                DELETE FROM usage_scan_state;
+            `)
+        }
+
+        const fcmColumns = this.db.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        if (fcmColumns.length > 0 && !fcmColumns.some((column) => column.name === 'push_key')) {
+            this.db.exec('ALTER TABLE fcm_devices ADD COLUMN push_key TEXT')
+        }
+        const messageColumns = this.getMessageColumnNames()
+        if (messageColumns.size > 0 && !messageColumns.has('delivery_state')) {
+            this.db.exec("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'")
+        }
+    }
+
     /**
      * A2A Layer 1 / P1 (#1374) + P3 substrate: hub work-graph ledger tables.
      * Namespace + principal_json required on every events row.
@@ -980,29 +1072,6 @@ export class Store {
                 ON event_links(namespace, from_event_id);
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
-        `)
-    }
-
-    private migrateFromV23ToV24(): void {
-        // Usage events are a rebuildable index. v24 adds cumulative-cost and
-        // context-only presence markers; the derived rows must be re-derived
-        // under the new semantics instead of mixing old and new rows.
-        const columns = new Set(
-            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
-                .map((column) => column.name)
-        )
-        if (!columns.has('context_only')) {
-            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
-        }
-        if (!columns.has('cost')) {
-            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
-        }
-        if (!columns.has('cost_currency')) {
-            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
-        }
-        this.db.exec(`
-            DELETE FROM usage_events;
-            DELETE FROM usage_scan_state;
         `)
     }
 
