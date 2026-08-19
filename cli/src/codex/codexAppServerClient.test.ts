@@ -107,9 +107,9 @@ describe('CodexAppServerClient process cwd', () => {
                 input: [{ type: 'text', text: 'x' }],
                 expectedTurnId: 'turn-1'
             });
-            const dispatched = expect(steer.dispatched).rejects.toThrow("timed out after 25000ms");
-            const completed = expect(steer.completed).rejects.toThrow("timed out after 25000ms");
-            await vi.advanceTimersByTimeAsync(25_000);
+            const dispatched = expect(steer.dispatched).rejects.toThrow("timed out after 20000ms");
+            const completed = expect(steer.completed).rejects.toThrow("timed out after 20000ms");
+            await vi.advanceTimersByTimeAsync(20_000);
             await dispatched;
             await completed;
             await client.disconnect();
