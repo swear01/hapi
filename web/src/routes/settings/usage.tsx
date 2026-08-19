@@ -31,8 +31,8 @@ export function formatCost(amount: number, currency: string, locale?: string): s
     }
 }
 
-function formatCosts(costs: UsageCost[]): string {
-    return costs.map((cost) => formatCost(cost.amount, cost.currency)).join(' + ')
+function formatCosts(costs: UsageCost[], locale: string): string {
+    return costs.map((cost) => formatCost(cost.amount, cost.currency, locale)).join(' + ')
 }
 
 const AGENT_STATUS_ORDER: UsageAgentStatus[] = ['complete', 'context-only', 'cost-only', 'not-reported']
@@ -40,7 +40,7 @@ const AGENT_STATUS_ORDER: UsageAgentStatus[] = ['complete', 'context-only', 'cos
 type AgentStatusStyle = Record<UsageAgentStatus, { className: string; label: string }>
 
 function AgentAvailabilityList(props: { rows: Array<{ agent: string; status: UsageAgentStatus; sessions: number; costs: UsageCost[] }> }) {
-    const { t } = useTranslation()
+    const { t, locale } = useTranslation()
     if (props.rows.length === 0) {
         return <div className="px-3 py-4 text-sm text-[var(--app-hint)]">{t('settings.usage.agents.empty')}</div>
     }
@@ -60,7 +60,7 @@ function AgentAvailabilityList(props: { rows: Array<{ agent: string; status: Usa
                 <div key={row.agent} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
                     <span className="min-w-0 truncate font-medium text-[var(--app-fg)]">{row.agent}</span>
                     <span className="flex shrink-0 items-center gap-2">
-                        {row.costs.length > 0 ? <span className="text-xs text-[var(--app-hint)]">{formatCosts(row.costs)}</span> : null}
+                        {row.costs.length > 0 ? <span className="text-xs text-[var(--app-hint)]">{formatCosts(row.costs, locale)}</span> : null}
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle[row.status].className}`}>
                             {statusStyle[row.status].label}
                         </span>
@@ -101,7 +101,7 @@ function UsageBarList(props: { rows: UsageSummaryBucket[]; empty: string }) {
 
 export default function SettingsUsagePage() {
     const { api } = useAppContext()
-    const { t } = useTranslation()
+    const { t, locale } = useTranslation()
     const [range, setRange] = useState<UsageRange>('7d')
     const [timeZone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
     const query = useQuery({
@@ -160,7 +160,7 @@ export default function SettingsUsagePage() {
                         {query.data.totals.costs.length > 0 ? (
                             <div className="rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-3 shadow-sm">
                                 <div className="text-xs text-[var(--app-hint)]">{t('settings.usage.cost')}</div>
-                                <div className="mt-1 text-xl font-semibold text-[var(--app-fg)]">{formatCosts(query.data.totals.costs)}</div>
+                                <div className="mt-1 text-xl font-semibold text-[var(--app-fg)]">{formatCosts(query.data.totals.costs, locale)}</div>
                             </div>
                         ) : null}
                     </div>
