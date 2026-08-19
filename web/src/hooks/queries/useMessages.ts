@@ -58,6 +58,12 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         if (sessionId) {
             activateMessageWindow(sessionId)
         }
+        return () => {
+            if (sessionId) {
+                cancelOlderMessageLoad(sessionId)
+                setMessageViewMode(sessionId, 'tail')
+            }
+        }
     }, [sessionId])
 
     useEffect(() => {
