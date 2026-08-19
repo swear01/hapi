@@ -274,6 +274,13 @@ function makeClient() {
         keepAlive: vi.fn(),
         emitSessionReady: vi.fn(),
         emitMessagesConsumed: vi.fn(),
+        emitSteerIndeterminate: vi.fn(),
+        setSteerDeliveryState: vi.fn(async (localIds: string[], state: 'queued' | 'dispatching') => {
+            if (state === 'dispatching') {
+                expect(harness.softSteerCalls).toBe(0);
+            }
+            return true;
+        }),
         updateAgentState: vi.fn()
     } as unknown as ApiSessionClient;
 }
@@ -1559,6 +1566,66 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
+    it('persists dispatching state before starting an ACP steer', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+            setSteerDeliveryState: ReturnType<typeof vi.fn>;
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        await expect(steerHandler!({ localId: 'local-2' })).resolves.toEqual({ steered: true });
+        expect(client.setSteerDeliveryState).toHaveBeenCalledWith(['local-2'], 'dispatching');
+        expect(harness.softSteerCalls).toBe(1);
+
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('does not start an ACP steer when the hub cannot persist dispatching state', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+            setSteerDeliveryState: ReturnType<typeof vi.fn>;
+            emitSteerIndeterminate: ReturnType<typeof vi.fn>;
+        };
+        client.setSteerDeliveryState.mockResolvedValueOnce(false);
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        await expect(steerHandler!({ localId: 'local-2' })).resolves.toEqual({
+            steered: false,
+            error: 'Steer state is indeterminate'
+        });
+        expect(harness.softSteerCalls).toBe(0);
+        expect(client.emitSteerIndeterminate).toHaveBeenCalledWith(['local-2']);
+        expect(session.queue.cancelByLocalId('local-2')).toBe(true);
+
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
     it('rejects steer when no prompt is in flight', async () => {
         const session = makeSession(null, false);
 
@@ -1643,7 +1710,7 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
-    it('consumes a transport-indeterminate steer at most once', async () => {
+    it('keeps a transport-indeterminate steer out of delivered state', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
         harness.deferSoftSteer = new Promise((_resolve, reject) => {
@@ -1663,22 +1730,23 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
                 handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
             };
             emitMessagesConsumed: ReturnType<typeof vi.fn>;
+            emitSteerIndeterminate: ReturnType<typeof vi.fn>;
         };
         const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
 
         await expect(steerHandler!({ localId: 'local-2' })).resolves.toEqual({ steered: true });
         harness.rejectSoftSteer!(indeterminate);
-        await vi.waitFor(() => expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-2']));
-        expect(client.emitMessagesConsumed.mock.calls.filter(([localIds]) =>
-            Array.isArray(localIds) && localIds.includes('local-2'))).toHaveLength(1);
+        await vi.waitFor(() => expect(client.emitSteerIndeterminate).toHaveBeenCalledWith(['local-2']));
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
         expect(session.queue.pendingLocalIds()).not.toContain('local-2');
+        expect(session.queue.cancelByLocalId('local-2')).toBe(true);
 
         releasePrompt();
         session.queue.close();
         await runPromise;
     });
 
-    it('consumes a transport-indeterminate dispatch failure at most once', async () => {
+    it('keeps a transport-indeterminate dispatch failure out of delivered state', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
         const indeterminate = new Error('stdin closed after dispatch');
@@ -1696,12 +1764,18 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
                 handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
             };
             emitMessagesConsumed: ReturnType<typeof vi.fn>;
+            emitSteerIndeterminate: ReturnType<typeof vi.fn>;
         };
         const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
 
-        await expect(steerHandler!({ localId: 'local-2' })).resolves.toEqual({ steered: true });
-        expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-2']);
+        await expect(steerHandler!({ localId: 'local-2' })).resolves.toEqual({
+            steered: false,
+            error: 'Steer outcome is being reconciled'
+        });
+        expect(client.emitSteerIndeterminate).toHaveBeenCalledWith(['local-2']);
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
         expect(session.queue.pendingLocalIds()).not.toContain('local-2');
+        expect(session.queue.cancelByLocalId('local-2')).toBe(true);
 
         releasePrompt();
         session.queue.close();

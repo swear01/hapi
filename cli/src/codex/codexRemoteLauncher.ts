@@ -3249,16 +3249,23 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             session.sendSessionEvent({ type: 'ready' });
         };
 
-        await appServerClient.connect();
-        await appServerClient.initialize({
-            clientInfo: {
-                name: 'hapi-codex-client',
-                version: '1.0.0'
-            },
-            capabilities: {
-                experimentalApi: true
+        const ensureAppServerInitialized = async (): Promise<void> => {
+            if (appServerClient.isConnected() && appServerClient.isInitialized()) {
+                return;
             }
-        });
+            await appServerClient.connect();
+            await appServerClient.initialize({
+                clientInfo: {
+                    name: 'hapi-codex-client',
+                    version: '1.0.0'
+                },
+                capabilities: {
+                    experimentalApi: true
+                }
+            });
+        };
+
+        await ensureAppServerInitialized();
 
         const publishConversationHistoryCapabilities = async () => {
             const conversationHistory = this.conversationHistory.getCapabilitiesForMetadata()?.conversationHistory
@@ -3366,16 +3373,54 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     hash: taken.item.modeHash
                 };
                 const steerEpoch = this.steerEpoch;
+                const steerThreadId = this.currentThreadId;
                 if (!session.queue.beginReservationDispatch(taken)) {
                     return { steered: false, error: 'Steer cancelled' };
+                }
+                const dispatchStatePersisted = await session.client.setSteerDeliveryState([localId], 'dispatching');
+                if (!dispatchStatePersisted) {
+                    session.queue.markReservationIndeterminate(taken);
+                    session.client.emitSteerIndeterminate([localId]);
+                    return { steered: false, error: 'Steer state is indeterminate' };
+                }
+                const restoreQueuedReservation = async (): Promise<boolean> => {
+                    if (!taken.originIndeterminate) {
+                        const persisted = await session.client.setSteerDeliveryState([localId], 'queued');
+                        if (!persisted) {
+                            session.queue.markReservationIndeterminate(taken);
+                            session.client.emitSteerIndeterminate([localId]);
+                            return false;
+                        }
+                    }
+                    if (taken.state !== 'dispatching' || !session.queue.restoreReservation(taken)) {
+                        session.client.emitSteerIndeterminate([localId]);
+                        return false;
+                    }
+                    if (taken.originIndeterminate) {
+                        session.client.emitSteerIndeterminate([localId]);
+                    }
+                    return true;
+                };
+                if (taken.state !== 'dispatching'
+                    || !turnInFlight
+                    || this.currentThreadId !== steerThreadId
+                    || this.currentTurnId !== steerTurnId
+                    || !isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
+                    await restoreQueuedReservation();
+                    return { steered: false, error: 'Active turn changed' };
                 }
                 const steerRequest = trySteerActiveTurn(batch, localId);
                 inFlightSteers.add(steerRequest);
                 try {
                     const outcome = await steerRequest;
-                    if (outcome === 'accepted' || outcome === 'indeterminate') {
-                        // An indeterminate transport failure may follow a
-                        // successful app-server write; consume it at most once.
+                    if (outcome === 'indeterminate') {
+                        if (isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
+                            && session.queue.markReservationIndeterminate(taken)) {
+                            session.client.emitSteerIndeterminate([localId]);
+                        }
+                        return { steered: false, error: 'Steer outcome is being reconciled' };
+                    }
+                    if (outcome === 'accepted') {
                         if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
                             || !session.queue.commitReservation(taken)) {
                             return { steered: false, error: 'Steer cancelled' };
@@ -3401,7 +3446,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
                         return { steered: false, error: 'Steer cancelled' };
                     }
-                    if (!session.queue.restoreReservation(taken)) {
+                    if (!await restoreQueuedReservation()) {
                         return { steered: false, error: 'Steer cancelled' };
                     }
                     return { steered: false, error: 'Active turn is not steerable' };
@@ -3796,6 +3841,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
         while (!this.shouldExit) {
             logActiveHandles('loop-top');
+            await ensureAppServerInitialized();
             if (!pending && recoveryInFlight) {
                 await waitForTurnOrRecovery(this.abortController.signal);
                 if (this.abortController.signal.aborted && !this.shouldExit) {

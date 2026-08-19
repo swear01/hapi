@@ -46,6 +46,7 @@ const harness = vi.hoisted(() => ({
     goal: null as Record<string, unknown> | null,
     suppressGoalNotifications: false,
     suppressTurnCompletion: false,
+    dropAppServerAfterFirstTurn: false,
     remainingThreadSystemErrors: 0,
     emitFailedCompletionAfterThreadSystemError: false,
     emitCyberPolicyAfterThreadSystemError: false,
@@ -100,10 +101,24 @@ vi.mock('./codexAppServerClient', () => {
         private notificationHandler: ((method: string, params: unknown) => void) | null = null;
         private stderrHandler: ((text: string) => void) | null = null;
 
-        async connect(): Promise<void> {}
+        private connected = false;
+        private initialized = false;
+
+        async connect(): Promise<void> {
+            this.connected = true;
+        }
+
+        isConnected(): boolean {
+            return this.connected;
+        }
+
+        isInitialized(): boolean {
+            return this.initialized;
+        }
 
         async initialize(params: unknown): Promise<{ protocolVersion: number }> {
             harness.initializeCalls.push(params);
+            this.initialized = true;
             return { protocolVersion: 1 };
         }
 
@@ -996,6 +1011,10 @@ vi.mock('./codexAppServerClient', () => {
             const completed = { status: 'Completed', turn: { id: turnId } };
             harness.notifications.push({ method: 'turn/completed', params: completed });
             this.notificationHandler?.('turn/completed', completed);
+            if (harness.dropAppServerAfterFirstTurn && harness.startTurnThreadIds.length === 1) {
+                this.connected = false;
+                this.initialized = false;
+            }
 
             return { turn: { id: turnId } };
         }
@@ -1113,6 +1132,16 @@ function createSessionStub(
     const foundSessionIds: string[] = [];
     const resetThreadCalls: string[] = [];
     const collaborationModes: Array<EnhancedMode['collaborationMode'] | undefined> = [];
+    const steerDeliveryStateCalls: Array<{ localIds: string[]; state: 'queued' | 'dispatching' }> = [];
+    const emitMessagesConsumed = vi.fn((_localIds: string[]) => {});
+    const emitSteerIndeterminate = vi.fn((_localIds: string[]) => {});
+    const setSteerDeliveryState = vi.fn(async (localIds: string[], state: 'queued' | 'dispatching') => {
+        if (state === 'dispatching') {
+            expect(harness.steerTurnCalls).toHaveLength(0);
+        }
+        steerDeliveryStateCalls.push({ localIds, state });
+        return true;
+    });
     let currentPermissionMode: EnhancedMode['permissionMode'] = mode.permissionMode;
     let currentModel: string | null | undefined = mode.model;
     let currentModelReasoningEffort = mode.modelReasoningEffort;
@@ -1137,7 +1166,9 @@ function createSessionStub(
             codexMessages.push(message);
         },
         sendUserMessage(_text: string) {},
-        emitMessagesConsumed(_localIds: string[]) {},
+        emitMessagesConsumed,
+        emitSteerIndeterminate,
+        setSteerDeliveryState,
         sendClaudeSessionMessage(message: unknown) {
             summaryMessages.push(message);
         },
@@ -1206,6 +1237,10 @@ function createSessionStub(
         foundSessionIds,
         resetThreadCalls,
         rpcHandlers,
+        emitMessagesConsumed,
+        emitSteerIndeterminate,
+        setSteerDeliveryState,
+        steerDeliveryStateCalls,
         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
             currentPermissionMode = nextMode;
         },
@@ -1261,6 +1296,7 @@ describe('codexRemoteLauncher', () => {
         harness.goal = null;
         harness.suppressGoalNotifications = false;
         harness.suppressTurnCompletion = false;
+        harness.dropAppServerAfterFirstTurn = false;
         harness.steerTurnCalls = [];
         harness.deferSteerTurn = null;
         harness.releaseSteerTurn = null;
@@ -3241,6 +3277,21 @@ describe('isCurrentSteerHandler (#888)', () => {
     });
 });
 
+describe('codexRemoteLauncher app-server lifecycle', () => {
+    afterEach(() => {
+        harness.dropAppServerAfterFirstTurn = false;
+    });
+
+    it('reinitializes a replacement app-server before the next turn', async () => {
+        harness.dropAppServerAfterFirstTurn = true;
+        const { session } = createSessionStub(['first message', 'second message']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.initializeCalls).toHaveLength(2);
+    });
+});
+
 describe('codexRemoteLauncher mid-turn steer (#888)', () => {
     beforeEach(() => {
         harness.suppressTurnCompletion = false;
@@ -3320,12 +3371,40 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         queue.close();
     });
 
-    it('consumes an indeterminate steer at most once', async () => {
+    it('keeps an indeterminate steer held for explicit reconciliation', async () => {
         harness.suppressTurnCompletion = true;
         const indeterminate = new Error('Codex app-server exited after accepting steer');
         Object.defineProperty(indeterminate, CODEX_APP_SERVER_INDETERMINATE_SYMBOL, { value: true });
         harness.steerTurnError = indeterminate;
-        const { session, rpcHandlers } = createSessionStub(['first message']);
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first message']);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('steer me', createMode(), 'steer-local');
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        await expect(steerHandler!({ localId: 'steer-local' })).resolves.toEqual({
+            steered: false,
+            error: 'Steer outcome is being reconciled'
+        });
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['steer-local']);
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['steer-local']);
+        expect(queue.pendingLocalIds()).not.toContain('steer-local');
+        expect(queue.cancelByLocalId('steer-local')).toBe(true);
+
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-1' }
+        });
+        queue.close();
+        await runPromise;
+    });
+
+    it('persists dispatching state before writing a steer to Codex', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, rpcHandlers, steerDeliveryStateCalls } = createSessionStub(['first message']);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
 
@@ -3335,7 +3414,39 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
 
         await expect(steerHandler!({ localId: 'steer-local' })).resolves.toEqual({ steered: true });
-        expect(queue.pendingLocalIds()).not.toContain('steer-local');
+        expect(steerDeliveryStateCalls).toEqual([{
+            localIds: ['steer-local'],
+            state: 'dispatching'
+        }]);
+        expect(harness.steerTurnCalls).toHaveLength(1);
+
+        harness.dispatchNotification?.('turn/completed', {
+            status: 'Completed',
+            turn: { id: 'turn-1' }
+        });
+        queue.close();
+        await runPromise;
+    });
+
+    it('does not write a steer when the hub cannot persist dispatching state', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, rpcHandlers, setSteerDeliveryState, emitSteerIndeterminate } = createSessionStub(['first message']);
+        setSteerDeliveryState.mockResolvedValueOnce(false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('steer me', createMode(), 'steer-local');
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        await expect(steerHandler!({ localId: 'steer-local' })).resolves.toEqual({
+            steered: false,
+            error: 'Steer state is indeterminate'
+        });
+        expect(harness.steerTurnCalls).toHaveLength(0);
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['steer-local']);
+        expect(queue.cancelByLocalId('steer-local')).toBe(true);
 
         harness.dispatchNotification?.('turn/completed', {
             status: 'Completed',
