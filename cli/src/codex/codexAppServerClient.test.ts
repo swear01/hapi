@@ -63,6 +63,57 @@ describe('CodexAppServerClient process cwd', () => {
     });
 });
 
+describe('CodexAppServerClient process generations', () => {
+    it('ignores lifecycle events from a replaced app-server child', async () => {
+        const first = fakeChild();
+        const second = fakeChild();
+        spawnMock.mockReturnValueOnce(first).mockReturnValueOnce(second);
+        const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+
+        await client.connect();
+        first.emit('exit', 1, null);
+        await client.connect();
+
+        // Late lifecycle events from the old child must not tear down the replacement.
+        first.emit('exit', 2, null);
+        first.emit('error', new Error('stale child error'));
+        expect(client.isConnected()).toBe(true);
+
+        await client.disconnect();
+    });
+
+    it('classifies an asynchronous stdin write failure as indeterminate', async () => {
+        vi.useFakeTimers();
+        try {
+            const child = fakeChild();
+            child.stdin.write = vi.fn((_chunk: string, callback?: (error?: Error | null) => void) => {
+                callback?.(new Error('EPIPE'));
+                return true;
+            });
+            spawnMock.mockReturnValue(child);
+            const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+            await client.connect();
+
+            const resultPromise = client.steerTurn({
+                threadId: 'thread-1',
+                input: [{ type: 'text', text: 'pivot now' }],
+                expectedTurnId: 'turn-1'
+            }).then(
+                () => null,
+                (error: unknown) => error
+            );
+            await vi.advanceTimersByTimeAsync(25_001);
+            const error = await resultPromise;
+
+            expect(error).toMatchObject({ message: 'EPIPE' });
+            expect(isCodexAppServerIndeterminateError(error)).toBe(true);
+            expect(client.isConnected()).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
 describe('CodexAppServerClient turn/steer', () => {
     beforeEach(() => {
         spawnMock.mockReset();

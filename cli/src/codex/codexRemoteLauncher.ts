@@ -14,6 +14,7 @@ import { buildHapiMcpBridge } from './utils/buildHapiMcpBridge';
 import { emitReadyIfIdle } from './utils/emitReadyIfIdle';
 import type { CodexSession } from './session';
 import type { EnhancedMode } from './loop';
+import type { QueueReservation } from '@/utils/MessageQueue2';
 import { hasCodexCliOverrides } from './utils/codexCliOverrides';
 import { AppServerEventConverter } from './utils/appServerEventConverter';
 import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
@@ -101,6 +102,9 @@ const SAME_THREAD_MAX_RETRIES = 3;
 const SAME_THREAD_MAX_COMPACT_RETRIES = 1;
 const SAME_THREAD_COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
 const THREAD_STATUS_FAILURE_GRACE_MS = 250;
+const CODEX_STEER_RECONCILIATION_TIMEOUT_MS = 60 * 1000;
+const CODEX_STEER_RECONCILIATION_INTERVAL_MS = 1_000;
+const CODEX_STEER_RECONCILIATION_READ_TIMEOUT_MS = 5 * 1000;
 const SAFETY_BUFFERING_LEARN_MORE_URL = 'https://help.openai.com/en/articles/20001326';
 const TRUSTED_ACCESS_FOR_CYBER_URL = 'https://chatgpt.com/cyber';
 const CYBER_POLICY_TRUSTED_ACCESS_URL = 'https://openai.com/form/enterprise-trusted-access-for-cyber/';
@@ -1931,6 +1935,100 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             signal.addEventListener('abort', finish, { once: true });
         });
 
+        type PendingSteerReconciliation = {
+            threadId: string;
+            turnId: string;
+            taken: QueueReservation<EnhancedMode>;
+            batch: QueuedMessage;
+            expiresAt: number;
+        };
+        const pendingSteerReconciliations = new Map<string, PendingSteerReconciliation>();
+        let steerReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+        let steerReconcileInProgress = false;
+        let reconciliationShuttingDown = false;
+        const isSteerReconciliationActive = (): boolean => {
+            return !reconciliationShuttingDown && !this.shouldExit && !this.leavingRemote;
+        };
+
+        const commitReconciledSteer = (localId: string, entry: PendingSteerReconciliation): void => {
+            if (pendingSteerReconciliations.get(localId) !== entry || !isSteerReconciliationActive()) {
+                return;
+            }
+            const committed = session.queue.commitReservation(entry.taken);
+            pendingSteerReconciliations.delete(localId);
+            if (!committed) {
+                return;
+            }
+            this.conversationHistory.rememberLocalIdTurn(localId, entry.turnId);
+            session.client.updateMetadata((metadata) => ({
+                ...metadata,
+                path: metadata?.path ?? session.path,
+                host: metadata?.host ?? 'unknown',
+                conversationHistoryPoints: {
+                    ...metadata?.conversationHistoryPoints,
+                    [localId]: true as const
+                },
+                conversationHistoryTurns: {
+                    ...metadata?.conversationHistoryTurns,
+                    [localId]: entry.turnId
+                }
+            }));
+            messageBuffer.addMessage(entry.batch.message, 'user');
+            session.client.emitMessagesConsumed([localId]);
+        };
+
+        const runSteerReconciliation = async (): Promise<void> => {
+            if (steerReconcileTimer) {
+                clearTimeout(steerReconcileTimer);
+                steerReconcileTimer = null;
+            }
+            if (!isSteerReconciliationActive() || steerReconcileInProgress || pendingSteerReconciliations.size === 0) {
+                return;
+            }
+            steerReconcileInProgress = true;
+            try {
+                for (const [localId, entry] of Array.from(pendingSteerReconciliations.entries())) {
+                    if (!isSteerReconciliationActive()) {
+                        break;
+                    }
+                    if (pendingSteerReconciliations.get(localId) !== entry) {
+                        continue;
+                    }
+                    if (Date.now() >= entry.expiresAt) {
+                        logger.debug(`[Codex] steer ${localId} reconciliation expired; keeping indeterminate`);
+                        pendingSteerReconciliations.delete(localId);
+                        continue;
+                    }
+                    const outcome = await reconcileSteerByClientId(entry.threadId, localId);
+                    if (outcome === 'accepted') {
+                        commitReconciledSteer(localId, entry);
+                    }
+                }
+            } finally {
+                steerReconcileInProgress = false;
+                if (isSteerReconciliationActive() && pendingSteerReconciliations.size > 0) {
+                    steerReconcileTimer = setTimeout(() => {
+                        steerReconcileTimer = null;
+                        void runSteerReconciliation();
+                        wakeLoop();
+                    }, CODEX_STEER_RECONCILIATION_INTERVAL_MS);
+                    steerReconcileTimer.unref?.();
+                }
+            }
+        };
+
+        const scheduleSteerReconcileRetry = (): void => {
+            if (!isSteerReconciliationActive() || steerReconcileTimer || steerReconcileInProgress) {
+                return;
+            }
+            steerReconcileTimer = setTimeout(() => {
+                steerReconcileTimer = null;
+                void runSteerReconciliation();
+                wakeLoop();
+            }, CODEX_STEER_RECONCILIATION_INTERVAL_MS);
+            steerReconcileTimer.unref?.();
+        };
+
         const clearCompactRecovery = (recovery: typeof compactRecovery) => {
             if (!recovery) {
                 return;
@@ -3265,6 +3363,34 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             });
         };
 
+        const reconcileSteerByClientId = async (threadId: string, localId: string): Promise<'accepted' | 'unknown'> => {
+            try {
+                await ensureAppServerInitialized();
+                const response = await appServerClient.readThread(
+                    { threadId, includeTurns: true },
+                    { signal: AbortSignal.timeout(CODEX_STEER_RECONCILIATION_READ_TIMEOUT_MS) }
+                );
+                const thread = asRecord(response.thread);
+                const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+                for (const turn of turns) {
+                    const turnRecord = asRecord(turn);
+                    const items = Array.isArray(turnRecord?.items) ? turnRecord.items : [];
+                    for (const item of items) {
+                        const itemRecord = asRecord(item);
+                        const type = asString(itemRecord?.type) ?? asString(itemRecord?.itemType);
+                        const clientId = asString(itemRecord?.clientId) ?? asString(itemRecord?.client_id);
+                        if ((type === 'userMessage' || type === 'user_message') && clientId === localId) {
+                            return 'accepted';
+                        }
+                    }
+                }
+                return 'unknown';
+            } catch (error) {
+                logger.debug(`[Codex] steer reconcile unavailable (${error instanceof Error ? error.message : String(error)})`);
+                return 'unknown';
+            }
+        };
+
         await ensureAppServerInitialized();
 
         const publishConversationHistoryCapabilities = async () => {
@@ -3356,6 +3482,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 if (!taken) {
                     return { steered: false, error: 'Message not in queue' };
                 }
+                // An explicit retry supersedes an outstanding reconciliation poll.
+                pendingSteerReconciliations.delete(localId);
                 const isControlCommand = Boolean(taken.item.isolate)
                     || Boolean(parseCodexSpecialCommand(taken.item.message).type);
                 if (isControlCommand) {
@@ -3417,6 +3545,16 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         if (isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
                             && session.queue.markReservationIndeterminate(taken)) {
                             session.client.emitSteerIndeterminate([localId]);
+                            if (steerThreadId) {
+                                pendingSteerReconciliations.set(localId, {
+                                    threadId: steerThreadId,
+                                    turnId: steerTurnId,
+                                    taken,
+                                    batch,
+                                    expiresAt: Date.now() + CODEX_STEER_RECONCILIATION_TIMEOUT_MS
+                                });
+                                scheduleSteerReconcileRetry();
+                            }
                         }
                         return { steered: false, error: 'Steer outcome is being reconciled' };
                     }
@@ -4123,6 +4261,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         }
 
+        reconciliationShuttingDown = true;
+        if (steerReconcileTimer) {
+            clearTimeout(steerReconcileTimer);
+            steerReconcileTimer = null;
+        }
+        pendingSteerReconciliations.clear();
         failPendingAgentStarts('spawn_agent did not return an agent id before the Codex session ended');
         clearDeferredThreadStatusFailure();
         cancelSafetyBufferingRequest('Session ended');
