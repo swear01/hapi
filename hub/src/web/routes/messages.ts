@@ -113,7 +113,7 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         const localIds = [...new Set(parsed.data.localIds)]
         if (localIds.length === 0) {
-            return c.json({ queuedLocalIds: [], invokedLocalMessages: [] })
+            return c.json({ queuedLocalIds: [], indeterminateLocalIds: [], invokedLocalMessages: [] })
         }
         return c.json(engine.getQueuedState(sessionId, localIds))
     })

@@ -496,6 +496,7 @@ export function getUninvokedLocalMessages(
 export type LocalMessageState = {
     localId: string
     invokedAt: number | null
+    deliveryState?: string | null
 }
 
 export function getLocalMessageStates(
@@ -508,17 +509,21 @@ export function getLocalMessageStates(
     }
     const placeholders = localIds.map(() => '?').join(', ')
     const rows = db.prepare(`
-        SELECT local_id, invoked_at
+        SELECT local_id, invoked_at, delivery_state
         FROM messages
         WHERE session_id = ? AND local_id IN (${placeholders})
         ORDER BY seq ASC
     `).all(sessionId, ...localIds) as Array<{
         local_id: string
         invoked_at: number | null
+        delivery_state: string | null
     }>
     return rows.map((row) => ({
         localId: row.local_id,
-        invokedAt: row.invoked_at
+        invokedAt: row.invoked_at,
+        ...(row.delivery_state && row.delivery_state !== 'queued'
+            ? { deliveryState: row.delivery_state }
+            : {})
     }))
 }
 

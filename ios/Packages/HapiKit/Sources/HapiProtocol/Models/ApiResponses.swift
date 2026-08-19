@@ -252,10 +252,16 @@ public struct InvokedLocalMessage: Codable, Equatable, Sendable {
 public struct QueuedStateResponse: Codable, Equatable, Sendable {
     public var queuedLocalIds: [String]
     public var invokedLocalMessages: [InvokedLocalMessage]
+    public var indeterminateLocalIds: [String]?
 
-    public init(queuedLocalIds: [String], invokedLocalMessages: [InvokedLocalMessage]) {
+    public init(
+        queuedLocalIds: [String],
+        invokedLocalMessages: [InvokedLocalMessage],
+        indeterminateLocalIds: [String]? = nil
+    ) {
         self.queuedLocalIds = queuedLocalIds
         self.invokedLocalMessages = invokedLocalMessages
+        self.indeterminateLocalIds = indeterminateLocalIds
     }
 }
 

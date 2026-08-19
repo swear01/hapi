@@ -150,7 +150,10 @@ export class MessageService {
         const states = this.store.messages.getLocalMessageStates(sessionId, localIds)
         return {
             queuedLocalIds: states
-                .filter((state) => state.invokedAt === null)
+                .filter((state) => state.invokedAt === null && state.deliveryState !== 'indeterminate' && state.deliveryState !== 'dispatching')
+                .map((state) => state.localId),
+            indeterminateLocalIds: states
+                .filter((state) => state.invokedAt === null && (state.deliveryState === 'indeterminate' || state.deliveryState === 'dispatching'))
                 .map((state) => state.localId),
             invokedLocalMessages: states.flatMap((state) => state.invokedAt === null
                 ? []
