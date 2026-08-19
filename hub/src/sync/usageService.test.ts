@@ -1007,7 +1007,7 @@ describe('usage service', () => {
         store.close()
     })
 
-    it('omits pre-range spend when an old session first reports cost inside the range', () => {
+    it('keeps known in-range growth after an old session first reports cost inside the range', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession(
             'acp-cost-old-session-test',
@@ -1016,18 +1016,16 @@ describe('usage service', () => {
             'default'
         )
         const day = 24 * 60 * 60 * 1000
-        // The session predates the 7-day window but its first (and only) cost
-        // sample lands inside it. The bounded view cannot attribute how much
-        // was already spent, so it omits the session; all-time keeps the full
-        // cumulative amount.
+        // The session predates the 7-day window, so its first in-range sample
+        // cannot be attributed. Later in-range growth is still measurable.
         const internalDb = (store as unknown as { db: Database }).db
         internalDb.prepare('UPDATE sessions SET created_at = ? WHERE id = ?')
             .run(Date.now() - 30 * day, session.id)
-        addAgentMessage(store, session.id, {
+        const costMessage = (cost: number) => ({
             type: 'codex',
             data: {
                 type: 'token_count',
-                cost: 5,
+                cost,
                 costCurrency: 'USD',
                 info: {
                     total: { inputTokens: 0, outputTokens: 0 },
@@ -1036,11 +1034,13 @@ describe('usage service', () => {
                 }
             }
         })
+        addAgentMessage(store, session.id, costMessage(5), Date.now() - 2 * day)
+        addAgentMessage(store, session.id, costMessage(6), Date.now() - day)
 
         const sevenDay = getUsageSummary(store, 'default', '7d')
-        expect(sevenDay.totals.costs).toEqual([])
+        expect(sevenDay.totals.costs).toEqual([{ amount: 1, currency: 'USD' }])
         const allTime = getUsageSummary(store, 'default', 'all')
-        expect(allTime.totals.costs).toEqual([{ amount: 5, currency: 'USD' }])
+        expect(allTime.totals.costs).toEqual([{ amount: 6, currency: 'USD' }])
         store.close()
     })
 

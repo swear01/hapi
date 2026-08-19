@@ -1006,25 +1006,19 @@ export class Store {
             (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
                 .map((column) => column.name)
         )
-        let rebuildUsage = false
         if (!usageColumns.has('context_only')) {
             this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
-            rebuildUsage = true
         }
         if (!usageColumns.has('cost')) {
             this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
-            rebuildUsage = true
         }
         if (!usageColumns.has('cost_currency')) {
             this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
-            rebuildUsage = true
         }
-        if (rebuildUsage) {
-            this.db.exec(`
-                DELETE FROM usage_events;
-                DELETE FROM usage_scan_state;
-            `)
-        }
+        this.db.exec(`
+            DELETE FROM usage_events;
+            DELETE FROM usage_scan_state;
+        `)
     }
 
     /**

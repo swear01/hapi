@@ -535,16 +535,18 @@ export function getUsageSummary(
             : points
         if (inRange.length === 0) continue
         // A missing baseline is only a true zero when the session itself
-        // started inside the range; an older session with its first cost
-        // sample inside the window cannot be attributed, so it is omitted.
-        if (from !== null && !baseline && session && session.createdAt < from) {
-            continue
-        }
+        // started inside the range; an older session's first in-range sample
+        // cannot be attributed, but later in-range growth is still measurable.
         let previous = baseline
+        let pointsToCount = inRange
+        if (from !== null && previous === null && session && session.createdAt < from) {
+            previous = inRange[0] ?? null
+            pointsToCount = inRange.slice(1)
+        }
         let total = 0
         let currency: string | null = null
         let mismatch = false
-        for (const point of inRange) {
+        for (const point of pointsToCount) {
             if (previous !== null && previous.currency !== point.currency) {
                 mismatch = true
                 break

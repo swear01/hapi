@@ -76,4 +76,48 @@ describe('Store V25→V26 migration: ACP usage columns', () => {
             rmSync(directory, { recursive: true, force: true })
         }
     })
+
+    it('rebuilds stale usage indexes when a v25 database already has the new columns', () => {
+        const directory = mkdtempSync(join(tmpdir(), 'hapi-migration-v25-recovery-'))
+        const dbPath = join(directory, 'test.db')
+        let store: Store | undefined
+        try {
+            store = new Store(dbPath)
+            const session = store.sessions.getOrCreateSession(
+                'migration-v25-recovery',
+                { path: '/tmp', host: 'test', flavor: 'claude' },
+                null,
+                'default'
+            )
+            store.close()
+            store = undefined
+
+            const db = new Database(dbPath, { create: true, readwrite: true, strict: true })
+            db.exec(`
+                INSERT INTO usage_events (
+                    session_id, source_key, source_seq, created_at, agent, kind,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    context_only, cost, cost_currency
+                ) VALUES (
+                    '${session.id}', 'stale', 1, 1, 'claude', 'delta',
+                    1, 1, 0, 0, 0, 2.5, 'USD'
+                );
+                INSERT INTO usage_scan_state (session_id, message_epoch, last_seq)
+                VALUES ('${session.id}', 0, 1);
+                PRAGMA user_version = 25;
+            `)
+            db.close()
+
+            store = new Store(dbPath)
+            const internalDb = (store as unknown as { db: Database }).db
+            const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
+
+            expect(version.user_version).toBe(26)
+            expect((internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }).count).toBe(0)
+            expect((internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }).count).toBe(0)
+        } finally {
+            store?.close()
+            rmSync(directory, { recursive: true, force: true })
+        }
+    })
 })
