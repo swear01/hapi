@@ -1090,14 +1090,18 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const backend = this.backend;
         const sessionId = this.acpSessionId ?? this.session.sessionId;
         if (backend && sessionId) {
+            const pendingSoftSteers = [...this.softSteerWaiters];
             await backend.cancelPrompt(sessionId);
-            // Drop only soft-steer bookkeeping first; the foreground prompt
-            // remains counted while its cancellation drains.
+            // Drop soft-steer bookkeeping first; retain the foreground prompt
+            // count and wait for both boundaries before a new handler is used.
             backend.abortSoftSteers();
             if (!this.shouldExit) {
                 let timeout: ReturnType<typeof setTimeout> | null = null;
                 const drained = await Promise.race([
-                    backend.waitForResponseComplete().then(() => true),
+                    Promise.all([
+                        backend.waitForResponseComplete(),
+                        Promise.allSettled(pendingSoftSteers)
+                    ]).then(() => true),
                     new Promise<boolean>((resolve) => {
                         timeout = setTimeout(() => resolve(false), CURSOR_ABORT_DRAIN_TIMEOUT_MS);
                         timeout.unref?.();

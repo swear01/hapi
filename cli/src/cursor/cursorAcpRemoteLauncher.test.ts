@@ -319,7 +319,7 @@ describe('cursorAcpRemoteLauncher', () => {
         _resetSharedCursorModelsCacheForTests();
     });
 
-    it('does not block the next prompt on a soft steer that outlives an abort', async () => {
+    it('ends the launcher when a soft steer outlives an abort', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
         // Soft-steer completion never settles — simulates Cursor keeping the
@@ -337,16 +337,16 @@ describe('cursorAcpRemoteLauncher', () => {
 
         session.queue.push('soft steer', mode, 'steer');
         await handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
-        await handlers.get(RPC_METHODS.Abort)!();
-        session.queue.push('next', mode, 'next');
-
-        // Abort drops the waiters — the next prompt must start immediately.
         harness.deferPrompt = null;
         releasePrompt();
-        await vi.waitFor(() => expect(harness.promptCalls).toBe(2));
+        await handlers.get(RPC_METHODS.Abort)!();
+
+        // The old soft steer never settled, so the launcher must not install
+        // another prompt handler over it; the bounded drain ends the session.
+        expect(harness.promptCalls).toBe(1);
         session.queue.close();
         await runPromise;
-    });
+    }, 10_000);
 
     it('restores a queued steer when ACP dispatch fails', async () => {
         let releasePrompt!: () => void;
@@ -545,10 +545,10 @@ describe('cursorAcpRemoteLauncher', () => {
         session.queue.push('soft steer', mode, 'steer');
         const steerResult = handlers.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'steer' });
         await Promise.resolve();
-        await handlers.get(RPC_METHODS.Abort)!();
         releaseDispatch();
-
         await expect(steerResult).resolves.toEqual({ steered: true });
+        await handlers.get(RPC_METHODS.Abort)!();
+
         await vi.waitFor(() => expect(session.client.emitMessagesConsumed).toHaveBeenCalledWith(['steer'], { steered: true }));
         expect(vi.mocked(session.client.emitMessagesConsumed).mock.calls
             .filter(([ids]) => ids.includes('steer'))).toHaveLength(1);
