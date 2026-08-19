@@ -487,34 +487,43 @@ function makeTranscriptGapMessage(beforeSeq: number | null, afterSeq: number | n
     } as DecryptedMessage
 }
 
-function trimNavigationWindow(
+function trimNavigationRegularWindow(
     messages: DecryptedMessage[]
-): { kept: DecryptedMessage[]; dropped: DecryptedMessage[] } {
+): DecryptedMessage[] {
     const limit = NAVIGATION_HEAD_LIMIT + NAVIGATION_TAIL_LIMIT
     if (messages.length <= limit) {
-        return { kept: messages, dropped: [] }
+        return messages
     }
-    // Queued/scheduled rows must survive the trim: the queued-messages bar
-    // reads them straight from the window, so dropping them mid-navigation
-    // would silently disable its edit/cancel/steer controls.
-    const queued = messages.filter(isQueuedForInvocation)
-    const queuedIds = new Set(queued.map((message) => message.id))
-    const trimmable = messages.filter((message) => !queuedIds.has(message.id))
-    if (trimmable.length <= NAVIGATION_HEAD_LIMIT + NAVIGATION_TAIL_LIMIT) {
-        return { kept: messages, dropped: [] }
-    }
-    const head = trimmable.slice(0, NAVIGATION_HEAD_LIMIT)
-    const tail = trimmable.slice(-NAVIGATION_TAIL_LIMIT)
+    const head = messages.slice(0, NAVIGATION_HEAD_LIMIT)
+    const tail = messages.slice(-NAVIGATION_TAIL_LIMIT)
     const headLast = head.at(-1) ?? null
     const tailFirst = tail[0] ?? null
     const headLastSeq = headLast?.seq ?? null
     const tailFirstSeq = tailFirst?.seq ?? null
     const contiguous = headLastSeq !== null && tailFirstSeq !== null && tailFirstSeq === headLastSeq + 1
     const gapAt = headLast ? (headLast.invokedAt ?? headLast.createdAt) : 0
-    const windowRows = contiguous
+    return contiguous
         ? [...head, ...tail]
         : [...head, makeTranscriptGapMessage(headLastSeq, tailFirstSeq, gapAt), ...tail]
-    const kept = mergeMessages(windowRows, queued)
+}
+
+function trimNavigationWindow(
+    messages: DecryptedMessage[]
+): { kept: DecryptedMessage[]; dropped: DecryptedMessage[] } {
+    // Queued/scheduled rows must survive the trim: the queued-messages bar
+    // reads them straight from the window, so dropping them mid-navigation
+    // would silently disable its edit/cancel/steer controls.
+    const queued = messages.filter(isQueuedForInvocation)
+    const queuedIds = new Set(queued.map((message) => message.id))
+    const nonQueued = messages.filter((message) => !queuedIds.has(message.id))
+    const agentRuns = nonQueued.filter(isCodexAgentRunMessage)
+    const regular = nonQueued.filter((message) => !isCodexAgentRunMessage(message))
+    const regularWindow = trimNavigationRegularWindow(regular)
+    const agentRunWindow = sliceForTrim(agentRuns, AGENT_RUN_WINDOW_SIZE, 'append')
+    const kept = mergeMessages(
+        [...regularWindow, ...agentRunWindow.kept],
+        queued
+    )
     const keptIds = new Set(kept.map((message) => message.id))
     return {
         kept,

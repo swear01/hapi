@@ -92,7 +92,12 @@ function makeHiddenAgentMessage(props: { id: string; seq: number; at: number }):
     } as DecryptedMessage
 }
 
-function makeAgentRunMessage(id: string, seq: number, at: number): DecryptedMessage {
+function makeAgentRunMessage(
+    id: string,
+    seq: number,
+    at: number,
+    type: 'agent-run-start' | 'agent-run-update' | 'agent-run-trace' = 'agent-run-update'
+): DecryptedMessage {
     return {
         id,
         seq,
@@ -102,7 +107,7 @@ function makeAgentRunMessage(id: string, seq: number, at: number): DecryptedMess
             content: {
                 type: 'codex',
                 data: {
-                    type: 'agent-run-update',
+                    type,
                     cardId: 'card-1',
                     agentId: 'agent-1',
                     status: 'running',
@@ -1518,6 +1523,44 @@ describe('explicit history navigation', () => {
         // length, not the original array length) and no gap is introduced.
         expect(state.messages).toHaveLength(total + 1)
         expect(state.messages.some((message) => message.id.startsWith('__transcript-gap__'))).toBe(false)
+        releaseNavigation()
+    })
+
+    it('keeps ordinary navigation rows outside the Codex agent-run budget', () => {
+        const id = sessionId('navigation-agent-run-budget')
+        const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        const ordinaryCount = 600
+        const agentRunCount = 801
+        const messages: DecryptedMessage[] = []
+        let seq = 1
+        for (let index = 0; index < agentRunCount; index += 1) {
+            if (index < ordinaryCount) {
+                messages.push(makeAgentMessage({
+                    id: `ordinary-${index}`,
+                    seq,
+                    at: seq
+                }))
+                seq += 1
+            }
+            messages.push(makeAgentRunMessage(
+                `run-${index}`,
+                seq,
+                seq,
+                index % 3 === 0
+                    ? 'agent-run-start'
+                    : index % 3 === 1 ? 'agent-run-update' : 'agent-run-trace'
+            ))
+            seq += 1
+        }
+
+        ingestIncomingMessages(id, messages)
+
+        const state = getMessageWindowState(id)
+        expect(state.messages.filter((message) => message.id.startsWith('ordinary-'))).toHaveLength(ordinaryCount)
+        expect(state.messages.filter((message) => message.id.startsWith('run-'))).toHaveLength(800)
+        expect(state.messages.some((message) => message.id === 'run-0')).toBe(false)
+        expect(state.messages.some((message) => message.id === 'run-800')).toBe(true)
         releaseNavigation()
     })
 
