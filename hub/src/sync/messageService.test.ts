@@ -175,7 +175,7 @@ describe('MessageService goal status filtering', () => {
         expect(result.payload.messages.map((message) => message.id)).toEqual([normal.id, scheduled.id])
     })
 
-    it('returns too-large instead of truncating an export over the cap', () => {
+    it('returns a warning instead of truncating an export over the threshold', () => {
         const store = makeStore()
         const session = makeSession(store, 'session-export-cap')
 
@@ -183,13 +183,30 @@ describe('MessageService goal status filtering', () => {
         store.messages.addMessage(session.id, { role: 'agent', content: 'Two' })
 
         const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
-        const result = service.getSessionExport(session.id, toProtocolSession(session), 1)
+        const result = service.getSessionExport(session.id, toProtocolSession(session), { limit: 1 })
 
-        expect(result).toEqual({
-            type: 'too-large',
+        expect(result).toMatchObject({
+            type: 'warning',
             count: 2,
             limit: 1
         })
+        if (result.type !== 'warning') throw new Error('Expected export warning')
+        expect(result.sizeBytes).toBeGreaterThan(0)
+    })
+
+    it('returns the full export after the warning is explicitly confirmed', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'session-export-confirmed')
+
+        store.messages.addMessage(session.id, { role: 'user', content: 'One' })
+        store.messages.addMessage(session.id, { role: 'agent', content: 'Two' })
+
+        const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
+        const result = service.getSessionExport(session.id, toProtocolSession(session), { limit: 1, allowLarge: true })
+
+        expect(result.type).toBe('success')
+        if (result.type !== 'success') throw new Error('Expected confirmed export')
+        expect(result.payload.messages).toHaveLength(2)
     })
 
     it('includes scratchlist text and attachment metadata in chronological order (tiann/hapi#1235)', () => {
