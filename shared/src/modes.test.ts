@@ -132,15 +132,27 @@ describe('claude auto permission mode', () => {
     })
 })
 
+describe('isSteeringSupportedForFlavor', () => {
+    it('supports codex, cursor, and pi', () => {
+        expect(isSteeringSupportedForFlavor('codex')).toBe(true)
+        expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
+        expect(isSteeringSupportedForFlavor('pi')).toBe(true)
+        expect(isSteeringSupportedForFlavor('claude')).toBe(false)
+        expect(isSteeringSupportedForFlavor('opencode')).toBe(false)
+        expect(isSteeringSupportedForFlavor(undefined)).toBe(false)
+        expect(isSteeringSupportedForFlavor(null)).toBe(false)
+    })
+})
+
 describe('isSteeringSupportedForSession', () => {
-    it('supports codex regardless of cursor metadata', () => {
+    it('supports codex and pi sessions', () => {
         expect(isSteeringSupportedForSession({ flavor: 'codex' })).toBe(true)
-        expect(isSteeringSupportedForSession({ flavor: 'codex', cursorSessionId: 'x' })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'pi' })).toBe(true)
     })
 
     it('supports ACP cursor sessions', () => {
         expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionProtocol: 'acp' })).toBe(true)
-        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'x', cursorSessionProtocol: 'acp' })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'sess-1', cursorSessionProtocol: 'acp' })).toBe(true)
     })
 
     it('rejects legacy stream-json cursor sessions', () => {
@@ -148,12 +160,9 @@ describe('isSteeringSupportedForSession', () => {
         expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'x' })).toBe(false)
     })
 
-    it('rejects other flavors and missing metadata', () => {
-        expect(isSteeringSupportedForSession({ flavor: 'pi' })).toBe(false)
+    it('rejects non-steerable flavors and missing metadata', () => {
         expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
         expect(isSteeringSupportedForSession(null)).toBe(false)
         expect(isSteeringSupportedForSession(undefined)).toBe(false)
-        expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
-        expect(isSteeringSupportedForFlavor('pi')).toBe(false)
     })
 })

@@ -27,7 +27,7 @@ import { CursorLegacyMigrator, type CursorLegacyMigratorOptions } from '../curso
 
 import { EventPublisher, type SyncEventListener } from './eventPublisher'
 import { MachineCache, type Machine } from './machineCache'
-import { MessageService } from './messageService'
+import { MessageService, type RetryIndeterminateMessageResult } from './messageService'
 import { createTitleSuggestionService, type TitleSuggestionService } from './titleSuggestion'
 import { selectForkTranscriptPrefix } from './forkTranscript'
 import {
@@ -1027,10 +1027,16 @@ export class SyncEngine {
         return this.messageService.cancelQueuedMessage(sessionId, messageId)
     }
 
+    async retryIndeterminateMessage(
+        sessionId: string,
+        messageId: string
+    ): Promise<RetryIndeterminateMessageResult> {
+        return this.messageService.retryIndeterminateMessage(sessionId, messageId)
+    }
+
     /**
-     * Ask the CLI to deliver one waiting-queue message into the active Pi turn
-     * (Pi native steer). Only pi sessions support this today; the CLI's
-     * `steer-queued-message` handler is registered by the pi runner alone.
+     * Ask the CLI to deliver one waiting-queue message into the active turn.
+     * The CLI registers the handler for each steer-capable agent.
      */
     async steerQueuedMessage(
         sessionId: string,
@@ -1040,7 +1046,7 @@ export class SyncEngine {
         if (!session) {
             return { status: 'failed', error: 'Session not found', localId: null }
         }
-        if (session.metadata?.flavor !== 'pi' && !isSteeringSupportedForSession(session.metadata)) {
+        if (!isSteeringSupportedForSession(session.metadata)) {
             return { status: 'failed', error: 'Steering is not supported for this session', localId: null }
         }
         if (session.agentState?.controlledByUser === true) {

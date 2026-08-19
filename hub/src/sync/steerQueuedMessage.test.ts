@@ -73,6 +73,29 @@ describe('SyncEngine.steerQueuedMessage', () => {
         }
     })
 
+    it('rejects unsupported flavors without invoking the CLI', async () => {
+        const { store, engine } = createEngine()
+        try {
+            const session = engine.getOrCreateSession(
+                'steer-claude',
+                { path: '/tmp/project', host: 'localhost', flavor: 'claude' },
+                { requests: {}, completedRequests: {} },
+                'default'
+            )
+            const message = store.messages.addMessage(session.id, { text: 'hi' }, 'local-id')
+
+            const result = await engine.steerQueuedMessage(session.id, message.id)
+
+            expect(result).toEqual({
+                status: 'failed',
+                error: 'Steering is not supported for this session',
+                localId: null
+            })
+        } finally {
+            engine.stop()
+        }
+    })
+
     it('accepts ACP cursor sessions but rejects legacy stream-json ones', async () => {
         const { store, engine } = createEngine()
         try {

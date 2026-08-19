@@ -282,22 +282,6 @@ export interface TurnInterruptResponse {
     [key: string]: unknown;
 }
 
-export interface TurnSteerParams {
-    threadId: string;
-    /** New user input to inject into the active turn. */
-    input: Array<{ type: 'text'; text: string }>;
-    /** Must match the active turn id; the server rejects the steer otherwise. */
-    expectedTurnId: string;
-    /** HAPI local id echoed in native history for fork/rewind mapping. */
-    clientUserMessageId?: string;
-}
-
-export interface TurnSteerResponse {
-    /** The active turn that accepted the steer. */
-    turnId: string;
-    [key: string]: unknown;
-}
-
 export interface ThreadRollbackParams {
     threadId: string;
     numTurns: number;
@@ -308,6 +292,18 @@ export interface ThreadRollbackResponse {
         id: string;
         [key: string]: unknown;
     };
+    [key: string]: unknown;
+}
+
+export interface TurnSteerParams {
+    threadId: string;
+    input: UserInput[];
+    expectedTurnId: string;
+    clientUserMessageId?: string | null;
+}
+
+export interface TurnSteerResponse {
+    turnId: string;
     [key: string]: unknown;
 }
 

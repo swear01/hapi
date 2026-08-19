@@ -183,10 +183,10 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
 
 /**
  * Flavors that can deliver a queued message into an active turn on demand
- * (per-message "Steer" from the waiting queue), without waiting for full-turn
- * end.
+ * (per-message "Steer" from the waiting queue), without waiting for full-turn end.
  *
  * Steer = soft mid-turn delivery (same idea as Cursor GUI default "Send"):
+ * - Pi: native steer over the Pi runtime (first-class since #1466)
  * - Codex: app-server `turn/steer` (true mid-turn inject)
  * - Cursor ACP: concurrent `session/prompt` soft-send (no cancel). Legacy
  *   stream-json Cursor sessions are NOT steerable — gate with
@@ -194,7 +194,7 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
  *
  * Claude / others: not supported (no reachable soft-steer path) — UI hides Steer.
  */
-export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor'] as const
+export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor', 'pi'] as const
 
 export function isSteeringSupportedForFlavor(flavor?: string | null): boolean {
     return (STEERING_SUPPORTED_FLAVORS as readonly string[]).includes(flavor ?? '')
@@ -213,7 +213,7 @@ export function isSteeringSupportedForSession(metadata?: {
     cursorSessionId?: string | null
     cursorSessionProtocol?: 'acp' | 'stream-json' | null
 } | null): boolean {
-    if (metadata?.flavor === 'codex') {
+    if (metadata?.flavor === 'codex' || metadata?.flavor === 'pi') {
         return true
     }
     if (metadata?.flavor !== 'cursor') {
