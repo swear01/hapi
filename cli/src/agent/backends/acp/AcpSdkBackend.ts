@@ -716,7 +716,7 @@ export class AcpSdkBackend implements AgentBackend {
         const request = transport.sendRequestWithDispatch('session/prompt', {
             sessionId,
             prompt: content
-        }, { timeoutMs: Infinity, dispatchTimeoutMs: 25_000 });
+        }, { timeoutMs: Infinity, dispatchTimeoutMs: 20_000 });
         const completed = (async () => {
             try {
                 await request.completed;
