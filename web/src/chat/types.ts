@@ -26,6 +26,8 @@ export type AgentEvent =
     | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
     | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
     | { type: 'compact'; trigger: string; preTokens: number }
+    // Structured result of Pi's compact RPC; rendered as a dedicated chat block.
+    | { type: 'compact-summary'; summary: string; tokensBefore?: number; estimatedTokensAfter?: number }
     // Claude Code's automatic away-summary recap (TUI window blur 5min+, then focus).
     | { type: 'recap'; text: string }
     | { type: 'thread-goal-updated'; goal: ThreadGoal; threadId?: string; turnId?: string }
@@ -152,6 +154,8 @@ export type NormalizedMessage = ({
      * flavors) — consumers should fall back to `createdAt` in that case.
      */
     agentTimestamp?: number | null
+    /** True when a user message was steered into an active turn (mid-turn). */
+    steered?: boolean
 }
 
 export type ToolPermission = {
@@ -205,6 +209,8 @@ export type UserTextBlock = {
     status?: MessageStatus
     originalText?: string
     meta?: unknown
+    /** True when this message was steered into an active turn (mid-turn). */
+    steered?: boolean
 }
 
 export type AgentTextBlock = {
