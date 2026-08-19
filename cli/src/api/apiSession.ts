@@ -422,7 +422,7 @@ export class ApiSessionClient extends EventEmitter {
             this.agentTerminalActive = false
         }))
 
-        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean; indeterminate?: boolean; accepted?: boolean }) => void) => {
+        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean; indeterminate?: boolean; accepted?: boolean; consumed?: boolean }) => void) => {
             try {
                 if (!data.body) return
 
@@ -440,6 +440,10 @@ export class ApiSessionClient extends EventEmitter {
                         accepted = cancelled !== 'in-flight' && cancelled !== 'consumed'
                         if (cancelled === 'indeterminate') {
                             accepted = this.retryQueuedMessageCallback?.(data.body.localId) === true
+                        }
+                        if (cancelled === 'consumed') {
+                            ack?.({ removed: false, accepted: false, consumed: true })
+                            return
                         }
                     }
                     if (accepted) {

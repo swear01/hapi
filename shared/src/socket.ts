@@ -166,7 +166,8 @@ export const CancelQueuedMessageAckSchema = z.object({
     removed: z.boolean(),
     inFlight: z.boolean().optional(),
     indeterminate: z.boolean().optional(),
-    accepted: z.boolean().optional()
+    accepted: z.boolean().optional(),
+    consumed: z.boolean().optional()
 })
 
 export type CancelQueuedMessageAck = z.infer<typeof CancelQueuedMessageAckSchema>

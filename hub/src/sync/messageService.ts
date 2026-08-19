@@ -141,6 +141,19 @@ export class MessageService {
         }
     }
 
+    private recordConsumedAcknowledgement(
+        sessionId: string,
+        localId: string,
+    ): CancelQueuedMessageResult {
+        const invokedAt = Date.now()
+        this.store.messages.markMessagesInvoked(sessionId, [localId], invokedAt)
+        this.publisher.emit({ type: 'messages-consumed', sessionId, localIds: [localId], invokedAt })
+        const settled = this.store.messages.lookupQueuedMessage(sessionId, localId)
+        return settled.status === 'invoked'
+            ? settled
+            : { status: 'cancelled', localId }
+    }
+
     getMessages(sessionId: string, limit: number = 200): DecryptedMessage[] {
         const stored = this.store.messages.getMessages(sessionId, limit)
         return toVisibleDecryptedMessages(stored)
@@ -452,7 +465,10 @@ export class MessageService {
         // A live dispatch is not cancellable by timeout. Convert it to the
         // durable unknown state and require a second explicit resolution.
         if (isDispatching) {
-            await this.requestCliCancelAck(sessionId, localId, messageId, 500)
+            const ackResult = await this.requestCliCancelAck(sessionId, localId, messageId, 500)
+            if (ackResult === 'consumed') {
+                return this.recordConsumedAcknowledgement(sessionId, localId)
+            }
             // The native request may have reached the agent while the cancel
             // round-trip was pending. Never delete a live dispatch; hold it as
             // unknown and let the user explicitly retry or discard afterwards.
@@ -476,6 +492,9 @@ export class MessageService {
             const ackResult = cliCount > 0
                 ? await this.requestCliCancelAck(sessionId, localId, messageId, 500)
                 : 'timeout' as const
+            if (ackResult === 'consumed') {
+                return this.recordConsumedAcknowledgement(sessionId, localId)
+            }
             if (ackResult === 'in-flight' || ackResult === 'indeterminate' || (ackResult === 'timeout' && cliCount > 0)) {
                 return { status: 'busy', localId }
             }
@@ -558,6 +577,9 @@ export class MessageService {
 
         const ackResult = await this.requestCliCancelAck(sessionId, localId, messageId, 500)
 
+        if (ackResult === 'consumed') {
+            return this.recordConsumedAcknowledgement(sessionId, localId)
+        }
         if (ackResult === 'in-flight') {
             // The row is inside an async steer (mid-turn delivery): it can
             // neither be removed nor stamped invoked — the steer's eventual
@@ -644,6 +666,12 @@ export class MessageService {
         }
 
         const cancelResult = await this.requestCliCancelAck(sessionId, lookup.localId, messageId, 500)
+        if (cancelResult === 'consumed') {
+            const settled = this.recordConsumedAcknowledgement(sessionId, lookup.localId)
+            return settled.status === 'invoked'
+                ? { status: 'invoked', message: toDecryptedMessage(settled.message) }
+                : { status: 'not-found' }
+        }
         if (cancelResult === 'in-flight' || cancelResult === 'timeout') {
             return { status: 'retry-unavailable', localId: lookup.localId }
         }
@@ -719,7 +747,7 @@ export class MessageService {
         localId: string,
         messageId: string,
         timeoutMs: number
-    ): Promise<'removed' | 'in-flight' | 'indeterminate' | 'not-found' | 'timeout'> {
+    ): Promise<'removed' | 'in-flight' | 'indeterminate' | 'consumed' | 'not-found' | 'timeout'> {
         return new Promise((resolve) => {
             const room = this.io.of('/cli').to(`session:${sessionId}`)
             // socket.io v4 BroadcastOperator: .timeout(ms).emit(event, data, ackCb)
@@ -737,13 +765,17 @@ export class MessageService {
                         localId
                     }
                 },
-                (err: Error | null, responses: Array<{ removed: boolean; inFlight?: boolean; indeterminate?: boolean }>) => {
+                (err: Error | null, responses: Array<{ removed: boolean; inFlight?: boolean; indeterminate?: boolean; consumed?: boolean }>) => {
                     // Check responses before err: in a reconnect overlap or any room with
                     // multiple CLI sockets, Socket.IO may set err (one socket timed out)
                     // while still delivering successful responses from the sockets that did
                     // ack. An explicit in-flight report dominates: one socket may be
                     // dispatching the steer while a stale duplicate socket reports
                     // removed — deleting the row then would orphan the executing message.
+                    if (responses?.some((r) => r.consumed === true)) {
+                        resolve('consumed')
+                        return
+                    }
                     if (responses?.some((r) => r.indeterminate === true)) {
                         resolve('indeterminate')
                         return
