@@ -69,14 +69,18 @@ describe('CodexAppServerClient process generations', () => {
         const second = fakeChild();
         spawnMock.mockReturnValueOnce(first).mockReturnValueOnce(second);
         const client = new CodexAppServerClient({ cwd: '/neutral-home' });
+        const onTransportAbandoned = vi.fn();
+        client.setTransportAbandonedHandler(onTransportAbandoned);
 
         await client.connect();
         first.emit('exit', 1, null);
+        expect(onTransportAbandoned).toHaveBeenCalledTimes(1);
         await client.connect();
 
         // Late lifecycle events from the old child must not tear down the replacement.
         first.emit('exit', 2, null);
         first.emit('error', new Error('stale child error'));
+        expect(onTransportAbandoned).toHaveBeenCalledTimes(1);
         expect(client.isConnected()).toBe(true);
 
         await client.disconnect();

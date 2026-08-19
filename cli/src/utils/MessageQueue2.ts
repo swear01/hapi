@@ -17,6 +17,7 @@ export type QueueReservation<T> = {
     nextItem: QueueItem<T> | null;
     /** Once ambiguous, retries must remain held unless explicitly committed. */
     originIndeterminate: boolean;
+    transportStarted: boolean;
     cancelReason?: 'explicit' | 'queue-reset';
     state: 'reserved' | 'dispatching' | 'indeterminate' | 'cancelled';
 };
@@ -31,6 +32,7 @@ export class MessageQueue2<T> {
     private closed = false;
     private onMessageHandler: ((message: string, mode: T) => void) | null = null;
     onBatchConsumed: ((localIds: string[]) => void) | null = null;
+    onBatchIndeterminate: ((localIds: string[]) => void) | null = null;
     modeHasher: (mode: T) => string;
     private readonly reservations = new Map<string, QueueReservation<T>>();
     private readonly consumedReservations = new Set<string>();
@@ -183,6 +185,10 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushIsolateAndClear() called with mode hash: ${modeHash} - clearing ${this.queue.length} pending messages`);
 
+        const indeterminateLocalIds = this.markDispatchingReservationsIndeterminate();
+        if (indeterminateLocalIds.length > 0) {
+            this.onBatchIndeterminate?.(indeterminateLocalIds);
+        }
         // A clearing command must acknowledge steers whose dispatch already
         // started before discarding the remaining hidden reservations.
         const dispatchedLocalIds = this.commitDispatchingReservations();
@@ -371,6 +377,7 @@ export class MessageQueue2<T> {
             previousItem: this.queue[idx - 1] ?? null,
             nextItem: this.queue[idx] ?? null,
             originIndeterminate: false,
+            transportStarted: false,
             state: 'reserved'
         };
         if (item.localId) {
@@ -449,7 +456,17 @@ export class MessageQueue2<T> {
         if (reservation.item.localId && this.reservations.get(reservation.item.localId) !== reservation) {
             return false;
         }
+        reservation.transportStarted = false;
         reservation.state = 'dispatching';
+        return true;
+    }
+
+    markReservationTransportStarted(reservation: QueueReservation<T>): boolean {
+        if (reservation.state !== 'dispatching') return false;
+        if (reservation.item.localId && this.reservations.get(reservation.item.localId) !== reservation) {
+            return false;
+        }
+        reservation.transportStarted = true;
         return true;
     }
 
@@ -458,17 +475,30 @@ export class MessageQueue2<T> {
     }
 
     /**
-     * Commit rows whose dispatch has started before a destructive abort/reset.
+     * Commit rows whose transport dispatch has started before a destructive abort/reset.
      * The caller emits the returned ids as consumed so an accepted steer is
      * never replayed after its reservation is cleared.
      */
     commitDispatchingReservations(): string[] {
         const localIds: string[] = [];
         for (const reservation of this.reservations.values()) {
-            if (reservation.state !== 'dispatching' || !reservation.item.localId) {
+            if (!reservation.transportStarted || reservation.state !== 'dispatching' || !reservation.item.localId) {
                 continue;
             }
             if (this.commitReservation(reservation)) {
+                localIds.push(reservation.item.localId);
+            }
+        }
+        return localIds;
+    }
+
+    markDispatchingReservationsIndeterminate(): string[] {
+        const localIds: string[] = [];
+        for (const reservation of this.reservations.values()) {
+            if (reservation.state !== 'dispatching' || reservation.transportStarted) {
+                continue;
+            }
+            if (this.markReservationIndeterminate(reservation) && reservation.item.localId) {
                 localIds.push(reservation.item.localId);
             }
         }

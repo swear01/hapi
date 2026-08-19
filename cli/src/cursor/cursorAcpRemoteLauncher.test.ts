@@ -36,7 +36,8 @@ const harness = vi.hoisted(() => ({
     releaseSoftSteer: null as (() => void) | null,
     rejectSoftSteer: null as ((error: Error) => void) | null,
     deferPrompt: null as Promise<void> | null,
-    releasePrompt: null as (() => void) | null
+    releasePrompt: null as (() => void) | null,
+    deferSteerDeliveryState: null as Promise<void> | null
 }));
 
 const legacyLauncher = vi.hoisted(() => vi.fn());
@@ -278,6 +279,9 @@ function makeClient() {
         setSteerDeliveryState: vi.fn(async (localIds: string[], state: 'queued' | 'dispatching') => {
             if (state === 'dispatching') {
                 expect(harness.softSteerCalls).toBe(0);
+                if (harness.deferSteerDeliveryState) {
+                    await harness.deferSteerDeliveryState;
+                }
             }
             return true;
         }),
@@ -1514,6 +1518,7 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         harness.rejectSoftSteer = null;
         harness.deferPrompt = null;
         harness.releasePrompt = null;
+        harness.deferSteerDeliveryState = null;
         harness.promptCalls = 0;
         harness.prompts = [];
     });
@@ -1539,6 +1544,7 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
                 handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
             };
             updateAgentState: ReturnType<typeof vi.fn>;
+            emitMessagesConsumed: ReturnType<typeof vi.fn>;
         };
         const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
         expect(steerHandler).toBeTypeOf('function');
@@ -1547,6 +1553,7 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
 
         expect(result).toEqual({ steered: true });
         expect(harness.softSteerCalls).toBe(1);
+        expect(client.emitMessagesConsumed).toHaveBeenCalledWith(['local-2'], { steered: true });
         // The soft-steer backend call receives the steered message text.
         const backend = vi.mocked(createCursorAcpBackend).mock.results[0]?.value as {
             beginSoftSteerPrompt: ReturnType<typeof vi.fn>;
@@ -1782,6 +1789,42 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await runPromise;
     });
 
+    it('does not acknowledge a steer while dispatch state persistence is pending during abort', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        let releasePersistence!: () => void;
+        harness.deferSteerDeliveryState = new Promise((resolve) => { releasePersistence = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+            setSteerDeliveryState: ReturnType<typeof vi.fn>;
+            emitMessagesConsumed: ReturnType<typeof vi.fn>;
+            emitSteerIndeterminate: ReturnType<typeof vi.fn>;
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+        const steer = steerHandler!({ localId: 'local-2' });
+        await vi.waitFor(() => expect(client.setSteerDeliveryState).toHaveBeenCalledWith(['local-2'], 'dispatching'));
+
+        await client.rpcHandlerManager.handlers.get(RPC_METHODS.Abort)?.({});
+        expect(harness.softSteerCalls).toBe(0);
+        expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
+        expect(client.emitSteerIndeterminate).toHaveBeenCalledWith(['local-2']);
+
+        releasePersistence();
+        await steer;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
     it('rejects a steer arriving after abort started', async () => {
         let releasePrompt!: () => void;
         harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
@@ -1808,6 +1851,43 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         expect(harness.softSteerCalls).toBe(0);
 
         await abortPromise;
+        releasePrompt();
+        session.queue.close();
+        await runPromise;
+    });
+
+    it('rejects a second steer while the first steer state is still persisting', async () => {
+        let releasePrompt!: () => void;
+        harness.deferPrompt = new Promise((resolve) => { releasePrompt = resolve; });
+        let releasePersistence!: () => void;
+        harness.deferSteerDeliveryState = new Promise((resolve) => { releasePersistence = resolve; });
+        const session = makeSession(null, false);
+        const mode = { permissionMode: 'default' } as EnhancedMode;
+        session.queue.push('first message', mode, 'local-1');
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.promptCalls).toBe(1));
+        session.queue.push('steer me', mode, 'local-2');
+        session.queue.push('steer me too', mode, 'local-3');
+        const client = session.client as unknown as {
+            rpcHandlerManager: {
+                handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
+            };
+            setSteerDeliveryState: ReturnType<typeof vi.fn>;
+        };
+        const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        const first = steerHandler!({ localId: 'local-2' });
+        await vi.waitFor(() => expect(client.setSteerDeliveryState).toHaveBeenCalledWith(['local-2'], 'dispatching'));
+        const second = steerHandler!({ localId: 'local-3' });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(client.setSteerDeliveryState).toHaveBeenCalledTimes(1);
+        expect(harness.softSteerCalls).toBe(0);
+
+        releasePersistence();
+        await expect(second).resolves.toEqual({ steered: false, error: 'Another steer is already in progress' });
+        await expect(first).resolves.toEqual({ steered: true });
+
         releasePrompt();
         session.queue.close();
         await runPromise;

@@ -791,12 +791,28 @@ describe('MessageQueue2', () => {
             expect(queue.size()).toBe(0);
         });
 
-        it('commits dispatching rows before an abort reset', () => {
+        it('does not commit a reservation before transport starts', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            const consumed: string[] = [];
+            queue.onBatchConsumed = (localIds) => consumed.push(...localIds);
+            queue.push('msg1', 'local', 'id-1');
+            const taken = queue.takeByLocalId('id-1');
+            queue.beginReservationDispatch(taken!);
+
+            expect(queue.markDispatchingReservationsIndeterminate()).toEqual(['id-1']);
+            expect(queue.commitDispatchingReservations()).toEqual([]);
+            expect(consumed).toEqual([]);
+            expect(queue.pendingLocalIds()).toEqual([]);
+            expect(queue.cancelByLocalId('id-1')).toBe(true);
+        });
+
+        it('commits dispatching rows after transport starts before an abort reset', () => {
             const queue = new MessageQueue2<string>(mode => mode);
             queue.push('msg1', 'local', 'id-1');
             queue.push('msg2', 'local', 'id-2');
             const taken = queue.takeByLocalId('id-1');
             queue.beginReservationDispatch(taken!);
+            queue.markReservationTransportStarted(taken!);
 
             expect(queue.commitDispatchingReservations()).toEqual(['id-1']);
             expect(queue.commitDispatchingReservations()).toEqual([]);
@@ -851,10 +867,26 @@ describe('MessageQueue2', () => {
             queue.push('msg1', 'local', 'id-1');
             const taken = queue.takeByLocalId('id-1');
             queue.beginReservationDispatch(taken!);
+            queue.markReservationTransportStarted(taken!);
 
             queue.pushIsolateAndClear('/clear', 'local', 'clear-1');
 
             expect(consumed).toEqual(['id-1']);
+            expect(queue.restoreReservation(taken!)).toBe(false);
+            expect(queue.pendingLocalIds()).toEqual(['clear-1']);
+        });
+
+        it('holds pre-transport reservations when isolate-and-clear races them', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            const indeterminate: string[] = [];
+            queue.onBatchIndeterminate = (localIds) => indeterminate.push(...localIds);
+            queue.push('msg1', 'local', 'id-1');
+            const taken = queue.takeByLocalId('id-1');
+            queue.beginReservationDispatch(taken!);
+
+            queue.pushIsolateAndClear('/clear', 'local', 'clear-1');
+
+            expect(indeterminate).toEqual(['id-1']);
             expect(queue.restoreReservation(taken!)).toBe(false);
             expect(queue.pendingLocalIds()).toEqual(['clear-1']);
         });

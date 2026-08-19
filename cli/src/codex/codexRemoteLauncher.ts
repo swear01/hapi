@@ -305,6 +305,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         this.steeringBlocked = true;
         this.steerEpoch++;
         this.session.client.updateAgentState?.((state) => ({ ...state, steeringActive: false }));
+        const indeterminateLocalIds = this.session.queue.markDispatchingReservationsIndeterminate();
+        if (indeterminateLocalIds.length > 0) {
+            this.session.client.emitSteerIndeterminate(indeterminateLocalIds);
+        }
         const committedLocalIds = this.session.queue.commitDispatchingReservations();
         if (committedLocalIds.length > 0) {
             this.session.client.emitMessagesConsumed(committedLocalIds);
@@ -707,7 +711,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         // next batch while one is pending: takeByLocalId removed the row from
         // the physical queue, and collecting surrounding rows first would let
         // a rejected steer restore out of FIFO order (#888).
-        const inFlightSteers = new Set<Promise<'accepted' | 'rejected' | 'indeterminate'>>();
+        const inFlightSteers = new Set<Promise<unknown>>();
+        let steerAdmissionLocked = false;
         const setTurnInFlight = (value: boolean) => {
             turnInFlight = value;
             session.client.updateAgentState?.((state) => ({ ...state, steeringActive: value }));
@@ -1917,6 +1922,16 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             waiter();
         };
 
+        appServerClient.setTransportAbandonedHandler(() => {
+            setTurnInFlight(false);
+            this.conversationHistory.setBusy(false);
+            if (session.thinking) session.onThinkingChange(false);
+            recoveryInFlight = false;
+            activeMessage = null;
+            this.currentTurnId = null;
+            wakeLoop();
+        });
+
         const waitForTurnOrRecovery = (signal: AbortSignal): Promise<void> => new Promise((resolve) => {
             if (!turnInFlight && !recoveryInFlight) {
                 resolve();
@@ -1974,7 +1989,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             }));
             messageBuffer.addMessage(entry.batch.message, 'user');
-            session.client.emitMessagesConsumed([localId]);
+            session.client.emitMessagesConsumed([localId], { steered: true });
         };
 
         const runSteerReconciliation = async (): Promise<void> => {
@@ -3473,9 +3488,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const steerTurnId = this.currentTurnId;
                 // One steer at a time: concurrent reservations would both save
                 // the same index and restore out of FIFO order on failure.
-                if (inFlightSteers.size > 0) {
+                if (inFlightSteers.size > 0 || steerAdmissionLocked) {
                     return { steered: false, error: 'Another steer is already in progress' };
                 }
+                steerAdmissionLocked = true;
+                const steerOperation = (async () => {
                 // Reserve before awaiting turn/steer so the main loop cannot
                 // collect the same row for turn/start while steer is in flight.
                 const taken = session.queue.takeByLocalId(localId);
@@ -3537,10 +3554,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     await restoreQueuedReservation();
                     return { steered: false, error: 'Active turn changed' };
                 }
+                if (!session.queue.markReservationTransportStarted(taken)) {
+                    await restoreQueuedReservation();
+                    return { steered: false, error: 'Steer cancelled' };
+                }
                 const steerRequest = trySteerActiveTurn(batch, localId);
-                inFlightSteers.add(steerRequest);
-                try {
-                    const outcome = await steerRequest;
+                const outcome = await steerRequest;
                     if (outcome === 'indeterminate') {
                         if (isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)
                             && session.queue.markReservationIndeterminate(taken)) {
@@ -3578,7 +3597,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                             }
                         }));
                         messageBuffer.addMessage(batch.message, 'user');
-                        session.client.emitMessagesConsumed([localId]);
+                        session.client.emitMessagesConsumed([localId], { steered: true });
                         return { steered: true };
                     }
                     if (!isCurrentSteerHandler(this.steerEpoch, steerEpoch, this.shouldExit)) {
@@ -3588,8 +3607,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         return { steered: false, error: 'Steer cancelled' };
                     }
                     return { steered: false, error: 'Active turn is not steerable' };
+                })();
+                inFlightSteers.add(steerOperation);
+                try {
+                    return await steerOperation;
                 } finally {
-                    inFlightSteers.delete(steerRequest);
+                    inFlightSteers.delete(steerOperation);
+                    steerAdmissionLocked = false;
                 }
             }
         );
@@ -4288,6 +4312,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
+        this.appServerClient.setTransportAbandonedHandler(null);
         this.appServerClient.setStderrHandler(null);
         try {
             await this.appServerClient.disconnect();
