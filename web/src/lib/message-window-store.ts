@@ -633,13 +633,26 @@ function mergeIntoWindow(
 }
 
 // Rows accumulated while a provisional boundary held the no-trim branch have
-// no loaded page to justify them once the boundary is released; shed them back
-// to the bounded tail window immediately so the rendered and persisted state
-// does not linger over budget.
+// no loaded page to justify them once the boundary is released; trim them with
+// the active view's existing window policy immediately.
 function trimReleasedProvisionalWindow(previous: InternalState): InternalState {
-    const { kept, dropped } = trimPreservingQueued(previous.messages, VISIBLE_WINDOW_SIZE, 'append')
+    const historyMode = previous.viewMode === 'history'
+    const { kept, dropped } = trimPreservingQueued(
+        previous.messages,
+        historyMode ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE,
+        historyMode ? 'prepend' : 'append'
+    )
     if (dropped.length === 0) {
         return previous
+    }
+    if (historyMode) {
+        const newest = derivePosition(kept, 'newest')
+        return buildState(previous, {
+            messages: kept,
+            requiresLatestReset: true,
+            newestPositionAt: newest?.at ?? null,
+            newestPositionSeq: newest?.seq ?? null
+        })
     }
     const oldest = derivePosition(kept, 'oldest')
     return buildState(previous, {

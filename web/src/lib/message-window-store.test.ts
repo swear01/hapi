@@ -1809,6 +1809,100 @@ describe('history view and older pagination', () => {
         expect(state.messages.at(-1)!.seq).toBe(850)
     })
 
+    it('preserves history rows when a provisional load fails', async () => {
+        const id = sessionId('history-provisional-failure')
+        const initial = Array.from({ length: 200 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const getMessages = vi.fn()
+            .mockResolvedValueOnce(latestResponse(initial, {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: 1,
+                nextBeforeSeq: 1
+            }))
+            .mockRejectedValueOnce(new Error('fixture: before-page failure'))
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+        ingestIncomingMessages(id, Array.from({ length: 400 }, (_, index) => {
+            const seq = index + 201
+            return makeAgentMessage({ id: `m-${seq}`, seq, at: seq })
+        }))
+
+        const outcome = await fetchOlderMessages(api, id, {
+            shouldInstallBoundary: () => true
+        })
+
+        expect(outcome.kind).toBe('failed')
+        const state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(600)
+    })
+
+    it('preserves history rows when a provisional load is invalidated', async () => {
+        const id = sessionId('history-provisional-invalidation')
+        const initial = Array.from({ length: 200 }, (_, index) =>
+            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
+        )
+        const older = deferred<MessagesResponse>()
+        const tail = deferred<MessagesResponse>()
+        const getMessages = vi.fn(async (
+            _sessionId: string,
+            options?: Parameters<ApiClient['getMessages']>[1]
+        ) => {
+            if (options?.beforeAt !== undefined) return await older.promise
+            if (options?.afterAt !== undefined) return await tail.promise
+            return latestResponse(initial, {
+                epoch: 0,
+                hasMore: true,
+                nextBeforeAt: 1,
+                nextBeforeSeq: 1
+            })
+        }) as ApiClient['getMessages']
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+        ingestIncomingMessages(id, Array.from({ length: 400 }, (_, index) => {
+            const seq = index + 201
+            return makeAgentMessage({ id: `m-${seq}`, seq, at: seq })
+        }))
+
+        const loading = fetchOlderMessages(api, id, {
+            shouldInstallBoundary: () => true
+        })
+        await vi.waitFor(() => expect(getMessageWindowState(id).isLoadingMore).toBe(true))
+        const syncing = syncTailMessages(api, id)
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(3))
+
+        let state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(600)
+
+        tail.resolve(afterResponse([], {
+            epoch: 0,
+            nextAfterAt: 600,
+            nextAfterSeq: 600,
+            snapshotHeadAt: 600,
+            snapshotHeadSeq: 600
+        }))
+        await syncing
+        older.resolve(beforeResponse([], {
+            epoch: 0,
+            hasMore: false,
+            nextBeforeAt: null,
+            nextBeforeSeq: null
+        }))
+        expect(await loading).toEqual({ kind: 'stopped', reason: 'invalidated' })
+
+        state = getMessageWindowState(id)
+        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
+        expect(state.messages[0]!.seq).toBe(1)
+        expect(state.messages.at(-1)!.seq).toBe(600)
+    })
+
     it('releases the loaded range when the user returns to the tail', async () => {
         const id = sessionId('loaded-history-tail-release')
         const all = Array.from({ length: 600 }, (_, index) =>
