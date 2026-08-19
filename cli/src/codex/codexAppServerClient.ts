@@ -248,6 +248,7 @@ export class CodexAppServerClient extends JsonLineParser {
             this.initialized = false;
             this.resetParserState();
             this.process = null;
+            this.transportAbandonedHandler?.();
         });
 
         child.on('error', (error) => {
@@ -261,6 +262,7 @@ export class CodexAppServerClient extends JsonLineParser {
             this.connected = false;
             this.resetParserState();
             this.process = null;
+            this.transportAbandonedHandler?.();
         });
 
         this.connected = true;
@@ -396,7 +398,7 @@ export class CodexAppServerClient extends JsonLineParser {
         // indeterminate and funnels into thread reconciliation.
         const request = await this.sendRequestWithDispatch('turn/steer', params, {
             signal: options?.signal,
-            timeoutMs: 25_000
+            timeoutMs: 20_000
         });
         return {
             dispatched: request.dispatched,

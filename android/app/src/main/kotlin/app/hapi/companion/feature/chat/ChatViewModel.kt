@@ -956,6 +956,7 @@ class ChatViewModel(
                 store.appendOptimistic(invokedMessage.asWindowMessage(MessageStatus.Sent))
             } else if (response.status == "busy") {
                 store.appendOptimistic(row.copy(status = MessageStatus.Indeterminate))
+                runCatching { store.reconcileQueuedState() }
             }
             response.status
         } catch (cancellation: CancellationException) {
@@ -984,6 +985,11 @@ class ChatViewModel(
                 }
                 if (response.status == "retried" || response.status == "already-queued") {
                     response.localId?.let { awaitWindowStore().markRequeued(listOf(it)) }
+                } else if (response.status == "not-found") {
+                    awaitWindowStore().removeMessage(messageId)
+                    _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed("Message is no longer available")))
+                } else if (response.status == "retry-unavailable") {
+                    _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed("Delivery is still being resolved")))
                 }
             } catch (error: Exception) {
                 _events.tryEmit(ChatEvent.Notice(ChatNotice.CancelQueuedFailed(error.message)))

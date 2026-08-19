@@ -458,6 +458,7 @@ public final class ChatInteractor {
                 return .invoked
             case .busy:
                 await store.appendOptimistic(row.withDeliveryState("indeterminate"))
+                try? await store.reconcileQueuedState()
                 return .busy
             }
         } catch {
