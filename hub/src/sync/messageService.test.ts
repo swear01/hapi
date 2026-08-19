@@ -497,10 +497,12 @@ describe('MessageService.getQueuedState', () => {
             'local-other'
         ])).toEqual({
             queuedLocalIds: ['local-queued', 'local-future'],
+            indeterminateLocalIds: [],
             invokedLocalMessages: [{ localId: 'local-invoked', invokedAt: 1_000 }]
         })
         expect(service.getQueuedState(session.id, [])).toEqual({
             queuedLocalIds: [],
+            indeterminateLocalIds: [],
             invokedLocalMessages: []
         })
     })

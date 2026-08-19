@@ -147,6 +147,7 @@ data class SteerQueuedMessageResponse(
 data class QueuedStateResponse(
     val queuedLocalIds: List<String>,
     val invokedLocalMessages: List<InvokedLocalMessage>,
+    val indeterminateLocalIds: List<String> = emptyList(),
 )
 
 @Serializable
