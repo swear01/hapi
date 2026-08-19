@@ -482,6 +482,11 @@ public final class ChatInteractor {
                 } else if response.status == "retried" || response.status == "already-queued",
                           let localId = response.localId {
                     await (windowController()).markRequeued(localIds: [localId])
+                } else if response.status == "not-found" {
+                    await (windowController()).removeMessage(localIdOrId: messageId)
+                    emit(.notice("Message is no longer available"))
+                } else if response.status == "retry-unavailable" {
+                    emit(.notice("Delivery is still being resolved"))
                 }
             } catch {
                 emit(.notice(Self.errorMessage(error, fallback: "Failed to retry message")))

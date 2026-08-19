@@ -3990,6 +3990,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
         while (!this.shouldExit) {
             logActiveHandles('loop-top');
+            if (!appServerClient.isConnected() || !appServerClient.isInitialized()) {
+                await ensureAppServerInitialized();
+            }
             if (pendingSteerReconciliations.size > 0) {
                 await runSteerReconciliation();
             }
