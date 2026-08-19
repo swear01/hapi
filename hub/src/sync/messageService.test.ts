@@ -209,6 +209,34 @@ describe('MessageService goal status filtering', () => {
         expect(result.payload.messages).toHaveLength(2)
     })
 
+    it('counts UTF-8 bytes without requiring TextEncoder for multibyte export data', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'session-export-utf8-size')
+        store.messages.addMessage(session.id, { role: 'user', content: '你好' })
+
+        const textEncoderDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'TextEncoder')
+        const dateNow = Date.now
+        Object.defineProperty(globalThis, 'TextEncoder', { value: undefined, configurable: true, writable: true })
+        Date.now = () => 1_762_000_000_000
+        try {
+            const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
+            const result = service.getSessionExport(session.id, toProtocolSession(session), { limit: 0 })
+            const confirmed = service.getSessionExport(session.id, toProtocolSession(session), { allowLarge: true })
+
+            expect(result.type).toBe('warning')
+            expect(confirmed.type).toBe('success')
+            if (result.type !== 'warning' || confirmed.type !== 'success') throw new Error('Expected export results')
+            expect(result.sizeBytes).toBe(Buffer.byteLength(`${JSON.stringify(confirmed.payload, null, 2)}\n`, 'utf8'))
+        } finally {
+            Date.now = dateNow
+            if (textEncoderDescriptor) {
+                Object.defineProperty(globalThis, 'TextEncoder', textEncoderDescriptor)
+            } else {
+                Reflect.deleteProperty(globalThis, 'TextEncoder')
+            }
+        }
+    })
+
     it('includes scratchlist text and attachment metadata in chronological order (tiann/hapi#1235)', () => {
         const store = makeStore()
         const session = makeSession(store, 'session-export-scratchlist')

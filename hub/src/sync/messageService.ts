@@ -213,7 +213,8 @@ export class MessageService {
             messages,
             scratchlist
         }
-        const sizeBytes = new TextEncoder().encode(`${JSON.stringify(payload, null, 2)}\n`).byteLength
+        const serialized = `${JSON.stringify(payload, null, 2)}\n`
+        const sizeBytes = Buffer.byteLength(serialized, 'utf8')
         if (sizeBytes > SESSION_EXPORT_MAX_BYTES) {
             return {
                 type: 'too-large',

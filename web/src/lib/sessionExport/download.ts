@@ -53,10 +53,10 @@ export function buildSessionExportFilename(payload: HapiSessionExport, format: S
 }
 
 function downloadTextFile(filename: string, text: string, mimeType: string): void {
-    if (new TextEncoder().encode(text).byteLength > SESSION_EXPORT_MAX_BYTES) {
+    const blob = new Blob([text], { type: mimeType })
+    if (blob.size > SESSION_EXPORT_MAX_BYTES) {
         throw new Error(`Session export exceeds ${SESSION_EXPORT_MAX_BYTES} bytes`)
     }
-    const blob = new Blob([text], { type: mimeType })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
