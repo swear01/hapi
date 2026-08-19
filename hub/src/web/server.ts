@@ -9,6 +9,7 @@ import { getConfiguration } from '../configuration'
 import { PROTOCOL_VERSION } from '@hapi/protocol'
 import { buildGeminiLiveSetupMessage, QWEN_REALTIME_MODEL } from '@hapi/protocol/voice'
 import { getProviderEnvironment } from '../config/providerCredentials'
+import { readTitleProviderConfig } from '../sync/titleSuggestion'
 import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
@@ -30,6 +31,7 @@ import { createPushRoutes } from './routes/push'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
 import { createHubSettingsRoutes } from './routes/hubSettings'
+import { createWorkGraphRoutes } from './routes/workGraph'
 import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
@@ -231,9 +233,6 @@ function createWebApp(options: {
 
     app.use('*', logger())
 
-    // Health check endpoint (no auth required)
-    app.get('/health', (c) => c.json({ status: 'ok', protocolVersion: PROTOCOL_VERSION }))
-
     const configuration = getConfiguration()
     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins
     const corsOriginOption = corsOrigins.includes('*') ? '*' : corsOrigins
@@ -244,8 +243,20 @@ function createWebApp(options: {
         // SSE replay; allow it in case a browser preflights the request.
         allowHeaders: ['authorization', 'content-type', 'last-event-id']
     })
+    app.use('/health', corsMiddleware)
     app.use('/api/*', corsMiddleware)
     app.use('/cli/*', corsMiddleware)
+
+    // Health check endpoint (no auth required).
+    // Capabilities are additive so older clients can ignore unknown fields.
+    app.get('/health', (c) => c.json({
+        status: 'ok',
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {
+            workGraph: true,
+            titleSuggestion: readTitleProviderConfig() !== null
+        }
+    }))
 
     // Gzip JSON API responses. Over the relay tunnel every byte is metered
     // twice (the SNI proxy copies in both directions), and API payloads are
@@ -295,6 +306,8 @@ function createWebApp(options: {
     app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes({ dataDir: configuration.dataDir }))
+    // Path is intentionally NOT `/api/events` — that route is the SSE stream.
+    app.route('/api', createWorkGraphRoutes(options.store))
 
     // Skip static serving in relay mode, show helpful message on root
     if (options.relayMode) {

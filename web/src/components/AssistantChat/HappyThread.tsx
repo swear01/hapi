@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
+import { ThreadPrimitive, unstable_useThreadMessageIds, useAuiState } from '@assistant-ui/react'
+import type { ComponentProps } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
 import type { HappyRuntimeExtras } from '@/lib/assistant-runtime'
 import type { Session, SessionMetadataSummary } from '@/types/api'
@@ -20,6 +22,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { CloseIcon } from '@/components/icons'
 import { ShareTurnDialog } from '@/components/AssistantChat/ShareTurnDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
+import { getSessionTitle } from '@/lib/sessionTitle'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
@@ -30,6 +33,8 @@ import { formatRelativeTime } from '@/lib/relativeTime'
 import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { getShareTurnReasoningLabel, selectShareTurnMetadata } from '@/lib/shareTurnMetadata'
 import { useMinuteTick } from '@/hooks/useMinuteTick'
+import { queryKeys } from '@/lib/query-keys'
+import { matchesSearchQuery } from '@hapi/protocol'
 
 type ScrollAnchor = {
     id: string
@@ -58,7 +63,6 @@ type HistoryLoaderState = {
 type ShareTurnState = {
     id: number
     snapshots: ShareTurnSnapshot[]
-    title: string
     sourceContentWidth: number | null
 } | null
 
@@ -299,6 +303,32 @@ const THREAD_MESSAGE_COMPONENTS = {
     SystemMessage: HappySystemMessage
 } as const
 
+type ThreadMessageComponents = ComponentProps<typeof ThreadPrimitive.Unstable_MessageById>['components']
+
+/**
+ * Render messages by stable id instead of their current array index.
+ *
+ * Rewind can replace a non-empty transcript with an empty one in a single
+ * external-runtime update. Index-based providers may then ask assistant-ui
+ * for message 0 while its lookup table is already empty. Stable id providers
+ * unmount removed rows without consulting a stale index.
+ */
+export function ThreadMessagesById({ components }: { components: ThreadMessageComponents }) {
+    const messageIds = unstable_useThreadMessageIds()
+
+    return (
+        <>
+            {messageIds.map((messageId) => (
+                <ThreadPrimitive.Unstable_MessageById
+                    key={messageId}
+                    messageId={messageId}
+                    components={components}
+                />
+            ))}
+        </>
+    )
+}
+
 export function ConversationOutlinePanel(props: {
     items: readonly ConversationOutlineItem[]
     hasMoreMessages: boolean
@@ -309,13 +339,13 @@ export function ConversationOutlinePanel(props: {
 }) {
     const { t, locale } = useTranslation()
     const [searchQuery, setSearchQuery] = useState('')
-    const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
+    const normalizedSearchQuery = searchQuery.trim()
     const filteredItems = useMemo(() => {
         if (normalizedSearchQuery.length === 0) {
             return props.items
         }
         return props.items.filter((item) => (
-            item.label.toLocaleLowerCase().includes(normalizedSearchQuery)
+            matchesSearchQuery(item.label, normalizedSearchQuery)
         ))
     }, [normalizedSearchQuery, props.items])
 
@@ -471,6 +501,7 @@ export function HappyThread(props: {
     const machineLabelsById = useMachineLabels(machines)
     const [shareTurn, setShareTurn] = useState<ShareTurnState>(null)
     const shareDialogOpen = shareTurn !== null
+    const shareTitle = shareTurn ? getSessionTitle(props.session) : ''
     const shareRelativeTimeTick = useMinuteTick(headerMetadata.lastActive && shareDialogOpen)
     const shareMetadataItems = useMemo(() => {
         const agentFlavor = props.session.metadata?.flavor ?? null
@@ -514,6 +545,15 @@ export function HappyThread(props: {
         })
     }, [headerMetadata, locale, machineLabelsById, props.serviceTier, props.session, shareDialogOpen, shareRelativeTimeTick, t])
     const { terminalToolDisplayMode } = useTerminalToolDisplayMode()
+    const hubSettingsQuery = useQuery({
+        queryKey: queryKeys.hubSettings,
+        queryFn: async () => props.api.getHubSettings(),
+        enabled: Boolean(props.api),
+        staleTime: 30_000,
+        refetchInterval: 30_000,
+        retry: false,
+    })
+    const showSessionSummaryInChat = hubSettingsQuery.data?.sessionSummaryInChat === true
     const runtimeExtras = useAuiState((s) => s.thread.extras) as HappyRuntimeExtras | undefined
     const appliedMessagesVersion = runtimeExtras?.messagesVersion ?? props.messagesVersion
     const appliedHistoryVersion = runtimeExtras?.historyVersion ?? props.historyVersion
@@ -1515,7 +1555,6 @@ export function HappyThread(props: {
             setShareTurn({
                 id: ++shareTurnIdRef.current,
                 snapshots: fallbackSnapshot ? [fallbackSnapshot] : [],
-                title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
                 sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
             })
             return
@@ -1559,10 +1598,9 @@ export function HappyThread(props: {
         setShareTurn({
             id: ++shareTurnIdRef.current,
             snapshots: completeSnapshots,
-            title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
             sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
         })
-    }, [props.metadata, props.sessionId])
+    }, [props.session])
 
     return (
         <HappyChatProvider value={{
@@ -1570,6 +1608,7 @@ export function HappyThread(props: {
             sessionId: props.sessionId,
             metadata: props.metadata,
             terminalToolDisplayMode,
+            showSessionSummaryInChat,
             disabled: props.disabled,
             onRefresh: props.onRefresh,
             onRetryMessage: props.onRetryMessage,
@@ -1614,7 +1653,7 @@ export function HappyThread(props: {
                 >
                     <div
                         ref={viewportRef}
-                        className="app-scroll-y chat-scroll-y min-h-0 flex-1 overflow-x-hidden"
+                        className="app-scroll-y chat-scroll-y min-h-0 flex-1 overflow-x-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--app-link)]"
                         tabIndex={0}
                     >
                         <div ref={contentRef} className="chat-scroll-content mx-auto w-full max-w-content min-w-0 p-3">
@@ -1637,7 +1676,7 @@ export function HappyThread(props: {
                                 </>
                             )}
                             <div className="happy-thread-messages flex flex-col gap-3">
-                                <ThreadPrimitive.Messages components={THREAD_MESSAGE_COMPONENTS} />
+                                <ThreadMessagesById components={THREAD_MESSAGE_COMPONENTS} />
                             </div>
                         </div>
                     </div>
@@ -1666,7 +1705,7 @@ export function HappyThread(props: {
                 <ShareTurnDialog
                     key={shareTurn?.id ?? 'closed'}
                     isOpen={shareTurn !== null}
-                    title={shareTurn?.title ?? ''}
+                    title={shareTitle}
                     metadataItems={shareMetadataItems}
                     sourceSnapshots={shareTurn?.snapshots ?? []}
                     sourceContentWidth={shareTurn?.sourceContentWidth ?? null}
