@@ -15,9 +15,9 @@ function formatTokens(value: number): string {
     return `${(value / 1_000_000_000).toFixed(1)}B`
 }
 
-export function formatCost(amount: number, currency: string): string {
+export function formatCost(amount: number, currency: string, locale?: string): string {
     try {
-        const base = new Intl.NumberFormat(undefined, { style: 'currency', currency })
+        const base = new Intl.NumberFormat(locale, { style: 'currency', currency })
         // Costs below the currency's smallest unit (e.g. USD 0.004, or 0.4
         // for a zero-decimal currency such as JPY) would render as zero;
         // use significant digits so nonzero spend stays visible.
@@ -25,7 +25,7 @@ export function formatCost(amount: number, currency: string): string {
         const precision = amount > 0 && amount < smallestUnit
             ? { minimumSignificantDigits: 2, maximumSignificantDigits: 4 }
             : {}
-        return new Intl.NumberFormat(undefined, { style: 'currency', currency, ...precision }).format(amount)
+        return new Intl.NumberFormat(locale, { style: 'currency', currency, ...precision }).format(amount)
     } catch {
         return `${amount.toFixed(4)} ${currency}`
     }
