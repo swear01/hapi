@@ -28,6 +28,7 @@ export const EMPTY_STATE: MessageWindowState = {
     messagesVersion: 0,
     historyVersion: 0,
     navigationLeaseCount: 0,
+    tailRevision: 0,
 }
 
 export function useMessages(api: ApiClient | null, sessionId: string | null): {
@@ -39,6 +40,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
     viewMode: MessageViewMode
     messagesVersion: number
     historyVersion: number
+    tailRevision: number
     loadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
     cancelLoadMore: () => void
     refetch: () => Promise<void>
@@ -101,6 +103,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         viewMode: state.viewMode,
         messagesVersion: state.messagesVersion,
         historyVersion: state.historyVersion,
+        tailRevision: state.tailRevision,
         loadMore,
         cancelLoadMore,
         refetch,
