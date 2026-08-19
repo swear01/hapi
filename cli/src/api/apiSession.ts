@@ -463,7 +463,8 @@ export class ApiSessionClient extends EventEmitter {
                     ack?.({
                         removed: result === true,
                         inFlight: result === 'in-flight',
-                        indeterminate: result === 'indeterminate'
+                        indeterminate: result === 'indeterminate',
+                        consumed: result === 'consumed'
                     })
                     return
                 }
