@@ -899,7 +899,7 @@ export type UsageSummaryBucket = {
 
 export type UsageAgentStatus = 'complete' | 'context-only' | 'cost-only' | 'not-reported'
 
-/** One cumulative cost amount in its own currency (never collapsed). */
+/** One cost amount in its own currency (never collapsed). */
 export type UsageCost = {
     amount: number
     currency: string
@@ -911,7 +911,7 @@ export type UsageAgentAvailability = {
      *  only cumulative cost, or nothing at all. */
     status: UsageAgentStatus
     sessions: number
-    /** Latest cumulative cost per currency across this agent's sessions. */
+    /** Cost attributed to the selected range across this agent's sessions. */
     costs: UsageCost[]
 }
 
@@ -929,7 +929,7 @@ export type UsageSummaryResponse = {
         uncachedTokens: number
         requests: number
         sessions: number
-        /** Latest cumulative cost per currency across sessions. */
+        /** Cost attributed to the selected range across sessions. */
         costs: UsageCost[]
     }
     daily: Array<UsageSummaryBucket & { key: string }>
