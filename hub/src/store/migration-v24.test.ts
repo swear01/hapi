@@ -13,7 +13,7 @@ afterEach(() => {
     }
 })
 
-describe('schema migration v23 to v25', () => {
+describe('schema migration v23 to v26', () => {
     it('adds ACP usage fields and the iOS push key to a V23 database', () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v24-'))
         tempDirs.push(dir)
@@ -58,7 +58,7 @@ describe('schema migration v23 to v25', () => {
         expect(usageColumns.has('cost_currency')).toBe(true)
         expect(fcmColumns.some((column) => column.name === 'push_key')).toBe(true)
         expect(messageColumns.some((column) => column.name === 'delivery_state')).toBe(true)
-        expect(version.user_version).toBe(25)
+        expect(version.user_version).toBe(26)
 
         const seedCount = internalDb.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE session_id = 'migration-v24-seed'").get() as { n: number }
         expect(seedCount.n).toBe(0)
@@ -108,7 +108,7 @@ describe('schema migration v23 to v25', () => {
         expect(usageColumns.some((column) => column.name === 'cost_currency')).toBe(true)
         expect(fcmColumns.some((column) => column.name === 'push_key')).toBe(true)
         expect(messageColumns.some((column) => column.name === 'delivery_state')).toBe(true)
-        expect(version.user_version).toBe(25)
+        expect(version.user_version).toBe(26)
         migrated.close()
     })
 })
