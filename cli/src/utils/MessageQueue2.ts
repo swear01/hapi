@@ -185,15 +185,9 @@ export class MessageQueue2<T> {
         const modeHash = this.modeHasher(mode);
         logger.debug(`[MessageQueue2] pushIsolateAndClear() called with mode hash: ${modeHash} - clearing ${this.queue.length} pending messages`);
 
-        const indeterminateLocalIds = this.markDispatchingReservationsIndeterminate();
+        const indeterminateLocalIds = this.markAllDispatchingReservationsIndeterminate();
         if (indeterminateLocalIds.length > 0) {
             this.onBatchIndeterminate?.(indeterminateLocalIds);
-        }
-        // A clearing command must acknowledge steers whose dispatch already
-        // started before discarding the remaining hidden reservations.
-        const dispatchedLocalIds = this.commitDispatchingReservations();
-        if (dispatchedLocalIds.length > 0) {
-            this.onBatchConsumed?.(dispatchedLocalIds);
         }
         // Clear any pending messages to ensure this message is processed in complete isolation
         this.queue = [];
@@ -474,12 +468,7 @@ export class MessageQueue2<T> {
         this.restoreReservation(taken);
     }
 
-    /**
-     * Commit rows whose transport dispatch has started before isolate-and-clear
-     * discards their reservations. The caller emits the returned ids as
-     * consumed so an accepted steer is never replayed after its reservation is
-     * cleared.
-     */
+    /** Commit dispatching rows only when the caller has proven delivery. */
     commitDispatchingReservations(): string[] {
         const localIds: string[] = [];
         for (const reservation of this.reservations.values()) {
