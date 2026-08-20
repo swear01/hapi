@@ -132,13 +132,13 @@ class SyncFromUpstreamTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn('TREE_DIFFERS_FROM_ORIGIN_MAIN', result.stdout)
 
-    def test_rejects_carrying_excluded_antigravity_pr(self):
+    def test_accepts_upstreamed_antigravity_pr_reference(self):
         self.manifest.write_text(f'0001.patch\tcarry\tpr-1320\t{self.fork_commit}\n')
 
         result = run(str(SCRIPT), '--repo', str(self.repo), '--patch-dir', str(self.patch_dir), '--manifest', str(self.manifest), '--skip-tests', check=False)
 
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn('EXCLUDED_UPSTREAM_REF: pr-1320 must be drop', result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn('REHEARSAL_OK', result.stdout)
 
     def test_rejects_non_personal_pr_that_fails_quality_gates(self):
         self.manifest.write_text(f'0001.patch\tcarry\tpr-1315\t{self.fork_commit}\n')

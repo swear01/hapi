@@ -83,7 +83,8 @@ class ReleaseAuditTest(unittest.TestCase):
         self.assertIn("#1315", audit)
         self.assertIn("CLEAN", audit)
         self.assertIn("abc123", audit)
-        self.assertIn("Hard exclusion: PR #1320 (Antigravity) must be recorded as drop", audit)
+        self.assertIn("Official upstream is authoritative; upstreamed PRs are accepted and are not replayed.", audit)
+        self.assertNotIn("Hard exclusion: PR #1320 (Antigravity)", audit)
         self.assertIn("Personal PR owner: swear01", audit)
 
         rows = self.pr_audit.read_text().splitlines()

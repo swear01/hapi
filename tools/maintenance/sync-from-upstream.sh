@@ -65,10 +65,6 @@ trap cleanup EXIT
 while IFS=$'\t' read -r patch state upstream_ref source_commits; do
     [ -n "${patch:-}" ] || continue
     case "$patch" in \#*) continue ;; esac
-    if [ "$upstream_ref" = "pr-1320" ] && [ "$state" != "drop" ]; then
-        echo "EXCLUDED_UPSTREAM_REF: pr-1320 must be drop" >&2
-        exit 6
-    fi
     case "$state" in
         carry|regenerate)
             if [ "$source_commits" != "-" ]; then

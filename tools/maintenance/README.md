@@ -24,7 +24,7 @@ patch	state	upstream_ref	source_commits
 Its states are `carry`, `regenerate`, or `drop`. Every fork-only commit must be represented before a rebuild can proceed.
 Use `-` for the source commit of a newly generated release patch that is not replacing an existing fork commit.
 
-PR #1320 (Antigravity) is excluded from future maintained releases. Record `pr-1320` and its follow-up patches as `drop`; `sync-from-upstream.sh` rejects attempts to carry or regenerate that upstream ref. If an official upstream base later contains it, stop for an explicit operator decision instead of silently inheriting or reverting it.
+Official upstream is authoritative for upstreamed behavior. If an official base already contains a PR, accept it as part of the base and do not replay its commits; record it only as upstreamed context in the release audit.
 
 ## Nightly PR gate
 
@@ -54,7 +54,7 @@ Review every open PR and replace each `review` value:
 - `behavior`: `preserve` or `accepted-change`. Use the linked issue, reproduction, `git log`/`git blame`, old PR discussion, common-path cost, and maintenance-surface impact. Preference-only changes to behavior that already works are `unjustified-change`.
 - `reason`: evidence for an exception, defer, or drop. Map every changed file group to a stated acceptance criterion; generated and lockfile churn does not count as semantic scope.
 
-Personal PRs authored by the owner of `origin` start as `carry` and always bypass the quality gate. The rebuild still verifies their current PR head and prints every failed rule as `PERSONAL_PR_POLICY_EXCEPTION`; include those lines in the final release report. This bypass does not override the permanent PR #1320 exclusion or stale-audit protection.
+Personal PRs authored by the owner of `origin` start as `carry` and always bypass the quality gate. The rebuild still verifies their current PR head and prints every failed rule as `PERSONAL_PR_POLICY_EXCEPTION`; include those lines in the final release report. This bypass does not override stale-audit protection.
 
 Rehearse with the completed ledger:
 

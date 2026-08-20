@@ -58,7 +58,7 @@ for pr in json.load(sys.stdin):
     printf 'Record every open PR as carry, defer, or drop with its reviewed SHA before rebuilding.\n'
     printf 'Normal carries require ready CI/merge state, clear maintainer signal, latest-head HAPI Bot no-findings, proportional or evidenced scope, and preserved or accepted behavior.\n'
     printf 'Personal PRs authored by %s are auto-carry; record and report every failed quality rule after integration.\n' "$personal_pr_owner"
-    printf 'Hard exclusion: PR #1320 (Antigravity) must be recorded as drop and must not be replayed.\n'
+    printf 'Official upstream is authoritative; upstreamed PRs are accepted and are not replayed.\n'
 } > "$output"
 
 if [ -n "$pr_audit_output" ]; then
