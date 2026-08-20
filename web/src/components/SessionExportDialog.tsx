@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { HapiSessionExportWarning } from '@hapi/protocol/sessionExport'
 import type { ApiClient } from '@/api/client'
 import {
     downloadSessionExport,
@@ -24,17 +25,30 @@ type SessionExportDialogProps = {
     api: ApiClient | null
 }
 
+function formatExportSize(bytes: number): string {
+    const units = ['B', 'KiB', 'MiB', 'GiB']
+    let value = bytes
+    let unitIndex = 0
+    while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024
+        unitIndex += 1
+    }
+    return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
 export function SessionExportDialog(props: SessionExportDialogProps) {
     const { t } = useTranslation()
     const toast = useToast()
     const [format, setFormat] = useState<SessionExportFormat>('json')
     const [isExporting, setIsExporting] = useState(false)
+    const [warning, setWarning] = useState<HapiSessionExportWarning | null>(null)
     const [error, setError] = useState<string | null>(null)
     const abortRef = useRef<AbortController | null>(null)
 
     useEffect(() => {
         if (!props.isOpen) return
         setFormat(readSessionExportFormat())
+        setWarning(null)
         setError(null)
     }, [props.isOpen])
 
@@ -48,6 +62,7 @@ export function SessionExportDialog(props: SessionExportDialogProps) {
         abortRef.current?.abort()
         abortRef.current = null
         setIsExporting(false)
+        setWarning(null)
         props.onClose()
     }
 
@@ -65,8 +80,21 @@ export function SessionExportDialog(props: SessionExportDialogProps) {
 
         try {
             const result = await downloadSessionExport(props.api, props.sessionId, format, {
+                force: warning !== null,
                 signal: controller.signal
             })
+            if (result.type === 'warning') {
+                setWarning(result.warning)
+                return
+            }
+            if (result.type === 'too-large') {
+                setError(t('session.export.error.tooLarge', {
+                    count: result.count.toLocaleString(),
+                    size: formatExportSize(result.estimatedBytes),
+                    maxSize: formatExportSize(result.maxBytes)
+                }))
+                return
+            }
             toast.addToast({
                 title: t('session.export.toast.success.title'),
                 body: t('session.export.toast.success.body', { filename: result.filename }),
@@ -141,6 +169,19 @@ export function SessionExportDialog(props: SessionExportDialogProps) {
                     </label>
                 </div>
 
+                {warning ? (
+                    <div role="alert" className="mt-3 rounded-md bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-900/20 dark:text-amber-200">
+                        <p className="font-medium">{t('session.export.warning.title')}</p>
+                        <p className="mt-1">
+                            {t('session.export.warning.description', {
+                                count: warning.count.toLocaleString(),
+                                size: formatExportSize(warning.estimatedBytes),
+                                limit: warning.limit.toLocaleString()
+                            })}
+                        </p>
+                    </div>
+                ) : null}
+
                 {error ? (
                     <div className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
                         {error}
@@ -152,7 +193,11 @@ export function SessionExportDialog(props: SessionExportDialogProps) {
                         {t('button.cancel')}
                     </Button>
                     <Button type="button" onClick={handleDownload} disabled={isExporting}>
-                        {isExporting ? t('session.export.downloading') : t('session.export.download')}
+                        {isExporting
+                            ? t('session.export.downloading')
+                            : warning
+                                ? t('session.export.downloadAnyway')
+                                : t('session.export.download')}
                     </Button>
                 </div>
             </DialogContent>
