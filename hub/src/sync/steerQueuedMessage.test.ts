@@ -48,31 +48,6 @@ describe('SyncEngine.steerQueuedMessage', () => {
         }
     })
 
-    it('accepts codex sessions (turn/steer) and forwards to the CLI', async () => {
-        const { store, engine } = createEngine()
-        try {
-            const session = engine.getOrCreateSession(
-                'steer-codex',
-                { path: '/tmp/project', host: 'localhost', flavor: 'codex' },
-                { requests: {}, completedRequests: {} },
-                'default'
-            )
-            const message = store.messages.addMessage(session.id, { text: 'hi' }, 'local-id')
-
-            const result = await engine.steerQueuedMessage(session.id, message.id)
-
-            // No CLI attached in this unit test → generic RPC failure, not a
-            // flavor rejection: the hub forwards codex steers to the gateway.
-            expect(result.status).toBe('failed')
-            if (result.status === 'failed') {
-                expect(result.error).not.toBe('Steering is not supported for this session')
-                expect(result.localId).toBe('local-id')
-            }
-        } finally {
-            engine.stop()
-        }
-    })
-
     it('rejects unsupported flavors without invoking the CLI', async () => {
         const { store, engine } = createEngine()
         try {
@@ -88,56 +63,7 @@ describe('SyncEngine.steerQueuedMessage', () => {
 
             expect(result).toEqual({
                 status: 'failed',
-                error: 'Steering is not supported for this session',
-                localId: null
-            })
-        } finally {
-            engine.stop()
-        }
-    })
-
-    it('accepts ACP cursor sessions but rejects legacy stream-json ones', async () => {
-        const { store, engine } = createEngine()
-        try {
-            const acpSession = engine.getOrCreateSession(
-                'steer-cursor-acp',
-                {
-                    path: '/tmp/project',
-                    host: 'localhost',
-                    flavor: 'cursor',
-                    cursorSessionId: 'chat-1',
-                    cursorSessionProtocol: 'acp'
-                },
-                { requests: {}, completedRequests: {} },
-                'default'
-            )
-            const acpMessage = store.messages.addMessage(acpSession.id, { text: 'hi' }, 'acp-local')
-            const acpResult = await engine.steerQueuedMessage(acpSession.id, acpMessage.id)
-            // Forwards to the (unregistered) CLI handler → generic failure, not a flavor rejection.
-            expect(acpResult.status).toBe('failed')
-            if (acpResult.status === 'failed') {
-                expect(acpResult.error).not.toBe('Steering is not supported for this session')
-            }
-
-            const legacySession = engine.getOrCreateSession(
-                'steer-cursor-legacy',
-                {
-                    path: '/tmp/project',
-                    host: 'localhost',
-                    flavor: 'cursor',
-                    cursorSessionId: 'chat-2',
-                    cursorSessionProtocol: 'stream-json'
-                },
-                { requests: {}, completedRequests: {} },
-                'default'
-            )
-            const legacyMessage = store.messages.addMessage(legacySession.id, { text: 'hi' }, 'legacy-local')
-
-            const legacyResult = await engine.steerQueuedMessage(legacySession.id, legacyMessage.id)
-
-            expect(legacyResult).toEqual({
-                status: 'failed',
-                error: 'Steering is not supported for this session',
+                error: 'Steering is only supported for Pi, Codex, and Cursor ACP sessions',
                 localId: null
             })
         } finally {

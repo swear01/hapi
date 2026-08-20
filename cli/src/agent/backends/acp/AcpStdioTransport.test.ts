@@ -608,6 +608,30 @@ describe('AcpStdioTransport closed stdin writes', () => {
         expect(buffer.length).toBeLessThanOrEqual(8_000);
     });
 
+    test('bounds a stalled stdin dispatch and rejects both promises', async () => {
+        vi.useFakeTimers();
+        try {
+            spawnState.deferStdinWriteCallback = () => {};
+            const transport = await AcpStdioTransport.create({ command: 'gemini' });
+            const request = transport.sendRequestWithDispatch('session/prompt', {}, {
+                timeoutMs: Infinity,
+                dispatchTimeoutMs: 10
+            });
+            let dispatchError: unknown;
+            let completedError: unknown;
+            const dispatch = request.dispatched.catch((error) => { dispatchError = error; });
+            const completed = request.completed.catch((error) => { completedError = error; });
+            await vi.advanceTimersByTimeAsync(10);
+            await dispatch;
+            await completed;
+            expect(isAcpIndeterminateError(dispatchError)).toBe(true);
+            expect(isAcpIndeterminateError(completedError)).toBe(true);
+            await transport.close();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     test('rejects pending requests when stdin.write throws', async () => {
         spawnState.stdinWrite.mockImplementation(() => {
             throw new Error('WritableIterable is closed');

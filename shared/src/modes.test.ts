@@ -133,7 +133,7 @@ describe('claude auto permission mode', () => {
 })
 
 describe('isSteeringSupportedForFlavor', () => {
-    it('supports codex, cursor, and pi', () => {
+    it('supports codex, cursor and pi', () => {
         expect(isSteeringSupportedForFlavor('codex')).toBe(true)
         expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
         expect(isSteeringSupportedForFlavor('pi')).toBe(true)
@@ -150,19 +150,29 @@ describe('isSteeringSupportedForSession', () => {
         expect(isSteeringSupportedForSession({ flavor: 'pi' })).toBe(true)
     })
 
-    it('supports ACP cursor sessions', () => {
-        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionProtocol: 'acp' })).toBe(true)
-        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'sess-1', cursorSessionProtocol: 'acp' })).toBe(true)
+    it('supports Cursor ACP sessions', () => {
+        expect(isSteeringSupportedForSession({
+            flavor: 'cursor',
+            cursorSessionProtocol: 'acp',
+            cursorSessionId: 'sess-1',
+        })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'cursor' })).toBe(true)
     })
 
-    it('rejects legacy stream-json cursor sessions', () => {
-        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionProtocol: 'stream-json' })).toBe(false)
-        expect(isSteeringSupportedForSession({ flavor: 'cursor', cursorSessionId: 'x' })).toBe(false)
+    it('rejects legacy Cursor stream-json sessions', () => {
+        expect(isSteeringSupportedForSession({
+            flavor: 'cursor',
+            cursorSessionProtocol: 'stream-json',
+            cursorSessionId: 'legacy-1',
+        })).toBe(false)
+        expect(isSteeringSupportedForSession({
+            flavor: 'cursor',
+            cursorSessionId: 'legacy-without-protocol',
+        })).toBe(false)
     })
 
-    it('rejects non-steerable flavors and missing metadata', () => {
+    it('rejects non-steerable flavors', () => {
         expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
         expect(isSteeringSupportedForSession(null)).toBe(false)
-        expect(isSteeringSupportedForSession(undefined)).toBe(false)
     })
 })

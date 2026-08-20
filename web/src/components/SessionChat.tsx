@@ -15,7 +15,6 @@ import type {
     PiModelSummary,
     SlashCommand
 } from '@/types/api'
-import { isSteeringSupportedForSession } from '@hapi/protocol'
 import type { ChatBlock, NormalizedMessage } from '@/chat/types'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
@@ -54,6 +53,7 @@ import {
     type ComposerSendIntent,
 } from '@/lib/messageDelivery'
 import type { MessageDeliveryMode } from '@hapi/protocol'
+import { isSteeringSupportedForSession } from '@hapi/protocol'
 import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
 import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
@@ -852,16 +852,6 @@ function SessionChatInner(props: SessionChatProps) {
     )
     const agentFlavor = props.session.metadata?.flavor ?? null
     const controlledByUser = props.session.agentState?.controlledByUser === true
-    // Steer button visibility: pi native steer (gated on thinking — Pi reports
-    // no steeringActive), or Codex/Cursor mid-turn steer (turn/steer / ACP
-    // soft-send; the CLI reports steeringActive only while a steerable turn is
-    // actually in flight). Legacy Cursor stream-json and other flavors never
-    // support steer.
-    const canSteerQueuedMessage = props.session.active && (
-        (agentFlavor === 'pi' && props.session.thinking)
-        || (isSteeringSupportedForSession(props.session.metadata)
-            && props.session.agentState?.steeringActive === true)
-    ) && !controlledByUser
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
     const codexModelsState = useCodexModels({
         api: props.api,
@@ -1875,7 +1865,12 @@ function SessionChatInner(props: SessionChatProps) {
                                     // Restore the schedule so the clock button re-activates
                                     updatePendingSchedule(restored)
                                 }}
-                                canSteer={canSteerQueuedMessage}
+                                canSteer={props.session.active
+                                    && isSteeringSupportedForSession(props.session.metadata)
+                                    && (agentFlavor === 'pi'
+                                        ? props.session.thinking
+                                        : props.session.agentState?.steeringActive === true)
+                                    && !controlledByUser}
                             />
                         </div>
 
