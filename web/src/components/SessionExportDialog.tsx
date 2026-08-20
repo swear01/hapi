@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { HapiSessionExportWarning } from '@hapi/protocol/sessionExport'
-import type { ApiClient } from '@/api/client'
+import type { HapiSessionExportTooLarge, HapiSessionExportWarning } from '@hapi/protocol/sessionExport'
+import { ApiError, type ApiClient } from '@/api/client'
 import {
     downloadSessionExport,
     readSessionExportFormat,
@@ -34,6 +34,27 @@ function formatExportSize(bytes: number): string {
         unitIndex += 1
     }
     return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function parseSessionExportTooLarge(error: unknown): HapiSessionExportTooLarge | null {
+    if (!(error instanceof ApiError) || error.code !== 'session_export_too_large' || !error.body) {
+        return null
+    }
+
+    try {
+        const details = JSON.parse(error.body) as Partial<HapiSessionExportTooLarge>
+        if (
+            details.type !== 'too-large'
+            || typeof details.count !== 'number'
+            || typeof details.estimatedBytes !== 'number'
+            || typeof details.maxBytes !== 'number'
+        ) {
+            return null
+        }
+        return details as HapiSessionExportTooLarge
+    } catch {
+        return null
+    }
 }
 
 export function SessionExportDialog(props: SessionExportDialogProps) {
@@ -106,9 +127,16 @@ export function SessionExportDialog(props: SessionExportDialogProps) {
             if (controller.signal.aborted) {
                 return
             }
-            const message = error instanceof Error && error.message
-                ? error.message
-                : t('session.export.error.default')
+            const resourceLimit = parseSessionExportTooLarge(error)
+            const message = resourceLimit
+                ? t('session.export.error.tooLarge', {
+                    count: resourceLimit.count.toLocaleString(),
+                    size: formatExportSize(resourceLimit.estimatedBytes),
+                    maxSize: formatExportSize(resourceLimit.maxBytes)
+                })
+                : error instanceof Error && error.message
+                    ? error.message
+                    : t('session.export.error.default')
             setError(message)
             toast.addToast({
                 title: t('session.export.toast.error.title'),

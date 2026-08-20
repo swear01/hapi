@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ApiClient } from '@/api/client'
+import { ApiError, type ApiClient } from '@/api/client'
 import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider } from '@/lib/toast-context'
 import { SessionExportDialog } from './SessionExportDialog'
@@ -46,5 +46,31 @@ describe('SessionExportDialog large export confirmation', () => {
 
         expect(onClose).toHaveBeenCalledOnce()
         expect(getSessionExport).toHaveBeenCalledOnce()
+    })
+
+    it('localizes server resource-limit details instead of showing the raw 413 response', async () => {
+        const getSessionExport = vi.fn().mockRejectedValue(new ApiError(
+            'HTTP 413: server response',
+            413,
+            'session_export_too_large',
+            JSON.stringify({
+                type: 'too-large',
+                error: 'Session export exceeds the resource limit',
+                code: 'session_export_too_large',
+                count: 20_001,
+                estimatedBytes: 104_857_601,
+                maxBytes: 104_857_600
+            })
+        ))
+        const api = { getSessionExport } as unknown as ApiClient
+
+        renderDialog(api, vi.fn())
+        fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+
+        await waitFor(() => {
+            expect(screen.getByText(/too large to safely prepare/)).toBeInTheDocument()
+            expect(screen.getByText(/20,001/)).toBeInTheDocument()
+            expect(screen.queryByText(/HTTP 413/)).not.toBeInTheDocument()
+        })
     })
 })
