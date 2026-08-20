@@ -1118,6 +1118,7 @@ import { CODEX_APP_SERVER_INDETERMINATE_SYMBOL } from './codexAppServerClient';
 type FakeAgentState = {
     requests: Record<string, unknown>;
     completedRequests: Record<string, unknown>;
+    steeringActive?: boolean;
 };
 
 function createMode(): EnhancedMode {
@@ -1131,7 +1132,8 @@ function createMode(): EnhancedMode {
 function createSessionStub(
     messages = ['hello from launcher test'],
     mode = createMode(),
-    isolateMessages = false
+    isolateMessages = false,
+    initialSteeringActive = false
 ) {
     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
     messages.forEach((message, index) => {
@@ -1172,7 +1174,8 @@ function createSessionStub(
     let currentCollaborationMode: EnhancedMode['collaborationMode'] | undefined = mode.collaborationMode;
     let agentState: FakeAgentState = {
         requests: {},
-        completedRequests: {}
+        completedRequests: {},
+        ...(initialSteeringActive ? { steeringActive: true } : {})
     };
 
     const rpcHandlers = new Map<string, (params: unknown) => unknown>();
@@ -3328,6 +3331,20 @@ describe('codexRemoteLauncher app-server lifecycle', () => {
 
     afterEach(() => {
         harness.dropAppServerAfterFirstTurn = false;
+    });
+
+    it('clears stale steeringActive state when the launcher starts', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitTurnAbortedOnInterrupt = true;
+        const { session, rpcHandlers, getAgentState } = createSessionStub(['first message'], createMode(), false, true);
+        const runPromise = codexRemoteLauncher(session as never);
+
+        await vi.waitFor(() => expect(getAgentState().steeringActive).toBe(false));
+        expect(harness.startTurnThreadIds).toHaveLength(0);
+
+        await rpcHandlers.get('abort')?.({});
+        session.queue.close();
+        await runPromise;
     });
 
     it('reinitializes a replacement app-server before the next turn', async () => {
