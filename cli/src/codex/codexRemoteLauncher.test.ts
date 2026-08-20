@@ -3366,7 +3366,7 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         harness.emitTurnAbortedOnInterrupt = true;
         let releaseSteer!: () => void;
         harness.deferSteerTurn = new Promise((resolve) => { releaseSteer = resolve; });
-        const { session, rpcHandlers, codexMessages } = createSessionStub(['first message']);
+        const { session, rpcHandlers, codexMessages, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first message']);
 
         const runPromise = codexRemoteLauncher(session as never);
         // Turn 1 is in flight (completion suppressed).
@@ -3390,8 +3390,11 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         const result = await steerPromise;
 
         expect(result).toEqual({ steered: false, error: 'Steer cancelled' });
-        // The invalidated steer never surfaces as a user message.
+        // The invalidated steer never surfaces as a user message or a
+        // delivered acknowledgement; its outcome stays indeterminate.
         expect(codexMessages).toEqual([]);
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['steer-local']);
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['steer-local']);
         // handleAbort reset() reopened the queue; close it so the launcher
         // winds down and exits.
         queue.close();
@@ -3717,7 +3720,7 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         let releaseSteer!: () => void;
         harness.deferSteerTurn = new Promise((resolve) => { releaseSteer = resolve; });
         harness.failNextSteerTurn = true;
-        const { session, rpcHandlers } = createSessionStub(['first message']);
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first message']);
 
         const runPromise = codexRemoteLauncher(session as never);
         // Turn 1 is in flight (completion suppressed).
@@ -3750,6 +3753,8 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         releaseSteer();
         const result = await steerPromise;
         expect(result).toEqual({ steered: false, error: 'Active turn is not steerable' });
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['b-local']);
+        expect(emitSteerIndeterminate).not.toHaveBeenCalledWith(['b-local']);
 
         await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(2));
         expect(harness.startTurnMessages[1]).toBe('A\nB\nC');

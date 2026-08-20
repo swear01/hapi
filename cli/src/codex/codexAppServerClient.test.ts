@@ -211,8 +211,8 @@ describe('CodexAppServerClient turn/steer', () => {
                 input: [{ type: 'text', text: 'pivot now' }],
                 expectedTurnId: 'turn-1'
             });
-            const result = expect(steerPromise).rejects.toThrow("timed out after 25000ms");
-            await vi.advanceTimersByTimeAsync(25_001);
+            const result = expect(steerPromise).rejects.toThrow("timed out after 20000ms");
+            await vi.advanceTimersByTimeAsync(20_001);
             await result;
             await client.disconnect();
         } finally {

@@ -475,9 +475,10 @@ export class MessageQueue2<T> {
     }
 
     /**
-     * Commit rows whose transport dispatch has started before a destructive abort/reset.
-     * The caller emits the returned ids as consumed so an accepted steer is
-     * never replayed after its reservation is cleared.
+     * Commit rows whose transport dispatch has started before isolate-and-clear
+     * discards their reservations. The caller emits the returned ids as
+     * consumed so an accepted steer is never replayed after its reservation is
+     * cleared.
      */
     commitDispatchingReservations(): string[] {
         const localIds: string[] = [];
@@ -496,6 +497,20 @@ export class MessageQueue2<T> {
         const localIds: string[] = [];
         for (const reservation of this.reservations.values()) {
             if (reservation.state !== 'dispatching' || reservation.transportStarted) {
+                continue;
+            }
+            if (this.markReservationIndeterminate(reservation) && reservation.item.localId) {
+                localIds.push(reservation.item.localId);
+            }
+        }
+        return localIds;
+    }
+
+    /** Mark every dispatching reservation indeterminate until delivery is proven. */
+    markAllDispatchingReservationsIndeterminate(): string[] {
+        const localIds: string[] = [];
+        for (const reservation of this.reservations.values()) {
+            if (reservation.state !== 'dispatching') {
                 continue;
             }
             if (this.markReservationIndeterminate(reservation) && reservation.item.localId) {

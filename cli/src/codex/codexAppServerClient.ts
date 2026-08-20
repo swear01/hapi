@@ -383,9 +383,9 @@ export class CodexAppServerClient extends JsonLineParser {
     async steerTurn(params: TurnSteerParams, options?: { signal?: AbortSignal }): Promise<TurnSteerResponse> {
         const response = await this.sendRequest('turn/steer', params, {
             signal: options?.signal,
-            // Bound the wait below the hub RPC timeout; timeout is classified
+            // Leave margin below the hub RPC timeout; timeout is classified
             // as indeterminate so the launcher consumes at most once.
-            timeoutMs: 25_000
+            timeoutMs: 20_000
         });
         return response as TurnSteerResponse;
     }

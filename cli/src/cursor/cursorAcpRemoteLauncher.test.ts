@@ -1703,6 +1703,8 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
                 handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
             };
             emitMessagesConsumed: ReturnType<typeof vi.fn>;
+            setSteerDeliveryState: ReturnType<typeof vi.fn>;
+            emitSteerIndeterminate: ReturnType<typeof vi.fn>;
         };
         const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
 
@@ -1710,7 +1712,9 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         expect(session.queue.pendingLocalIds()).not.toContain('local-2');
         harness.rejectSoftSteer!(new Error('request rejected'));
         await vi.waitFor(() => expect(session.queue.pendingLocalIds()).toContain('local-2'));
+        expect(client.setSteerDeliveryState).toHaveBeenCalledWith(['local-2'], 'queued');
         expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
+        expect(client.emitSteerIndeterminate).not.toHaveBeenCalledWith(['local-2']);
 
         releasePrompt();
         session.queue.close();
@@ -1946,14 +1950,15 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
                 handlers: Map<string, (payload?: unknown) => Promise<unknown>>;
             };
             emitMessagesConsumed: ReturnType<typeof vi.fn>;
+            emitSteerIndeterminate: ReturnType<typeof vi.fn>;
         };
         const steerHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.SteerQueuedMessage);
         const result = await steerHandler!({ localId: 'local-2' });
         expect(result).toEqual({ steered: true });
         expect(client.emitMessagesConsumed).not.toHaveBeenCalledWith(['local-2']);
 
-        // Abort finalizes the already-dispatched steer before resetting the
-        // queue; its later completion must not emit a second acknowledgement.
+        // Abort leaves the already-dispatched steer indeterminate before
+        // resetting the queue; its later completion must not acknowledge it.
         session.client.emitSessionReady();
         const abortHandler = client.rpcHandlerManager.handlers.get(RPC_METHODS.Abort);
         expect(abortHandler).toBeTypeOf('function');
@@ -1963,9 +1968,10 @@ describe('cursorAcpRemoteLauncher mid-turn steer (#888)', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
 
         // The successful completion is stale after abort and must not publish
-        // a second consumed event.
+        // a consumed event.
         expect(client.emitMessagesConsumed.mock.calls.filter(([localIds]) =>
-            Array.isArray(localIds) && localIds.includes('local-2'))).toHaveLength(1);
+            Array.isArray(localIds) && localIds.includes('local-2'))).toHaveLength(0);
+        expect(client.emitSteerIndeterminate).toHaveBeenCalledWith(['local-2']);
         expect(session.queue.pendingLocalIds()).not.toContain('local-2');
 
         releasePrompt();

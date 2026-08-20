@@ -819,6 +819,18 @@ describe('MessageQueue2', () => {
             expect(queue.pendingLocalIds()).toEqual(['id-2']);
         });
 
+        it('marks every dispatching reservation indeterminate before abort/reset', () => {
+            const queue = new MessageQueue2<string>(mode => mode);
+            queue.push('msg1', 'local', 'id-1');
+            const taken = queue.takeByLocalId('id-1');
+            queue.beginReservationDispatch(taken!);
+            queue.markReservationTransportStarted(taken!);
+
+            expect(queue.markAllDispatchingReservationsIndeterminate()).toEqual(['id-1']);
+            expect(queue.commitDispatchingReservations()).toEqual([]);
+            expect(queue.cancelByLocalId('id-1')).toBe(true);
+        });
+
         it('cannot begin dispatch twice', () => {
             const queue = new MessageQueue2<string>(mode => mode);
             queue.push('msg1', 'local', 'id-1');
