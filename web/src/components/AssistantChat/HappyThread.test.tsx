@@ -7,9 +7,10 @@ import {
     captureScrollAnchor,
     getHistoryCoverageRetryDelay,
     getPullToLoadState,
-    getScrollIntent,
     hasAppliedHistoryVersion,
     isNestedScrollEvent,
+    getScrollIntent,
+    loadOlderForNavigationWithRetry,
     locateOutlineTargetMessage,
     prependMissingUserSnapshot,
     restoreScrollAnchor,
@@ -334,6 +335,30 @@ describe('scroll anchor helpers', () => {
         })
     })
 
+    it('keeps the first conversation-start smooth-scroll frame as upward when the pre-jump baseline is preserved', () => {
+        // After load-all, restoration leaves the viewport near the bottom.
+        // Zeroing previousScrollTop before smooth scroll makes the first
+        // near-bottom frame look non-upward and can flip view mode to tail.
+        expect(getScrollIntent({
+            scrollTop: 24_800,
+            previousScrollTop: 0,
+            scrollHeight: 25_200,
+            clientHeight: 530
+        })).toMatchObject({
+            isNearBottom: true,
+            isScrollingUp: false
+        })
+        expect(getScrollIntent({
+            scrollTop: 24_800,
+            previousScrollTop: 24_967,
+            scrollHeight: 25_200,
+            clientHeight: 530
+        })).toMatchObject({
+            isNearBottom: true,
+            isScrollingUp: true
+        })
+    })
+
     it('cancels initial scroll settling when the user scrolls up away from the bottom', () => {
         const intent = getScrollIntent({
             scrollTop: 520,
@@ -485,5 +510,40 @@ describe('share turn snapshots', () => {
         const fallback = { html: '', text: 'prompt', role: 'user' as const }
 
         expect(prependMissingUserSnapshot([user], fallback)).toEqual([user])
+    })
+})
+
+describe('navigation history loading', () => {
+    it('retries transient stops until a page loads', async () => {
+        const loadOlder = vi.fn()
+            .mockResolvedValueOnce('transient-stop')
+            .mockResolvedValueOnce('transient-stop')
+            .mockResolvedValueOnce('loaded')
+        const wait = vi.fn(async () => {})
+
+        await expect(loadOlderForNavigationWithRetry(loadOlder, { wait })).resolves.toBe(true)
+        expect(loadOlder).toHaveBeenCalledTimes(3)
+        expect(wait).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not retry a terminal stop', async () => {
+        const loadOlder = vi.fn(async () => 'terminal-stop' as const)
+        const wait = vi.fn(async () => {})
+
+        await expect(loadOlderForNavigationWithRetry(loadOlder, { wait })).resolves.toBe(false)
+        expect(loadOlder).toHaveBeenCalledOnce()
+        expect(wait).not.toHaveBeenCalled()
+    })
+
+    it('bounds repeated transient stops', async () => {
+        const loadOlder = vi.fn(async () => 'transient-stop' as const)
+        const wait = vi.fn(async () => {})
+
+        await expect(loadOlderForNavigationWithRetry(loadOlder, {
+            maxTransientRetries: 2,
+            wait
+        })).resolves.toBe(false)
+        expect(loadOlder).toHaveBeenCalledTimes(3)
+        expect(wait).toHaveBeenCalledTimes(2)
     })
 })

@@ -1,0 +1,82 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1563	KorenKrita	a1c3a793e2b678a6255bfc273a6ef97053c63915	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1562	swear01	b0e9e1eb9a16aff2a5e5beb996f3eabc0444904b	carry	ready	clear	clean	-	proportional	accepted-change	fork PR #5 merged into origin main as 5161be5c9; content copied into this release
+pr-1561	techotaku39	2888325a00c40e8126bca972656371c79830c3de	defer	ready	review	findings	-	review	review	not in this release; findings or status below ready: additions=148,deletions=24,files=2
+pr-1560	techotaku39	6dd8a3123b649bdbe5de035724a76094ea3e4ec5	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1557	0xshawn	10bd24dfdfcd4b1165c5026d4d3288cd0a137d16	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1552	techotaku39	66691c72d1ecb05c061fefc7470e632b57236e5d	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1550	techotaku39	49fb32745128860780ada910b49d540562fe6c6e	defer	ready	review	findings	-	review	review	not in this release; findings or status below ready: additions=36,deletions=211,files=5
+pr-1548	techotaku39	7f1875ba818b21527adb7600c589691ea31f8916	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1547	techotaku39	127b0ac1ad23a338b94987689d0afce5c5efc79c	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1546	techotaku39	5b870568d077f618b9a6bff5ab6d65da8ff9d637	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1544	techotaku39	5f7e3cc5920ce356a0c47b847c6174f582d46666	defer	merge-dirty	review	review	-	review	review	not in this release: additions=100,deletions=20,files=3
+pr-1543	techotaku39	f5ebfae0bae9d468e6562bf22e95e605f44a0491	defer	ready	clear	clean	-	proportional	preserve	hotfix-scoped release; carry next cycle
+pr-1542	swear01	a7b5d521d29ff4fdcdf3e11d1161a72b043d5ba7	defer	ready	clear	findings	-	review-large	review	personal PR not yet merged into fork main; carry next cycle
+pr-1541	swear01	2db15d1b3cee32ca9bc3ab0134642a34d6ef39b0	defer	ready	clear	clean	-	review	review	personal PR not yet merged into fork main; carry next cycle
+pr-1537	zj1123581321	693aed6e40beed850caeb65ac32fb4e6d68442d5	defer	merge-unknown	review	review	-	review-large	review	not in this release: additions=487,deletions=73,files=36
+pr-1534	swear01	ed2fca2424287abefc5422e8df1be4b943ca8a02	defer	merge-unknown	clear	review	-	review	review	personal PR not yet merged into fork main; carry next cycle
+pr-1530	techotaku39	b5b72457b3184524588008b3492013682db0f5cd	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-1528	7bata	3517c527077d71033ec3782185ca4cf6d280d0f4	defer	merge-unknown	review	review	-	review-large	review	not in this release: additions=1701,deletions=7,files=9
+pr-1527	7bata	597c28d6bcb5dd2fc8938197d60e5dea9d327821	defer	merge-unknown	review	review	-	review-large	review	not in this release: additions=1598,deletions=24,files=19
+pr-1525	7bata	85e5ec888140097893bdf30dfe1b101145d2c54e	defer	merge-unknown	review	review	-	review	review	not in this release: additions=179,deletions=27,files=4
+pr-1523	techotaku39	8ebecc1a459ca0aa886a51619591312b946d2d97	defer	merge-unstable	review	review	-	review-large	review	not in this release: additions=772,deletions=91,files=21
+pr-1517	TimChesko	d9767f92f0beb3a245ed2329030126441676e8e0	defer	ready	review	findings	-	review-large	review	not in this release; findings or status below ready: additions=1242,deletions=53,files=15
+pr-1512	techotaku39	2268c6653034ce55fc6aee5909ba3ad1a109558c	defer	ready	review	findings	-	review-large	review	not in this release; findings or status below ready: additions=1263,deletions=61,files=35
+pr-1511	heavygee	e905d633b9c583b14d4a06bae25d5baea37df701	defer	draft	review	review	-	review-large	review	not in this release: additions=2174,deletions=36,files=28
+pr-1495	techotaku39	a0de77881531f3df564a42860ddcc992813ff109	defer	ready	review	review	-	review	review	not in this release: additions=50,deletions=1,files=2
+pr-1490	techotaku39	df02f89bc3815e5c4fe96156acb82e21757b7b34	defer	ready	review	review	-	review	review	not in this release: additions=61,deletions=2,files=2
+pr-1475	swear01	4591052676fce788a213a44dcc21f0bb256cbfba	defer	merge-unknown	clear	review	-	review	review	personal PR not yet merged into fork main; carry next cycle
+pr-1473	heavygee	1d55a4be9ec243237611fd8f1bb45cb7a60a8e7f	defer	ready	review	findings	-	review-huge	review	not in this release; findings or status below ready: additions=9052,deletions=262,files=126
+pr-1471	Kryptonzy	bf96cf679f2d568702a509a4ba6ec76f00fd33c0	defer	ready	review	review	-	review	review	not in this release: additions=38,deletions=7,files=2
+pr-1469	swear01	e4e831101ce51ed039d98b21ff02bceade73be33	carry	ready	clear	clean	-	review-huge	review	content in this release
+pr-1468	swear01	fd2e0775c42463bb122f40b0c7b2c4872a729308	defer	merge-unknown	clear	review	-	review-large	review	personal PR not yet merged into fork main; carry next cycle
+pr-1451	swear01	f489209f15333faf17666cbadfdd6a219a7d6d74	defer	merge-unknown	clear	review	-	review	review	personal PR not yet merged into fork main; carry next cycle
+pr-1447	wu736139669	703c1adef0e967187796d6dcee0a1b0043057c21	carry	merge-unknown	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-1443	wu736139669	75e42cdcfecd633ddeb6663bb1b8e63be9643b18	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=2656,deletions=352,files=57
+pr-1436	swear01	155ec33a04b8b748279f0495ed0bd7518c98eee3	defer	merge-unknown	clear	review	-	review-large	review	personal PR not yet merged into fork main; carry next cycle
+pr-1429	wu736139669	1548315fbc9b48f6b60d68ad957c7151e88d3d12	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=5148,deletions=123,files=38
+pr-1424	heavygee	6052798a014d0ae6e0cac73945b47a8806a515f1	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-1422	techotaku39	5ae02d6caed360298761decc20e1f23db6d880da	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-1421	swear01	ed7c7cf5e39907e18aaf34fb86b01f0fd72ddf03	defer	merge-unknown	clear	review	-	review	review	personal PR not yet merged into fork main; carry next cycle
+pr-1419	swear01	adb0ad029640aeae8dd821d62af7ee790ec95b12	defer	merge-unknown	clear	review	-	review	review	personal PR not yet merged into fork main; carry next cycle
+pr-1418	swear01	d3c28fa332bae90aa62c2dd1d7b0f4a9b3fd3e86	carry	ready	clear	clean	-	review	review	content in this release
+pr-1414	techotaku39	ffac0662f0f0f1fabc2022f514cf06fb37084806	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-1361	Himehane	6a6d45dfa4ea9b771c3b9219f6332b594743014e	defer	merge-unknown	review	review	-	review	review	not in this release: additions=309,deletions=17,files=2
+pr-1360	wu736139669	7fb80ea97b003a7bd9e07c16a5ccd866718ea6d1	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=2404,deletions=60,files=42
+pr-1351	yin1245	feb70174798df546512ebd9096768c94ddead945	defer	merge-unknown	review	review	-	review-large	review	not in this release: additions=913,deletions=28,files=22
+pr-1309	techotaku39	01a98c4efd4ddcfb0b8278c936ddd346f7e30936	defer	draft	review	review	-	review	review	not in this release: additions=957,deletions=195,files=13
+pr-1257	hqhq1025	6957978424f74209dca9295699137179282e80ad	defer	ready	review	findings	-	review	review	not in this release; findings or status below ready: additions=287,deletions=9,files=2
+pr-1242	hqhq1025	2c7a46f98f49a23e638f5188a6960ddc937cade3	defer	merge-dirty	review	review	-	review	review	not in this release: additions=326,deletions=64,files=11
+pr-1212	hqhq1025	93d8678da8535c3a812e166f43961c1c4ff50f92	defer	merge-dirty	review	review	-	review-large	review	not in this release: additions=1224,deletions=7,files=21
+pr-1193	mrrnb	999f1d1170d382cc4fd5e5fdf6e0a6ab4a0bf65f	defer	draft	review	review	-	review	review	not in this release: additions=60,deletions=5,files=2
+pr-1189	tiann	5f949783ad2123d865d758a921681245683f899d	defer	merge-unknown	review	review	-	review	review	not in this release: additions=113,deletions=11,files=4
+pr-1188	tiann	1f23f857e4173a25f969879ef139487ec1c9955e	defer	merge-unknown	review	review	-	review	review	not in this release: additions=60,deletions=0,files=2
+pr-1163	heavygee	b662270feaa0329b4670f1e30629b803d31e9f56	defer	merge-unstable	review	review	-	review-huge	review	not in this release: additions=3149,deletions=76,files=59
+pr-1158	techotaku39	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-1157	techotaku39	b62788b053616a9b2f02b118116a917bec253be9	defer	draft	review	review	-	review	review	not in this release: additions=233,deletions=10,files=9
+pr-1126	GoldenZqqq	31ce48080df1a62150e9fe7e0a86fde511ef3cc2	defer	merge-dirty	review	review	-	review	review	not in this release: additions=389,deletions=25,files=7
+pr-1099	NPUlrk	91116cd9089107625d95ae2bc99fa615ef87d6a6	defer	merge-unknown	review	review	-	review	review	not in this release: additions=152,deletions=16,files=3
+pr-1093	techotaku39	5d0f0d226cb48f036fcfb2d967bbacbc31092013	defer	ready	review	findings	-	review-large	review	not in this release; findings or status below ready: additions=1025,deletions=36,files=14
+pr-1092	zulinliu	4427e6e08b2fed4429c793af2841f7f47fb70bac	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=4590,deletions=359,files=41
+pr-1091	zulinliu	0cf0d70310e9c58c5a41509793260a003822a9b4	drop	merge-dirty	review	-	-	review-huge	review	temporary exclusion per operator ruling 2026-08-13 (session model-picker grouping)
+pr-1059	Arnie97	37deeeba5263ceb402429c069e911eac96eb406e	defer	merge-unknown	review	review	-	review	review	not in this release: additions=22,deletions=307,files=4
+pr-1054	DullJZ	9cbe9b1fa24edec152bb610e0b1049930c723432	defer	merge-unknown	review	review	-	review	review	not in this release: additions=263,deletions=64,files=12
+pr-987	heavygee	30a92beaf04227029f9c470afe1fea20e0bd5eaf	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-975	KorenKrita	344c6009b53e20829978e44367fa50b5870986fe	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=4520,deletions=36,files=49
+pr-955	swear01	f6a624251cb125182965dc343351c362035d071a	carry	merge-unknown	clear	clean	-	review-large	review	content in this release
+pr-945	heavygee	41d772c1998872cbcd468aee7ec2fa12a3833eae	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-942	dzshzx	f1f93474f042381818f0d605b1d64b3fb42cb02b	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=29927,deletions=1050,files=246
+pr-906	swear01	d652eafdb885d5b2e09ff76461564f3f316b78e1	carry	merge-unknown	clear	clean	-	review-huge	review	content in this release
+pr-847	heavygee	939a9d1e61853e6b3720852f7d902575a94fb8f2	carry	ready	clear	clean	-	proportional	preserve	content already in v0.27.3.2 fork delta; copied into this release
+pr-769	junxin367	60c11607ce3bba734f38b6fcf87be07b32298683	defer	merge-unknown	review	review	-	review-huge	review	not in this release: additions=3322,deletions=19,files=52
+pr-663	SpartaGeorge	5dbf6d406a6bb8507dc07598ba2aecc8cd98ee0f	defer	merge-unknown	review	review	-	review	review	not in this release: additions=619,deletions=76,files=15
+pr-658	yrom	f7d8ca3ea0f8ae47245443ce2c0cfec612263e62	defer	merge-unknown	review	review	-	review	review	not in this release: additions=159,deletions=6,files=4
+pr-553	wzxjohn	6e3da463f4fb213afc6a95d3005232e647f39ec6	defer	merge-dirty	review	review	-	review-large	review	not in this release: additions=1866,deletions=7,files=20
+pr-536	dsus4wang	1de72788e93c6aae6511a5af8bb05bda631093c0	defer	merge-dirty	review	review	-	review-large	review	not in this release: additions=1754,deletions=11,files=38
+pr-535	dsus4wang	abcf3a4bff8b685a70ceeb77008f4f217b43b67c	defer	merge-unknown	review	review	-	review	review	not in this release: additions=643,deletions=6,files=17
+pr-518	duxiaoxiong	72cceea333addd3a8b39948b722750056433d39b	defer	draft	review	review	-	review-huge	review	not in this release: additions=8937,deletions=304,files=119
+pr-490	tehao999	745acf545461ad7f8c615ebd178f3a15df869fb2	defer	draft	review	review	-	review-huge	review	not in this release: additions=113035,deletions=7945,files=719
+pr-484	YiwenZhu77	641a01266de65d4944ec5c609a40c717cd41662a	defer	merge-unknown	review	review	-	review-large	review	not in this release: additions=1128,deletions=58,files=19
+pr-394	koenzhao	fb5f201ec230e0b7abdc15dcf26483d67a56a1be	defer	merge-unknown	review	review	-	review	review	not in this release: additions=33,deletions=9,files=2
+pr-325	MrHeB	c12df55ff52d2544ff40f313b702b24dc0732cf8	defer	merge-unknown	review	review	-	review-large	review	not in this release: additions=2186,deletions=7,files=18
+pr-312	just4zeroq	572d489bbd359fe1ca9b4eb96a852804e42e69ac	defer	merge-dirty	review	review	-	review-large	review	not in this release: additions=2092,deletions=6,files=18

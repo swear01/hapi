@@ -1,18 +1,11 @@
-import {
-    useCallback,
-    useEffect,
-    useId,
-    useLayoutEffect,
-    useRef,
-    useState,
-    type CSSProperties
-} from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { useTranslation } from '@/lib/use-translation'
 import { HoverTooltip } from '@/components/HoverTooltip'
 import { safeCopyToClipboard } from '@/lib/clipboard'
 import { buildSessionReferenceText } from '@/lib/sessionReference'
 import { usePlatform } from '@/hooks/usePlatform'
 import { CopyIcon } from '@/components/icons'
+import { useAnchoredMenu } from '@/hooks/useAnchoredMenu'
 
 type SessionActionMenuProps = {
     isOpen: boolean

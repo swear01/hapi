@@ -1,3 +1,4 @@
+export * from './agentBudget'
 export * from './scratchlistAttachments'
 export * from './workGraph'
 export * from './apiTypes'
@@ -7,12 +8,15 @@ export * from './buildInfo'
 export * from './conversationHistory'
 export * from './effort'
 export * from './flavors'
+export * from './providerManagement'
 export * from './models'
 export * from './modes'
 export * from './resume'
 export * from './rpcMethods'
 export * from './runnerCapabilities'
 export * from './search'
+export * from './machineRegistration'
+export * from './upgradeChannel'
 export * from './socket'
 export * from './sessionSummary'
 export * from './sessionCitation'
@@ -25,4 +29,16 @@ export * from './slashCommands'
 export * from './utils'
 export * from './usage'
 export * from './version'
+export {
+    AttachedJobSchema,
+    AttachedJobUpsertSchema,
+    AttachedJobPatchSchema,
+    AttachedJobStatusSchema
+} from './schemas'
+export type {
+    AttachedJob,
+    AttachedJobUpsert,
+    AttachedJobPatch,
+    AttachedJobStatus
+} from './schemas'
 export type * from './types'

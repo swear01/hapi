@@ -13,6 +13,7 @@ Run official Claude Code / Codex / Cursor Agent / Grok Build / OpenCode / Kimi /
 - **Terminal Anywhere** - Run commands from your phone or browser, directly connected to the working machine.
 - **Voice Control** - Talk to your AI agent hands-free using the built-in voice assistant.
 - **Workspace Browser** - Opt-in via one or more `hapi runner start --workspace-root <path>` flags: browse scoped file trees from the web and start sessions in allowed subdirectories.
+- **Managed API Providers** - Configure machine-local API profiles, provider health checks, and model choices for supported coding agents.
 
 ## Demo
 
@@ -39,6 +40,7 @@ For self-hosted options (Cloudflare Tunnel, Tailscale), see [Installation](docs/
 - [How it Works](docs/guide/how-it-works.md)
 - [Supported Agents](docs/guide/agents.md)
 - [Voice Assistant](docs/guide/voice-assistant.md)
+- [API Providers](docs/guide/api-providers.md)
 - [Why HAPI](docs/guide/why-hapi.md)
 - [FAQ](docs/guide/faq.md)
 

@@ -1172,7 +1172,6 @@ export function markMessagesRequeued(sessionId: string, localIds: string[]): voi
         return changed ? buildState(previous, { messages }) : previous
     }, true)
 }
-
 export function markMessagesConsumed(
     sessionId: string,
     localIds: string[],

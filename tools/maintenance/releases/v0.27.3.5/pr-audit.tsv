@@ -1,0 +1,52 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1573	techotaku39	5ffdee3c895aac21a1ea9e26d09b5e5e9b0d90b3	carry	ready	clear	clean	5ffdee3c895	proportional	preserve	bot clean at head; preserves Fork action while reading history
+pr-1581	techotaku39	ac2750164e3b10b49e99b190bab4eb57ad489b32	carry	ready	clear	clean	ac2750164e3	proportional	preserve	bot clean at head; clears stale drafts after delayed queued sends
+pr-1582	swear01	4ecb4b31e784e8965f091177c22f973f724dbcdd	carry	ready	clear	clean	4ecb4b31e78	proportional	preserve	PERSONAL_PR_POLICY_EXCEPTION: personal PR; bot clean at head; compact-summary mapping
+pr-1541	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1543	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1548	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1552	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1557	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1560	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1563	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-906	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1422	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1414	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-847	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-987	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-945	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1447	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1158	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1424	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1469	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1418	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-955	-	-	carry	ready	clear	clean	-	proportional	preserve	in tree from v0.27.3.4; carried via fork overlay
+pr-1471	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1490	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1495	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1530	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1544	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1546	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1547	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1550	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1562	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1565	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1568	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1569	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1570	-	-	drop	merged	clear	clean	-	proportional	preserve	officially merged in upstream 901f17d0c; supersedes carried patch
+pr-1091	-	-	drop	merge-dirty	review	-	-	review-huge	review	operator ruling 2026-08-13
+pr-1320	-	-	drop	merged	review	-	-	review-huge	review	permanent exclusion (Antigravity)
+pr-1574	-	-	defer	-	clear	findings	-	-	review	personal; +6445 DSH; Major at head
+pr-1572	-	-	defer	-	clear	findings	-	-	review	2x Major at head
+pr-1571	-	-	defer	-	clear	findings	-	-	review	findings at head
+pr-1564	-	-	defer	-	clear	findings	-	-	review	Major: cross-runner hapiMcpUrl
+pr-1566	-	-	defer	-	clear	findings	-	-	review	Major: DSH preset dropped
+pr-1542	-	-	defer	-	clear	findings	-	-	review	personal; findings
+pr-1534	-	-	defer	-	clear	findings	-	-	review	personal; findings
+pr-1475	-	-	defer	-	clear	findings	-	-	review	personal; findings at new head
+pr-1436	-	-	defer	-	clear	findings	-	-	review	personal; findings
+pr-1421	-	-	defer	-	clear	findings	-	-	review	personal; findings
+pr-1468	-	-	defer	-	clear	findings	-	-	review	personal; UNSTABLE; operator-dropped
+pr-1451	-	-	defer	-	clear	findings	-	-	review	personal; DIRTY
+pr-1419	-	-	defer	-	clear	findings	-	-	review	personal; DIRTY
+pr-1567	-	-	defer	-	clear	findings	-	-	review	5522 additions Reasonix; waits maintainer

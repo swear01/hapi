@@ -12,6 +12,7 @@ import type {
     UserInput
 } from '../appServerTypes';
 import { resolveCodexPermissionModeConfig } from './permissionModeConfig';
+import { resolveManagedProviderWireModel } from '@/host/providerModel';
 
 export const codexCollaborationSpawnAgentInstructions = [
     'Codex sub-agent spawning rules:',
@@ -224,8 +225,9 @@ export function buildThreadStartParams(args: {
         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
     };
 
-    if (args.mode.model) {
-        params.model = args.mode.model;
+    const wireModel = resolveManagedProviderWireModel(args.mode.model);
+    if (wireModel) {
+        params.model = wireModel;
     }
     if (args.mode.personality) {
         params.personality = args.mode.personality;

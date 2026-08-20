@@ -73,3 +73,9 @@ android/captures/
 # drop in their own) — never commit a real one. The committed placeholder is
 # android/app/google-services.json.example.
 android/app/google-services.json
+
+# Desktop generated packaging output
+**/release/
+**/release-artifacts/
+desktop/resources/hapi-cli/*/*
+!desktop/resources/hapi-cli/*/.gitkeep

@@ -62,12 +62,15 @@ import TerminalPage from '@/routes/sessions/terminal'
 import SettingsLayout from '@/routes/settings/layout'
 import SettingsHubPage from '@/routes/settings'
 import SettingsGeneralPage from '@/routes/settings/general'
+import SettingsRunnerManagementPage from '@/routes/settings/runner-management'
 import SettingsDisplayPage from '@/routes/settings/display'
 import SettingsChatPage from '@/routes/settings/chat'
+import SettingsProvidersPage from '@/routes/settings/providers'
 import SettingsVoicePage from '@/routes/settings/voice'
 import SettingsVoiceVoicesPage from '@/routes/settings/voice-voices'
 import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
 import SettingsMachinesPage from '@/routes/settings/machines'
+import SettingsNotificationsPage from '@/routes/settings/notifications'
 import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import SettingsUsagePage from '@/routes/settings/usage'
@@ -586,10 +589,11 @@ function SessionPage() {
         retryMessage,
         isSending,
         sendSettlement,
+        consumeSendSettlement,
     } = useSendMessage(api, sessionId, {
         isSessionThinking: session?.thinking ?? false,
-        onSuccess: (sentSessionId) => {
-            clearDraftsAfterSend(sentSessionId, sessionId)
+        onSuccess: (sentSessionId, sentText) => {
+            clearDraftsAfterSend(sentSessionId, sessionId, sentText)
             // 中文注释：一旦用户已经在 Hapi 内继续这个 Codex 会话，就清除"刚从 Codex 导入"的标记。
             clearCodexImportedSession(session?.metadata?.codexSessionId)
             // A successful send supersedes any previously-rendered error
@@ -800,6 +804,7 @@ function SessionPage() {
             isLoadingMoreMessages={messagesLoadingMore}
             isSending={isSending}
             sendSettlement={sendSettlement}
+            onConsumeSendSettlement={consumeSendSettlement}
             viewMode={messagesViewMode}
             messagesVersion={messagesVersion}
             historyVersion={historyVersion}
@@ -1201,6 +1206,12 @@ const settingsGeneralRoute = createRoute({
     component: SettingsGeneralPage,
 })
 
+const settingsRunnerManagementRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'general/runners',
+    component: SettingsRunnerManagementPage,
+})
+
 const settingsDisplayRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'display',
@@ -1211,6 +1222,12 @@ const settingsChatRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'chat',
     component: SettingsChatPage,
+})
+
+const settingsProvidersRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'providers',
+    component: SettingsProvidersPage,
 })
 
 const settingsVoiceRoute = createRoute({
@@ -1235,6 +1252,12 @@ const settingsMachinesRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'machines',
     component: SettingsMachinesPage,
+})
+
+const settingsNotificationsRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'notifications',
+    component: SettingsNotificationsPage,
 })
 
 const settingsAboutRoute = createRoute({
@@ -1282,12 +1305,15 @@ export const routeTree = rootRoute.addChildren([
     settingsRoute.addChildren([
         settingsIndexRoute,
         settingsGeneralRoute,
+        settingsRunnerManagementRoute,
         settingsDisplayRoute,
         settingsChatRoute,
+        settingsProvidersRoute,
         settingsVoiceRoute,
         settingsVoiceVoicesRoute,
         settingsVoiceAdvancedRoute,
         settingsMachinesRoute,
+        settingsNotificationsRoute,
         settingsStorageRoute,
         settingsUsageRoute,
         settingsAboutRoute,

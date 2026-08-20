@@ -5,8 +5,11 @@ import {
     type TranscriptionMode,
     type TranscriptionProvider
 } from '@hapi/protocol/voice'
+import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
+import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
+import { appendTranscript } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -29,6 +32,8 @@ export function useRealtimeDictation(config: {
     provider: TranscriptionProvider | null
     mode: TranscriptionMode
     onFinalTranscript: (text: string) => void
+    sendMessage?: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
+    getCurrentText?: () => string
 }) {
     const supported = config.api !== null
         && config.mode === 'realtime'
@@ -53,23 +58,70 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const finish = useCallback((text: string) => {
-        if (!mountedRef.current) return
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode } | null>(null)
+
+    const finish = useCallback(async (text: string) => {
+        const pendingSend = sendOnFinishRef.current
+        sendOnFinishRef.current = null
         updatePartial('')
-        onFinalTranscriptRef.current(text)
-        setStatus('disconnected')
-    }, [updatePartial])
+        if (pendingSend) {
+            const finalMessage = appendTranscript(pendingSend.initialText, text)
+            if (finalMessage.trim()) {
+                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                try {
+                    await sendMsg(pendingSend.sessionId, finalMessage, pendingSend.deliveryMode)
+                    const cur = getDraft(pendingSend.sessionId)
+                    if (cur === '' || cur === pendingSend.draftAtStart) {
+                        clearDraft(pendingSend.sessionId)
+                    }
+                } catch (sendError) {
+                    const cur = getDraft(pendingSend.sessionId)
+                    if (cur === '' || cur === pendingSend.draftAtStart) {
+                        saveDraft(pendingSend.sessionId, finalMessage)
+                    }
+                    if (mountedRef.current) {
+                        if (!config.getCurrentText?.().trim()) {
+                            onFinalTranscriptRef.current(finalMessage)
+                        }
+                        setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
+                        setStatus('error')
+                        return
+                    }
+                }
+            }
+        } else if (mountedRef.current) {
+            onFinalTranscriptRef.current(text)
+            setStatus('disconnected')
+        }
+        if (mountedRef.current) {
+            setStatus('disconnected')
+        }
+    }, [config.api, config.getCurrentText, config.sendMessage, updatePartial])
 
     const fail = useCallback((value: unknown) => {
-        if (!mountedRef.current) return
+        const pendingSend = sendOnFinishRef.current
+        sendOnFinishRef.current = null
+        if (pendingSend) {
+            const finalMessage = appendTranscript(pendingSend.initialText, partialRef.current)
+            const cur = getDraft(pendingSend.sessionId)
+            if (cur === '' || cur === pendingSend.draftAtStart) {
+                saveDraft(pendingSend.sessionId, finalMessage)
+            }
+            if (mountedRef.current) {
+                if (!config.getCurrentText?.().trim()) {
+                    onFinalTranscriptRef.current(finalMessage)
+                }
+            }
+        }
         elevenLabsActiveRef.current = false
         resolveElevenLabsCommitRef.current?.()
         resolveElevenLabsCommitRef.current = null
+        if (!mountedRef.current) return
         sessionRef.current?.cancel()
         sessionRef.current = null
-        setError(value instanceof Error ? value.message : 'Realtime transcription failed')
+        setError(value instanceof Error ? value.message : 'Transcription failed')
         setStatus('error')
-    }, [])
+    }, [config.getCurrentText])
 
     const elevenLabs = useScribe({
         modelId: ELEVENLABS_REALTIME_TRANSCRIPTION_MODEL,
@@ -224,6 +276,11 @@ export function useRealtimeDictation(config: {
         }
     }, [elevenLabs, fail])
 
+    const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode) => {
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), deliveryMode }
+        await stop()
+    }, [stop])
+
     const toggle = useCallback(async () => {
         if (status === 'connected' || status === 'connecting') await stop()
         else await start()
@@ -233,6 +290,7 @@ export function useRealtimeDictation(config: {
         mountedRef.current = true
         return () => {
             mountedRef.current = false
+            if (sendOnFinishRef.current) return
             operationRef.current += 1
             startAbortRef.current?.abort()
             startAbortRef.current = null
@@ -244,5 +302,5 @@ export function useRealtimeDictation(config: {
         }
     }, [])
 
-    return { supported, status, error, partialTranscript, toggle }
+    return { supported, status, error, partialTranscript, toggle, stopAndSend }
 }

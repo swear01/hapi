@@ -1,0 +1,271 @@
+# HAPI maintained release audit
+
+Previous maintained release: v0.27.3.2
+
+Official release: v0.27.3
+
+Personal PR owner: swear01
+
+Origin main: 5161be5c93dde86f045fc37b5ec37be5184f9ab9
+Upstream main: febbf8ff58005e6c54ccd00967bc01f71792892f
+
+## Fork-only commits
+
+- 5161be5c93dde86f045fc37b5ec37be5184f9ab9 fix(web): recover silently-dead SSE connections quickly, stop banner noise (#5)
+- 702b1d35fecd4100e84ac322ffe7acb8a3c8941a docs(maintenance): temporary drop ruling for PR #1091 (model-picker grouping)
+- 217d3efaeb8aa873fc308ecd095d6db708951704 chore(release): v0.27.3.2 CI hotfix
+- 801ba3e76ff7c800b56a59236bcd1c8e336b6329 chore(release): prepare v0.27.3.1
+- 1529be2e748e4ee16048a0e23fa1ca35d605a524 carry: PR #1529 exclusive agent spawn lease
+- 5eccc0ab7a81287a955b7bf084bfb8f87e03cf7f carry: PR #1530 prevent Rewind transcript reset crashes
+- 7f061b438f502531ccc74fabe99bf43f27ff173c carry: PR #1447 current head and dedupe pin controls
+- aa2cd23a8e45be854038aceb5d69599b2b0cb343 carry: PR #1158 current head
+- 29978313c7b8bcfeb0eb691bb613585e1468bff7 merge: rebuild v0.27.3.1 from upstream 0.27.3 with maintained overlay
+- 32e025204180ce13a80a3b131f9f0f1621b0a639 chore(release): prepare v0.27.2.5 (hotfix — machine capability overlay)
+- eedeac835e2424edd2f6f84265d79a0c0a26489f fix(hub): restore live machine-capability overlay on machine lists (mapLive) — skew banner showed all runners as legacy; fix(cli): keepalive/connect identity keeps asRunner capabilities
+- a61e54e8ac3f9aa210f4e52d84494691175a9e7a chore(release): v0.27.2.4 manifest + pr-audit (33 carried, 6 dropped, #1473/#1511/#1512 deferred)
+- b1b9238aea944f3990ab321925cb3fec5b563232 docs(release): mention fork-main codex-usage rate-limit fields in v0.27.2.4 notes
+- b020733645139958d7780f7c78d70699c0c04b8e fix: AcpSdkBackend #1503 debounce + activity tests, remove #1468 cost tests, restore #1484 drain tests
+- 7c19bb13c559d13d0669afbc1cc4d57013a71fa9 fix: post-fork-main-merge alignment — upstream usage/usageService/usage page (no #1468), fork RunnerVersionSkewBanner/MachineSelector, SqliteTableUsage.rows, markdown-a fixture
+- 20db9fcee588051857d4adff39f30e41bbc1c634 merge: re-apply fork-main PR #4 codex-usage rate-limit fields onto v0.27.2.4
+- 1a96a26ef6e55e35c49f30045474e5fac78e7009 merge: fork main into v0.27.2.4 (resolve ours — new build supersedes v0.27.2.3 content)
+- 723c36e087b45aae31b66b606abd11b330018b02 chore(release): prepare v0.27.2.4 (version bump + release notes)
+- 58eb28d20ff515978577d7f7a3ef8da59fc8ca97 fix(cli): restore agy Linux-only skipIf guards (upstream #1406 removed them; tests assume /proc)
+- 069c12ae95232fd4ed338b5ab79919c17927fd01 fix: web/hub test alignment — session_jobs wiring (upstream lacks #1404), #1519 fail-closed href tests, runner-mgmt link, UnifiedButton voice (fork #1419), DirectoryTree storage spies
+- 464aee406f7c22b3a9adf8f0918139ee604ae7e5 merge: Phase 2 resolution complete — carried patches on upstream 11964b4b0, #1468 dropped, all typechecks green (cli/hub/web/desktop)
+- 5a1392a8f6ae80393b7da6b1d02766c20a197168 merge: resolve carried patches onto upstream 11964b4b0 (Phase 2: upstream-new files, #1468 dropped, schema ladder V24-V28)
+- 15a4f465def6b56c2d8019adf8153fb3ed1c68c5 carry: 28-pr-1475 (resolved from v0.27.2.3; Phase 1)
+- 0366b9fbab35d83e8df761e4a9e85966345dcc92 carry: 27-pr-1484 (resolved from v0.27.2.3; Phase 1)
+- 143cfcbb44add76398072acfccafa0494d4de781 carry: 21-pr-1498 (resolved from v0.27.2.3; Phase 1)
+- 1d0d8e57ff4a882b7b90e6c6889eef17ca880413 carry: 18-pr-1429 (resolved from v0.27.2.3; Phase 1)
+- 99d43aaf57f53ebd61b76c11300e79f49d2489fa carry: 17-pr-1447 (resolved from v0.27.2.3; Phase 1)
+- 56a4aa736e041cc1afb677b55eaf25fa32598c2d carry: 15-pr-1451 (resolved from v0.27.2.3; Phase 1)
+- 7e3d1ff9fda6dbe752edcf2d707114c4204bb55f carry: 14-pr-1469 (resolved from v0.27.2.3; Phase 1)
+- baddc68a70b4b3489dad32756e6d7d2c452b2878 carry: 13-pr-769 (resolved from v0.27.2.3; Phase 1)
+- 066f94a6819f58f968a1a1d691888233c9c338d4 carry: 12-pr-1419 (resolved from v0.27.2.3; Phase 1)
+- a7c1a14cc5ce41b30cd9b60347fe105c6a690e7b carry: 09-pr-906 (resolved from v0.27.2.3; Phase 1)
+- a5ee6ea53f1768295a1a392f93d3dfc2f589931a carry: 07-pr-1158 (resolved from v0.27.2.3; Phase 1)
+- eaf924d31d6ffbde17ade03ece56db97ac958965 carry: 04-pr-1424 (resolved from v0.27.2.3; Phase 1)
+- a0e49c775eba1dee2ab37ba86da06574e8355695 carry: 03-pr-847 (resolved from v0.27.2.3; Phase 1)
+- 2227b7744b9cc2a31d860e7f271bd94a9ac81572 carry: 02-pr-987 (resolved from v0.27.2.3; Phase 1)
+- 45589d81c47f7fae52f6f0f664bc382146893c39 carry: 01-pr-1091 (resolved from v0.27.2.3; Phase 1)
+- efb1ada54c89c5ee045fe74c4bc670375e115618 carry: 33-pr-1521
+- fc69e7a846bce61dbb6fe961332fe2b827ed6dbf carry: 32-pr-1519
+- 8e86d26253d30de55ada7aa6c1aba56258bada9d carry: 31-pr-1518
+- beb9a4a7818f7d816aec2d6d9399bd058e1cefbc carry: 30-pr-1503
+- 2587ae64e5ba272af4615cb9fd0d29c4c42ac4ec carry: 29-pr-1477
+- bd65159f3592230b22437cae720d1ebd56a41a0b carry: 26-pr-1471
+- d4f1dea7f50cf763765291ab94eeeb14d4754c41 carry: 25-pr-1490
+- 9e1f58411415cf3749d5aba4dcae1b3a0b67af19 carry: 24-pr-1495
+- 3c28f29c589a456c73f84b0272652d61f1a5416e carry: 23-pr-1496
+- b3461597384b963fe5e64c497c0fdf3560e7bc7d carry: 22-pr-1497
+- 3c8d6f894bfb2a664de2033767b2359f5dc0e625 carry: 20-pr-1501
+- 8906f4f49724d475f3adccd549a1ab9b10cc950f carry: 19-pr-1360
+- f2a20c908cc79f680840c9bfb6b298e23c0e7c5b carry: 16-pr-1418
+- cfc6db95287d5618c664bf9a124c227705c39782 carry: 11-pr-1421
+- 2e1dfdc500d98d278defbcdaef76ab87b1d6fccd carry: 10-pr-1436
+- cc61d058af57e2c19ce5ba461d716e462697bedb carry: 08-pr-955
+- 8a703e1db549a04b1b43452a53bd8e6e6f74630e carry: 06-pr-1414
+- 499662ad6ae986919637930f4dc23aeead8206b3 carry: 05-pr-1422
+- 8ac754d40f574315c5eeb0f5565280d3f60725b7 chore(release): normalize patch names
+- 7b3c4d0eee16894068bee59f9614510bc6f22ce7 chore(release): v0.27.2.4 patch queue (33 PRs, PR-only diffs)
+- 901d84a1d4d8d8efe5728e6ccd63929974cf8468 Merge pull request #4 from swear01/fix/codex-usage-rate-limit-fields
+- 837937e00c3afa63d28b19f5107b3d47f3c2a3b0 chore(maintenance): copy fork maintenance tooling
+- 0f8139c5aad62d82c3962982d6651e1fdf9f4d61 fix(codex-usage): parse real app-server rate-limit fields (closes tiann/hapi#1514)
+- ecfce85951af58947b326bec0ac8d73c2f927ab6 fix: repair fork-main merge — restore #1468 usage cost columns, #1093 MessageActions navigation, #1480 steer real-mutation, dedupe rpcGateway/codexLocalLauncher
+- ae345cef83c642e409824caa21e8a5a1bd396155 merge: fork main (hub storage breakdown vacuum + Gemini review method) into v0.27.2.3
+- 688a0c01f739bdf1c292605953d244fccf7acdb7 merge: v0.27.2.2 baseline (resolve ours — rebuilt content is newer)
+- e653f7a747a018fd2f7f1aa7f9e1566bad83b33c docs(release): correct v0.27.2.3 notes — #1473 deferred, not carried
+- ebd2b2988dff56eaaaf9ad4496925d451bb07e1c chore(release): v0.27.2.3 manifest + pr-audit (35 carried, #1473 deferred, #1462 absorbed)
+- a8286dbe0cc9109f0868e4a4ac1696c54171c6e1 fix(web): guard markMessagesConsumed localId/invokedAt nullability in steer invoked reconcile
+- 7181d608457d3332f11e2656d57c7e276c1f600a fix: web test alignment (#1480 steer hook real-mutation, #1475 toolbar order, #1501 dictation recordingFailed guard) + restore Linux-only agy guards (#1406) + keep #906 modelError flush with #1484 anchoring
+- 1aacf66fb63bcd27b13b4c2337d1db10da3d50d4 fix: hub merge fixes (autoBridge reconcile, fleetUpgrade live-RPC + coalescing, opencodeClear job transfer, mergeSessions redirect reclaim)
+- b12c9b713cff1e0f7992b5af50f9b6af4ce6f0c4 fix: UsageEventRow cost columns
+- f6c5e7eb95231afdf27a5279273d8ae1e2751c0f fix: map cost/contextOnly in toUsageEvent
+- a077128b36249a7ad13a26ff2fb949bbe98f115a fix: extend UsageEvent with cost/contextOnly (#1468)
+- db64ea6a7f42e855486e20c69a7902eadcaef480 fix: usageService cost/agents (#1468), callPiRpc (#1480)
+- 3320108f4e17a83911803288c9de0145bf6c20a2 fix: hub (dup import, autoBridge write import, callPiRpc, usage costs)
+- 253440fc44324528dd5f0a18540558ad3e5ccf3e fix: hub fixes (rpcGateway dup, autoBridge apply method, push return shape, claudeImportState fields)
+- b9c221528403434a849e0cd435679e752f280a9d fix: add model/effort toolbar label keys
+- e1c4d81e361e53f324bca0813b18fd0fa7a8ffe2 fix: ComposerButtons useLongPress import + allowQueueGesture prop + toolbar ids
+- 3f31db76261833802facc2390b52ceba24ba285b fix: web fixes (App imports, toolbar ids, fixtures, locales, useNarrowViewport, QueuedMessagesBar steer refs)
+- 21368c56f64e4ddfbd85b9586b4c42f3fa448013 fix: repair steerQueuedMessage/steerMessage methods in client.ts
+- fd98e01fc2e5020af7ae467f3b77779e195823de fix: await listLocalClaudeSessionSummaries in ACP handler
+- aa2411217e90197aa0ae4a58ef91bdbf062f79a8 fix: add stateUpdate constant (#1468) and await claude session page (#1429); claudeRemote timeout
+- 9f3832fbc395785e51170e2ceaed40167f915fca fix: dedupe handleAgentMessage signature in cursorAcpRemoteLauncher
+- 57f54e4360f177a1d57cf0f6f065344635175f53 chore(release): prepare v0.27.2.3 (version bump + release notes)
+- 205fdf9aed4b092c219c1a80cb49620917ee883a fix: resolve useSteerQueuedMessage to generic steer (#906); keep api.steerMessage for Pi
+- 9420a97b8b374de67f55d8d1b3ada1f809f298a3 carry: 37-pr-1484 ACP between-turn straggler flush (merged with #1487 thinking + #906 steer)
+- 0b003637b687f84fc5d16cd25b458ce68511e04c carry: 36-pr-1480 pi queue mid-turn steer (merged with #906 generic steer)
+- 61d70b99f77c81704d28aac2d4b0c517cb96a325 carry: 34-pr-1471
+- d844d73825a620b11ed2c34e4cf6e839b4ca678a carry: 32-pr-1490
+- aa8cf1279382857c3206a2fdf37269322ff9390a carry: 31-pr-1495
+- 8893508a006d6377ad1fe3e2eb1d9339c08f9348 carry: 30-pr-1496 Telegram Mini App chrome
+- 11dab8c63015e18d580b00722dc9188efcd44d1f carry: 29-pr-1497
+- 1fe312606f1657853d985f965af0fee8f27d935b carry: 28-pr-1498
+- 1ff95f1b013e09b8943f5ff3703514a6f0f8fcd1 carry: 27-pr-1501
+- a98ca9986286c183835695ddfc7aa30fb3ec9187 carry: 23-pr-1477 (resolved from v0.27.2.2)
+- bbbde89e4e52c6358b70a7c6b94ba3722a5ab741 carry: 15-pr-1419 (resolved from v0.27.2.2)
+- c8ffebd4ff694333a03637605e8f29751241df22 carry: 24-pr-1447 (resolved from v0.27.2.2)
+- e9cd65422cf301cf064b2ebb0121c682879e2c6b carry: 21-pr-1451 (resolved from v0.27.2.2)
+- 28698aaa18961d927f6c596837778961bcd593eb carry: 14-pr-1421 (resolved from v0.27.2.2)
+- efcf484d952e9c1f8273461eeb1627dd805f29a9 carry: 12-pr-906 (resolved from v0.27.2.2 + upstream #1487 thinking-bump)
+- 0f558ab28b8126bf17fafbe633f5b3550939dca5 carry: 11-pr-955 (resolved from v0.27.2.2)
+- 3750b5a7638a0b357a6abf1d834dc0395d744177 carry: 10-pr-1158 (resolved from v0.27.2.2)
+- 32c2288c496ce5c0828aa67cc30e1bc7bd05d098 carry: 09-pr-1413 (resolved from v0.27.2.2)
+- 1a15c8f545a5c3c49224058dff762cb2b04033c8 carry: 08-pr-1414 (resolved from v0.27.2.2)
+- fec27beb9aaa7df2ca0d990271b28a61dacf3d4f carry: 07-pr-1422 (resolved from v0.27.2.2)
+- c521e7ce5d12d910659a636239e28f6b48b1abdf carry: 06-pr-1424 (resolved from v0.27.2.2)
+- c18855f2d06f79393fa78e7c4156747977f0d678 carry: 05-pr-1108 (resolved from v0.27.2.2)
+- ac1af9a25d028b6b9d90f1178f7a9f7c9c53ce15 carry: 04-pr-847 (resolved from v0.27.2.2)
+- 6749caed19008376c4f0d57971ab6bb6446d6676 carry: 03-pr-986 (resolved from v0.27.2.2)
+- 8d19f063077c4a5a5ad3e2e49698230cee2a98da carry: 02-pr-987 (resolved from v0.27.2.2)
+- 7b2beec2d403a119689ab51a540229ffd31e373c carry: 01-pr-1091 (resolved from v0.27.2.2)
+- d748724cdf01e0505e85a4ca647becfc9f43b82f Merge pull request #3 from swear01/chore/fork-review-method
+- 169e06b8add041e2f51975622d96b18de5fcbe3f chore(ci): drop OpenAI-codex PR review on the fork; GitHub-native Gemini bot is the fork review method
+- b5ba80f85ecb94badf21eba17463ef04b74018e3 Merge pull request #2 from swear01/feat/hub-storage-breakdown-vacuum
+- b7991be8b2fa29bbbb8b2502e49036bfe7ceccf8 test(hub): tolerate empty-table omission in storage breakdown fallback
+- 26109761f9f2f7c41c036dc95ba999066651592b fix(hub): fall back to content-length table estimates when dbstat is unavailable
+- 0622001ce6bdbbcd911d2ca0c50764e7e872beff chore(web): drop macOS case-collision workaround; rely on helper rename to storageUsageSlices
+- f5a4d1b9e1ab959e0ff33e7779ad89e53f75c9ea feat(hub+web): show logical SQLite usage breakdown and add manual VACUUM cleanup
+- e089989e326a47c16d0d2854b948270304078ae2 fix(web): rename storageUsagePie helper to storageUsageSlices to avoid macOS case-collision with StorageUsagePie.tsx
+- 25faf4f190390bd10d02229e81934d4ab895ff6a fix(hub): V27→V28 repair migration creates A2A events ledger when skipped by pre-V23 fork DBs
+- 506344260108975e8d1b165b39a055aa6c471ae5 fix(fork): reject CLI sessions outside machine workspace roots (HAPI_FORK_ENFORCE_SESSION_ROOTS=1 default, from parallel release)
+- 43fda2c97c60ea94150cf5ce2cc64b1c9ae12bae fix: push.test helper returns {sent,failed,subscriptions}
+- 2094925188d177cd8bf460f803ce2b9d260af29e fix: web test fixes (useDictation #1436 version, PermissionField mock, claude api mock, QueryClientProvider in mobile-scroll, SessionList pin gate)
+- a9f088ca533b41ded25ab8b145028baed50d9a82 fix: align cursor transport_closed transient expectation with #987 head
+- 670ebd4517650172f4f33ebed528bc5246b9bdb4 fix: re-apply Linux-only skipIf guards to agy carrier tests
+- 2213be0ea4a922273d2068ea6c38fec137d7e839 fix: hub-session-jobs PUT rejects client-supplied heartbeatAt
+- f37b1eba1dc5588f330b0276f7e20d58dae9f55b fix: hub test fixes (push 503 mock, machines arg index, opencodeClear args, session route stubs, tunwg timeout)
+- e82c6a6ad3539a6474caee91c7230a91fd490858 fix: align pushService test and test-push route with {sent,failed,subscriptions} return
+- 6313ad81a72d0221c570fb2207693db40ab53933 fix: dedupe syncEngine session-job methods
+- fc3c66457bf7726ac79c5a1e22e0c6ee7fcecdc3 fix: remove duplicate upsert/patchSessionJob in syncEngine; align with outcome-returning API
+- 509f6462229d14e0853dd2db16a94688613839f7 fix: repair notificationHub.test structure (restore missing test closes)
+- 6fe9448d856bff0fa4cf006a5367193721c4634f fix: rewrite hubSettings.test.ts with all three settings covered
+- c2475f428bb390dc0d0ea0c8d191fd47c4b947c3 fix: repair hub settings.ts doc comment and hubSettings.test merge
+- 1d0044b4433bd2cab2ad17914ddd9afe4ed9ec5c fix: add deliveryMode to useDictation sendOnFinishRef type
+- a7b08efd075379b7732b9b26e28ba0687374d88f fix: resolve web typecheck errors (voice deliveryMode wiring, settings mocks, locales dupes, fixtures, SettingsPageContent title)
+- 7879696803aeb1d82b9fa22f7a13c1c425a82e34 fix: wire voice deliveryMode through dictation; fix storageUsage casing; update HappyChatContext fixture
+- 35b1e234703ec29914b9ad300f277cf48e062456 fix: restore v0.27.2.1 resolutions for useLongPress and SessionSummary fixtures; dedupe SessionList import
+- 3f5137b35e04a33e6635b4bac0189b0c5c9aad2e fix: repair merge debris in App.tsx toasts, NewSession claude import, SessionList buckets, SessionList test
+- df2ce5abfb334bf23feb7b21c3e022c7d27e9f93 fix: remove stray brace in codexLocalLauncher action loop
+- 3a967213e0198b3099ada35ff4c5905781ea244c fix: adapt codexLocalLauncher to CodexConversionAction[] API; remove duplicate claudeRemote test timeout
+- f61301cef88df377e6e3448ac54c2179bd8e27a9 fix: clean leftover merge markers from patch 12/25 partial applies (MessageQueue2 types, startHub, presentation/useSSE tests, codexLocalLauncher)
+- 8c5cf8ac60732989a5790a18a5a00d84f5e2d3b5 chore(maintenance): drop pr-1443 patch (superseded by pr-906)
+- 756c74b2cc0bb8291c66d531831dc756d30e1b0d chore(maintenance): record v0.27.2.2 release audit and patch manifest
+- 1d8fbb34f850dcf337bc716d3c505ac1ee2c198c chore(release): prepare v0.27.2.2 (version bump, release notes, audit manifest)
+- c23d905264dd4e7cde9030e597bcd64cc74d1d49 carry: PR #1093 assistant response navigation
+- 5571f9c2eed495609b777c06b7a35e030217dbd9 carry: PR #1360 notification preferences (V26→V27 migration ported; resolved on f63d4bb8)
+- 4280ec2fac62e13ecee3c28f4c17be3e7404f264 carry: PR #1429 claude import local session history (resolved on f63d4bb8)
+- 164879cc6c649eb8e815d19507e82d090fa0dab1 carry: PR #1447 pin active sessions (integrated with mode-based pin-in-progress; resolved on f63d4bb8)
+- 14f06016b4ea4d3044a38bf353757a88dd99e8cb carry: PR #1477 AGENT_NOTIFY_SUMMARY chat display settings (resolved on f63d4bb8)
+- 3be69d867c78fac91e412097e46f10cbbe02b22d carry: 22-pr-1418
+- 5dd67a5d73cdf4d1509f766071661def72b4070b carry: PR #1451 Create agent visibility (resolved on f63d4bb8)
+- 6835d25e5e4d0806ffc5aa9547083ba0a5fe0a3b carry: PR #1468 ACP cost usage (V25→V26 migration ported; resolved on f63d4bb8)
+- 97f6e9e931f7f8d814d450f205787af769ad915c carry: PR #1469 unified agent configuration descriptors (resolved on f63d4bb8)
+- 820b8426f333e6e738fae78ce49fcdbafd669e1b carry: 18-pr-1474
+- 86501f132cd54744931b704013e0db3f78147ba6 carry: PR #1475 composer model/effort value buttons
+- 49e8b377aaaa45cb83100bfd98111339e9f608b7 carry: PR #769 desktop launcher (resolved on f63d4bb8; incl. four-part version + bun-layout template fixes)
+- f1a2ff2d40e87bb599a552db1f0ea08353f70780 carry: PR #1419 voice direct send (resolved on f63d4bb8)
+- 26adc12a14de9dadfeb53bf7aab3d8bad2fb1e19 carry: PR #1421 remember all launch settings (resolved on f63d4bb8)
+- 82c3f7b84d8c2cf747ba4cf02029e6a5f0709e28 carry: PR #1436 voice message persistence (resolved on f63d4bb8)
+- 4ef904145ac83a910bb94b25088aefb9b018b099 carry: PR #906 per-queued-message steer (resolved on f63d4bb8)
+- 225ffac5be9b02037a5bf0573e8dc8514ae26127 carry: PR #955 project groups (resolved on f63d4bb8)
+- 0499a3125525078a9c639e0fe78aa16da22752e4 carry: PR #1414 machine labels + PR #1413 share ingest + PR #1158 session header (resolved on f63d4bb8)
+- 8f1a5634c9c3f189f5d61df9410c5a9a938ad96a carry: PR #1422 expandable file errors
+- 0ed32cfe7c8aecc7be1adcea3f72078c1390400d fix(test): resolve leftover codexLocalLauncher test harness merge (keep both messageEvents and usagePayloads)
+- 616ef14a4829fc32ff597dd2cf5d6e553c5800ca carry: PR #1424 session-attached jobs (resolved on f63d4bb8)
+- 06a6018e2fd09c5a468a878e131b4dcc429c6f44 carry: PR #1108 fleet runner version governance (resolved on f63d4bb8)
+- c90525ef14e635ca71105694e8663c77f7965474 carry: PR #986 searchable share + PR #847 codex budget (resolved on f63d4bb8)
+- e68541bf2933b957e3df90898fe42e9a345206db carry: PR #987 notifications + model-error bridge (resolved on f63d4bb8)
+- 20a16ba52de44cbf893bce35248a6b4748acc4cd carry: PR #1091 managed agent API profiles (resolved on f63d4bb8)
+
+## Open upstream pull requests
+
+- #1563 [CLEAN] fix(pi): settle autonomous agent lifecycles instead of swallowing them @ a1c3a793e2b678a6255bfc273a6ef97053c63915 (https://github.com/tiann/hapi/pull/1563)
+- #1562 [CLEAN] fix(web): recover silently-dead SSE connections quickly, stop banner noise @ b0e9e1eb9a16aff2a5e5beb996f3eabc0444904b (https://github.com/tiann/hapi/pull/1562)
+- #1561 [CLEAN] fix(hub): retry Cursor legacy SQLite cleanup on Windows @ 2888325a00c40e8126bca972656371c79830c3de (https://github.com/tiann/hapi/pull/1561)
+- #1560 [CLEAN] fix(web): prioritize latest tail on session re-entry @ 6dd8a3123b649bdbe5de035724a76094ea3e4ec5 (https://github.com/tiann/hapi/pull/1560)
+- #1557 [CLEAN] fix(runner) preserve native instructions @ 10bd24dfdfcd4b1165c5026d4d3288cd0a137d16 (https://github.com/tiann/hapi/pull/1557)
+- #1552 [CLEAN] fix(web): preserve session sidebar scroll during navigation @ 66691c72d1ecb05c061fefc7470e632b57236e5d (https://github.com/tiann/hapi/pull/1552)
+- #1550 [CLEAN] fix(web): keep share actions visible during generation @ 49fb32745128860780ada910b49d540562fe6c6e (https://github.com/tiann/hapi/pull/1550)
+- #1548 [CLEAN] feat(i18n): localize AGENT_NOTIFY_SUMMARY by namespace UI locale @ 7f1875ba818b21527adb7600c589691ea31f8916 (https://github.com/tiann/hapi/pull/1548)
+- #1547 [CLEAN] fix(web): stabilize autocomplete dropdown layout @ 127b0ac1ad23a338b94987689d0afce5c5efc79c (https://github.com/tiann/hapi/pull/1547)
+- #1546 [CLEAN] fix(web): localize Fork and Rewind labels in Simplified Chinese @ 5b870568d077f618b9a6bff5ab6d65da8ff9d637 (https://github.com/tiann/hapi/pull/1546)
+- #1544 [DIRTY] fix(web): add clear action to collapsed session search @ 5f7e3cc5920ce356a0c47b847c6174f582d46666 (https://github.com/tiann/hapi/pull/1544)
+- #1543 [CLEAN] fix(web): preserve wrapped inline code backgrounds in shared images @ f5ebfae0bae9d468e6562bf22e95e605f44a0491 (https://github.com/tiann/hapi/pull/1543)
+- #1542 [CLEAN] fix(web): keep loaded older history in the window while a session streams @ a7b5d521d29ff4fdcdf3e11d1161a72b043d5ba7 (https://github.com/tiann/hapi/pull/1542)
+- #1541 [CLEAN] fix(cursor): retry transient ACP connection errors @ 2db15d1b3cee32ca9bc3ab0134642a34d6ef39b0 (https://github.com/tiann/hapi/pull/1541)
+- #1537 [UNKNOWN] feat: add peer tools exposure toggle (#1401) @ 693aed6e40beed850caeb65ac32fb4e6d68442d5 (https://github.com/tiann/hapi/pull/1537)
+- #1534 [UNKNOWN] fix(codex): cache codex model list to avoid spawning app-server per request @ ed2fca2424287abefc5422e8df1be4b943ca8a02 (https://github.com/tiann/hapi/pull/1534)
+- #1530 [CLEAN] fix(web): prevent Rewind crashes when message history resets @ b5b72457b3184524588008b3492013682db0f5cd (https://github.com/tiann/hapi/pull/1530)
+- #1528 [UNKNOWN] fix(hub): make session timeout and reconnect state durable and consistent @ 3517c527077d71033ec3782185ca4cf6d280d0f4 (https://github.com/tiann/hapi/pull/1528)
+- #1527 [UNKNOWN] feat(cli): survive terminal hangup by switching the session to remote mode @ 597c28d6bcb5dd2fc8938197d60e5dea9d327821 (https://github.com/tiann/hapi/pull/1527)
+- #1525 [UNKNOWN] test(cli): make the suite pass on macOS hosts @ 85e5ec888140097893bdf30dfe1b101145d2c54e (https://github.com/tiann/hapi/pull/1525)
+- #1523 [UNSTABLE] fix(web): unify agent task status presentation @ 8ebecc1a459ca0aa886a51619591312b946d2d97 (https://github.com/tiann/hapi/pull/1523)
+- #1517 [CLEAN] Fix Telegram Mini App polish and file tree state @ d9767f92f0beb3a245ed2329030126441676e8e0 (https://github.com/tiann/hapi/pull/1517)
+- #1512 [CLEAN] fix(web): use latest assistant replies for session recency @ 2268c6653034ce55fc6aee5909ba3ad1a109558c (https://github.com/tiann/hapi/pull/1512)
+- #1511 [draft] feat(cli): spawn-peer CLI + MCP spawn_peer for peer spawn with remit @ e905d633b9c583b14d4a06bae25d5baea37df701 (https://github.com/tiann/hapi/pull/1511)
+- #1495 [CLEAN] fix(web): hide chat viewport focus outline after Home/End @ a0de77881531f3df564a42860ddcc992813ff109 (https://github.com/tiann/hapi/pull/1495)
+- #1490 [CLEAN] fix(web): normalize Windows file search query separators @ df02f89bc3815e5c4fe96156acb82e21757b7b34 (https://github.com/tiann/hapi/pull/1490)
+- #1475 [UNKNOWN] feat(web): composer model/effort value buttons and first-class permission (part of #1438) @ 4591052676fce788a213a44dcc21f0bb256cbfba (https://github.com/tiann/hapi/pull/1475)
+- #1473 [CLEAN] feat(peer): attribute ping_peer deliveries with trusted provenance @ 1d55a4be9ec243237611fd8f1bb45cb7a60a8e7f (https://github.com/tiann/hapi/pull/1473)
+- #1471 [CLEAN] fix(web): keep single tildes literal in markdown @ bf96cf679f2d568702a509a4ba6ec76f00fd33c0 (https://github.com/tiann/hapi/pull/1471)
+- #1469 [CLEAN] feat: unified agent configuration descriptors (session config consolidation) @ e4e831101ce51ed039d98b21ff02bceade73be33 (https://github.com/tiann/hapi/pull/1469)
+- #1468 [UNKNOWN] feat(usage): record ACP cost and surface per-agent reporting availability @ fd2e0775c42463bb122f40b0c7b2c4872a729308 (https://github.com/tiann/hapi/pull/1468)
+- #1451 [UNKNOWN] feat(web): configure Create agent visibility @ f489209f15333faf17666cbadfdd6a219a7d6d74 (https://github.com/tiann/hapi/pull/1451)
+- #1447 [UNKNOWN] feat(web): add separate option to pin active sessions @ 703c1adef0e967187796d6dcee0a1b0043057c21 (https://github.com/tiann/hapi/pull/1447)
+- #1443 [UNKNOWN] feat: restore mid-turn steer for Codex and Cursor @ 75e42cdcfecd633ddeb6663bb1b8e63be9643b18 (https://github.com/tiann/hapi/pull/1443)
+- #1436 [UNKNOWN] feat(web): persist and send voice input message across session navigation (#1435) @ 155ec33a04b8b748279f0495ed0bd7518c98eee3 (https://github.com/tiann/hapi/pull/1436)
+- #1429 [UNKNOWN] feat(claude): import local session history @ 1548315fbc9b48f6b60d68ad957c7151e88d3d12 (https://github.com/tiann/hapi/pull/1429)
+- #1424 [CLEAN] feat: show progress bar on session for hours-long jobs @ 6052798a014d0ae6e0cac73945b47a8806a515f1 (https://github.com/tiann/hapi/pull/1424)
+- #1422 [CLEAN] fix(web): make long file errors expandable @ 5ae02d6caed360298761decc20e1f23db6d880da (https://github.com/tiann/hapi/pull/1422)
+- #1421 [UNKNOWN] feat(web): remember all launch settings options in NewSession preferences @ ed7c7cf5e39907e18aaf34fb86b01f0fd72ddf03 (https://github.com/tiann/hapi/pull/1421)
+- #1419 [UNKNOWN] feat(web): add direct send button during active voice session @ adb0ad029640aeae8dd821d62af7ee790ec95b12 (https://github.com/tiann/hapi/pull/1419)
+- #1418 [CLEAN] feat(web): drag sessions into composer mentions @ d3c28fa332bae90aa62c2dd1d7b0f4a9b3fd3e86 (https://github.com/tiann/hapi/pull/1418)
+- #1414 [CLEAN] fix(web): hide redundant machine labels on single-machine pinned rows @ ffac0662f0f0f1fabc2022f514cf06fb37084806 (https://github.com/tiann/hapi/pull/1414)
+- #1361 [UNKNOWN] Fix/codex sync idle active @ 6a6d45dfa4ea9b771c3b9219f6332b594743014e (https://github.com/tiann/hapi/pull/1361)
+- #1360 [UNKNOWN] feat: add notification preferences and customizable web push copy @ 7fb80ea97b003a7bd9e07c16a5ccd866718ea6d1 (https://github.com/tiann/hapi/pull/1360)
+- #1351 [UNKNOWN] feat(claude): steer mid-turn messages instead of queueing them @ feb70174798df546512ebd9096768c94ddead945 (https://github.com/tiann/hapi/pull/1351)
+- #1309 [draft] feat(web): customize session list toolbar @ 01a98c4efd4ddcfb0b8278c936ddd346f7e30936 (https://github.com/tiann/hapi/pull/1309)
+- #1257 [CLEAN] fix(web): budget subagent messages separately from top-level history @ 6957978424f74209dca9295699137179282e80ad (https://github.com/tiann/hapi/pull/1257)
+- #1242 [DIRTY] feat(web): show status and platform on the machines settings page @ 2c7a46f98f49a23e638f5188a6960ddc937cade3 (https://github.com/tiann/hapi/pull/1242)
+- #1212 [DIRTY] feat(web): quote selected text from a message into the composer @ 93d8678da8535c3a812e166f43961c1c4ff50f92 (https://github.com/tiann/hapi/pull/1212)
+- #1193 [draft] feat(codex): support app-server profile configuration @ 999f1d1170d382cc4fd5e5fdf6e0a6ab4a0bf65f (https://github.com/tiann/hapi/pull/1193)
+- #1189 [UNKNOWN] fix(codex): accept thread-matching stale terminal events during same-thread recovery @ 5f949783ad2123d865d758a921681245683f899d (https://github.com/tiann/hapi/pull/1189)
+- #1188 [UNKNOWN] fix(cli): run SDK metadata extraction in a temp cwd @ 1f23f857e4173a25f969879ef139487ec1c9955e (https://github.com/tiann/hapi/pull/1188)
+- #1163 [UNSTABLE] feat(session): opt-in GitHub PR awareness + explicit attach @ b662270feaa0329b4670f1e30629b803d31e9f56 (https://github.com/tiann/hapi/pull/1163)
+- #1158 [CLEAN] fix(web): unify session header display labels @ b00e39794e707d3bdbd6ab1029b5a6576b3cf985 (https://github.com/tiann/hapi/pull/1158)
+- #1157 [draft] feat(web): add configurable tool grouping mode @ b62788b053616a9b2f02b118116a917bec253be9 (https://github.com/tiann/hapi/pull/1157)
+- #1126 [DIRTY] fix(web): preserve loaded history during streaming @ 31ce48080df1a62150e9fe7e0a86fde511ef3cc2 (https://github.com/tiann/hapi/pull/1126)
+- #1099 [UNKNOWN] fix(web): avoid session misclicks during live reordering @ 91116cd9089107625d95ae2bc99fa615ef87d6a6 (https://github.com/tiann/hapi/pull/1099)
+- #1093 [CLEAN] feat(web): add assistant response navigation @ 5d0f0d226cb48f036fcfb2d967bbacbc31092013 (https://github.com/tiann/hapi/pull/1093)
+- #1092 [UNKNOWN] feat(workspace): add scoped file and Git controls @ 4427e6e08b2fed4429c793af2841f7f47fb70bac (https://github.com/tiann/hapi/pull/1092)
+- #1091 [DIRTY] feat(providers): add managed agent API profiles @ 0cf0d70310e9c58c5a41509793260a003822a9b4 (https://github.com/tiann/hapi/pull/1091)
+- #1059 [UNKNOWN] fix(pi): remove PiModelPanel/PiThinkingLevelPanel @ 37deeeba5263ceb402429c069e911eac96eb406e (https://github.com/tiann/hapi/pull/1059)
+- #1054 [UNKNOWN] fix(web): local-mode permission UX + stop OpenCode 500 spam @ 9cbe9b1fa24edec152bb610e0b1049930c723432 (https://github.com/tiann/hapi/pull/1054)
+- #987 [CLEAN] feat(cursor): detect inline model errors, surface, notify, and bridge (#878) @ 30a92beaf04227029f9c470afe1fea20e0bd5eaf (https://github.com/tiann/hapi/pull/987)
+- #975 [UNKNOWN] feat: add OMP (Oh My Pi) coding agent support @ 344c6009b53e20829978e44367fa50b5870986fe (https://github.com/tiann/hapi/pull/975)
+- #955 [UNKNOWN] feat(web): right-click context menu for sidebar project groups (#881) @ f6a624251cb125182965dc343351c362035d071a (https://github.com/tiann/hapi/pull/955)
+- #945 [CLEAN] feat(hub,cli,web): estate-wide multi-agent session import (Codex | Cursor | Claude) @ 41d772c1998872cbcd468aee7ec2fa12a3833eae (https://github.com/tiann/hapi/pull/945)
+- #942 [UNKNOWN] feat: import existing Claude Code sessions (+ fork-resume for live sessions) @ f1f93474f042381818f0d605b1d64b3fb42cb02b (https://github.com/tiann/hapi/pull/942)
+- #906 [UNKNOWN] feat(web+cli): per-queued-message Steer for Codex and Cursor (mid-turn) @ d652eafdb885d5b2e09ff76461564f3f316b78e1 (https://github.com/tiann/hapi/pull/906)
+- #847 [CLEAN] Codex usage indicator with cross-flavor budget gauge shape (rebase of #537) @ 939a9d1e61853e6b3720852f7d902575a94fb8f2 (https://github.com/tiann/hapi/pull/847)
+- #769 [UNKNOWN] feat(desktop): add HAPI desktop launcher @ 60c11607ce3bba734f38b6fcf87be07b32298683 (https://github.com/tiann/hapi/pull/769)
+- #663 [UNKNOWN]   feat: support Codex local goal sync and remote approvals @ 5dbf6d406a6bb8507dc07598ba2aecc8cd98ee0f (https://github.com/tiann/hapi/pull/663)
+- #658 [UNKNOWN] fix(cli): preserve permission mode after ExitPlanMode + sidechain UUID chain fix @ f7d8ca3ea0f8ae47245443ce2c0cfec612263e62 (https://github.com/tiann/hapi/pull/658)
+- #553 [DIRTY] feat(hub): add WeCom bot push notification channel @ 6e3da463f4fb213afc6a95d3005232e647f39ec6 (https://github.com/tiann/hapi/pull/553)
+- #536 [DIRTY] [codex] restore Codex session history @ 1de72788e93c6aae6511a5af8bb05bda631093c0 (https://github.com/tiann/hapi/pull/536)
+- #535 [UNKNOWN] [codex] add Codex session selection support @ abcf3a4bff8b685a70ceeb77008f4f217b43b67c (https://github.com/tiann/hapi/pull/535)
+- #518 [draft] feat: import existing sessions and restore Codex runtime UI @ 72cceea333addd3a8b39948b722750056433d39b (https://github.com/tiann/hapi/pull/518)
+- #490 [draft] [codex] add mobile attention notifications @ 745acf545461ad7f8c615ebd178f3a15df869fb2 (https://github.com/tiann/hapi/pull/490)
+- #484 [UNKNOWN] feat(web): multi-session grid view, composer status bar, in-chat keyboard shortcuts @ 641a01266de65d4944ec5c609a40c717cd41662a (https://github.com/tiann/hapi/pull/484)
+- #394 [UNKNOWN] feat(claude): sync Claude Code session title to HAPI web UI @ fb5f201ec230e0b7abdc15dcf26483d67a56a1be (https://github.com/tiann/hapi/pull/394)
+- #325 [UNKNOWN] Feishu support @ c12df55ff52d2544ff40f313b702b24dc0732cf8 (https://github.com/tiann/hapi/pull/325)
+- #312 [DIRTY] 增加飞书支持 @ 572d489bbd359fe1ca9b4eb96a852804e42e69ac (https://github.com/tiann/hapi/pull/312)
+
+## Required decisions
+
+Record every open PR as carry, defer, or drop with its reviewed SHA before rebuilding.
+Normal carries require ready CI/merge state, clear maintainer signal, latest-head HAPI Bot no-findings, proportional or evidenced scope, and preserved or accepted behavior.
+Personal PRs authored by swear01 are auto-carry; record and report every failed quality rule after integration.
+Hard exclusion: PR #1320 (Antigravity) must be recorded as drop and must not be replayed.

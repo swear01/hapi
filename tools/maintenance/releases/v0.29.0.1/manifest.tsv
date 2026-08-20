@@ -1,0 +1,7 @@
+# v0.29.0.1 — manual UFR merge from official tag 240ab2f0535eadbb0a3f51b287c7ed04f405f34a.
+# Official base is authoritative: upstreamed PRs are accepted in place and are not replayed.
+# Officially accepted context: #1320 is present in v0.29.0 and remains; #888, #1469, #1475, #1541, #1584, #1591, #1595, and related upstream work are likewise taken from the official base where present.
+# Dropped by operator ruling: #1091 and #1093. New open PR heads are deferred in pr-audit.tsv and are not applied.
+# Re-audited fork-only overlay retained: Cursor model-error classification/bridge UX, queued steer indeterminate delivery, Pi model/thinking selection, AGY structured model discovery, session-attached jobs, tri-state session pinning, reasoning preference hydration, send/draft settlement repairs, and related tests/docs.
+# The release tree was resolved manually because the UFR merge contains side-selected conflicts; this overlay row records the regenerated integrated state rather than replaying upstream PR commits.
+overlay	regenerate	-	-

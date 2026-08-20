@@ -1,0 +1,170 @@
+diff --git a/web/src/components/ChatInput/Autocomplete.test.tsx b/web/src/components/ChatInput/Autocomplete.test.tsx
+new file mode 100644
+index 000000000..eaeba4932
+--- /dev/null
++++ b/web/src/components/ChatInput/Autocomplete.test.tsx
+@@ -0,0 +1,78 @@
++import { render, screen } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { Suggestion } from '@/hooks/useActiveSuggestions'
++import { Autocomplete } from './Autocomplete'
++
++function suggestion(key: string): Suggestion {
++    return {
++        key,
++        text: key,
++        label: key,
++    }
++}
++
++describe('Autocomplete', () => {
++    let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
++    let scrollIntoView: ReturnType<typeof vi.fn>
++
++    beforeEach(() => {
++        originalScrollIntoView = HTMLElement.prototype.scrollIntoView
++        scrollIntoView = vi.fn()
++        Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
++            configurable: true,
++            value: scrollIntoView,
++        })
++    })
++
++    afterEach(() => {
++        if (originalScrollIntoView) {
++            Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
++                configurable: true,
++                value: originalScrollIntoView,
++            })
++        } else {
++            delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
++        }
++        vi.restoreAllMocks()
++    })
++
++    it('lets selected rows reach both edges of the overlay', () => {
++        const { container } = render(
++            <Autocomplete
++                suggestions={[suggestion('first'), suggestion('second')]}
++                selectedIndex={1}
++                onSelect={vi.fn()}
++            />
++        )
++
++        const list = container.firstElementChild
++        expect(list).not.toHaveClass('pt-1')
++        expect(list).not.toHaveClass('pb-1')
++        expect(screen.getByRole('button', { name: 'second' })).toHaveClass(
++            'bg-[var(--app-button)]',
++            'text-[var(--app-button-text)]'
++        )
++    })
++
++    it('does not re-scroll when suggestions only change identity', () => {
++        const { rerender } = render(
++            <Autocomplete
++                suggestions={[suggestion('first'), suggestion('second')]}
++                selectedIndex={0}
++                onSelect={vi.fn()}
++            />
++        )
++        expect(scrollIntoView).toHaveBeenCalledTimes(1)
++
++        scrollIntoView.mockClear()
++        rerender(
++            <Autocomplete
++                suggestions={[suggestion('first'), suggestion('second')]}
++                selectedIndex={0}
++                onSelect={vi.fn()}
++            />
++        )
++
++        expect(scrollIntoView).not.toHaveBeenCalled()
++    })
++})
+diff --git a/web/src/components/ChatInput/Autocomplete.tsx b/web/src/components/ChatInput/Autocomplete.tsx
+index 07fe99687..cb1010156 100644
+--- a/web/src/components/ChatInput/Autocomplete.tsx
++++ b/web/src/components/ChatInput/Autocomplete.tsx
+@@ -22,14 +22,14 @@ export const Autocomplete = memo(function Autocomplete(props: AutocompleteProps)
+             `[data-suggestion-index="${selectedIndex}"]`
+         )
+         selectedEl?.scrollIntoView({ block: 'nearest' })
+-    }, [selectedIndex, suggestions])
++    }, [selectedIndex, suggestions.length])
+ 
+     if (suggestions.length === 0) {
+         return null
+     }
+ 
+     return (
+-        <div className="py-1" ref={listRef}>
++        <div ref={listRef}>
+             {suggestions.map((suggestion, index) => (
+                 <button
+                     key={suggestion.key}
+diff --git a/web/src/hooks/useMachineLabels.test.ts b/web/src/hooks/useMachineLabels.test.ts
+index 6f2d44ca9..a6f574686 100644
+--- a/web/src/hooks/useMachineLabels.test.ts
++++ b/web/src/hooks/useMachineLabels.test.ts
+@@ -54,4 +54,23 @@ describe('useMachineLabels', () => {
+ 
+         expect(result.current['machine-1']).toBe('new-name')
+     })
++
++    it('reuses the label map when only live machine state changes', () => {
++        const machine = makeMachine('machine-1', { host: 'MacBook Pro' } as Machine['metadata'])
++        const { result, rerender } = renderHook(
++            ({ machines }) => useMachineLabels(machines),
++            { initialProps: { machines: [machine] } }
++        )
++        const initialLabels = result.current
++
++        rerender({
++            machines: [{
++                ...machine,
++                activeAt: 20,
++                health: { collectedAt: 20, load1m: 0.5 },
++            }]
++        })
++
++        expect(result.current).toBe(initialLabels)
++    })
+ })
+diff --git a/web/src/hooks/useMachineLabels.ts b/web/src/hooks/useMachineLabels.ts
+index 134c0682e..be761f7f5 100644
+--- a/web/src/hooks/useMachineLabels.ts
++++ b/web/src/hooks/useMachineLabels.ts
+@@ -1,4 +1,4 @@
+-import { useEffect, useMemo } from 'react'
++import { useEffect, useMemo, useRef } from 'react'
+ import type { Machine } from '@/types/api'
+ 
+ export function getMachineTitle(machine: Machine): string {
+@@ -49,11 +49,26 @@ function writeCachedLabels(labels: Record<string, string>): void {
+  * back to a raw id prefix.
+  */
+ export function useMachineLabels(machines: Machine[]): Record<string, string> {
++    const previousLabelsRef = useRef<Record<string, string> | null>(null)
+     const labels = useMemo(() => {
+         const merged = readCachedLabels()
+         for (const machine of machines) {
+             merged[machine.id] = getMachineTitle(machine)
+         }
++
++        const previous = previousLabelsRef.current
++        if (previous) {
++            const previousKeys = Object.keys(previous)
++            const mergedKeys = Object.keys(merged)
++            if (
++                previousKeys.length === mergedKeys.length
++                && mergedKeys.every((key) => merged[key] === previous[key])
++            ) {
++                return previous
++            }
++        }
++
++        previousLabelsRef.current = merged
+         return merged
+     }, [machines])
+ 

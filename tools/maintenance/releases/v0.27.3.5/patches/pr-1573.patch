@@ -1,0 +1,351 @@
+diff --git a/web/src/components/SessionChat.test.ts b/web/src/components/SessionChat.test.ts
+index a16bd2281..96ea39138 100644
+--- a/web/src/components/SessionChat.test.ts
++++ b/web/src/components/SessionChat.test.ts
+@@ -5,6 +5,7 @@ import {
+     isScratchlistHotkeyBlockedTarget,
+     isScratchlistToggleHotkey,
+     resolvePiContextWindow,
++    resolveLatestCompletedBoundaryIdForView,
+     shouldAutoClearPendingSchedule,
+     shouldRouteToScratchlist,
+ } from './SessionChat'
+@@ -66,6 +67,35 @@ describe('resolvePiContextWindow', () => {
+     })
+ })
+ 
++describe('resolveLatestCompletedBoundaryIdForView', () => {
++    it('uses the live tail boundary when following the latest messages', () => {
++        expect(resolveLatestCompletedBoundaryIdForView('tail', 'agent-text:latest', {
++            id: 'agent-text:old',
++            tailRevision: 1
++        }, 2))
++            .toBe('agent-text:latest')
++    })
++
++    it('keeps the live tail boundary while reading older messages', () => {
++        expect(resolveLatestCompletedBoundaryIdForView('history', null, {
++            id: 'agent-text:latest',
++            tailRevision: 2
++        }, 2))
++            .toBe('agent-text:latest')
++    })
++
++    it('invalidates the remembered boundary after a live tail revision', () => {
++        expect(resolveLatestCompletedBoundaryIdForView('history', null, {
++            id: 'agent-text:old',
++            tailRevision: 2
++        }, 3)).toBeNull()
++    })
++
++    it('does not invent a boundary before the tail has been observed', () => {
++        expect(resolveLatestCompletedBoundaryIdForView('history', null, null, 0)).toBeNull()
++    })
++})
++
+ function userMessage(props: {
+     id: string
+     createdAt: number
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 2d313572a..1bd2821e7 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -377,6 +377,27 @@ export function buildGoalStateMessages(
+     return messages.filter((message) => !isUninvokedScheduledMessage(message))
+ }
+ 
++/**
++ * Keep the latest completed fork boundary available while reading history.
++ * The history window can no longer contain the tail after older pages are
++ * loaded, so recomputing a boundary from that window would either hide the
++ * current Fork action or incorrectly mark an older message as current.
++ * A live tail revision invalidates the remembered boundary until tail view
++ * observes the authoritative current boundary again.
++ */
++export function resolveLatestCompletedBoundaryIdForView(
++    viewMode: 'tail' | 'history',
++    currentTailBoundaryId: string | null,
++    rememberedTailBoundary: { id: string | null; tailRevision: number } | null,
++    currentTailRevision: number
++): string | null {
++    if (viewMode === 'tail') return currentTailBoundaryId
++    if (!rememberedTailBoundary || rememberedTailBoundary.tailRevision !== currentTailRevision) {
++        return null
++    }
++    return rememberedTailBoundary.id
++}
++
+ function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
+     for (const block of blocks) {
+         if (block.kind === 'tool-call') {
+@@ -410,6 +431,7 @@ type SessionChatProps = {
+     viewMode: 'tail' | 'history'
+     messagesVersion: number
+     historyVersion: number
++    tailRevision: number
+     onBack: () => void
+     onRefresh: () => void
+     onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+@@ -507,6 +529,10 @@ function SessionChatInner(props: SessionChatProps) {
+     const normalizedCacheRef = useRef<Map<string, { source: DecryptedMessage; normalized: NormalizedMessage | null }>>(new Map())
+     const blocksByIdRef = useRef<Map<string, ChatBlock>>(new Map())
+     const visibleGroupsRef = useRef<ToolGroupBlock[]>([])
++    const [rememberedTailBoundary, setRememberedTailBoundary] = useState<{
++        id: string | null
++        tailRevision: number
++    } | null>(null)
+     const [forceScrollToken, setForceScrollToken] = useState(0)
+     const uploadDraftSnapshotRef = useRef<{ text: string; attachments: AttachmentDraftInput[] }>({
+         text: '',
+@@ -1211,7 +1237,12 @@ function SessionChatInner(props: SessionChatProps) {
+     // Fork-current must compare against assistant-ui message ids (`kind:id`),
+     // not raw hub message ids — MessageActions receive the rendered card id,
+     // and adjacent assistant blocks join under the first block's id.
+-    const latestCompletedBoundaryId = useMemo(() => {
++    //
++    // Calculate the boundary from the tail window, then remember it while the
++    // operator reads history. Otherwise changing viewMode to `history` hides
++    // a valid current Fork action, and loading older pages can make the last
++    // visible historical message look like the current fork boundary.
++    const currentTailBoundaryId = useMemo(() => {
+         if (props.viewMode !== 'tail') return null
+         return findLatestCompletedBoundaryId(
+             visibleBlocks,
+@@ -1220,6 +1251,22 @@ function SessionChatInner(props: SessionChatProps) {
+         )
+     }, [props.viewMode, props.session.activeTurnStartedAt, props.session.thinking, visibleBlocks])
+ 
++    useEffect(() => {
++        if (props.viewMode !== 'tail') return
++        setRememberedTailBoundary((previous) => (
++            previous?.id === currentTailBoundaryId && previous.tailRevision === props.tailRevision
++                ? previous
++                : { id: currentTailBoundaryId, tailRevision: props.tailRevision }
++        ))
++    }, [currentTailBoundaryId, props.tailRevision, props.viewMode])
++
++    const latestCompletedBoundaryId = resolveLatestCompletedBoundaryIdForView(
++        props.viewMode,
++        currentTailBoundaryId,
++        rememberedTailBoundary,
++        props.tailRevision
++    )
++
+     const isLatestCompletedBoundary = useCallback((messageId: string) => {
+         return latestCompletedBoundaryId === messageId
+     }, [latestCompletedBoundaryId])
+diff --git a/web/src/hooks/queries/useMessages.ts b/web/src/hooks/queries/useMessages.ts
+index 13ecc9584..b01922790 100644
+--- a/web/src/hooks/queries/useMessages.ts
++++ b/web/src/hooks/queries/useMessages.ts
+@@ -27,6 +27,7 @@ export const EMPTY_STATE: MessageWindowState = {
+     viewMode: 'tail',
+     messagesVersion: 0,
+     historyVersion: 0,
++    tailRevision: 0,
+ }
+ 
+ export function useMessages(api: ApiClient | null, sessionId: string | null): {
+@@ -38,6 +39,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
+     viewMode: MessageViewMode
+     messagesVersion: number
+     historyVersion: number
++    tailRevision: number
+     loadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+     cancelLoadMore: () => void
+     refetch: () => Promise<void>
+@@ -100,6 +102,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
+         viewMode: state.viewMode,
+         messagesVersion: state.messagesVersion,
+         historyVersion: state.historyVersion,
++        tailRevision: state.tailRevision,
+         loadMore,
+         cancelLoadMore,
+         refetch,
+diff --git a/web/src/lib/message-window-store.test.ts b/web/src/lib/message-window-store.test.ts
+index 82649ed91..175566958 100644
+--- a/web/src/lib/message-window-store.test.ts
++++ b/web/src/lib/message-window-store.test.ts
+@@ -816,6 +816,39 @@ describe('history view and older pagination', () => {
+         expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['older', 'latest'])
+     })
+ 
++    it('advances the tail revision for live messages but not older-page loads', async () => {
++        const id = sessionId('tail-revision')
++        const latest = makeAgentMessage({ id: 'latest', seq: 10, at: 10_000 })
++        const older = makeAgentMessage({ id: 'older', seq: 9, at: 9_000 })
++        const getMessages = vi.fn()
++            .mockResolvedValueOnce(latestResponse([latest], {
++                epoch: 4,
++                hasMore: true,
++                nextBeforeAt: 10_000,
++                nextBeforeSeq: 10
++            }))
++            .mockResolvedValueOnce(beforeResponse([older], {
++                epoch: 4,
++                hasMore: false,
++                nextBeforeAt: 9_000,
++                nextBeforeSeq: 9
++            }))
++        const api = createApi(getMessages)
++
++        await syncTailMessages(api, id)
++        const afterTailSync = getMessageWindowState(id).tailRevision
++        setMessageViewMode(id, 'history')
++        await fetchOlderMessages(api, id)
++
++        expect(getMessageWindowState(id).tailRevision).toBe(afterTailSync)
++
++        ingestIncomingMessages(id, [
++            makeAgentMessage({ id: 'new-live', seq: 11, at: 11_000 })
++        ])
++
++        expect(getMessageWindowState(id).tailRevision).toBe(afterTailSync + 1)
++    })
++
+     it('leaves the window unchanged when the final older-page apply check rejects', async () => {
+         const id = sessionId('older-page-apply-rejected')
+         const latest = makeAgentMessage({ id: 'latest', seq: 10, at: 10_000 })
+@@ -1106,6 +1139,7 @@ describe('optimistic and queued-message operations', () => {
+             makeAgentMessage({ id: 'agent', seq: 2, at: 2_000 })
+         ])
+ 
++        const beforeConsumed = getMessageWindowState(id).tailRevision
+         markMessagesConsumed(id, ['local-1'], 3_000)
+ 
+         expect(getMessageWindowState(id).messages.at(-1)).toMatchObject({
+@@ -1113,6 +1147,7 @@ describe('optimistic and queued-message operations', () => {
+             status: 'sent',
+             invokedAt: 3_000
+         })
++        expect(getMessageWindowState(id).tailRevision).toBe(beforeConsumed + 1)
+     })
+ 
+     it('reconciles queued candidates without a secondary pending collection', () => {
+diff --git a/web/src/lib/message-window-store.ts b/web/src/lib/message-window-store.ts
+index d7a14e428..232dffb37 100644
+--- a/web/src/lib/message-window-store.ts
++++ b/web/src/lib/message-window-store.ts
+@@ -34,6 +34,7 @@ export type MessageWindowState = {
+     viewMode: MessageViewMode
+     messagesVersion: number
+     historyVersion: number
++    tailRevision: number
+ }
+ 
+ export const VISIBLE_WINDOW_SIZE = 400
+@@ -232,6 +233,7 @@ function createState(sessionId: string): InternalState {
+         viewMode: 'tail',
+         messagesVersion: 0,
+         historyVersion: 0,
++        tailRevision: 0,
+         oldestPositionAt: null,
+         oldestPositionSeq: null,
+         newestPositionAt: null,
+@@ -389,6 +391,7 @@ function buildState(
+         | 'syncGeneration'
+         | 'olderGeneration'
+         | 'historyVersion'
++        | 'tailRevision'
+     >>
+ ): InternalState {
+     const messages = updates.messages ?? previous.messages
+@@ -488,6 +491,7 @@ function mergeIntoWindow(
+     options: {
+         mode?: 'append' | 'prepend'
+         regularLimit?: number
++        advanceTailRevision?: boolean
+     } = {}
+ ): InternalState {
+     const retainedIncoming = incoming.filter(shouldRetainWindowMessage)
+@@ -500,7 +504,10 @@ function mergeIntoWindow(
+     const merged = mergeMessages(previous.messages, retainedIncoming)
+     const { kept, dropped } = trimPreservingQueued(merged, regularLimit, mode)
+     let next = buildState(previous, {
+-        messages: kept
++        messages: kept,
++        ...(options.advanceTailRevision
++            ? { tailRevision: previous.tailRevision + 1 }
++            : {})
+     })
+     if (dropped.length === 0) {
+         return next
+@@ -569,6 +576,7 @@ function applyLatestResponse(
+         oldestPositionSeq: oldest?.seq ?? null,
+         newestPositionAt: newest?.at ?? null,
+         newestPositionSeq: newest?.seq ?? null,
++        tailRevision: previous.tailRevision + 1,
+         requiresLatestReset: false,
+         isLoadingMore: options.replaceServerRows ? false : previous.isLoadingMore,
+         olderGeneration: options.replaceServerRows
+@@ -666,7 +674,9 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
+ 
+             updateState(sessionId, (previous) => {
+                 if (previous.syncGeneration !== generation) return previous
+-                const merged = mergeIntoWindow(previous, response.messages)
++                const merged = mergeIntoWindow(previous, response.messages, {
++                    advanceTailRevision: true
++                })
+                 if (merged.requiresLatestReset) {
+                     return buildState(merged, {
+                         epoch: response.page.epoch,
+@@ -932,7 +942,9 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
+ export function ingestIncomingMessages(sessionId: string, incoming: DecryptedMessage[]): void {
+     if (incoming.length === 0) return
+     updateState(sessionId, (previous) => {
+-        let merged = mergeIntoWindow(previous, incoming)
++        let merged = mergeIntoWindow(previous, incoming, {
++            advanceTailRevision: true
++        })
+         if (merged.epoch === null || merged.requiresLatestReset) {
+             return merged
+         }
+@@ -986,6 +998,7 @@ export function seedMessageWindowFromSession(fromSessionId: string, toSessionId:
+     const seeded = buildState(createState(toSessionId), {
+         messages: [...source.messages],
+         hasMore: source.hasMore,
++        tailRevision: source.tailRevision,
+         oldestPositionAt: source.oldestPositionAt,
+         oldestPositionSeq: source.oldestPositionSeq,
+         requiresLatestReset: true,
+@@ -1034,7 +1047,8 @@ export function reconcileQueuedLocalIds(
+ export function appendOptimisticMessage(sessionId: string, message: DecryptedMessage): void {
+     updateState(sessionId, (previous) => {
+         return mergeIntoWindow(previous, [message], {
+-            mode: previous.viewMode === 'history' ? 'prepend' : 'append'
++            mode: previous.viewMode === 'history' ? 'prepend' : 'append',
++            advanceTailRevision: true
+         })
+     }, true)
+ }
+@@ -1084,6 +1098,9 @@ export function markMessagesConsumed(sessionId: string, localIds: string[], invo
+             }
+         })
+         if (!changed) return previous
+-        return buildState(previous, { messages: mergeMessages([], updated) })
++        return buildState(previous, {
++            messages: mergeMessages([], updated),
++            tailRevision: previous.tailRevision + 1
++        })
+     })
+ }
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index ebb3e6e2d..7f0ef0fa9 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -360,6 +360,7 @@ function SessionPage() {
+         viewMode: messagesViewMode,
+         messagesVersion,
+         historyVersion,
++        tailRevision,
+         setViewMode,
+     } = useMessages(api, sessionId)
+ 
+@@ -789,6 +790,7 @@ function SessionPage() {
+             viewMode={messagesViewMode}
+             messagesVersion={messagesVersion}
+             historyVersion={historyVersion}
++            tailRevision={tailRevision}
+             onBack={goBack}
+             onRefresh={refreshSelectedSession}
+             onLoadMore={loadMoreMessages}

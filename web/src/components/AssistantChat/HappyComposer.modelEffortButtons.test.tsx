@@ -114,6 +114,8 @@ vi.mock('@/hooks/useActiveSuggestions', () => ({ useActiveSuggestions: () => [[]
 vi.mock('@/components/ChatInput/FloatingOverlay', () => ({ FloatingOverlay: ({ children }: { children: ReactNode }) => <>{children}</> }))
 vi.mock('@/components/ChatInput/Autocomplete', () => ({ Autocomplete: () => null }))
 vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }))
+vi.mock('./PiModelPanel', () => ({ PiModelPanel: () => null }))
+vi.mock('./PiThinkingLevelPanel', () => ({ PiThinkingLevelPanel: () => null }))
 
 function renderComposer(agentFlavor: string, overrides: Partial<Parameters<typeof HappyComposer>[0]> = {}) {
     render(

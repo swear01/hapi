@@ -1,0 +1,1002 @@
+diff --git a/bun.lock b/bun.lock
+index 8ac0d2ec4..4e1f93d12 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -1106,6 +1106,8 @@
+ 
+     "@twsxtd/hapi-linux-x64": ["@twsxtd/hapi-linux-x64@0.27.3", "", { "os": "linux", "cpu": "x64", "bin": { "hapi": "bin/hapi" } }, "sha512-xezXLDF60bMPdyRBzzZjdBL0yC8zOH3EoznJwzh3RsW1lzc3vd5XWLP+TvY1UU4/MWsMM0mp9/U6IivTlQjcHw=="],
+ 
++    "@twsxtd/hapi-win32-x64": ["@twsxtd/hapi-win32-x64@0.27.3", "", { "os": "win32", "cpu": "x64", "bin": { "hapi": "bin/hapi.exe" } }, "sha512-Rtnz6WwRVqqt3qVcM6awHA/LUU7lLB35YAkfTeloNf+ARuANslZUeMyXHIi6/xoNEVX5S9+mRJyfv80EOmwSkw=="],
++
+     "@types/aria-query": ["@types/aria-query@5.0.4", "", {}, "sha512-rfT93uj5s0PRL7EzccGMs3brplhcrghnDoV26NqKhCAS1hVo+WdNsPvE/yb6ilfr5hi2MEk6d5EWJTKdxg8jVw=="],
+ 
+     "@types/babel__core": ["@types/babel__core@7.20.5", "", { "dependencies": { "@babel/parser": "^7.20.7", "@babel/types": "^7.20.7", "@types/babel__generator": "*", "@types/babel__template": "*", "@types/babel__traverse": "*" } }, "sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA=="],
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.initialize.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.initialize.test.ts
+index 6dc851b79..040e590b2 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.initialize.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.initialize.test.ts
+@@ -4,9 +4,11 @@ const transportState = vi.hoisted(() => ({
+     calls: [] as Array<{ method: string; params?: unknown }>
+ }));
+ 
+-vi.mock('./AcpStdioTransport', () => ({
+-    AcpStdioTransport: class {
+-        constructor(_options: unknown) {}
++vi.mock('./AcpStdioTransport', () => {
++    class MockAcpStdioTransport {
++        static async create(_options: unknown) {
++            return new MockAcpStdioTransport();
++        }
+         onNotification = vi.fn();
+         onStderrError = vi.fn();
+         registerRequestHandler = vi.fn();
+@@ -19,7 +21,8 @@ vi.mock('./AcpStdioTransport', () => ({
+         });
+         close = vi.fn(async () => {});
+     }
+-}));
++    return { AcpStdioTransport: MockAcpStdioTransport };
++});
+ 
+ import { AcpSdkBackend } from './AcpSdkBackend';
+ 
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index fbe0441cb..f686a9ddf 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -74,6 +74,7 @@ export class AcpSdkBackend implements AgentBackend {
+     private messageHandler: AcpMessageHandler | null = null;
+     private activeSessionId: string | null = null;
+     private initializeResult: AcpInitializeResult | null = null;
++    private initializeInFlight: Promise<void> | null = null;
+     private setModeSupported: boolean | undefined = undefined;
+     private isProcessingMessage = false;
+     private promptRequestInFlight = false;
+@@ -133,13 +134,35 @@ export class AcpSdkBackend implements AgentBackend {
+ 
+     async initialize(): Promise<void> {
+         if (this.transport) return;
++        if (this.initializeInFlight) {
++            await this.initializeInFlight;
++            return;
++        }
++
++        this.initializeInFlight = this.bootstrapTransport();
++        try {
++            await this.initializeInFlight;
++        } finally {
++            this.initializeInFlight = null;
++        }
++    }
+ 
+-        this.transport = new AcpStdioTransport({
++    private async bootstrapTransport(): Promise<void> {
++        if (this.transport) return;
++
++        const transport = await AcpStdioTransport.create({
+             command: this.options.command,
+             args: this.options.args,
+             env: this.options.env
+         });
+ 
++        if (this.transport) {
++            await transport.close();
++            return;
++        }
++
++        this.transport = transport;
++
+         this.transport.onNotification((method, params) => {
+             if (method === 'session/update') {
+                 this.handleSessionUpdate(params);
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+index ba1749cd2..33a94d548 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.test.ts
+@@ -129,7 +129,7 @@ describe('AcpStdioTransport agent CLI guard', () => {
+     });
+ 
+     test('registers cross-process guard only for Cursor agent command', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         expect(guard.register).toHaveBeenCalledTimes(1);
+         expect(guard.recordChildPid).toHaveBeenCalledWith(424242);
+         await transport.close();
+@@ -137,17 +137,17 @@ describe('AcpStdioTransport agent CLI guard', () => {
+         expect(guard.unregister).toHaveBeenCalledWith({ childPid: 424242 });
+     });
+ 
+-    test('registers the ACP guard before spawn so list-models cannot race the new child', () => {
++    test('registers the ACP guard before spawn so list-models cannot race the new child', async () => {
+         spawnState.spawnCallOrder = [];
+-        new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         expect(spawnState.spawnCallOrder.indexOf('register')).toBeGreaterThanOrEqual(0);
+         expect(spawnState.spawnCallOrder.indexOf('spawn')).toBeGreaterThan(
+             spawnState.spawnCallOrder.indexOf('register')
+         );
+     });
+ 
+-    test('keeps the ACP guard held across exit until close drains stdio', () => {
+-        new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++    test('keeps the ACP guard held across exit until close drains stdio', async () => {
++        await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         guard.unregister.mockClear();
+ 
+         for (const handler of spawnState.exitHandlers) {
+@@ -162,12 +162,12 @@ describe('AcpStdioTransport agent CLI guard', () => {
+         expect(guard.unregister).toHaveBeenCalledWith({ childPid: 424242 });
+     });
+ 
+-    test('does not register guard for non-agent ACP backends', () => {
++    test('does not register guard for non-agent ACP backends', async () => {
+         for (const command of ['gemini', 'opencode', 'kimi']) {
+             guard.register.mockClear();
+             guard.unregister.mockClear();
+             guard.recordChildPid.mockClear();
+-            new AcpStdioTransport({ command });
++            await AcpStdioTransport.create({ command });
+             expect(guard.register).not.toHaveBeenCalled();
+             expect(guard.recordChildPid).not.toHaveBeenCalled();
+             expect(guard.unregister).not.toHaveBeenCalled();
+@@ -188,7 +188,7 @@ describe('AcpStdioTransport plain-text stdout', () => {
+     });
+ 
+     test('ignores Cursor worktree banner and keeps JSON-RPC session alive', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const notifications: Array<{ method: string; params: unknown }> = [];
+         transport.onNotification((method, params) => {
+             notifications.push({ method, params });
+@@ -221,7 +221,7 @@ describe('AcpStdioTransport plain-text stdout', () => {
+     });
+ 
+     test('ignores non-object JSON lines without killing the session', async () => {
+-        const transport = new AcpStdioTransport({ command: 'gemini' });
++        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+         const pending = transport.sendRequest('initialize');
+ 
+         emitStdout('42\n');
+@@ -239,7 +239,7 @@ describe('AcpStdioTransport plain-text stdout', () => {
+     });
+ 
+     test('treats unknown non-JSON stdout as a fatal protocol error', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const pending = transport.sendRequest('initialize');
+ 
+         expect(spawnState.stdoutDataHandlers.length).toBeGreaterThan(0);
+@@ -266,7 +266,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('rejects new requests after process exit before close without writing stdin', async () => {
+-        const transport = new AcpStdioTransport({ command: 'gemini' });
++        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+         spawnState.exitCode = 1;
+         spawnState.stdinWrite.mockClear();
+ 
+@@ -287,7 +287,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('rejects new requests after the ACP process exits instead of throwing from stdin.write', async () => {
+-        const transport = new AcpStdioTransport({ command: 'gemini' });
++        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+         spawnState.exitCode = 1;
+         spawnState.stdinWrite.mockImplementation(() => {
+             throw new Error('WritableIterable is closed');
+@@ -304,7 +304,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('includes recent stderr on process close so callers can classify model rejection', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -328,7 +328,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('accumulates split stderr chunks so Cannot use this model survives a catalog follow-up chunk', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -352,7 +352,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('preserves Cannot use this model when the keyword itself is split across chunks', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -382,7 +382,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('waits for the model id before emitting Cannot use this model via onStderrError', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -415,7 +415,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('pins Cannot use this model head when Available models catalog exceeds the rolling window', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -439,7 +439,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+     });
+ 
+     test('keeps the head of long stderr so Cannot use this model survives Available models lists', async () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -462,8 +462,8 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         );
+     });
+ 
+-    test('reports Cannot use this model stderr via onStderrError with Cursor text intact', () => {
+-        const transport = new AcpStdioTransport({ command: 'agent', args: ['acp'] });
++    test('reports Cannot use this model stderr via onStderrError with Cursor text intact', async () => {
++        const transport = await AcpStdioTransport.create({ command: 'agent', args: ['acp'] });
+         const seen: Array<{ type: string; message: string; raw: string }> = [];
+         transport.onStderrError((error) => {
+             seen.push(error);
+@@ -492,8 +492,8 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         ['status 404', 'model_not_found'],
+         ['Cannot use this model: stale-id', 'model_not_found'],
+         ['unexpected error', 'unknown']
+-    ])('reports newline-free %s stderr immediately', (chunk, type) => {
+-        const transport = new AcpStdioTransport({ command: 'agent' });
++    ])('reports newline-free %s stderr immediately', async (chunk, type) => {
++        const transport = await AcpStdioTransport.create({ command: 'agent' });
+         const seen: Array<{ type: string }> = [];
+         transport.onStderrError((error) => seen.push(error));
+         const proc = (transport as unknown as { process: {
+@@ -508,8 +508,8 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         expect(seen.map((error) => error.type)).toEqual([type]);
+     });
+ 
+-    test('reports a completed non-HTTP/2 cancellation record', () => {
+-        const transport = new AcpStdioTransport({ command: 'agent' });
++    test('reports a completed non-HTTP/2 cancellation record', async () => {
++        const transport = await AcpStdioTransport.create({ command: 'agent' });
+         const seen: Array<{ type: string; message: string; raw: string }> = [];
+         transport.onStderrError((error) => seen.push(error));
+         const proc = (transport as unknown as { process: {
+@@ -528,8 +528,8 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         }]);
+     });
+ 
+-    test('parses stall signatures split across stderr chunks without waiting for close', () => {
+-        const transport = new AcpStdioTransport({ command: 'opencode' });
++    test('parses stall signatures split across stderr chunks without waiting for close', async () => {
++        const transport = await AcpStdioTransport.create({ command: 'opencode' });
+         const seen: Array<{ type: string; message: string; raw: string }> = [];
+         transport.onStderrError((error) => {
+             seen.push(error);
+@@ -579,8 +579,8 @@ describe('AcpStdioTransport closed stdin writes', () => {
+         ]);
+     });
+ 
+-    test('bounds newline-free unclassified stderr tails', () => {
+-        const transport = new AcpStdioTransport({ command: 'agent' });
++    test('bounds newline-free unclassified stderr tails', async () => {
++        const transport = await AcpStdioTransport.create({ command: 'agent' });
+         const proc = (transport as unknown as { process: {
+             stderr: { on: ReturnType<typeof vi.fn> };
+         } }).process;
+@@ -599,7 +599,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
+             throw new Error('WritableIterable is closed');
+         });
+ 
+-        const transport = new AcpStdioTransport({ command: 'gemini' });
++        const transport = await AcpStdioTransport.create({ command: 'gemini' });
+         await expect(transport.sendRequest('initialize')).rejects.toThrow('WritableIterable is closed');
+         await expect(transport.sendRequest('session/new')).rejects.toThrow('WritableIterable is closed');
+     });
+diff --git a/cli/src/agent/backends/acp/AcpStdioTransport.ts b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+index c576412c3..d5bee14cd 100644
+--- a/cli/src/agent/backends/acp/AcpStdioTransport.ts
++++ b/cli/src/agent/backends/acp/AcpStdioTransport.ts
+@@ -1,4 +1,9 @@
+ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from 'node:child_process';
++import {
++    acquireAgentCliSpawnLease,
++    releaseAgentCliSpawnLeaseFromAcpRegisterSync
++} from '@hapi/protocol/agentCliSpawnLease';
++import { resolveHapiHomeDir } from '@/configuration';
+ import { logger } from '@/ui/logger';
+ import { killProcessByChildProcess } from '@/utils/process';
+ import { GEMINI_MODEL_PRESETS } from '@hapi/protocol';
+@@ -58,6 +63,7 @@ export function buildAcpStdioSpawnOptions(env?: Record<string, string>): SpawnOp
+ export class AcpStdioTransport {
+     /** Only Cursor's `agent` CLI is single-process; other ACP backends must not block model probes. */
+     private readonly shouldGuardAgentCli: boolean;
++    private readonly command: string;
+     private readonly process: ChildProcessWithoutNullStreams;
+     private readonly pending = new Map<string | number, {
+         resolve: (value: unknown) => void;
+@@ -87,23 +93,44 @@ export class AcpStdioTransport {
+     /** Max stderr attached to the close Error (prefer model-rejection head). */
+     private static readonly CLOSE_STDERR_CAP = 4_000;
+ 
+-    constructor(options: {
++    static async create(options: {
+         command: string;
+         args?: string[];
+         env?: Record<string, string>;
+-    }) {
+-        this.shouldGuardAgentCli = options.command === 'agent';
+-        // Register before spawn so runner/list-models cannot observe an unlocked
+-        // window between process creation and lock write (#1472).
+-        if (this.shouldGuardAgentCli) {
+-            registerActiveAcpTransport();
++    }): Promise<AcpStdioTransport> {
++        const shouldGuardAgentCli = options.command === 'agent';
++        if (shouldGuardAgentCli) {
++            await acquireAgentCliSpawnLease(resolveHapiHomeDir());
++            try {
++                registerActiveAcpTransport();
++                try {
++                    const process = spawn(
++                        options.command,
++                        options.args ?? [],
++                        buildAcpStdioSpawnOptions(options.env)
++                    ) as ChildProcessWithoutNullStreams;
++                    return new AcpStdioTransport(process, true, options.command);
++                } catch (error) {
++                    unregisterActiveAcpTransport();
++                    throw error;
++                }
++            } finally {
++                releaseAgentCliSpawnLeaseFromAcpRegisterSync();
++            }
+         }
+ 
+-        this.process = spawn(
++        const process = spawn(
+             options.command,
+             options.args ?? [],
+             buildAcpStdioSpawnOptions(options.env)
+         ) as ChildProcessWithoutNullStreams;
++        return new AcpStdioTransport(process, false, options.command);
++    }
++
++    private constructor(process: ChildProcessWithoutNullStreams, shouldGuardAgentCli: boolean, command: string) {
++        this.shouldGuardAgentCli = shouldGuardAgentCli;
++        this.command = command;
++        this.process = process;
+ 
+         if (this.shouldGuardAgentCli) {
+             const childPid = typeof this.process.pid === 'number' ? this.process.pid : null;
+@@ -195,7 +222,7 @@ export class AcpStdioTransport {
+             logger.debug('[ACP] Process error', error);
+             const message = error instanceof Error ? error.message : String(error);
+             this.markClosed(new Error(
+-                `Failed to spawn ${options.command}: ${message}. Is it installed and on PATH?`,
++                `Failed to spawn ${this.command}: ${message}. Is it installed and on PATH?`,
+                 { cause: error }
+             ));
+         });
+diff --git a/cli/src/agent/backends/acp/agentCliGuard.test.ts b/cli/src/agent/backends/acp/agentCliGuard.test.ts
+index 8f54379fc..f885d5c56 100644
+--- a/cli/src/agent/backends/acp/agentCliGuard.test.ts
++++ b/cli/src/agent/backends/acp/agentCliGuard.test.ts
+@@ -13,6 +13,11 @@ import {
+     registerActiveAcpTransport,
+     unregisterActiveAcpTransport
+ } from './agentCliGuard';
++import {
++    releaseAgentCliSpawnLeaseFromAcpRegisterSync,
++    releaseAgentCliSpawnLeaseSync,
++    tryAcquireAgentCliSpawnLeaseSync
++} from '@hapi/protocol/agentCliSpawnLease';
+ 
+ const testHome = join(tmpdir(), `hapi-agent-cli-guard-${process.pid}`);
+ 
+@@ -58,6 +63,14 @@ describe('agentCliGuard', () => {
+         expect(isAgentAcpTransportActive()).toBe(false);
+     });
+ 
++    test('does not hold spawn lease for the full register lifetime', () => {
++        process.env.HAPI_HOME = testHome;
++        registerActiveAcpTransport();
++        expect(tryAcquireAgentCliSpawnLeaseSync(testHome)).toBe(true);
++        releaseAgentCliSpawnLeaseSync();
++        unregisterActiveAcpTransport();
++    });
++
+     test('keeps cross-process lock until the last transport unregisters', () => {
+         process.env.HAPI_HOME = testHome;
+         registerActiveAcpTransport();
+diff --git a/cli/src/agent/backends/acp/agentCliGuard.ts b/cli/src/agent/backends/acp/agentCliGuard.ts
+index 5540c0fbf..f76cd6511 100644
+--- a/cli/src/agent/backends/acp/agentCliGuard.ts
++++ b/cli/src/agent/backends/acp/agentCliGuard.ts
+@@ -8,6 +8,10 @@ import {
+     writeFileSync
+ } from 'node:fs';
+ import { join } from 'node:path';
++import {
++    releaseAgentCliSpawnLeaseFromAcpRegisterSync,
++    _resetAgentCliSpawnLeaseForTests
++} from '@hapi/protocol/agentCliSpawnLease';
+ import { resolveHapiHomeDir } from '@/configuration';
+ 
+ /**
+@@ -16,7 +20,10 @@ import { resolveHapiHomeDir } from '@/configuration';
+  * child (SIGTERM / exit 143) and crashes the remote session.
+  *
+  * In-process ref counting covers RPC handlers in the same process; a HAPI_HOME
+- * lock directory covers runner vs session child processes.
++ * lock directory covers runner vs session child processes. The proper-lockfile
++ * spawn lease (`locks/agent-cli.spawn`) is held only around `spawn('agent')`
++ * in AcpStdioTransport and during list-models probes — not for the full session
++ * (#1520; multi-session ACP must remain possible).
+  *
+  * Prefer recording the ACP child PID (not only the HAPI host PID) so stale
+  * cleanup and logs attribute the real `agent` process. Register the lock
+@@ -468,8 +475,11 @@ export function _setActiveAcpTransportCountForTests(count: number): void {
+ }
+ 
+ export function _resetAgentCliGuardForTests(): void {
++    const home = process.env.HAPI_HOME;
+     activeAcpTransportCount = 0;
+     registerPublishHook = null;
+     addLockPidHook = null;
++    releaseAgentCliSpawnLeaseFromAcpRegisterSync();
++    _resetAgentCliSpawnLeaseForTests(home);
+     removeAcpLockDir();
+ }
+diff --git a/cli/src/modules/common/cursorModels.test.ts b/cli/src/modules/common/cursorModels.test.ts
+index 0fe8171ee..496a20cae 100644
+--- a/cli/src/modules/common/cursorModels.test.ts
++++ b/cli/src/modules/common/cursorModels.test.ts
+@@ -404,20 +404,41 @@ describe('listCursorModels', () => {
+         });
+     });
+ 
+-    test('skips CLI slug probe when ACP lock is active after ACP probe', async () => {
++    test('skips CLI slug probe when spawn lease is held after guard reads inactive', async () => {
++        const { acquireAgentCliSpawnLeaseSync, _resetAgentCliSpawnLeaseForTests } = await import(
++            '@hapi/protocol/agentCliSpawnLease'
++        )
++        acquireAgentCliSpawnLeaseSync(testHapiHome)
++        vi.mocked(isAgentAcpTransportActive).mockReturnValueOnce(false)
++        acpProbeMock.runCursorAcpModelProbe.mockResolvedValue({
++            success: false,
++            error: 'no wires'
++        })
++
++        const result = await listCursorModels()
++
++        expect(spawnMock).not.toHaveBeenCalled()
++        expect(result.success).toBe(false)
++        expect(result.error).toContain('ACP transport is active')
++        _resetAgentCliSpawnLeaseForTests(testHapiHome)
++    })
++
++    test('does not spawn list-models when ACP marker appears after lease acquire', async () => {
+         vi.mocked(isAgentAcpTransportActive)
+             .mockReturnValueOnce(false)
+-            .mockReturnValueOnce(true);
++            .mockReturnValueOnce(false)
++            .mockReturnValueOnce(true)
+         acpProbeMock.runCursorAcpModelProbe.mockResolvedValue({
+             success: false,
+             error: 'no wires'
+-        });
++        })
+ 
+-        const result = await listCursorModels();
++        const result = await listCursorModels()
+ 
+-        expect(spawnMock).not.toHaveBeenCalled();
+-        expect(result).toEqual({ success: false, error: 'no wires' });
+-    });
++        expect(spawnMock).not.toHaveBeenCalled()
++        expect(result.success).toBe(false)
++        expect(result.error).toContain('ACP transport is active')
++    })
+ 
+     test('prefers live ACP snapshot over cache while ACP transport is active', async () => {
+         vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)
+diff --git a/cli/src/modules/common/cursorModels.ts b/cli/src/modules/common/cursorModels.ts
+index 8629b6240..ae9e0f641 100644
+--- a/cli/src/modules/common/cursorModels.ts
++++ b/cli/src/modules/common/cursorModels.ts
+@@ -1,6 +1,12 @@
+ import { spawn } from 'node:child_process';
+ import type { CursorModelsResponse, CursorModelSummary } from '@hapi/protocol/apiTypes';
++import {
++    releaseAgentCliSpawnLeaseSync,
++    tryAcquireAgentCliSpawnLeaseSync
++} from '@hapi/protocol/agentCliSpawnLease';
+ import { isAgentAcpTransportActive } from '@/agent/backends/acp/agentCliGuard';
++import { resolveHapiHomeDir } from '@/configuration';
++import { killProcessByChildProcess } from '@/utils/process';
+ import { getCursorAcpModelsSnapshot } from '@/cursor/utils/cursorAcpModelsBridge';
+ import { getErrorMessage } from './rpcResponses';
+ import {
+@@ -202,10 +208,23 @@ export function parseCursorModelsOutput(output: string): {
+ }
+ 
+ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
++    if (!tryAcquireAgentCliSpawnLeaseSync(resolveHapiHomeDir())) {
++        throw new Error('Cursor ACP transport is active');
++    }
+     if (isAgentAcpTransportActive()) {
++        releaseAgentCliSpawnLeaseSync();
+         throw new Error('Cursor ACP transport is active');
+     }
+ 
++    let leaseReleased = false;
++    const releaseLeaseOnce = (): void => {
++        if (leaseReleased) {
++            return;
++        }
++        leaseReleased = true;
++        releaseAgentCliSpawnLeaseSync();
++    };
++
+     return await new Promise((resolve, reject) => {
+         const child = spawn('agent', ['--list-models'], {
+             env: process.env,
+@@ -217,11 +236,21 @@ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
+         let stderr = '';
+         let settled = false;
+ 
+-        const timeout = setTimeout(() => {
+-            if (settled) return;
++        let timeoutError: Error | null = null;
++
++        const finish = (handler: () => void): void => {
++            if (settled) {
++                return;
++            }
+             settled = true;
+-            child.kill('SIGTERM');
+-            reject(new Error('Cursor model discovery timed out'));
++            clearTimeout(timeout);
++            releaseLeaseOnce();
++            handler();
++        };
++
++        const timeout = setTimeout(() => {
++            timeoutError = new Error('Cursor model discovery timed out');
++            void killProcessByChildProcess(child, true);
+         }, PROBE_TIMEOUT_MS);
+ 
+         child.stdout?.on('data', (chunk) => {
+@@ -231,23 +260,23 @@ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
+             stderr += chunk.toString();
+         });
+         child.on('error', (error) => {
+-            if (settled) return;
+-            settled = true;
+-            clearTimeout(timeout);
+-            reject(error);
++            finish(() => reject(error));
+         });
+         child.on('exit', (code) => {
+-            if (settled) return;
+-            settled = true;
+-            clearTimeout(timeout);
+-            if (code !== 0) {
+-                reject(new Error(stderr.trim() || `agent --list-models exited with code ${code}`));
+-                return;
+-            }
++            finish(() => {
++                if (timeoutError) {
++                    reject(timeoutError);
++                    return;
++                }
++                if (code !== 0) {
++                    reject(new Error(stderr.trim() || `agent --list-models exited with code ${code}`));
++                    return;
++                }
+ 
+-            resolve({
+-                success: true,
+-                ...parseCursorModelsOutput(stdout)
++                resolve({
++                    success: true,
++                    ...parseCursorModelsOutput(stdout)
++                });
+             });
+         });
+     });
+diff --git a/cli/src/modules/common/grokModels.ts b/cli/src/modules/common/grokModels.ts
+index 2a4d5747f..65d8063bf 100644
+--- a/cli/src/modules/common/grokModels.ts
++++ b/cli/src/modules/common/grokModels.ts
+@@ -152,7 +152,7 @@ async function runGrokModelsCliProbe(cwd: string): Promise<ListGrokModelsForCwdR
+ async function runGrokModelsProbe(cwd: string): Promise<ListGrokModelsForCwdResponse> {
+     // The primary ACP probe also uses shell mode on Windows through AcpStdioTransport.
+     assertSafeWindowsShellArg(cwd, 'cwd')
+-    const transport = new AcpStdioTransport({
++    const transport = await AcpStdioTransport.create({
+         command: 'grok',
+         args: ['--cwd', cwd, 'agent', '--reasoning-effort', 'low', 'stdio'],
+         env: Object.fromEntries(
+diff --git a/cli/src/modules/common/opencodeModels.test.ts b/cli/src/modules/common/opencodeModels.test.ts
+index f966bbab3..8910ac3b2 100644
+--- a/cli/src/modules/common/opencodeModels.test.ts
++++ b/cli/src/modules/common/opencodeModels.test.ts
+@@ -2,17 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
+ const sendRequestMock = vi.fn()
+ const closeMock = vi.fn().mockResolvedValue(undefined)
+-const transportConstructor = vi.fn()
++const transportCreate = vi.fn()
+ 
+-vi.mock('@/agent/backends/acp/AcpStdioTransport', () => ({
+-    AcpStdioTransport: class {
++vi.mock('@/agent/backends/acp/AcpStdioTransport', () => {
++    class MockAcpStdioTransport {
+         sendRequest = sendRequestMock
+         close = closeMock
+-        constructor(opts: { command: string; args?: string[] }) {
+-            transportConstructor(opts)
++        static async create(opts: { command: string; args?: string[] }) {
++            transportCreate(opts)
++            return new MockAcpStdioTransport()
+         }
+     }
+-}))
++    return { AcpStdioTransport: MockAcpStdioTransport }
++})
+ 
+ import { listOpencodeModelsForCwd, _resetOpencodeModelsCacheForTests } from './opencodeModels'
+ 
+@@ -21,7 +23,7 @@ describe('listOpencodeModelsForCwd', () => {
+         _resetOpencodeModelsCacheForTests()
+         sendRequestMock.mockReset()
+         closeMock.mockClear()
+-        transportConstructor.mockClear()
++        transportCreate.mockClear()
+     })
+ 
+     afterEach(() => {
+@@ -50,7 +52,7 @@ describe('listOpencodeModelsForCwd', () => {
+ 
+         const result = await listOpencodeModelsForCwd('/home/user/project')
+ 
+-        expect(transportConstructor).toHaveBeenCalledWith(
++        expect(transportCreate).toHaveBeenCalledWith(
+             expect.objectContaining({ command: 'opencode', args: ['acp'] })
+         )
+         expect(sendRequestMock).toHaveBeenNthCalledWith(
+@@ -131,7 +133,7 @@ describe('listOpencodeModelsForCwd', () => {
+         await listOpencodeModelsForCwd('/cache/cwd')
+         await listOpencodeModelsForCwd('/cache/cwd')
+ 
+-        expect(transportConstructor).toHaveBeenCalledTimes(1)
++        expect(transportCreate).toHaveBeenCalledTimes(1)
+         expect(sendRequestMock).toHaveBeenCalledTimes(2)
+     })
+ 
+@@ -152,7 +154,7 @@ describe('listOpencodeModelsForCwd', () => {
+ 
+         const [r1, r2] = await Promise.all([inflight1, inflight2])
+ 
+-        expect(transportConstructor).toHaveBeenCalledTimes(1)
++        expect(transportCreate).toHaveBeenCalledTimes(1)
+         expect(r1).toEqual(r2)
+         expect(r1.success).toBe(true)
+     })
+diff --git a/cli/src/modules/common/opencodeModels.ts b/cli/src/modules/common/opencodeModels.ts
+index 5d0651883..e837daeb2 100644
+--- a/cli/src/modules/common/opencodeModels.ts
++++ b/cli/src/modules/common/opencodeModels.ts
+@@ -84,7 +84,7 @@ function extractModelsFromResponse(response: unknown): {
+ }
+ 
+ async function runOpencodeProbe(cwd: string): Promise<ListOpencodeModelsForCwdResponse> {
+-    const transport = new AcpStdioTransport({
++    const transport = await AcpStdioTransport.create({
+         command: 'opencode',
+         args: ['acp']
+     });
+diff --git a/shared/package.json b/shared/package.json
+index 760d72d22..a8371503b 100644
+--- a/shared/package.json
++++ b/shared/package.json
+@@ -23,7 +23,8 @@
+         "./voicePickerCatalog": "./src/voicePickerCatalog.ts",
+         "./voice-personality": "./src/voicePersonality.ts",
+         "./usage": "./src/usage.ts",
+-        "./settingsFileLock": "./src/settingsFileLock.ts"
++        "./settingsFileLock": "./src/settingsFileLock.ts",
++        "./agentCliSpawnLease": "./src/agentCliSpawnLease.ts"
+     },
+     "sideEffects": false,
+     "scripts": {
+diff --git a/shared/src/agentCliSpawnLease.test.ts b/shared/src/agentCliSpawnLease.test.ts
+new file mode 100644
+index 000000000..0fdd332e1
+--- /dev/null
++++ b/shared/src/agentCliSpawnLease.test.ts
+@@ -0,0 +1,86 @@
++import { describe, expect, test, afterEach } from 'bun:test'
++import { existsSync, mkdtempSync, mkdirSync, utimesSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import {
++    acquireAgentCliSpawnLease,
++    acquireAgentCliSpawnLeaseSync,
++    getAgentCliSpawnLockTarget,
++    releaseAgentCliSpawnLeaseFromAcpRegisterSync,
++    releaseAgentCliSpawnLeaseSync,
++    tryAcquireAgentCliSpawnLeaseSync,
++    _resetAgentCliSpawnLeaseForTests,
++} from './agentCliSpawnLease'
++
++describe('agentCliSpawnLease', () => {
++    const dir = mkdtempSync(join(tmpdir(), 'hapi-agent-cli-spawn-lease-'))
++
++    afterEach(() => {
++        _resetAgentCliSpawnLeaseForTests(dir)
++    })
++
++    test('exclusive lease blocks a second non-blocking acquirer', () => {
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(true)
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(false)
++        releaseAgentCliSpawnLeaseSync()
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(true)
++        releaseAgentCliSpawnLeaseSync()
++    })
++
++    test('ACP register depth shares one lease until the last unregister', () => {
++        acquireAgentCliSpawnLeaseSync(dir)
++        acquireAgentCliSpawnLeaseSync(dir)
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(false)
++        releaseAgentCliSpawnLeaseFromAcpRegisterSync()
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(false)
++        releaseAgentCliSpawnLeaseFromAcpRegisterSync()
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(true)
++        releaseAgentCliSpawnLeaseSync()
++    })
++
++    test('ACP blocking acquire succeeds after probe releases the lease', () => {
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(true)
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(false)
++        releaseAgentCliSpawnLeaseSync()
++        acquireAgentCliSpawnLeaseSync(dir)
++        releaseAgentCliSpawnLeaseFromAcpRegisterSync()
++    })
++
++    test('async blocking acquire yields while same-process probe holds lease', async () => {
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(true)
++        const acquirePromise = acquireAgentCliSpawnLease(dir)
++        let probeReleased = false
++        setTimeout(() => {
++            releaseAgentCliSpawnLeaseSync()
++            probeReleased = true
++        }, 50)
++        await acquirePromise
++        expect(probeReleased).toBe(true)
++        releaseAgentCliSpawnLeaseFromAcpRegisterSync()
++    })
++
++    test('anchors spawn lease beside the agent-acp-active marker directory', () => {
++        const target = getAgentCliSpawnLockTarget(dir)
++        expect(target.endsWith(join('locks', 'agent-cli.spawn'))).toBe(true)
++        acquireAgentCliSpawnLeaseSync(dir)
++        expect(existsSync(join(dir, 'locks', 'agent-acp-active'))).toBe(false)
++        expect(existsSync(target)).toBe(true)
++        releaseAgentCliSpawnLeaseFromAcpRegisterSync()
++    })
++
++    test('reclaims a stale spawn lease left by a crashed holder', () => {
++        const target = getAgentCliSpawnLockTarget(dir)
++        const lockDir = spawnLockfilePath(target)
++        mkdirSync(lockDir)
++        const past = new Date(Date.now() - 300_000)
++        utimesSync(lockDir, past, past)
++
++        expect(tryAcquireAgentCliSpawnLeaseSync(dir)).toBe(true)
++        releaseAgentCliSpawnLeaseSync()
++        expect(existsSync(lockDir)).toBe(false)
++    })
++})
++
++function spawnLockfilePath(lockTarget: string): string {
++    return `${lockTarget}.hapi.lock`
++}
+diff --git a/shared/src/agentCliSpawnLease.ts b/shared/src/agentCliSpawnLease.ts
+new file mode 100644
+index 000000000..95ee1487e
+--- /dev/null
++++ b/shared/src/agentCliSpawnLease.ts
+@@ -0,0 +1,170 @@
++/**
++ * Cross-process exclusive lease for Cursor `agent` child processes.
++ * ACP transport and `agent --list-models` probes must not overlap — Cursor
++ * SIGTERMs the other child (exit 143). Uses proper-lockfile beside the
++ * agent-acp-active marker dir so acquisition is atomic (no check-then-act).
++ */
++
++import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
++import { join } from 'node:path'
++import lockfile from 'proper-lockfile'
++
++const SPAWN_LOCK_STALE_MS = 120_000
++const SPAWN_LOCK_UPDATE_MS = 30_000
++const SPAWN_LOCK_RETRY_INTERVAL_MS = 100
++const SPAWN_LOCK_MAX_ATTEMPTS = 300
++
++/** Cross-process lease release fn when this process holds the spawn lease. */
++let leaseRelease: (() => void) | null = null
++/** Nested ACP registerActiveAcpTransport calls sharing one lease. */
++let acpRegisterLeaseDepth = 0
++
++function sleepMsSync(ms: number): void {
++    const bun = (globalThis as { Bun?: { sleepSync?: (duration: number) => void } }).Bun
++    if (bun?.sleepSync) {
++        bun.sleepSync(ms)
++        return
++    }
++    const end = Date.now() + ms
++    while (Date.now() < end) {
++        // Node vitest fallback when Bun.sleepSync is unavailable.
++    }
++}
++
++function spawnLockfilePath(lockTarget: string): string {
++    return `${lockTarget}.hapi.lock`
++}
++
++function lockOptions(lockTarget: string): {
++    realpath: boolean
++    lockfilePath: string
++    stale: number
++    update: number
++    retries: number
++} {
++    return {
++        realpath: false,
++        lockfilePath: spawnLockfilePath(lockTarget),
++        stale: SPAWN_LOCK_STALE_MS,
++        update: SPAWN_LOCK_UPDATE_MS,
++        retries: 0,
++    }
++}
++
++/** Lease anchor file colocated with the agent-acp-active marker directory. */
++export function getAgentCliSpawnLockTarget(hapiHome: string): string {
++    const locksDir = join(hapiHome, 'locks')
++    mkdirSync(locksDir, { recursive: true })
++    const target = join(locksDir, 'agent-cli.spawn')
++    if (!existsSync(target)) {
++        writeFileSync(target, '', { flag: 'a' })
++    }
++    return target
++}
++
++function claimSpawnLeaseSync(hapiHome: string): boolean {
++    if (leaseRelease !== null) {
++        return false
++    }
++    const lockTarget = getAgentCliSpawnLockTarget(hapiHome)
++    try {
++        leaseRelease = lockfile.lockSync(lockTarget, lockOptions(lockTarget))
++        return true
++    } catch {
++        return false
++    }
++}
++
++/**
++ * Non-blocking exclusive lease for model-list probes. Returns false when
++ * another holder (ACP or probe) already owns the spawn lease.
++ */
++export function tryAcquireAgentCliSpawnLeaseSync(hapiHome: string): boolean {
++    if (leaseRelease !== null || acpRegisterLeaseDepth > 0) {
++        return false
++    }
++    return claimSpawnLeaseSync(hapiHome)
++}
++
++function sleepMs(ms: number): Promise<void> {
++    return new Promise((resolve) => setTimeout(resolve, ms))
++}
++
++/** Blocking exclusive lease for ACP transport startup (sync — tests only). */
++export function acquireAgentCliSpawnLeaseSync(hapiHome: string): void {
++    if (acpRegisterLeaseDepth > 0) {
++        acpRegisterLeaseDepth += 1
++        return
++    }
++
++    for (let attempt = 0; attempt < SPAWN_LOCK_MAX_ATTEMPTS; attempt++) {
++        if (claimSpawnLeaseSync(hapiHome)) {
++            acpRegisterLeaseDepth = 1
++            return
++        }
++        sleepMsSync(SPAWN_LOCK_RETRY_INTERVAL_MS)
++    }
++
++    throw new Error('agent CLI spawn lease held by another process')
++}
++
++/** Blocking exclusive lease for ACP transport startup (yields event loop between retries). */
++export async function acquireAgentCliSpawnLease(hapiHome: string): Promise<void> {
++    if (acpRegisterLeaseDepth > 0) {
++        acpRegisterLeaseDepth += 1
++        return
++    }
++
++    for (let attempt = 0; attempt < SPAWN_LOCK_MAX_ATTEMPTS; attempt++) {
++        if (claimSpawnLeaseSync(hapiHome)) {
++            acpRegisterLeaseDepth = 1
++            return
++        }
++        await sleepMs(SPAWN_LOCK_RETRY_INTERVAL_MS)
++    }
++
++    throw new Error('agent CLI spawn lease held by another process')
++}
++
++/** Release after a list-models probe child exits. */
++export function releaseAgentCliSpawnLeaseSync(): void {
++    if (acpRegisterLeaseDepth > 0 || leaseRelease === null) {
++        return
++    }
++    leaseRelease()
++    leaseRelease = null
++}
++
++/** Release after the last ACP transport unregisters in this process. */
++export function releaseAgentCliSpawnLeaseFromAcpRegisterSync(): void {
++    if (acpRegisterLeaseDepth <= 0) {
++        return
++    }
++    acpRegisterLeaseDepth -= 1
++    if (acpRegisterLeaseDepth > 0 || leaseRelease === null) {
++        return
++    }
++    leaseRelease()
++    leaseRelease = null
++}
++
++/** @internal test-only */
++export function _resetAgentCliSpawnLeaseForTests(hapiHome?: string): void {
++    acpRegisterLeaseDepth = 0
++    if (leaseRelease) {
++        leaseRelease()
++        leaseRelease = null
++    }
++    if (!hapiHome) {
++        return
++    }
++    const lockTarget = getAgentCliSpawnLockTarget(hapiHome)
++    try {
++        lockfile.unlockSync(lockTarget, {
++            realpath: false,
++            lockfilePath: spawnLockfilePath(lockTarget),
++        })
++    } catch {
++        // Best effort — lock may not exist.
++    }
++}
+diff --git a/web/src/components/assistant-ui/markdown-a.test.tsx b/web/src/components/assistant-ui/markdown-a.test.tsx
+index d2053f0c7..d5c161313 100644
+--- a/web/src/components/assistant-ui/markdown-a.test.tsx
++++ b/web/src/components/assistant-ui/markdown-a.test.tsx
+@@ -59,6 +59,7 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
+         hasMoreMessages: false,
+         isSyncingTail: false,
+         isLoadingMoreMessages: false,
++        showSessionSummaryInChat: false,
+         loadOlderMessagesPreservingScroll: async () => 'loaded',
+         ...overrides,
+     }

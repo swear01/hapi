@@ -1,0 +1,893 @@
+diff --git a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+index 1490118ad..8ac1332a1 100644
+--- a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+@@ -1,6 +1,6 @@
+ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import type { ReactNode, TextareaHTMLAttributes } from 'react'
+-import { useRef, useState } from 'react'
++import { useCallback, useRef, useState } from 'react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+@@ -157,10 +157,12 @@ type HarnessControls = {
+     acceptAndClearSchedule: () => void
+     remount: () => void
+     programmaticSetText: (text: string) => void
++    queuedEditSetText: (text: string) => void
+     acceptSend: () => void
+     setSending: (sending: boolean) => void
+     setThreadDisabled: (disabled: boolean) => void
+     settleSend: (error?: ComposerSendError) => void
++    settleRetrySend: () => void
+     settleAttachmentSendFailure: () => void
+     getClearErrorCalls: () => number
+ }
+@@ -169,6 +171,7 @@ function ComposerHarness(props: {
+     initialText: string
+     initialSchedule?: PendingSchedule | null
+     piRunning?: boolean
++    sessionId?: string
+     controls: { current: HarnessControls | null }
+ }) {
+     const [snapshot, setSnapshot] = useState<FakeRuntimeState>(() => ({
+@@ -179,11 +182,25 @@ function ComposerHarness(props: {
+     const [sendError, setSendError] = useState<ComposerSendError | null>(null)
+     const [isSending, setIsSending] = useState(false)
+     const [composerKey, setComposerKey] = useState('composer-a')
+-    const [sendAcceptance, setSendAcceptance] = useState<{ attemptId: string | null } | null>(null)
++    const [programmaticEditRevision, setProgrammaticEditRevision] = useState(0)
++    const [sendAcceptance, setSendAcceptance] = useState<{
++        attemptId: string | null
++        sessionId: string
++        programmaticEditRevision: number
++    } | null>(null)
+     const [sendSettlement, setSendSettlement] = useState<{
+         attemptId: string
++        sessionId: string
++        text: string
+         status: 'success' | 'error'
++        source: 'send' | 'retry'
+     } | null>(null)
++    const sessionId = props.sessionId ?? 'session-a'
++    const consumeSendSettlement = useCallback((attemptId: string) => {
++        setSendSettlement((current) =>
++            current?.attemptId === attemptId ? null : current
++        )
++    }, [])
+     const clearErrorCallsRef = useRef(0)
+     const pendingSendIntentRef = useRef<ComposerSendIntent>('default')
+ 
+@@ -209,10 +226,17 @@ function ComposerHarness(props: {
+             ...current,
+             composer: { ...current.composer, text },
+         })),
++        queuedEditSetText: (text) => {
++            setProgrammaticEditRevision((revision) => revision + 1)
++            setSnapshot((current) => ({
++                ...current,
++                composer: { ...current.composer, text },
++            }))
++        },
+         acceptSend: () => {
+             setIsSending(true)
+             setSendSettlement(null)
+-            setSendAcceptance({ attemptId: 'attempt-1' })
++            setSendAcceptance({ attemptId: 'attempt-1', sessionId, programmaticEditRevision })
+         },
+         setSending: setIsSending,
+         setThreadDisabled: (disabled) => setSnapshot((current) => ({
+@@ -221,11 +245,33 @@ function ComposerHarness(props: {
+         })),
+         settleSend: (error) => {
+             if (error) setSendError(error)
+-            setSendSettlement({ attemptId: 'attempt-1', status: error ? 'error' : 'success' })
++            setSendSettlement({
++                attemptId: 'attempt-1',
++                sessionId,
++                text: props.initialText,
++                status: error ? 'error' : 'success',
++                source: 'send',
++            })
++            setIsSending(false)
++        },
++        settleRetrySend: () => {
++            setSendSettlement({
++                attemptId: 'retry-1',
++                sessionId,
++                text: props.initialText,
++                status: 'success',
++                source: 'retry',
++            })
+             setIsSending(false)
+         },
+         settleAttachmentSendFailure: () => {
+-            setSendSettlement({ attemptId: 'attempt-1', status: 'error' })
++            setSendSettlement({
++                attemptId: 'attempt-1',
++                sessionId,
++                text: props.initialText,
++                status: 'error',
++                source: 'send',
++            })
+             setIsSending(false)
+         },
+         getClearErrorCalls: () => clearErrorCallsRef.current,
+@@ -235,11 +281,13 @@ function ComposerHarness(props: {
+         <I18nProvider>
+             <HappyComposer
+                 key={composerKey}
+-                sessionId={composerKey}
++                sessionId={sessionId}
+                 disabled={isSending}
+                 pendingSchedule={schedule}
+                 sendAcceptance={sendAcceptance}
++                programmaticEditRevision={programmaticEditRevision}
+                 sendSettlement={sendSettlement}
++                onConsumeSendSettlement={consumeSendSettlement}
+                 onSchedule={setSchedule}
+                 onClearSchedule={() => setSchedule(null)}
+                 sendError={sendError}
+@@ -266,11 +314,12 @@ function renderComposer(
+     initialText = 'failed text',
+     initialSchedule: PendingSchedule | null = { type: 'absolute', ms: 1234 },
+     piRunning = false,
++    sessionId = 'session-a',
+ ) {
+     const controls: { current: HarnessControls | null } = { current: null }
+     runtime.sentIntents = []
+     runtime.modelChanges = []
+-    render(<ComposerHarness initialText={initialText} initialSchedule={initialSchedule} piRunning={piRunning} controls={controls} />)
++    render(<ComposerHarness initialText={initialText} initialSchedule={initialSchedule} piRunning={piRunning} sessionId={sessionId} controls={controls} />)
+     return controls
+ }
+ 
+@@ -401,6 +450,116 @@ describe('HappyComposer send-error atomic restore', () => {
+         expect(screen.getByTestId('pending-schedule')).toHaveTextContent('{"type":"absolute","ms":1234}')
+     })
+ 
++    it('clears an untouched remounted send draft after a successful settlement', async () => {
++        const controls = renderComposer('submitted text', null)
++        send()
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.programmaticSetText('submitted text'))
++
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue(''))
++        fireEvent.change(input(), { target: { value: 'new draft after send' } })
++        expect(input()).toHaveValue('new draft after send')
++    })
++
++    it('clears a remounted draft from the original user submission after success', async () => {
++        const controls = renderComposer('submitted text', null)
++        fireEvent.change(input(), { target: { value: 'submitted text' } })
++        send()
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.programmaticSetText('submitted text'))
++
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue(''))
++    })
++
++    it('preserves a new user draft typed during a remounted send', async () => {
++        const controls = renderComposer('submitted text', null)
++        send()
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        fireEvent.change(input(), { target: { value: 'new draft while pending' } })
++
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('new draft while pending'))
++    })
++
++    it('preserves a different remounted draft after a successful settlement', async () => {
++        const controls = renderComposer('submitted text', null)
++        send()
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.programmaticSetText('replacement draft'))
++
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('replacement draft'))
++    })
++
++    it('preserves a same-text programmatic replacement during an accepted send', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.queuedEditSetText('foo'))
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++    })
++
++    it('preserves a same-text queued edit after the composer remounts', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.queuedEditSetText('foo'))
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++    })
++
++    it('preserves a matching draft when a retry settles without composer acceptance', async () => {
++        const controls = renderComposer('foo', null)
++
++        act(() => controls.current!.settleRetrySend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++    })
++
++    it('clears the matching draft in the resolved target session after success', async () => {
++        // The target session id models an inactive-session resume that retargets
++        // the accepted send from its original route to this composer.
++        const controls = renderComposer('foo', null, false, 'session-resolved')
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue(''))
++    })
++
++    it('preserves a later same-text draft after success and a session remount', async () => {
++        const controls = renderComposer('foo', null)
++        fireEvent.change(input(), { target: { value: 'foo' } })
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue(''))
++
++        fireEvent.change(input(), { target: { value: 'foo' } })
++        act(() => controls.current!.remount())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++    })
++
+     it('does not implicitly restore after a keyed remount receives a new draft interaction', async () => {
+         const controls = renderComposer()
+         send()
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index f037d0c57..2f2db379f 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -40,7 +40,7 @@ import type { PiThinkingLevel } from '@hapi/protocol'
+ import { markSkillUsed } from '@/lib/recent-skills'
+ import { useComposerDraft } from '@/hooks/useComposerDraft'
+ import type { AttachmentDraftInput } from '@/lib/composer-attachment-drafts'
+-import { persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
++import { clearComposerDraftSnapshotIfText, persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
+ import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
+ import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
+ import { Autocomplete } from '@/components/ChatInput/Autocomplete'
+@@ -64,6 +64,7 @@ import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
+ import { useDictation } from '@/hooks/useDictation'
+ import type { ComposerSendIntent } from '@/lib/messageDelivery'
+ import type { MessageDeliveryMode } from '@hapi/protocol'
++import type { SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
+ 
+ export interface TextInputState {
+     text: string
+@@ -368,9 +369,17 @@ export function HappyComposer(props: {
+     onClearSendError?: () => void
+     onSuppressSendErrorRestore?: (id: number) => void
+     /** Emitted by SessionChat after a send is accepted. Null attempt ids are settled scratchlist sends. */
+-    sendAcceptance?: { attemptId: string | null } | null
++    sendAcceptance?: {
++        attemptId: string | null
++        sessionId?: string
++        programmaticEditRevision?: number
++    } | null
++    /** Monotonic programmatic Queued Edit revision owned outside this keyed composer. */
++    programmaticEditRevision?: number
+     /** Terminal result for a chat mutation, including attachment-bearing failures. */
+-    sendSettlement?: { attemptId: string; status: 'success' | 'error' } | null
++    sendSettlement?: SendMessageSettlement | null
++    /** Consume a terminal result after this composer makes its clear/preserve decision. */
++    onConsumeSendSettlement?: (attemptId: string) => void
+     /**
+      * Resume/handoff path for inactive drafts that only exist in IndexedDB
+      * (no visible text/attachments for assistant-ui to append).
+@@ -525,6 +534,13 @@ export function HappyComposer(props: {
+     const [isExpanded, setIsExpanded] = useState(false)
+     const lastSendAcceptanceRef = useRef(props.sendAcceptance)
+     const pendingSendAttemptIdRef = useRef<string | null>(null)
++    const pendingSendEditGenerationRef = useRef<number | null>(null)
++    const acceptedSendEditGenerationRef = useRef<{
++        attemptId: string
++        generation: number
++        startedHere: boolean
++    } | null>(null)
++    const handledSuccessfulSendRef = useRef<string | null>(null)
+     const [showSettings, setShowSettings] = useState(false)
+     const [showPiModelPanel, setShowPiModelPanel] = useState(false)
+     const [showPiThinkingPanel, setShowPiThinkingPanel] = useState(false)
+@@ -543,10 +559,19 @@ export function HappyComposer(props: {
+         lastSendAcceptanceRef.current = acceptance
+         if (acceptance.attemptId === null) {
+             pendingSendAttemptIdRef.current = null
++            pendingSendEditGenerationRef.current = null
++            acceptedSendEditGenerationRef.current = null
+             setIsExpanded(false)
+             return
+         }
+         pendingSendAttemptIdRef.current = acceptance.attemptId
++        const pendingGeneration = pendingSendEditGenerationRef.current
++        acceptedSendEditGenerationRef.current = {
++            attemptId: acceptance.attemptId,
++            generation: pendingGeneration ?? userEditGenerationRef.current,
++            startedHere: pendingGeneration !== null,
++        }
++        pendingSendEditGenerationRef.current = null
+         const settlement = props.sendSettlement
+         if (!settlement || settlement.attemptId !== acceptance.attemptId) return
+         pendingSendAttemptIdRef.current = null
+@@ -692,6 +717,78 @@ export function HappyComposer(props: {
+         })
+     }, [active, attachmentRevision, draftHydration.complete, draftHydration.sessionId, props.canRestoreAttachments, sessionId])
+ 
++    // A keyed session remount can hydrate the text that assistant-ui cleared
++    // before the POST settled. Once that exact send succeeds, clear only an
++    // untouched matching draft; a new user edit must win over settlement.
++    useEffect(() => {
++        const settlement = props.sendSettlement
++        if (
++            !settlement
++            || settlement.status !== 'success'
++            || settlement.sessionId !== sessionId
++            || !sessionId
++        ) return
++        const settlementKey = `${settlement.sessionId}:${settlement.attemptId}`
++        if (handledSuccessfulSendRef.current === settlementKey) return
++        const consumeSettlement = () => {
++            handledSuccessfulSendRef.current = settlementKey
++            props.onConsumeSendSettlement?.(settlement.attemptId)
++        }
++
++        // Retry settlements reuse the failed message's local id and do not
++        // represent a composer-accepted send. Consume them without touching a
++        // matching draft that belongs to the operator.
++        if (
++            settlement.source !== 'send'
++            || (
++                props.sendAcceptance?.sessionId !== undefined
++                && props.sendAcceptance.sessionId !== sessionId
++            )
++            || props.sendAcceptance?.attemptId !== settlement.attemptId
++        ) {
++            consumeSettlement()
++            return
++        }
++        if (draftHydration.sessionId !== sessionId || !draftHydration.complete) return
++
++        const acceptedSend = acceptedSendEditGenerationRef.current
++        const sendEditGeneration = acceptedSend?.attemptId === settlement.attemptId
++            ? acceptedSend.generation
++            : pendingSendEditGenerationRef.current
++        const userEditedAfterSend = sendEditGeneration !== null
++            ? userEditGenerationRef.current > sendEditGeneration
++            : userEditGenerationRef.current > 0
++        if (userEditedAfterSend) {
++            consumeSettlement()
++            return
++        }
++
++        if (composerText !== settlement.text && composerText !== '') {
++            consumeSettlement()
++            return
++        }
++
++        const editedProgrammaticallyAfterSend =
++            (props.programmaticEditRevision ?? 0)
++            > (props.sendAcceptance?.programmaticEditRevision ?? 0)
++
++        // Queued-message Edit restores text through the assistant-ui store and
++        // does not fire the composer input handlers. If the accepted send
++        // started in this composer, an exact-text replacement is still newer
++        // state and must survive the settlement. A keyed remount has no local
++        // accepted-send marker, so its hydrated stale draft remains clearable.
++        if (editedProgrammaticallyAfterSend || (composerText === settlement.text && acceptedSend?.startedHere)) {
++            consumeSettlement()
++            return
++        }
++
++        if (composerText === settlement.text) {
++            api.composer().setText('')
++        }
++        clearComposerDraftSnapshotIfText(sessionId, settlement.text)
++        consumeSettlement()
++    }, [api, composerText, draftHydration.complete, draftHydration.sessionId, props.onConsumeSendSettlement, props.programmaticEditRevision, props.sendAcceptance, props.sendSettlement, sessionId])
++
+     // assistant-ui clears `composer.text` synchronously the moment a send is
+     // invoked AND `SessionChat.handleSend` clears `pendingSchedule` after the
+     // mutation is accepted. A failure must put the text and absolute schedule
+@@ -1182,9 +1279,11 @@ export function HappyComposer(props: {
+             // Must be adjacent to send(): useHappyRuntime consumes and resets
+             // this ref synchronously from assistant-ui's onNew callback.
+             if (pendingSendIntentRef) pendingSendIntentRef.current = effectiveIntent
++            pendingSendEditGenerationRef.current = userEditGenerationRef.current
+             api.composer().send()
+         } catch (error) {
+             resetPendingSendIntent()
++            pendingSendEditGenerationRef.current = null
+             throw error
+         }
+         // SessionChat owns clearing the schedule — it clears only after awaiting
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 2d313572a..8db2aab30 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -407,6 +407,15 @@ type SessionChatProps = {
+     isLoadingMoreMessages: boolean
+     isSending: boolean
+     sendSettlement: SendMessageSettlement | null
++    onConsumeSendSettlement?: (attemptId: string) => void
++    sendAcceptance?: {
++        attemptId: string | null
++        sessionId: string
++        programmaticEditRevision: number
++    } | null
++    programmaticEditRevision?: number
++    onSendAccepted?: (sessionId: string, attemptId: string | null) => void
++    onProgrammaticEdit?: () => void
+     viewMode: 'tail' | 'history'
+     messagesVersion: number
+     historyVersion: number
+@@ -461,7 +470,40 @@ type SessionChatProps = {
+  * SessionChatInner.
+  */
+ export function SessionChat(props: SessionChatProps) {
+-    return <SessionChatInner key={props.session.id} {...props} />
++    const sendAcceptanceBySessionRef = useRef(new Map<string, {
++        attemptId: string | null
++        sessionId: string
++        programmaticEditRevision: number
++    }>())
++    const programmaticEditRevisionBySessionRef = useRef(new Map<string, number>())
++    const [, forceComposerStateUpdate] = useState(0)
++    const sessionId = props.session.id
++    const sendAcceptance = sendAcceptanceBySessionRef.current.get(sessionId) ?? null
++    const programmaticEditRevision = programmaticEditRevisionBySessionRef.current.get(sessionId) ?? 0
++    const onSendAccepted = useCallback((acceptedSessionId: string, attemptId: string | null) => {
++        sendAcceptanceBySessionRef.current.set(acceptedSessionId, {
++            attemptId,
++            sessionId: acceptedSessionId,
++            programmaticEditRevision: programmaticEditRevisionBySessionRef.current.get(acceptedSessionId) ?? 0,
++        })
++        forceComposerStateUpdate((version) => version + 1)
++    }, [])
++    const onProgrammaticEdit = useCallback(() => {
++        const nextRevision = (programmaticEditRevisionBySessionRef.current.get(sessionId) ?? 0) + 1
++        programmaticEditRevisionBySessionRef.current.set(sessionId, nextRevision)
++        forceComposerStateUpdate((version) => version + 1)
++    }, [sessionId])
++
++    return (
++        <SessionChatInner
++            key={sessionId}
++            {...props}
++            sendAcceptance={sendAcceptance}
++            programmaticEditRevision={programmaticEditRevision}
++            onSendAccepted={onSendAccepted}
++            onProgrammaticEdit={onProgrammaticEdit}
++        />
++    )
+ }
+ 
+ function SessionChatInner(props: SessionChatProps) {
+@@ -689,7 +731,7 @@ function SessionChatInner(props: SessionChatProps) {
+             attachments?: AttachmentMetadata[],
+             scheduledAt?: number | null,
+             deliveryMode: MessageDeliveryMode = 'queue',
+-        ): Promise<{ attemptId: string | null } | false> => {
++        ): Promise<SendMessageAcceptance | false> => {
+             if (
+                 scratchlistMode
+                 && scheduledAt == null
+@@ -708,7 +750,7 @@ function SessionChatInner(props: SessionChatProps) {
+                     attachments,
+                     accepted,
+                 )
+-                return accepted ? { attemptId: null } : false
++                return accepted ? { attemptId: null, sessionId: props.session.id } : false
+             }
+             // If the user uploaded while scratchlist mode was on, then toggled
+             // it off before send, pending items still carry hub paths. Stage
+@@ -1419,7 +1461,6 @@ function SessionChatInner(props: SessionChatProps) {
+     // absolute epoch-ms using Date.now() at that moment (send-time base for presets).
+     const [pendingSchedule, setPendingSchedule] = useState<PendingSchedule | null>(null)
+     const [pendingScheduleRevision, setPendingScheduleRevision] = useState(0)
+-    const [sendAcceptance, setSendAcceptance] = useState<{ attemptId: string | null } | null>(null)
+     const updatePendingSchedule = useCallback((next: PendingSchedule | null) => {
+         setPendingSchedule(next)
+         setPendingScheduleRevision((revision) => revision + 1)
+@@ -1500,7 +1541,7 @@ function SessionChatInner(props: SessionChatProps) {
+         })
+         const accepted = await onSendForComposer(text, attachments, scheduledAt, deliveryMode)
+         if (!accepted) return
+-        setSendAcceptance({ attemptId: accepted.attemptId })
++        props.onSendAccepted?.(accepted.sessionId, accepted.attemptId)
+         if (!routedToScratchlist) {
+             // Clear pendingSchedule only after the mutation is actually
+             // accepted - covers both pre-mutation guards AND async
+@@ -1725,6 +1766,7 @@ function SessionChatInner(props: SessionChatProps) {
+                                 pendingSchedule={pendingSchedule}
+                                 pendingScheduleRevision={pendingScheduleRevision}
+                                 onEdit={({ pendingSchedule: restored }) => {
++                                    props.onProgrammaticEdit?.()
+                                     // Restore the schedule so the clock button re-activates
+                                     updatePendingSchedule(restored)
+                                 }}
+@@ -1742,8 +1784,10 @@ function SessionChatInner(props: SessionChatProps) {
+                         resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                         disabled={props.isSending}
+                         pendingSchedule={pendingSchedule}
+-                        sendAcceptance={sendAcceptance}
++                        sendAcceptance={props.sendAcceptance}
++                        programmaticEditRevision={props.programmaticEditRevision ?? 0}
+                         sendSettlement={props.sendSettlement}
++                        onConsumeSendSettlement={props.onConsumeSendSettlement}
+                         onSchedule={updatePendingSchedule}
+                         onClearSchedule={() => updatePendingSchedule(null)}
+                         permissionMode={props.session.permissionMode}
+diff --git a/web/src/hooks/mutations/useSendMessage.test.tsx b/web/src/hooks/mutations/useSendMessage.test.tsx
+index 236168cdc..a7cb9529c 100644
+--- a/web/src/hooks/mutations/useSendMessage.test.tsx
++++ b/web/src/hooks/mutations/useSendMessage.test.tsx
+@@ -62,11 +62,14 @@ describe('useSendMessage', () => {
+         })
+ 
+         await waitFor(() => {
+-            expect(onSuccess).toHaveBeenCalledWith('session-A')
++            expect(onSuccess).toHaveBeenCalledWith('session-A', 'hello')
+         })
+         expect(result.current.sendSettlement).toEqual({
+             attemptId: 'local-id-1',
++            sessionId: 'session-A',
++            text: 'hello',
+             status: 'success',
++            source: 'send',
+         })
+     })
+ 
+@@ -159,7 +162,7 @@ describe('useSendMessage', () => {
+         })
+ 
+         await waitFor(() => {
+-            expect(onSuccess).toHaveBeenCalledWith('session-resolved')
++            expect(onSuccess).toHaveBeenCalledWith('session-resolved', 'hello')
+         })
+     })
+ 
+@@ -308,7 +311,7 @@ describe('useSendMessage', () => {
+             })
+ 
+             await waitFor(() => {
+-                expect(onSuccess).toHaveBeenCalledWith('session-A')
++                expect(onSuccess).toHaveBeenCalledWith('session-A', 'clean send')
+             })
+             expect(onError).not.toHaveBeenCalled()
+         })
+@@ -484,7 +487,10 @@ describe('useSendMessage', () => {
+             })
+             expect(result.current.sendSettlement).toEqual({
+                 attemptId: 'local-id-1',
++                sessionId: 'session-A',
++                text: 'see this image',
+                 status: 'error',
++                source: 'send',
+             })
+             // No composer-restore: onError is NOT fired and the optimistic
+             // row is NOT removed -- both would destroy the attachment UX.
+@@ -573,7 +579,7 @@ describe('useSendMessage', () => {
+         act(() => {
+             acceptedPromise = result.current.sendMessage('hello')
+         })
+-        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1' })
++        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1', sessionId: 'session-A' })
+     })
+ 
+     it('resolves false when blocked (no api) so the caller can preserve schedule state', async () => {
+@@ -633,7 +639,7 @@ describe('useSendMessage', () => {
+         act(() => {
+             acceptedPromise = result.current.sendMessage('hello')
+         })
+-        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1' })
++        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1', sessionId: 'session-resolved' })
+     })
+ 
+     it('awaits onSessionResolved before starting the send mutation', async () => {
+@@ -892,6 +898,15 @@ describe('useSendMessage', () => {
+             scheduledAt,
+             'queue',
+         )
++        await waitFor(() => {
++            expect(result.current.sendSettlement).toEqual({
++                attemptId: 'local-retry-1',
++                sessionId: 'session-A',
++                text: 'hi later',
++                status: 'success',
++                source: 'retry',
++            })
++        })
+     })
+ 
+     it('downgrades a failed steer to queue when retrying the message', async () => {
+diff --git a/web/src/hooks/mutations/useSendMessage.ts b/web/src/hooks/mutations/useSendMessage.ts
+index cee70d99a..a30df4d63 100644
+--- a/web/src/hooks/mutations/useSendMessage.ts
++++ b/web/src/hooks/mutations/useSendMessage.ts
+@@ -1,5 +1,5 @@
+ import { useMutation } from '@tanstack/react-query'
+-import { useRef, useState } from 'react'
++import { useCallback, useRef, useState } from 'react'
+ import type { ApiClient } from '@/api/client'
+ import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
+ import { makeClientSideId } from '@/lib/messages'
+@@ -21,15 +21,20 @@ type SendMessageInput = {
+     attachments?: AttachmentMetadata[]
+     scheduledAt?: number | null
+     deliveryMode: MessageDeliveryMode
++    source: 'send' | 'retry'
+ }
+ 
+ export type SendMessageAcceptance = {
+-    attemptId: string
++    attemptId: string | null
++    sessionId: string
+ }
+ 
+ export type SendMessageSettlement = {
+     attemptId: string
++    sessionId: string
++    text: string
+     status: 'success' | 'error'
++    source: 'send' | 'retry'
+ }
+ 
+ type BlockedReason = 'no-api' | 'no-session' | 'pending'
+@@ -101,7 +106,7 @@ type UseSendMessageOptions = {
+         context: SessionResolvedContext,
+     ) => void | Promise<void | SessionResolution>
+     onBlocked?: (reason: BlockedReason) => void
+-    onSuccess?: (sessionId: string) => void
++    onSuccess?: (sessionId: string, text: string) => void
+     onError?: (info: SendErrorInfo) => void
+     isSessionThinking?: boolean
+ }
+@@ -203,10 +208,16 @@ export function useSendMessage(
+     retryMessage: (localId: string) => boolean
+     isSending: boolean
+     sendSettlement: SendMessageSettlement | null
++    consumeSendSettlement: (attemptId: string) => void
+ } {
+     const { haptic } = usePlatform()
+     const [isResolving, setIsResolving] = useState(false)
+     const [sendSettlement, setSendSettlement] = useState<SendMessageSettlement | null>(null)
++    const consumeSendSettlement = useCallback((attemptId: string) => {
++        setSendSettlement((current) =>
++            current?.attemptId === attemptId ? null : current
++        )
++    }, [])
+     const resolveGuardRef = useRef(false)
+     const isSessionThinkingRef = useRef(options?.isSessionThinking ?? false)
+     isSessionThinkingRef.current = options?.isSessionThinking ?? false
+@@ -231,17 +242,29 @@ export function useSendMessage(
+             return { successStatus }
+         },
+         onSuccess: (_, input, context) => {
+-            setSendSettlement({ attemptId: input.localId, status: 'success' })
++            setSendSettlement({
++                attemptId: input.localId,
++                sessionId: input.sessionId,
++                text: input.text,
++                status: 'success',
++                source: input.source,
++            })
+             updateMessageStatus(
+                 input.sessionId,
+                 input.localId,
+                 context?.successStatus ?? 'sent'
+             )
+             haptic.notification('success')
+-            options?.onSuccess?.(input.sessionId)
++            options?.onSuccess?.(input.sessionId, input.text)
+         },
+         onError: (error, input) => {
+-            setSendSettlement({ attemptId: input.localId, status: 'error' })
++            setSendSettlement({
++                attemptId: input.localId,
++                sessionId: input.sessionId,
++                text: input.text,
++                status: 'error',
++                source: input.source,
++            })
+             // Attachment sends keep the legacy failed-bubble UX: the
+             // composer-restore path can only re-seat text + scheduledAt,
+             // not the uploaded attachment metadata.  Removing the row
+@@ -355,8 +378,9 @@ export function useSendMessage(
+             attachments: sendAttachments,
+             scheduledAt,
+             deliveryMode,
++            source: 'send',
+         })
+-        return { attemptId: localId }
++        return { attemptId: localId, sessionId: targetSessionId }
+     }
+ 
+     const retryMessage = (localId: string): boolean => {
+@@ -388,6 +412,7 @@ export function useSendMessage(
+             attachments: getMessageAttachments(message),
+             scheduledAt: message.scheduledAt ?? null,
+             deliveryMode: getRetryDeliveryMode(getMessageDeliveryMode(message)),
++            source: 'retry',
+         })
+         return true
+     }
+@@ -397,5 +422,6 @@ export function useSendMessage(
+         retryMessage,
+         isSending: mutation.isPending || isResolving,
+         sendSettlement,
++        consumeSendSettlement,
+     }
+ }
+diff --git a/web/src/lib/clearDraftsAfterSend.test.ts b/web/src/lib/clearDraftsAfterSend.test.ts
+index 0561a8b3b..bd84eac9e 100644
+--- a/web/src/lib/clearDraftsAfterSend.test.ts
++++ b/web/src/lib/clearDraftsAfterSend.test.ts
+@@ -6,13 +6,18 @@ vi.mock('@/lib/composer-drafts', () => ({
+ vi.mock('@/lib/composer-attachment-drafts', () => ({
+     clearDraftAttachments: vi.fn(),
+ }))
++vi.mock('@/lib/composer-draft-transfer', () => ({
++    clearComposerDraftSnapshotIfText: vi.fn(),
++}))
+ 
+ import { clearDraft } from '@/lib/composer-drafts'
+ import { clearDraftAttachments } from '@/lib/composer-attachment-drafts'
++import { clearComposerDraftSnapshotIfText } from '@/lib/composer-draft-transfer'
+ import { clearDraftsAfterSend } from './clearDraftsAfterSend'
+ 
+ const mockClearDraft = vi.mocked(clearDraft)
+ const mockClearDraftAttachments = vi.mocked(clearDraftAttachments)
++const mockClearComposerDraftSnapshotIfText = vi.mocked(clearComposerDraftSnapshotIfText)
+ 
+ describe('clearDraftsAfterSend', () => {
+     beforeEach(() => {
+@@ -42,4 +47,9 @@ describe('clearDraftsAfterSend', () => {
+         expect(mockClearDraft).toHaveBeenCalledTimes(1)
+         expect(mockClearDraftAttachments).toHaveBeenCalledWith('session-A')
+     })
++
++    it('clears the sent text snapshot for the sent session', () => {
++        clearDraftsAfterSend('session-A', 'session-A', 'sent text')
++        expect(mockClearComposerDraftSnapshotIfText).toHaveBeenCalledWith('session-A', 'sent text')
++    })
+ })
+diff --git a/web/src/lib/clearDraftsAfterSend.ts b/web/src/lib/clearDraftsAfterSend.ts
+index c192c6b5b..785610db0 100644
+--- a/web/src/lib/clearDraftsAfterSend.ts
++++ b/web/src/lib/clearDraftsAfterSend.ts
+@@ -1,9 +1,13 @@
+ import { clearDraft } from '@/lib/composer-drafts'
+ import { clearDraftAttachments } from '@/lib/composer-attachment-drafts'
++import { clearComposerDraftSnapshotIfText } from '@/lib/composer-draft-transfer'
+ 
+-function clearComposerDraft(sessionId: string): void {
++function clearComposerDraft(sessionId: string, sentText?: string): void {
+     clearDraft(sessionId)
+     clearDraftAttachments(sessionId)
++    if (sentText !== undefined) {
++        clearComposerDraftSnapshotIfText(sessionId, sentText)
++    }
+ }
+ 
+ /**
+@@ -14,9 +18,10 @@ function clearComposerDraft(sessionId: string): void {
+ export function clearDraftsAfterSend(
+     sentSessionId: string,
+     routeSessionId: string | null,
++    sentText?: string,
+ ): void {
+-    clearComposerDraft(sentSessionId)
++    clearComposerDraft(sentSessionId, sentText)
+     if (routeSessionId && sentSessionId !== routeSessionId) {
+-        clearComposerDraft(routeSessionId)
++        clearComposerDraft(routeSessionId, sentText)
+     }
+ }
+diff --git a/web/src/lib/composer-draft-transfer.test.ts b/web/src/lib/composer-draft-transfer.test.ts
+index ccd9ab223..179264707 100644
+--- a/web/src/lib/composer-draft-transfer.test.ts
++++ b/web/src/lib/composer-draft-transfer.test.ts
+@@ -29,6 +29,7 @@ vi.mock('@/lib/composer-attachment-drafts', () => ({
+ import {
+     attachmentDraftRevision,
+     clearComposerDraftSnapshot,
++    clearComposerDraftSnapshotIfText,
+     composerDraftWasHandedOff,
+     forgetComposerDraftHandoff,
+     handoffComposerDraft,
+@@ -133,6 +134,26 @@ describe('transferComposerDraft', () => {
+         expectMovedAttachments('old-empty', 'new-empty', [])
+     })
+ 
++    it('clears a live snapshot when successful-send text still matches', async () => {
++        mocks.getDraft.mockReturnValue('')
++        setComposerDraftSnapshot('old-live', 'submitted text', [])
++        clearComposerDraftSnapshotIfText('old-live', 'submitted text')
++
++        await transferComposerDraft('old-live', 'new-live')
++
++        expect(mocks.saveDraft).toHaveBeenCalledWith('new-live', '')
++    })
++
++    it('keeps a newer live snapshot when successful-send text no longer matches', async () => {
++        mocks.getDraft.mockReturnValue('')
++        setComposerDraftSnapshot('old-live', 'new draft', [])
++        clearComposerDraftSnapshotIfText('old-live', 'submitted text')
++
++        await transferComposerDraft('old-live', 'new-live')
++
++        expect(mocks.saveDraft).toHaveBeenCalledWith('new-live', 'new draft')
++    })
++
+     it('falls back to persisted attachments after an inactive empty live snapshot is cleared', async () => {
+         const file = new File(['kept'], 'kept.txt')
+         mocks.getDraft.mockReturnValue('typed while inactive')
+diff --git a/web/src/lib/composer-draft-transfer.ts b/web/src/lib/composer-draft-transfer.ts
+index 1e72741b0..3f369a9de 100644
+--- a/web/src/lib/composer-draft-transfer.ts
++++ b/web/src/lib/composer-draft-transfer.ts
+@@ -102,6 +102,13 @@ export function clearComposerDraftSnapshot(sessionId: string): void {
+     pendingTransfers.delete(sessionId)
+ }
+ 
++/** Clear a send snapshot only when it still contains that send's text. */
++export function clearComposerDraftSnapshotIfText(sessionId: string, text: string): void {
++    const snapshot = liveSnapshots.get(sessionId)
++    if (!snapshot || snapshot.text !== text) return
++    clearComposerDraftSnapshot(sessionId)
++}
++
+ /** True after a cross-session transfer retired this source id. */
+ export function composerDraftWasHandedOff(sessionId: string): boolean {
+     return completedHandoffs.has(sessionId)
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index ebb3e6e2d..8f213ec96 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -574,10 +574,11 @@ function SessionPage() {
+         retryMessage,
+         isSending,
+         sendSettlement,
++        consumeSendSettlement,
+     } = useSendMessage(api, sessionId, {
+         isSessionThinking: session?.thinking ?? false,
+-        onSuccess: (sentSessionId) => {
+-            clearDraftsAfterSend(sentSessionId, sessionId)
++        onSuccess: (sentSessionId, sentText) => {
++            clearDraftsAfterSend(sentSessionId, sessionId, sentText)
+             // 中文注释：一旦用户已经在 Hapi 内继续这个 Codex 会话，就清除"刚从 Codex 导入"的标记。
+             clearCodexImportedSession(session?.metadata?.codexSessionId)
+             // A successful send supersedes any previously-rendered error
+@@ -786,6 +787,7 @@ function SessionPage() {
+             isLoadingMoreMessages={messagesLoadingMore}
+             isSending={isSending}
+             sendSettlement={sendSettlement}
++            onConsumeSendSettlement={consumeSendSettlement}
+             viewMode={messagesViewMode}
+             messagesVersion={messagesVersion}
+             historyVersion={historyVersion}

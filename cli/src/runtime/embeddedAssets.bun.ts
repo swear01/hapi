@@ -1,10 +1,10 @@
 import { feature } from 'bun:bundle';
 
-import difftasticArchiveLicense from '../../tools/archives/difftastic-LICENSE' assert { type: 'file' };
-import ripgrepArchiveLicense from '../../tools/archives/ripgrep-LICENSE' assert { type: 'file' };
-import difftasticLicense from '../../tools/licenses/difftastic-LICENSE' assert { type: 'file' };
-import ripgrepLicense from '../../tools/licenses/ripgrep-LICENSE' assert { type: 'file' };
-import tunwgLicense from '../../../shared/tools/tunwg/LICENSE' assert { type: 'file' };
+import difftasticArchiveLicense from '../../tools/archives/difftastic-LICENSE' with { type: 'file' };
+import ripgrepArchiveLicense from '../../tools/archives/ripgrep-LICENSE' with { type: 'file' };
+import difftasticLicense from '../../tools/licenses/difftastic-LICENSE' with { type: 'file' };
+import ripgrepLicense from '../../tools/licenses/ripgrep-LICENSE' with { type: 'file' };
+import tunwgLicense from '../../../shared/tools/tunwg/LICENSE' with { type: 'file' };
 
 export interface EmbeddedAsset {
     relativePath: string;

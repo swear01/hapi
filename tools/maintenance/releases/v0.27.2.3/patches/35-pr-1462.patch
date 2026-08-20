@@ -1,0 +1,446 @@
+diff --git a/shared/src/messages.test.ts b/shared/src/messages.test.ts
+index cd04a1316..86cf45451 100644
+--- a/shared/src/messages.test.ts
++++ b/shared/src/messages.test.ts
+@@ -3,6 +3,7 @@ import {
+     extractAssistantPlainText,
+     extractNotifySummary,
+     isRedundantGoalStatusEventContent,
++    splitNotifySummary,
+     type NotifySummary
+ } from './messages'
+ 
+@@ -210,6 +211,34 @@ describe('extractNotifySummary', () => {
+         expect(r?.summary).toBe('mentions AGENT_NOTIFY_SUMMARY here')
+         expect(r?.status).toBe('done')
+     })
++
++    test('splits a clean footer into visible prose and metadata', () => {
++        const text = 'Did the work.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done","action":"Review it"}'
++        const result = splitNotifySummary(text)
++
++        expect(result?.visibleText).toBe('Did the work.')
++        expect(result?.summary).toEqual({ summary: 'Done', status: 'done', action: 'Review it' })
++    })
++
++    test('splits a footer glued to prose on the last line', () => {
++        const text = 'Did the work.\nOwnership session pinged.AGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}'
++        const result = splitNotifySummary(text)
++
++        expect(result?.visibleText).toBe('Did the work.\nOwnership session pinged.')
++        expect(result?.summary.summary).toBe('Done')
++    })
++
++    test('preserves leading indentation when a footer is glued to Markdown prose', () => {
++        const text = '- item\n    nested line.AGENT_NOTIFY_SUMMARY {"summary":"Done"}'
++        const result = splitNotifySummary(text)
++
++        expect(result?.visibleText).toBe('- item\n    nested line.')
++    })
++
++    test('returns null when the footer is not a compliant final line', () => {
++        expect(splitNotifySummary('AGENT_NOTIFY_SUMMARY {"summary":"Done"}\nMore prose')).toBeNull()
++        expect(splitNotifySummary('Plain prose')).toBeNull()
++    })
+ })
+ 
+ describe('extractNotifySummary + extractAssistantPlainText (integration)', () => {
+diff --git a/shared/src/messages.ts b/shared/src/messages.ts
+index fc78a8e70..cee524526 100644
+--- a/shared/src/messages.ts
++++ b/shared/src/messages.ts
+@@ -147,7 +147,12 @@ export type NotifySummary = {
+  * end of line - so a literal `AGENT_NOTIFY_SUMMARY ` inside a JSON string
+  * value does not steal the match from the real footer.
+  */
+-function matchNotifySummaryLine(line: string): string | null {
++type NotifySummaryLineMatch = {
++    jsonPart: string
++    start: number
++}
++
++function matchNotifySummaryLine(line: string): NotifySummaryLineMatch | null {
+     for (
+         let idx = line.indexOf(NOTIFY_SUMMARY_PREFIX);
+         idx >= 0;
+@@ -156,7 +161,7 @@ function matchNotifySummaryLine(line: string): string | null {
+         const jsonPart = line.slice(idx + NOTIFY_SUMMARY_PREFIX.length).trim()
+         if (!jsonPart.startsWith('{') || !jsonPart.endsWith('}')) continue
+         try {
+-            if (isObject(JSON.parse(jsonPart))) return jsonPart
++            if (isObject(JSON.parse(jsonPart))) return { jsonPart, start: idx }
+         } catch {
+             // Try the next occurrence (e.g. token mentioned inside a value).
+         }
+@@ -164,6 +169,47 @@ function matchNotifySummaryLine(line: string): string | null {
+     return null
+ }
+ 
++function parseNotifySummaryJson(jsonPart: string): NotifySummary | null {
++    try {
++        const parsed: unknown = JSON.parse(jsonPart)
++        if (!isObject(parsed)) return null
++        const result: NotifySummary = {}
++        if (typeof parsed.version === 'number') result.version = parsed.version
++        if (typeof parsed.agent === 'string') result.agent = parsed.agent
++        if (typeof parsed.project === 'string') result.project = parsed.project
++        if (typeof parsed.status === 'string') result.status = parsed.status
++        if (typeof parsed.action === 'string') result.action = parsed.action
++        if (typeof parsed.summary === 'string') result.summary = parsed.summary
++        return result
++    } catch {
++        return null
++    }
++}
++
++type NotifySummaryMatch = {
++    lines: string[]
++    lastIdx: number
++    line: string
++    match: NotifySummaryLineMatch
++    summary: NotifySummary
++}
++
++function findNotifySummary(text: string): NotifySummaryMatch | null {
++    const lines = text.split('\n')
++    let lastIdx = lines.length - 1
++    while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx -= 1
++    if (lastIdx < 0) return null
++
++    const line = lines[lastIdx].trimEnd()
++    const match = matchNotifySummaryLine(line)
++    if (match === null) return null
++
++    const summary = parseNotifySummaryJson(match.jsonPart)
++    if (summary === null) return null
++
++    return { lines, lastIdx, line, match, summary }
++}
++
+ /**
+  * Look for an `AGENT_NOTIFY_SUMMARY {...json...}` footer as the **last
+  * non-empty line** of an agent's plain-text message.
+@@ -182,27 +228,34 @@ function matchNotifySummaryLine(line: string): string | null {
+ export function extractNotifySummary(text: unknown): NotifySummary | null {
+     if (typeof text !== 'string' || text.length === 0) return null
+ 
+-    const lines = text.split('\n')
+-    let lastIdx = lines.length - 1
+-    while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx -= 1
+-    if (lastIdx < 0) return null
++    return findNotifySummary(text)?.summary ?? null
++}
+ 
+-    const jsonPart = matchNotifySummaryLine(lines[lastIdx].trim())
+-    if (jsonPart === null) return null
++export type NotifySummaryDisplay = {
++    /** Agent prose with the machine-readable footer removed. */
++    visibleText: string
++    summary: NotifySummary
++}
+ 
+-    try {
+-        const parsed: unknown = JSON.parse(jsonPart)
+-        if (!isObject(parsed)) return null
+-        const result: NotifySummary = {}
+-        if (typeof parsed.version === 'number') result.version = parsed.version
+-        if (typeof parsed.agent === 'string') result.agent = parsed.agent
+-        if (typeof parsed.project === 'string') result.project = parsed.project
+-        if (typeof parsed.status === 'string') result.status = parsed.status
+-        if (typeof parsed.action === 'string') result.action = parsed.action
+-        if (typeof parsed.summary === 'string') result.summary = parsed.summary
+-        return result
+-    } catch {
+-        return null
++/**
++ * Split a valid trailing summary footer into user-facing prose and metadata.
++ *
++ * The original message remains untouched; callers can use `visibleText` only
++ * for presentation while retaining the raw text for copy/export/notifications.
++ */
++export function splitNotifySummary(text: unknown): NotifySummaryDisplay | null {
++    if (typeof text !== 'string' || text.length === 0) return null
++
++    const found = findNotifySummary(text)
++    if (found === null) return null
++
++    const prefix = found.line.slice(0, found.match.start).trimEnd()
++    const visibleLines = found.lines.slice(0, found.lastIdx)
++    if (prefix.length > 0) visibleLines.push(prefix)
++
++    return {
++        visibleText: visibleLines.join('\n').trimEnd(),
++        summary: found.summary
+     }
+ }
+ 
+diff --git a/web/src/components/AssistantChat/messages/AssistantMessage.tsx b/web/src/components/AssistantChat/messages/AssistantMessage.tsx
+index f89d0e9b7..071d2fac1 100644
+--- a/web/src/components/AssistantChat/messages/AssistantMessage.tsx
++++ b/web/src/components/AssistantChat/messages/AssistantMessage.tsx
+@@ -1,5 +1,4 @@
+ import { MessagePrimitive, useAuiState, type TextMessagePart } from '@assistant-ui/react'
+-import { MarkdownText } from '@/components/assistant-ui/markdown-text'
+ import { Reasoning, ReasoningGroup } from '@/components/assistant-ui/reasoning'
+ import { HappyToolMessage } from '@/components/AssistantChat/messages/ToolMessage'
+ import { CliOutputBlock } from '@/components/CliOutputBlock'
+@@ -9,13 +8,14 @@ import { getConversationMessageAnchorId } from '@/chat/outline'
+ import { CodexReviewCard } from '@/components/AssistantChat/messages/CodexReviewCard'
+ import { MessageActions } from '@/components/AssistantChat/messages/MessageActions'
+ import { useHappyChatContext } from '@/components/AssistantChat/context'
++import { NotifySummaryText } from '@/components/AssistantChat/messages/NotifySummaryText'
+ 
+ const TOOL_COMPONENTS = {
+     Fallback: HappyToolMessage
+ } as const
+ 
+ const MESSAGE_PART_COMPONENTS = {
+-    Text: MarkdownText,
++    Text: NotifySummaryText,
+     Reasoning: Reasoning,
+     ReasoningGroup: ReasoningGroup,
+     tools: TOOL_COMPONENTS
+diff --git a/web/src/components/AssistantChat/messages/NotifySummaryText.test.tsx b/web/src/components/AssistantChat/messages/NotifySummaryText.test.tsx
+new file mode 100644
+index 000000000..e6fe45eb1
+--- /dev/null
++++ b/web/src/components/AssistantChat/messages/NotifySummaryText.test.tsx
+@@ -0,0 +1,78 @@
++import { describe, expect, it, vi } from 'vitest'
++import { render, screen } from '@testing-library/react'
++import { I18nProvider } from '@/lib/i18n-context'
++import { NotifySummaryText } from './NotifySummaryText'
++
++vi.mock('@/components/assistant-ui/markdown-text', () => ({
++    MarkdownText: () => <div data-testid="raw-markdown">raw assistant text</div>
++}))
++
++vi.mock('@/components/MarkdownRenderer', () => ({
++    MarkdownRenderer: ({ content }: { content: string }) => (
++        <div data-testid="visible-markdown">{content}</div>
++    )
++}))
++
++function renderText(text: string, statusType: 'complete' | 'running' = 'complete') {
++    return render(
++        <I18nProvider>
++            <NotifySummaryText type="text" text={text} status={{ type: statusType }} />
++        </I18nProvider>
++    )
++}
++
++describe('NotifySummaryText', () => {
++    it('renders the prose and compact summary footer instead of raw JSON', () => {
++        renderText('Did the work.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done","action":"Review it"}')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Did the work.')
++        expect(screen.getByTestId('notify-summary-footer')).toHaveTextContent('Done')
++        expect(screen.getByTestId('notify-summary-footer')).toHaveTextContent('→Review it')
++        expect(screen.getByTestId('notify-summary-status')).toHaveAttribute('aria-label', 'Done')
++        expect(screen.getByTestId('notify-summary-status')).not.toHaveTextContent('Done')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeInTheDocument()
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++
++    it('keeps a status label and dot for non-complete summaries', () => {
++        renderText('Needs input.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Waiting","status":"needs_review"}')
++
++        expect(screen.getByTestId('notify-summary-status')).toHaveTextContent('Needs review')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeNull()
++    })
++
++    it('humanizes unknown prototype-named statuses instead of using inherited presentations', () => {
++        const view = renderText('Finished.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"constructor"}')
++
++        expect(screen.getByTestId('notify-summary-status')).toHaveTextContent('Constructor')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeNull()
++
++        view.unmount()
++        renderText('Finished.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"__proto__"}')
++
++        expect(screen.getByTestId('notify-summary-status')).toHaveTextContent('Proto')
++        expect(screen.getByTestId('notify-summary-status').querySelector('svg')).toBeNull()
++    })
++
++    it('keeps prose glued to the footer in the visible message body', () => {
++        renderText('Ownership session pinged.AGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}')
++
++        expect(screen.getByTestId('visible-markdown')).toHaveTextContent('Ownership session pinged.')
++        expect(screen.getByTestId('notify-summary-footer')).toHaveTextContent('Done')
++        expect(screen.queryByText(/AGENT_NOTIFY_SUMMARY/)).toBeNull()
++    })
++
++    it('uses the normal markdown renderer when there is no valid footer', () => {
++        renderText('Plain assistant prose.')
++
++        expect(screen.getByTestId('raw-markdown')).toBeInTheDocument()
++        expect(screen.queryByTestId('notify-summary-footer')).toBeNull()
++    })
++
++    it('keeps a complete-looking footer in markdown while the message is streaming', () => {
++        renderText('Still working.\n\nAGENT_NOTIFY_SUMMARY {"summary":"Done","status":"done"}', 'running')
++
++        expect(screen.getByTestId('raw-markdown')).toBeInTheDocument()
++        expect(screen.queryByTestId('notify-summary-footer')).toBeNull()
++    })
++})
+diff --git a/web/src/components/AssistantChat/messages/NotifySummaryText.tsx b/web/src/components/AssistantChat/messages/NotifySummaryText.tsx
+new file mode 100644
+index 000000000..7ceea26d7
+--- /dev/null
++++ b/web/src/components/AssistantChat/messages/NotifySummaryText.tsx
+@@ -0,0 +1,120 @@
++import type { TextMessagePartComponent } from '@assistant-ui/react'
++import { splitNotifySummary, type NotifySummary } from '@hapi/protocol/messages'
++import { MarkdownRenderer } from '@/components/MarkdownRenderer'
++import { MarkdownText } from '@/components/assistant-ui/markdown-text'
++import { CheckIcon } from '@/components/icons'
++import { useTranslation } from '@/lib/use-translation'
++
++type SummaryStatusPresentation = {
++    labelKey: string
++    marker: 'check' | 'dot'
++    markerClassName: string
++}
++
++const SUMMARY_STATUS_PRESENTATIONS: Record<string, SummaryStatusPresentation> = {
++    done: { labelKey: 'session.summary.status.done', marker: 'check', markerClassName: 'text-[var(--app-badge-success-text)]' },
++    blocked: { labelKey: 'session.summary.status.blocked', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' },
++    needs_review: { labelKey: 'session.summary.status.needsReview', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' },
++    needs_decision: { labelKey: 'session.summary.status.needsDecision', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' },
++    failed: { labelKey: 'session.summary.status.failed', marker: 'dot', markerClassName: 'bg-[var(--app-badge-error-text)]' },
++    stalled: { labelKey: 'session.summary.status.stalled', marker: 'dot', markerClassName: 'bg-[var(--app-badge-warning-text)]' }
++}
++
++function normalizeStatus(status: string | undefined): string {
++    return status?.trim().toLowerCase() ?? ''
++}
++
++function humanizeStatus(status: string): string {
++    return status
++        .replaceAll('_', ' ')
++        .replace(/\b\w/g, (character) => character.toUpperCase())
++}
++
++function SummaryStatusIndicator({ summary }: { summary: NotifySummary }) {
++    const { t } = useTranslation()
++    const normalizedStatus = normalizeStatus(summary.status)
++    const presentation = Object.hasOwn(SUMMARY_STATUS_PRESENTATIONS, normalizedStatus)
++        ? SUMMARY_STATUS_PRESENTATIONS[normalizedStatus]
++        : undefined
++    const statusLabel = presentation
++        ? t(presentation.labelKey)
++        : normalizedStatus
++            ? humanizeStatus(normalizedStatus)
++            : t('session.summary.label')
++
++    return (
++        <span
++            data-testid="notify-summary-status"
++            aria-label={statusLabel}
++            className={`inline-flex shrink-0 items-center text-xs leading-5 text-[var(--app-hint)] ${presentation?.marker === 'check' ? 'h-5 w-4 justify-center' : 'gap-1.5'}`}
++        >
++            {presentation?.marker === 'check' ? (
++                <span aria-hidden="true">
++                    <CheckIcon className={`block h-4 w-4 ${presentation.markerClassName}`} />
++                </span>
++            ) : (
++                <>
++                    <span
++                        aria-hidden="true"
++                        className={`h-1.5 w-1.5 -translate-y-px rounded-full ${presentation?.markerClassName ?? 'bg-[var(--app-hint)]'}`}
++                    />
++                    <span>{statusLabel}</span>
++                </>
++            )}
++        </span>
++    )
++}
++
++export function NotifySummaryFooter({ summary }: { summary: NotifySummary }) {
++    const { t } = useTranslation()
++    const summaryText = summary.summary?.trim() ?? ''
++    const actionText = summary.action?.trim() ?? ''
++
++    if (!summaryText && !actionText && !summary.status?.trim()) return null
++
++    return (
++        <div
++            role="status"
++            aria-label={t('session.summary.ariaLabel')}
++            data-testid="notify-summary-footer"
++            className="mt-2 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-0.5 border-t border-[var(--app-divider)] pt-2"
++        >
++            <SummaryStatusIndicator summary={summary} />
++            {summaryText ? (
++                <span className="min-w-0 break-words text-sm leading-5 text-[var(--app-fg)]">
++                    {summaryText}
++                </span>
++            ) : null}
++            {actionText && actionText !== summaryText ? (
++                <>
++                    <span className="col-start-1 inline-flex h-5 w-4 items-center justify-center text-xs leading-none text-[var(--app-hint)]">
++                        <span aria-hidden="true">→</span>
++                    </span>
++                    <span className="col-start-2 min-w-0 break-words text-xs leading-5 text-[var(--app-hint)]">
++                        {actionText}
++                    </span>
++                </>
++            ) : null}
++        </div>
++    )
++}
++
++/** Render the machine footer as a compact, user-facing message tail. */
++export const NotifySummaryText: TextMessagePartComponent = ({ text, status }) => {
++    if (status.type !== 'complete') return <MarkdownText />
++
++    const display = splitNotifySummary(text)
++    const hasDisplayableSummary = Boolean(
++        display?.summary.summary?.trim()
++        || display?.summary.action?.trim()
++        || display?.summary.status?.trim()
++    )
++    if (!display || !hasDisplayableSummary) return <MarkdownText />
++
++    return (
++        <>
++            {display.visibleText ? <MarkdownRenderer content={display.visibleText} /> : null}
++            <NotifySummaryFooter summary={display.summary} />
++        </>
++    )
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index bd22c1df3..0908874a8 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -1105,4 +1105,12 @@ export default {
+   'session.status.subagent.running': 'Running',
+   'session.status.subagent.waiting': 'Waiting',
+   'session.status.subagent.error': 'Error',
++  'session.summary.label': 'Session summary',
++  'session.summary.ariaLabel': 'Session status summary',
++  'session.summary.status.done': 'Done',
++  'session.summary.status.blocked': 'Blocked',
++  'session.summary.status.needsReview': 'Needs review',
++  'session.summary.status.needsDecision': 'Needs decision',
++  'session.summary.status.failed': 'Failed',
++  'session.summary.status.stalled': 'Stalled',
+ } as const
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 395e0ec72..d50dd39a1 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -1104,4 +1104,12 @@ export default {
+   'session.status.subagent.running': '运行中',
+   'session.status.subagent.waiting': '等待中',
+   'session.status.subagent.error': '错误',
++  'session.summary.label': '会话摘要',
++  'session.summary.ariaLabel': '会话状态摘要',
++  'session.summary.status.done': '已完成',
++  'session.summary.status.blocked': '已阻塞',
++  'session.summary.status.needsReview': '需要审阅',
++  'session.summary.status.needsDecision': '需要决策',
++  'session.summary.status.failed': '失败',
++  'session.summary.status.stalled': '已停滞',
+ } as const

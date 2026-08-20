@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { Hono } from 'hono'
 import type { WebAppEnv } from '../middleware/auth'
 import { createHubSettingsRoutes } from './hubSettings'
+import { writeAutoBridgeTransientModelErrorsEnabled } from '../../config/autoBridgeTransientModelErrors'
 import { writeSessionSummaryContractEnabled } from '../../config/sessionSummaryContract'
 import { writeSessionSummaryInChatEnabled } from '../../config/sessionSummaryInChat'
 
@@ -27,71 +28,61 @@ describe('GET/PUT /api/hub-settings', () => {
         return { app, dataDir }
     }
 
-    it('returns default off for emit and chat display', async () => {
+    it('returns hub settings for owner', async () => {
         const { app } = await createApp()
         const response = await app.request('/api/hub-settings')
         expect(response.status).toBe(200)
         expect(response.headers.get('cache-control')).toBe('no-store')
         expect(await response.json()).toEqual({
             sessionSummaryContract: false,
-            sessionSummaryInChat: false
+            sessionSummaryInChat: false,
+            autoBridgeTransientModelErrors: false
         })
     })
 
-    it('persists emit toggle for owner without changing display', async () => {
+    it('persists sessionSummaryContract toggle for owner', async () => {
         const { app } = await createApp()
-        const put = await app.request('/api/hub-settings', {
+        await app.request('/api/hub-settings', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionSummaryContract: true })
         })
-        expect(put.status).toBe(200)
-        expect(await put.json()).toEqual({
+        const response = await app.request('/api/hub-settings')
+        expect(await response.json()).toEqual({
             sessionSummaryContract: true,
-            sessionSummaryInChat: false
-        })
-
-        const get = await app.request('/api/hub-settings')
-        expect(await get.json()).toEqual({
-            sessionSummaryContract: true,
-            sessionSummaryInChat: false
+            sessionSummaryInChat: false,
+            autoBridgeTransientModelErrors: false
         })
     })
 
-    it('persists chat display toggle for owner without changing emit', async () => {
-        const { app, dataDir } = await createApp()
-        await writeSessionSummaryContractEnabled(dataDir, true)
-
-        const put = await app.request('/api/hub-settings', {
+    it('persists sessionSummaryInChat toggle for owner', async () => {
+        const { app } = await createApp()
+        await app.request('/api/hub-settings', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionSummaryInChat: true })
         })
-        expect(put.status).toBe(200)
-        expect(await put.json()).toEqual({
-            sessionSummaryContract: true,
-            sessionSummaryInChat: true
+        const response = await app.request('/api/hub-settings')
+        expect(await response.json()).toEqual({
+            sessionSummaryContract: false,
+            sessionSummaryInChat: true,
+            autoBridgeTransientModelErrors: false
         })
     })
 
-    it('rejects empty body', async () => {
+    it('persists autoBridgeTransientModelErrors toggle for owner', async () => {
         const { app } = await createApp()
-        const response = await app.request('/api/hub-settings', {
+        await app.request('/api/hub-settings', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({})
+            body: JSON.stringify({ autoBridgeTransientModelErrors: true })
         })
-        expect(response.status).toBe(400)
-    })
-
-    it('rejects invalid body', async () => {
-        const { app } = await createApp()
-        const response = await app.request('/api/hub-settings', {
-            method: 'PUT',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionSummaryContract: 'yes' })
+        const response = await app.request('/api/hub-settings')
+        expect(await response.json()).toEqual({
+            sessionSummaryContract: false,
+            sessionSummaryInChat: false,
+            autoBridgeTransientModelErrors: true
         })
-        expect(response.status).toBe(400)
     })
 
     it('rejects non-default namespaces for PUT but allows GET', async () => {
@@ -104,14 +95,8 @@ describe('GET/PUT /api/hub-settings', () => {
             await next()
         })
         tenantApp.route('/api', createHubSettingsRoutes(dataDir))
-
         const get = await tenantApp.request('/api/hub-settings')
-        expect(get.status).toBe(200)
-        expect(await get.json()).toEqual({
-            sessionSummaryContract: false,
-            sessionSummaryInChat: true
-        })
-
+        expect(get.status).toBe(403)
         const put = await tenantApp.request('/api/hub-settings', {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
@@ -123,11 +108,23 @@ describe('GET/PUT /api/hub-settings', () => {
     it('survives a prior write via settings helpers', async () => {
         const { app, dataDir } = await createApp()
         await writeSessionSummaryContractEnabled(dataDir, true)
+        await writeAutoBridgeTransientModelErrorsEnabled(dataDir, true)
         await writeSessionSummaryInChatEnabled(dataDir, true)
         const response = await app.request('/api/hub-settings')
         expect(await response.json()).toEqual({
             sessionSummaryContract: true,
-            sessionSummaryInChat: true
+            sessionSummaryInChat: true,
+            autoBridgeTransientModelErrors: true
         })
+    })
+
+    it('rejects empty update body', async () => {
+        const { app } = await createApp()
+        const response = await app.request('/api/hub-settings', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+        expect(response.status).toBe(400)
     })
 })

@@ -1,6 +1,8 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { logger } from '@/ui/logger';
+import { readCodexProviderConfigArgs } from './utils/providerConfigArgs';
+import { resolveCodexCommand } from './utils/codexExecutable';
 import { JsonLineParser } from '@/utils/jsonLineParser';
 import { killProcessByChildProcess } from '@/utils/process';
 import type {
@@ -96,6 +98,7 @@ function createAbortError(): Error {
 
 type CodexCommandCandidate = {
     command: string;
+    args: string[];
     source: 'desktop' | 'path';
     version: number[] | null;
 };
@@ -106,9 +109,9 @@ function parseCodexVersion(output: string): number[] | null {
     return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
-function getCodexVersion(command: string): number[] | null {
+function getCodexVersion(command: string, args: string[] = []): number[] | null {
     try {
-        const output = execFileSync(command, ['--version'], {
+        const output = execFileSync(command, [...args, '--version'], {
             encoding: 'utf8',
             timeout: 3_000,
             stdio: ['ignore', 'pipe', 'ignore']
@@ -130,15 +133,17 @@ function compareVersion(a: number[] | null, b: number[] | null): number {
     return 0;
 }
 
-function resolveCodexAppServerCommand(): string {
+function resolveCodexAppServerCommand(): { command: string; args: string[] } {
     if (process.env.HAPI_CODEX_APP_SERVER_BIN) {
-        return process.env.HAPI_CODEX_APP_SERVER_BIN;
+        return { command: process.env.HAPI_CODEX_APP_SERVER_BIN, args: [] };
     }
 
+    const pathCommand = resolveCodexCommand();
     const candidates: CodexCommandCandidate[] = [{
-        command: 'codex',
+        command: pathCommand.command,
+        args: pathCommand.args,
         source: 'path',
-        version: getCodexVersion('codex')
+        version: getCodexVersion(pathCommand.command, pathCommand.args)
     }];
 
     if (process.platform === 'darwin') {
@@ -146,6 +151,7 @@ function resolveCodexAppServerCommand(): string {
         if (existsSync(desktopCodex)) {
             candidates.push({
                 command: desktopCodex,
+                args: [],
                 source: 'desktop',
                 version: getCodexVersion(desktopCodex)
             });
@@ -162,14 +168,14 @@ function resolveCodexAppServerCommand(): string {
     })[0];
 
     logger.debug('[CodexAppServer] Resolved codex command', {
-        selected: best.command,
+        selected: [best.command, ...best.args].join(' '),
         candidates: candidates.map((candidate) => ({
-            command: candidate.command,
+            command: [candidate.command, ...candidate.args].join(' '),
             source: candidate.source,
             version: candidate.version?.join('.') ?? null
         }))
     });
-    return best.command;
+    return { command: best.command, args: best.args };
 }
 
 export class CodexAppServerClient extends JsonLineParser {
@@ -210,8 +216,8 @@ export class CodexAppServerClient extends JsonLineParser {
         }
 
         const codexCommand = resolveCodexAppServerCommand();
-        logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
-        const child = spawn(codexCommand, ['app-server'], {
+        logger.debug(`[CodexAppServer] Starting ${[codexCommand.command, ...codexCommand.args].join(' ')} app-server`);
+        const child = spawn(codexCommand.command, [...codexCommand.args, ...readCodexProviderConfigArgs(), 'app-server'], {
             cwd: this.options.cwd,
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];
@@ -219,7 +225,7 @@ export class CodexAppServerClient extends JsonLineParser {
                 return acc;
             }, {} as Record<string, string>),
             stdio: ['pipe', 'pipe', 'pipe'],
-            shell: process.platform === 'win32',
+            shell: false,
             windowsHide: process.platform === 'win32'
         });
         this.process = child;

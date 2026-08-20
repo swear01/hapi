@@ -74,7 +74,11 @@ vi.mock('node:child_process', () => ({
             },
             stdin: {
                 end: (...args: unknown[]) => spawnState.stdinEnd(...args),
-                write: (chunk: string) => spawnState.stdinWrite(chunk)
+                write: (chunk: string, callback?: (error?: Error | null) => void) => {
+                    const result = spawnState.stdinWrite(chunk);
+                    callback?.();
+                    return result;
+                }
             },
             on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
                 if (event === 'exit') {

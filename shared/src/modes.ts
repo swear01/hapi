@@ -15,8 +15,8 @@ export const AgentFlavorSchema = z.enum(AGENT_FLAVORS)
 // excluded: Google sunset the consumer Gemini CLI (2026-06-18) so it can no
 // longer be launched. It is kept in AGENT_FLAVORS / AgentFlavorSchema above so
 // existing stored Gemini sessions still validate and remain viewable.
-export const CREATABLE_AGENT_FLAVORS: readonly AgentFlavor[] = AGENT_FLAVORS.filter(
-    (flavor) => flavor !== 'gemini'
+export const CREATABLE_AGENT_FLAVORS: readonly Exclude<AgentFlavor, 'gemini'>[] = AGENT_FLAVORS.filter(
+    (flavor): flavor is Exclude<AgentFlavor, 'gemini'> => flavor !== 'gemini'
 )
 
 export const AGY_PERMISSION_MODES = ['request-review', 'always-proceed'] as const
@@ -190,12 +190,11 @@ export function getCodexCollaborationModeOptions(): CodexCollaborationModeOption
  * - Codex: app-server `turn/steer` (true mid-turn inject)
  * - Cursor ACP: concurrent `session/prompt` soft-send (no cancel). Legacy
  *   stream-json Cursor sessions are NOT steerable — gate with
- *   {@link isSteeringSupportedForSession}. (Cursor joins this list once its
- *   soft-steer handler lands.)
+ *   {@link isSteeringSupportedForSession}.
  *
  * Claude / others: not supported (no reachable soft-steer path) — UI hides Steer.
  */
-export const STEERING_SUPPORTED_FLAVORS = ['codex', 'pi'] as const
+export const STEERING_SUPPORTED_FLAVORS = ['codex', 'cursor', 'pi'] as const
 
 export function isSteeringSupportedForFlavor(flavor?: string | null): boolean {
     return (STEERING_SUPPORTED_FLAVORS as readonly string[]).includes(flavor ?? '')
@@ -217,5 +216,14 @@ export function isSteeringSupportedForSession(metadata?: {
     if (metadata?.flavor === 'codex' || metadata?.flavor === 'pi') {
         return true
     }
-    return false
+    if (metadata?.flavor !== 'cursor') {
+        return false
+    }
+    if (metadata.cursorSessionProtocol === 'stream-json') {
+        return false
+    }
+    if (!metadata.cursorSessionProtocol && metadata.cursorSessionId) {
+        return false
+    }
+    return true
 }

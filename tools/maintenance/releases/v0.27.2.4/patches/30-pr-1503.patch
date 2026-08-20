@@ -1,0 +1,294 @@
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+index 051e26ec2..4d17fa7b4 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.test.ts
+@@ -1413,7 +1413,8 @@ describe('AcpSdkBackend', () => {
+         ]);
+     });
+ 
+-    it('notifies agent-activity listener for harness-wake activity, not usage noise (#1470)', () => {
++    it('notifies agent-activity listener for sustained running + idle, not content/usage noise (#1470/#1502)', () => {
++        vi.useFakeTimers();
+         const backend = new AcpSdkBackend({ command: 'agent' });
+         const activity: boolean[] = [];
+         backend.setAgentActivityListener((thinking) => {
+@@ -1431,6 +1432,14 @@ describe('AcpSdkBackend', () => {
+                 content: { type: 'text', text: 'resumed' }
+             }
+         });
++        backendInternal.handleSessionUpdate({
++            sessionId: 'session-1',
++            update: {
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
++                toolCallId: 'tc-bg',
++                status: 'in_progress'
++            }
++        });
+         backendInternal.handleSessionUpdate({
+             sessionId: 'session-1',
+             update: { sessionUpdate: 'usage_update', used: 1_000, size: 200_000 }
+@@ -1442,16 +1451,55 @@ describe('AcpSdkBackend', () => {
+                 title: 'noise'
+             }
+         });
++        // Chatter: running then idle before debounce → no true bump (idle may clear)
++        backendInternal.handleSessionUpdate({
++            sessionId: 'session-1',
++            update: { sessionUpdate: 'state_update', state: 'running' }
++        });
++        vi.advanceTimersByTime(200);
++        backendInternal.handleSessionUpdate({
++            sessionId: 'session-1',
++            update: { sessionUpdate: 'state_update', state: 'idle' }
++        });
++        expect(activity.filter((v) => v === true)).toEqual([]);
++
++        // Sustained running commits after debounce
+         backendInternal.handleSessionUpdate({
+             sessionId: 'session-1',
+             update: { sessionUpdate: 'state_update', state: 'running' }
+         });
++        vi.advanceTimersByTime(750);
++        expect(activity.filter((v) => v === true)).toEqual([true]);
+         backendInternal.handleSessionUpdate({
+             sessionId: 'session-1',
+             update: { sessionUpdate: 'state_update', state: 'idle' }
+         });
++        expect(activity.at(-1)).toBe(false);
++        vi.useRealTimers();
++    });
+ 
+-        expect(activity).toEqual([true, true, false]);
++    it('ignores idle clears while a HAPI prompt turn is still draining', () => {
++        const backend = new AcpSdkBackend({ command: 'agent' });
++        const activity: boolean[] = [];
++        backend.setAgentActivityListener((thinking) => {
++            activity.push(thinking);
++        });
++        const backendInternal = backend as unknown as {
++            handleSessionUpdate: (params: unknown) => void;
++            isProcessingMessage: boolean;
++        };
++        backendInternal.isProcessingMessage = true;
++        backendInternal.handleSessionUpdate({
++            sessionId: 'session-1',
++            update: { sessionUpdate: 'state_update', state: 'idle' }
++        });
++        expect(activity).toEqual([]);
++        backendInternal.isProcessingMessage = false;
++        backendInternal.handleSessionUpdate({
++            sessionId: 'session-1',
++            update: { sessionUpdate: 'state_update', state: 'idle' }
++        });
++        expect(activity).toEqual([false]);
+     });
+ 
+     it('notifies agent-activity listener when a permission request arrives (#1470)', async () => {
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index d583460b5..fbe0441cb 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -83,8 +83,10 @@ export class AcpSdkBackend implements AgentBackend {
+     private promptUsageCallback: ((msg: AgentMessage) => void) | null = null;
+     private usageUpdateListener: ((msg: AgentMessage) => void) | null = null;
+     private sessionInfoUpdateListener: ((update: AcpSessionInfoUpdate) => void) | null = null;
+-    /** Fired on real agent activity so launchers can bump hub thinking (#1470). */
++    /** Fired on foreground ACP state / permission so launchers can bump hub thinking (#1470). */
+     private agentActivityListener: ((thinking: boolean) => void) | null = null;
++    /** Debounce timer for state_update running → thinking (#1502 chatter). */
++    private runningThinkingTimer: ReturnType<typeof setTimeout> | null = null;
+     private lastForwardedUsageUpdate: AcpUsageUpdate | null = null;
+     private sessionUpdateQueue: Promise<void> = Promise.resolve();
+ 
+@@ -99,6 +101,8 @@ export class AcpSdkBackend implements AgentBackend {
+     private static readonly PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 200;
+     private static readonly PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 1200;
+     private static readonly SESSION_TITLE_REFRESH_DELAYS_MS = [1000, 3000];
++    /** Cursor chatters running↔idle ~1–2s; require sustained running before bump. */
++    private static readonly RUNNING_THINKING_DEBOUNCE_MS = 750;
+     // After the initial post-prompt drain, slow-tailing models (DeepSeek,
+     // GPT-5.5, etc.) can keep sending agentMessageChunk notifications. We poll
+     // drainBuffers() on a short interval so the UI keeps streaming smoothly,
+@@ -444,10 +448,10 @@ export class AcpSdkBackend implements AgentBackend {
+     }
+ 
+     /**
+-     * Called when ACP reports thinking transitions for harness wake (#1470).
+-     * `true` = activity / running / permission; `false` = state_update idle.
+-     * Usage/title noise does not fire. Launchers should ignore no-ops when
+-     * session.thinking already matches.
++     * Called when ACP reports foreground state / permission for harness wake (#1470 / #1502).
++     * `true` = sustained `running` (debounced), `requires_action`, or permission.
++     * `false` = `state_update` idle (skipped while a HAPI prompt turn is still draining).
++     * Launchers should ignore no-ops when session.thinking already matches.
+      */
+     setAgentActivityListener(listener: ((thinking: boolean) => void) | null): void {
+         this.agentActivityListener = listener;
+@@ -755,6 +759,7 @@ export class AcpSdkBackend implements AgentBackend {
+             clearTimeout(timer);
+         }
+         this.sessionInfoRefreshTimers.clear();
++        this.clearRunningThinkingTimer();
+         await this.sessionUpdateQueue;
+         this.messageHandler?.drainBuffers();
+         this.messageHandler = null;
+@@ -813,7 +818,39 @@ export class AcpSdkBackend implements AgentBackend {
+         if (hint === null) {
+             return;
+         }
+-        this.agentActivityListener(hint);
++
++        if (hint === false) {
++            this.clearRunningThinkingTimer();
++            // Launcher owns thinking for the duration of prompt(); idle chatter
++            // mid-drain must not clear the spinner before finally runs.
++            if (this.isProcessingMessage) {
++                return;
++            }
++            this.agentActivityListener(false);
++            return;
++        }
++
++        // Sustained running only — Cursor flaps running↔idle while queue-idle (#1502).
++        if (update.sessionUpdate === 'state_update' && update.state === 'running') {
++            if (this.runningThinkingTimer) {
++                return;
++            }
++            this.runningThinkingTimer = setTimeout(() => {
++                this.runningThinkingTimer = null;
++                this.agentActivityListener?.(true);
++            }, AcpSdkBackend.RUNNING_THINKING_DEBOUNCE_MS);
++            return;
++        }
++
++        this.clearRunningThinkingTimer();
++        this.agentActivityListener(true);
++    }
++
++    private clearRunningThinkingTimer(): void {
++        if (this.runningThinkingTimer) {
++            clearTimeout(this.runningThinkingTimer);
++            this.runningThinkingTimer = null;
++        }
+     }
+ 
+     private forwardSessionInfoUpdate(sessionId: string | null, update: unknown): void {
+diff --git a/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.test.ts b/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.test.ts
+index 8744641f2..8e8f9d0b6 100644
+--- a/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.test.ts
++++ b/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.test.ts
+@@ -17,12 +17,12 @@ describe('thinkingHintFromSessionUpdate', () => {
+         'user_message',
+         'user_message_chunk',
+         'tool_call_content_chunk',
+-    ] as const)('returns true for activity type %s', (sessionUpdate) => {
+-        expect(thinkingHintFromSessionUpdate({ sessionUpdate })).toBe(true)
+-        expect(shouldBumpThinkingFromSessionUpdate({ sessionUpdate })).toBe(true)
++    ] as const)('ignores background/content type %s (not foreground state)', (sessionUpdate) => {
++        expect(thinkingHintFromSessionUpdate({ sessionUpdate })).toBeNull()
++        expect(shouldBumpThinkingFromSessionUpdate({ sessionUpdate })).toBe(false)
+     })
+ 
+-    it('returns true for ACP v2 state_update running / requires_action', () => {
++    it('returns true for state_update running/requires_action (debounced in backend)', () => {
+         expect(thinkingHintFromSessionUpdate({
+             sessionUpdate: 'state_update',
+             state: 'running',
+@@ -31,9 +31,13 @@ describe('thinkingHintFromSessionUpdate', () => {
+             sessionUpdate: 'state_update',
+             state: 'requires_action',
+         })).toBe(true)
++        expect(shouldBumpThinkingFromSessionUpdate({
++            sessionUpdate: 'state_update',
++            state: 'running',
++        })).toBe(true)
+     })
+ 
+-    it('returns false for ACP v2 state_update idle', () => {
++    it('returns false for state_update idle so mid-idle wakes can clear', () => {
+         expect(thinkingHintFromSessionUpdate({
+             sessionUpdate: 'state_update',
+             state: 'idle',
+diff --git a/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.ts b/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.ts
+index 0313c8f69..d8becdd81 100644
+--- a/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.ts
++++ b/cli/src/agent/backends/acp/shouldBumpThinkingFromSessionUpdate.ts
+@@ -1,10 +1,19 @@
+ /**
+- * Gate for harness/ACP resume → hub thinking (#1470).
++ * Gate for harness/ACP resume → hub thinking (#1470 / #1502 / #1503).
+  *
+  * Returns:
+- * - `true` — real agent activity / foreground running (bump thinking)
++ * - `true` — foreground ACP state (`running` / `requires_action`)
+  * - `false` — ACP v2 `state_update: idle` (clear thinking)
+- * - `null` — noise / unknown (do not touch thinking)
++ * - `null` — noise / background updates (do not touch)
++ *
++ * ACP allows `tool_call*` / message chunks while the agent reports `idle`
++ * (background activity). Mapping those onto hub thinking races idle clears and
++ * flickers the session-list spinner (#1502 residual on long-lived Cursor ACP).
++ * Foreground work is `state_update` only; permission bumps go through
++ * `setAgentActivityListener(true)` directly.
++ *
++ * `running` chatter is debounced in `AcpSdkBackend.notifyAgentActivity` so
++ * rapid running↔idle edges do not flip the spinner.
+  */
+ export type SessionUpdateThinkingHint = boolean | null
+ 
+@@ -15,29 +24,17 @@ export function thinkingHintFromSessionUpdate(
+         return null
+     }
+ 
+-    switch (update.sessionUpdate) {
+-        case 'agent_message_chunk':
+-        case 'agent_message':
+-        case 'agent_thought_chunk':
+-        case 'agent_thought':
+-        case 'tool_call':
+-        case 'tool_call_update':
+-        case 'tool_call_content_chunk':
+-        case 'plan':
+-        case 'user_message':
+-        case 'user_message_chunk':
+-            return true
+-        case 'state_update':
+-            if (update.state === 'running' || update.state === 'requires_action') {
+-                return true
+-            }
+-            if (update.state === 'idle') {
+-                return false
+-            }
+-            return null
+-        default:
+-            return null
++    if (update.sessionUpdate !== 'state_update') {
++        return null
++    }
++
++    if (update.state === 'idle') {
++        return false
++    }
++    if (update.state === 'running' || update.state === 'requires_action') {
++        return true
+     }
++    return null
+ }
+ 
+ /** @deprecated Prefer thinkingHintFromSessionUpdate; kept for call-site clarity in tests. */
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index f4e38159b..0e49a7b0c 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -563,7 +563,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+         });
+     }
+ 
+-    /** #1470: ACP activity after idle → hub thinking via existing keepalive. */
++    /**
++     * #1470 / #1502: ACP foreground state → hub thinking via keepalive.
++     * Background tool/content updates are ignored; running is debounced in the backend.
++     */
+     private wireAgentActivityThinking(backend: AcpSdkBackend, session: CursorSession): void {
+         backend.setAgentActivityListener((thinking) => {
+             if (session.thinking !== thinking) {

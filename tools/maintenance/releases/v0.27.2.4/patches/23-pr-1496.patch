@@ -1,0 +1,575 @@
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 3f9ea2c39..6bdc8863c 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -1,7 +1,7 @@
+ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+ import { Outlet, useLocation, useMatchRoute, useRouter } from '@tanstack/react-router'
+ import { useQueryClient } from '@tanstack/react-query'
+-import { getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
++import { configureTelegramWebApp, getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
+ import { initializeChatSurfaceColors } from '@/hooks/useChatSurfaceColors'
+ import { initializeTheme } from '@/hooks/useTheme'
+ import { initializeThemeColors } from '@/hooks/useThemeColors'
+@@ -14,6 +14,7 @@ import { useSyncingState } from '@/hooks/useSyncingState'
+ import { usePushNotifications } from '@/hooks/usePushNotifications'
+ import { useViewportHeight } from '@/hooks/useViewportHeight'
+ import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
++import { usePlatform, type HapticNotification } from '@/hooks/usePlatform'
+ import { queryKeys } from '@/lib/query-keys'
+ import { AppContextProvider } from '@/lib/app-context'
+ import { clearMessageWindow, syncTailMessages } from '@/lib/message-window-store'
+@@ -40,6 +41,14 @@ type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
+ 
+ const REQUIRE_SERVER_URL = requireHubUrlForLogin()
+ 
++function getToastHapticNotification(title: string): HapticNotification | null {
++    const normalizedTitle = title.trim()
++    if (normalizedTitle === 'Task completed') return 'success'
++    if (normalizedTitle === 'Task failed') return 'error'
++    if (normalizedTitle === 'Permission Request' || normalizedTitle === 'Ready for input') return 'warning'
++    return null
++}
++
+ function withPwaBanner(content: ReactNode) {
+     return (
+         <>
+@@ -69,14 +78,13 @@ function AppInner() {
+     const matchRoute = useMatchRoute()
+     const router = useRouter()
+     const { addToast } = useToast()
++    const { haptic } = usePlatform()
+ 
+     useEffect(() => {
+-        const tg = getTelegramWebApp()
+-        tg?.ready()
+-        tg?.expand()
+         initializeTheme()
+         initializeThemeColors()
+         initializeChatSurfaceColors()
++        configureTelegramWebApp()
+     }, [])
+ 
+     // Track visual viewport height for mobile keyboard avoidance (see useViewportHeight.ts)
+@@ -332,6 +340,11 @@ function AppInner() {
+     }, [t])
+ 
+     const handleToast = useCallback((event: ToastEvent) => {
++        const feedback = getToastHapticNotification(event.data.title)
++        if (feedback && isTelegramApp()) {
++            haptic.notification(feedback)
++        }
++
+         const localized = translateIncomingToast(event.data.title, event.data.body)
+         addToast({
+             title: localized.title,
+@@ -339,7 +352,7 @@ function AppInner() {
+             sessionId: event.data.sessionId,
+             url: event.data.url
+         })
+-    }, [addToast, translateIncomingToast])
++    }, [addToast, haptic, translateIncomingToast])
+ 
+     const globalEventSubscription = useMemo(() => getAppGlobalSseSubscription(), [])
+     const sessionEventSubscription = useMemo(
+diff --git a/web/src/hooks/usePlatform.ts b/web/src/hooks/usePlatform.ts
+index 849d59747..434ebcecb 100644
+--- a/web/src/hooks/usePlatform.ts
++++ b/web/src/hooks/usePlatform.ts
+@@ -1,5 +1,5 @@
+ import { useMemo } from 'react'
+-import { getTelegramWebApp, isTelegramApp } from './useTelegram'
++import { getTelegramWebApp, isTelegramApp, markTelegramHapticFeedback } from './useTelegram'
+ 
+ export type HapticStyle = 'light' | 'medium' | 'heavy' | 'rigid' | 'soft'
+ export type HapticNotification = 'error' | 'success' | 'warning'
+@@ -44,6 +44,7 @@ const haptic: PlatformHaptic = {
+     impact: (style: HapticStyle) => {
+         const tg = getTelegramWebApp()
+         if (tg?.HapticFeedback) {
++            markTelegramHapticFeedback()
+             tg.HapticFeedback.impactOccurred(style)
+         } else {
+             vibrate(vibrationPatterns[style])
+@@ -52,6 +53,7 @@ const haptic: PlatformHaptic = {
+     notification: (type: HapticNotification) => {
+         const tg = getTelegramWebApp()
+         if (tg?.HapticFeedback) {
++            markTelegramHapticFeedback()
+             tg.HapticFeedback.notificationOccurred(type)
+         } else {
+             vibrate(vibrationPatterns[type])
+@@ -60,6 +62,7 @@ const haptic: PlatformHaptic = {
+     selection: () => {
+         const tg = getTelegramWebApp()
+         if (tg?.HapticFeedback) {
++            markTelegramHapticFeedback()
+             tg.HapticFeedback.selectionChanged()
+         } else {
+             vibrate(vibrationPatterns.selection)
+diff --git a/web/src/hooks/useTelegram.test.ts b/web/src/hooks/useTelegram.test.ts
+new file mode 100644
+index 000000000..94642e635
+--- /dev/null
++++ b/web/src/hooks/useTelegram.test.ts
+@@ -0,0 +1,148 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { configureTelegramWebApp, loadTelegramSdk, normalizeCssColorToHex, syncTelegramWebAppThemeColors } from './useTelegram'
++
++afterEach(() => {
++    delete window.Telegram
++    document.head.querySelectorAll('script[src="https://telegram.org/js/telegram-web-app.js"]').forEach((script) => script.remove())
++    vi.useRealTimers()
++})
++
++describe('configureTelegramWebApp', () => {
++    it('marks Telegram Mini App ready, expands it, and disables vertical swipe close', () => {
++        const ready = vi.fn()
++        const expand = vi.fn()
++        const disableVerticalSwipes = vi.fn()
++        const setHeaderColor = vi.fn()
++        const setBackgroundColor = vi.fn()
++        const setBottomBarColor = vi.fn()
++
++        window.Telegram = {
++            WebApp: {
++                initData: 'init-data',
++                themeParams: {},
++                ready,
++                expand,
++                disableVerticalSwipes,
++                setHeaderColor,
++                setBackgroundColor,
++                setBottomBarColor,
++            },
++        }
++
++        configureTelegramWebApp()
++
++        expect(ready).toHaveBeenCalledOnce()
++        expect(expand).toHaveBeenCalledOnce()
++        expect(disableVerticalSwipes).toHaveBeenCalledOnce()
++    })
++
++    it('does nothing when the Telegram SDK is unavailable', () => {
++        expect(() => configureTelegramWebApp()).not.toThrow()
++    })
++
++    it('supports older Telegram clients without vertical swipe controls', () => {
++        const ready = vi.fn()
++        const expand = vi.fn()
++
++        window.Telegram = {
++            WebApp: {
++                initData: 'init-data',
++                themeParams: {},
++                ready,
++                expand,
++            },
++        }
++
++        configureTelegramWebApp()
++
++        expect(ready).toHaveBeenCalledOnce()
++        expect(expand).toHaveBeenCalledOnce()
++    })
++
++    it('syncs app background color to Telegram chrome', () => {
++        const setHeaderColor = vi.fn()
++        const setBackgroundColor = vi.fn()
++        const setBottomBarColor = vi.fn()
++
++        window.Telegram = {
++            WebApp: {
++                initData: 'init-data',
++                themeParams: {},
++                ready: vi.fn(),
++                expand: vi.fn(),
++                setHeaderColor,
++                setBackgroundColor,
++                setBottomBarColor,
++            },
++        }
++
++        syncTelegramWebAppThemeColors('#123abc')
++
++        expect(setHeaderColor).toHaveBeenCalledWith('#123abc')
++        expect(setBackgroundColor).toHaveBeenCalledWith('#123abc')
++        expect(setBottomBarColor).toHaveBeenCalledWith('#123abc')
++    })
++
++    it('normalizes CSS color values for Telegram APIs', () => {
++        expect(normalizeCssColorToHex('#abc')).toBe('#aabbcc')
++        expect(normalizeCssColorToHex('rgb(18, 58, 188)')).toBe('#123abc')
++        expect(normalizeCssColorToHex('rgba(300, -1, 16, 0.5)')).toBe('#ff0010')
++        expect(normalizeCssColorToHex('transparent')).toBeNull()
++    })
++
++    it('configures Telegram when the SDK loads after the timeout fallback', async () => {
++        vi.useFakeTimers()
++        const ready = vi.fn()
++        const expand = vi.fn()
++        const disableVerticalSwipes = vi.fn()
++
++        const loadPromise = loadTelegramSdk(3000)
++        const script = document.head.querySelector<HTMLScriptElement>('script[src="https://telegram.org/js/telegram-web-app.js"]')
++
++        expect(script).not.toBeNull()
++
++        vi.advanceTimersByTime(3000)
++        await loadPromise
++
++        window.Telegram = {
++            WebApp: {
++                initData: 'init-data',
++                themeParams: {},
++                ready,
++                expand,
++                disableVerticalSwipes,
++            },
++        }
++
++        script!.dispatchEvent(new Event('load'))
++
++        expect(ready).toHaveBeenCalledOnce()
++        expect(expand).toHaveBeenCalledOnce()
++        expect(disableVerticalSwipes).toHaveBeenCalledOnce()
++    })
++
++    it('does not emit haptics for programmatic clicks', () => {
++        const impactOccurred = vi.fn()
++        window.Telegram = {
++            WebApp: {
++                initData: 'init-data',
++                themeParams: {},
++                ready: vi.fn(),
++                expand: vi.fn(),
++                HapticFeedback: {
++                    impactOccurred,
++                    notificationOccurred: vi.fn(),
++                    selectionChanged: vi.fn(),
++                },
++            },
++        }
++        const button = document.createElement('button')
++        document.body.appendChild(button)
++
++        configureTelegramWebApp()
++        button.click()
++
++        expect(impactOccurred).not.toHaveBeenCalled()
++        button.remove()
++    })
++})
+diff --git a/web/src/hooks/useTelegram.ts b/web/src/hooks/useTelegram.ts
+index 4d52d0883..7a55d6b0f 100644
+--- a/web/src/hooks/useTelegram.ts
++++ b/web/src/hooks/useTelegram.ts
+@@ -54,6 +54,10 @@ export type TelegramWebApp = {
+     colorScheme?: 'light' | 'dark'
+     ready: () => void
+     expand: () => void
++    disableVerticalSwipes?: () => void
++    setHeaderColor?: (color: string) => void
++    setBackgroundColor?: (color: string) => void
++    setBottomBarColor?: (color: string) => void
+     close?: () => void
+     onEvent?: (eventType: string, callback: () => void) => void
+     offEvent?: (eventType: string, callback: () => void) => void
+@@ -91,6 +95,9 @@ export type TelegramWebApp = {
+     }
+ }
+ 
++let lastHapticFeedbackAt = 0
++let removeTelegramInteractionHaptics: (() => void) | null = null
++
+ declare global {
+     interface Window {
+         Telegram?: {
+@@ -112,6 +119,133 @@ export function isTelegramApp(): boolean {
+     return tg !== null && Boolean(tg.initData)
+ }
+ 
++export function configureTelegramWebApp(): void {
++    const tg = getTelegramWebApp()
++    if (!tg) return
++
++    tg.ready()
++    tg.expand()
++    tg.disableVerticalSwipes?.()
++    syncTelegramWebAppThemeColors()
++    installTelegramInteractionHaptics()
++}
++
++export function syncTelegramWebAppThemeColors(color = getResolvedAppBackgroundColor()): void {
++    const tg = getTelegramWebApp()
++    if (!tg || !color) return
++
++    tg.setHeaderColor?.(color)
++    tg.setBackgroundColor?.(color)
++    tg.setBottomBarColor?.(color)
++}
++
++export function getResolvedAppBackgroundColor(): string | null {
++    if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return null
++
++    const probe = document.createElement('div')
++    probe.style.position = 'fixed'
++    probe.style.pointerEvents = 'none'
++    probe.style.visibility = 'hidden'
++    probe.style.backgroundColor = 'var(--app-bg)'
++
++    document.body.appendChild(probe)
++    const resolved = window.getComputedStyle(probe).backgroundColor
++    probe.remove()
++
++    return normalizeCssColorToHex(resolved)
++}
++
++export function normalizeCssColorToHex(color: string): string | null {
++    const value = color.trim().toLowerCase()
++    if (!value || value === 'transparent') return null
++
++    const hex = value.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i)
++    if (hex) {
++        const raw = hex[1]!
++        if (raw.length === 6) return `#${raw}`
++        return `#${raw.split('').map((char) => char + char).join('')}`
++    }
++
++    const rgb = value.match(/^rgba?\(([^)]+)\)$/)
++    if (!rgb) return null
++
++    const channels = rgb[1]!
++        .split(',')
++        .slice(0, 3)
++        .map((part) => Number.parseInt(part.trim(), 10))
++
++    if (channels.length !== 3 || channels.some((channel) => Number.isNaN(channel))) {
++        return null
++    }
++
++    return `#${channels.map((channel) => clampColorChannel(channel).toString(16).padStart(2, '0')).join('')}`
++}
++
++function clampColorChannel(channel: number): number {
++    return Math.min(255, Math.max(0, channel))
++}
++
++export function markTelegramHapticFeedback(): void {
++    lastHapticFeedbackAt = Date.now()
++}
++
++export function hasRecentTelegramHapticFeedback(windowMs = 120): boolean {
++    return Date.now() - lastHapticFeedbackAt < windowMs
++}
++
++export function installTelegramInteractionHaptics(): void {
++    if (removeTelegramInteractionHaptics || typeof document === 'undefined') return
++
++    const onClick = (event: MouseEvent) => {
++        if (!event.isTrusted || hasRecentTelegramHapticFeedback()) return
++
++        const target = event.target
++        if (!(target instanceof Element)) return
++
++        const interactive = target.closest<HTMLElement>(
++            'button, a[href], select, summary, input[type="checkbox"], input[type="radio"], input[type="range"], [role="button"], [role="menuitem"], [role="option"], [data-haptic]'
++        )
++        if (!interactive || isDisabledInteractiveElement(interactive)) return
++
++        const feedback = getTelegramWebApp()?.HapticFeedback
++        if (!feedback) return
++
++        markTelegramHapticFeedback()
++        if (isSelectionInteractiveElement(interactive)) {
++            feedback.selectionChanged()
++            return
++        }
++        feedback.impactOccurred('light')
++    }
++
++    document.addEventListener('click', onClick)
++    removeTelegramInteractionHaptics = () => {
++        document.removeEventListener('click', onClick)
++        removeTelegramInteractionHaptics = null
++    }
++}
++
++function isDisabledInteractiveElement(element: HTMLElement): boolean {
++    if (element.getAttribute('aria-disabled') === 'true') return true
++    if (
++        element instanceof HTMLButtonElement
++        || element instanceof HTMLInputElement
++        || element instanceof HTMLSelectElement
++    ) {
++        return element.disabled
++    }
++    return false
++}
++
++function isSelectionInteractiveElement(element: HTMLElement): boolean {
++    if (element instanceof HTMLSelectElement) return true
++    if (element instanceof HTMLInputElement) {
++        return element.type === 'checkbox' || element.type === 'radio'
++    }
++    const role = element.getAttribute('role')
++    return role === 'option' || role === 'menuitemradio' || role === 'menuitemcheckbox'
++}
++
+ /**
+  * Dynamically loads the Telegram Web App SDK with timeout.
+  * Only call this if isTelegramEnvironment() returns true.
+@@ -124,20 +258,33 @@ export function loadTelegramSdk(timeoutMs = 3000): Promise<void> {
+         }
+ 
+         let settled = false
++        let timedOut = false
++        let timeoutId: ReturnType<typeof setTimeout> | null = null
+         const settle = () => {
+             if (!settled) {
+                 settled = true
++                if (timeoutId !== null) {
++                    clearTimeout(timeoutId)
++                }
+                 resolve()
+             }
+         }
+ 
+         // Timeout - don't block app indefinitely
+-        setTimeout(settle, timeoutMs)
++        timeoutId = setTimeout(() => {
++            timedOut = true
++            settle()
++        }, timeoutMs)
+ 
+         const script = document.createElement('script')
+         script.src = 'https://telegram.org/js/telegram-web-app.js'
+         script.async = true
+-        script.onload = settle
++        script.onload = () => {
++            if (timedOut) {
++                configureTelegramWebApp()
++            }
++            settle()
++        }
+         script.onerror = settle
+         document.head.appendChild(script)
+     })
+diff --git a/web/src/hooks/useTheme.ts b/web/src/hooks/useTheme.ts
+index ba5e68cc5..a34815099 100644
+--- a/web/src/hooks/useTheme.ts
++++ b/web/src/hooks/useTheme.ts
+@@ -1,5 +1,5 @@
+ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+-import { getTelegramWebApp } from './useTelegram'
++import { getTelegramWebApp, syncTelegramWebAppThemeColors } from './useTelegram'
+ import { applyColorTheme, getColorThemeBackground, getColorThemeStorageKey, getStoredColorTheme, type ColorScheme } from './useColorTheme'
+ 
+ export type AppearancePreference = 'system' | 'dark' | 'light' | 'oled'
+@@ -105,6 +105,7 @@ function applyTheme(scheme: ColorScheme): void {
+     document.documentElement.setAttribute('data-theme', scheme)
+     applyColorTheme(getStoredColorTheme(), scheme)
+     applyBrowserThemeColor(scheme)
++    syncTelegramWebAppThemeColors()
+ }
+ 
+ function applyPlatform(): void {
+diff --git a/web/src/hooks/useThemeColors.test.ts b/web/src/hooks/useThemeColors.test.ts
+index 5ce0c5087..f221214be 100644
+--- a/web/src/hooks/useThemeColors.test.ts
++++ b/web/src/hooks/useThemeColors.test.ts
+@@ -14,6 +14,7 @@ function setScheme(scheme: string): void {
+ describe('useThemeColors', () => {
+     beforeEach(() => {
+         localStorage.clear()
++        delete window.Telegram
+         document.documentElement.removeAttribute('data-theme')
+         document.documentElement.removeAttribute('style')
+     })
+@@ -101,6 +102,31 @@ describe('useThemeColors', () => {
+         expect(document.documentElement.style.getPropertyValue('--app-link').trim()).toBe('#526fff')
+     })
+ 
++    it('syncs Telegram chrome after applying custom background colors', () => {
++        const setHeaderColor = vi.fn()
++        const setBackgroundColor = vi.fn()
++        const setBottomBarColor = vi.fn()
++        window.Telegram = {
++            WebApp: {
++                initData: 'init-data',
++                themeParams: {},
++                ready: vi.fn(),
++                expand: vi.fn(),
++                setHeaderColor,
++                setBackgroundColor,
++                setBottomBarColor,
++            },
++        }
++        localStorage.setItem('hapi-theme-colors', JSON.stringify({ light: { background: '#123456' } }))
++        setScheme('light')
++
++        applyThemeColors()
++
++        expect(setHeaderColor).toHaveBeenCalledWith('#123456')
++        expect(setBackgroundColor).toHaveBeenCalledWith('#123456')
++        expect(setBottomBarColor).toHaveBeenCalledWith('#123456')
++    })
++
+     it('uses the active color theme as the custom color picker baseline', () => {
+         localStorage.setItem('hapi-color-theme', 'one')
+         setScheme('light')
+diff --git a/web/src/hooks/useThemeColors.ts b/web/src/hooks/useThemeColors.ts
+index 34f8be34b..788a658ce 100644
+--- a/web/src/hooks/useThemeColors.ts
++++ b/web/src/hooks/useThemeColors.ts
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useState } from 'react'
+ import { applyColorTheme, getColorThemePickerValue, getColorThemeStorageKey, getStoredColorTheme, type ColorScheme } from './useColorTheme'
++import { syncTelegramWebAppThemeColors } from './useTelegram'
+ 
+ /**
+  * Per-appearance "key color" customization.
+@@ -248,6 +249,7 @@ export function applyThemeColors(): void {
+ 
+     const overrides = getStoredThemeColors()[scheme] ?? {}
+     const rootStyle = document.documentElement.style
++    let telegramBackgroundColor: string | undefined
+ 
+     for (const key of THEME_COLOR_KEYS) {
+         const override = overrides[key.id]
+@@ -264,7 +266,13 @@ export function applyThemeColors(): void {
+                 rootStyle.setProperty(cssVar, derived[cssVar]!)
+             }
+         }
++
++        if (key.id === 'background') {
++            telegramBackgroundColor = hex
++        }
+     }
++
++    syncTelegramWebAppThemeColors(telegramBackgroundColor)
+ }
+ 
+ export function getThemeColorPickerValue(scheme: ThemeScheme, id: ThemeColorKeyId): string {
+diff --git a/web/src/main.tsx b/web/src/main.tsx
+index 6c5aee2e0..9fd4a35b1 100644
+--- a/web/src/main.tsx
++++ b/web/src/main.tsx
+@@ -5,7 +5,7 @@ import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
+ import { RouterProvider, createMemoryHistory } from '@tanstack/react-router'
+ import './index.css'
+ import { initializeFontScale } from '@/hooks/useFontScale'
+-import { getTelegramWebApp, isTelegramEnvironment, loadTelegramSdk } from './hooks/useTelegram'
++import { configureTelegramWebApp, getTelegramWebApp, isTelegramEnvironment, loadTelegramSdk } from './hooks/useTelegram'
+ import { queryClient } from './lib/query-client'
+ import { createAppRouter } from './router'
+ import { I18nProvider } from './lib/i18n-context'
+@@ -42,6 +42,7 @@ async function bootstrap() {
+     document.documentElement.dataset.telegramApp = isTelegram ? 'true' : 'false'
+     if (isTelegram) {
+         await loadTelegramSdk()
++        configureTelegramWebApp()
+     }
+ 
+     // Handle GitHub Pages 404 redirect for SPA routing

@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/Spinner'
 import { useTerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { useTranslation } from '@/lib/use-translation'
-import { CloseIcon } from '@/components/icons'
+import { CheckIcon, CloseIcon } from '@/components/icons'
 import { ShareTurnDialog } from '@/components/AssistantChat/ShareTurnDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { getSessionTitle } from '@/lib/sessionTitle'
@@ -143,6 +143,8 @@ const WHEEL_GESTURE_GAP_MS = 250
 const KEYBOARD_SCROLL_INTENT_WINDOW_MS = 750
 const POINTER_CANCEL_INTENT_WINDOW_MS = 750
 const UPWARD_SCROLL_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+const NAVIGATION_TRANSIENT_RETRY_DELAY_MS = 200
+const MAX_NAVIGATION_TRANSIENT_RETRIES = 150
 
 export function getPullToLoadState(distancePx: number): PullToLoadState {
     if (distancePx >= TOP_PULL_TRIGGER_PX) {
@@ -256,6 +258,28 @@ export function shouldLoadOlderForViewport(params: {
 
 export function getHistoryCoverageRetryDelay(deadline: number, now: number): number {
     return Math.max(0, deadline - now) + 16
+}
+
+export async function loadOlderForNavigationWithRetry(
+    loadOlder: () => Promise<OlderHistoryLoadResult>,
+    options: {
+        maxTransientRetries?: number
+        retryDelayMs?: number
+        wait?: (delayMs: number) => Promise<void>
+    } = {}
+): Promise<boolean> {
+    const maxTransientRetries = options.maxTransientRetries ?? MAX_NAVIGATION_TRANSIENT_RETRIES
+    const retryDelayMs = options.retryDelayMs ?? NAVIGATION_TRANSIENT_RETRY_DELAY_MS
+    const wait = options.wait ?? ((delayMs: number) => new Promise<void>((resolve) => {
+        window.setTimeout(resolve, delayMs)
+    }))
+
+    for (let transientRetries = 0; ; transientRetries += 1) {
+        const result = await loadOlder()
+        if (result === 'loaded') return true
+        if (result === 'terminal-stop' || transientRetries >= maxTransientRetries) return false
+        await wait(retryDelayMs)
+    }
 }
 
 function NewMessagesIndicator(props: { count: number; onClick: () => void }) {
@@ -619,6 +643,12 @@ export function HappyThread(props: {
 
     // Smart scroll state: enabled only while the user is intentionally at the bottom.
     const autoScrollEnabledRef = useRef(true)
+    // Keep pagination refs current during render. Explicit navigation can
+    // continue in a microtask immediately after a layout effect settles a
+    // page load, before passive effects would otherwise update these refs.
+    hasMoreMessagesRef.current = props.hasMoreMessages
+    isLoadingMoreRef.current = props.isLoadingMoreMessages
+    onLoadMoreRef.current = props.onLoadMore
     useEffect(() => {
         onViewModeChangeRef.current = props.onViewModeChange
     }, [props.onViewModeChange])
@@ -1399,7 +1429,15 @@ export function HappyThread(props: {
         return await loadOlderFromConsumer() === 'loaded'
     }, [loadOlderFromConsumer])
 
+    const markExplicitNavigationAwayFromBottom = useCallback(() => {
+        autoScrollEnabledRef.current = false
+        atBottomRef.current = false
+        onViewModeChangeRef.current('history')
+    }, [])
+
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        initialScrollDeadlineRef.current = 0
+        clearInitialScrollTimers()
         const target = await locateOutlineTargetMessage({
             targetMessageId: item.targetMessageId,
             findTarget: (anchorId) => document.getElementById(anchorId),
@@ -1408,11 +1446,12 @@ export function HappyThread(props: {
         })
         if (target) {
             target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            autoScrollEnabledRef.current = false
+            markExplicitNavigationAwayFromBottom()
         }
         props.onOutlineItemClick?.(item)
         props.onOutlineOpenChange(false)
-    }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
+    }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
+
 
     useEffect(() => {
         if (

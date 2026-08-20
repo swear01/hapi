@@ -1,31 +1,44 @@
 import { Hono } from 'hono'
 import { UpdateHubSettingsRequestSchema, type HubSettingsResponse } from '@hapi/protocol'
 import {
-    getSettingsFile,
-    readSettingsOrThrow,
-    updateSettings,
-    type Settings
-} from '../../config/settings'
+    readAutoBridgeTransientModelErrorsEnabled,
+    writeAutoBridgeTransientModelErrorsEnabled
+} from '../../config/autoBridgeTransientModelErrors'
+import {
+    readSessionSummaryContractEnabled,
+    writeSessionSummaryContractEnabled
+} from '../../config/sessionSummaryContract'
+import {
+    readSessionSummaryInChatEnabled,
+    writeSessionSummaryInChatEnabled
+} from '../../config/sessionSummaryInChat'
+import type { SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 
 const OWNER_ONLY_ERROR = 'Hub settings are only available to the hub owner'
 
-function toHubSettings(settings: Settings): HubSettingsResponse {
-    return {
-        sessionSummaryContract: settings.sessionSummaryContract === true,
-        sessionSummaryInChat: settings.sessionSummaryInChat === true
-    }
-}
-
-export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
+export function createHubSettingsRoutes(
+    dataDir: string,
+    getSyncEngine?: () => SyncEngine | null
+): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
-    // Authenticated readers (any namespace) can observe hub-wide display/emit
-    // flags. Mutations stay owner-only below.
     app.get('/hub-settings', async (c) => {
+        if (c.get('namespace') !== 'default') {
+            return c.json({ error: OWNER_ONLY_ERROR }, 403)
+        }
         c.header('Cache-Control', 'no-store')
-        const settings = await readSettingsOrThrow(getSettingsFile(dataDir))
-        return c.json(toHubSettings(settings))
+        const [sessionSummaryContract, sessionSummaryInChat, autoBridgeTransientModelErrors] = await Promise.all([
+            readSessionSummaryContractEnabled(dataDir),
+            readSessionSummaryInChatEnabled(dataDir),
+            readAutoBridgeTransientModelErrorsEnabled(dataDir)
+        ])
+        const response: HubSettingsResponse = {
+            sessionSummaryContract,
+            sessionSummaryInChat,
+            autoBridgeTransientModelErrors
+        }
+        return c.json(response)
     })
 
     app.put('/hub-settings', async (c) => {
@@ -37,20 +50,44 @@ export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
         if (!parsed.success) {
             return c.json({ error: 'Invalid body' }, 400)
         }
-        const response = await updateSettings(getSettingsFile(dataDir), (current) => {
-            const settings: Settings = { ...current }
-            if (parsed.data.sessionSummaryContract !== undefined) {
-                settings.sessionSummaryContract = parsed.data.sessionSummaryContract
+        if (parsed.data.sessionSummaryContract !== undefined) {
+            await writeSessionSummaryContractEnabled(
+                dataDir,
+                parsed.data.sessionSummaryContract
+            )
+        }
+        if (parsed.data.sessionSummaryInChat !== undefined) {
+            await writeSessionSummaryInChatEnabled(dataDir, parsed.data.sessionSummaryInChat)
+        }
+        if (parsed.data.autoBridgeTransientModelErrors !== undefined) {
+            const enabled = parsed.data.autoBridgeTransientModelErrors
+            const previous = await readAutoBridgeTransientModelErrorsEnabled(dataDir)
+            await writeAutoBridgeTransientModelErrorsEnabled(dataDir, enabled)
+            const engine = getSyncEngine?.() ?? null
+            if (engine) {
+                try {
+                    await engine.fanoutAutoBridgeTransientModelErrors(enabled)
+                } catch (error) {
+                    await writeAutoBridgeTransientModelErrorsEnabled(dataDir, previous)
+                    await engine.fanoutAutoBridgeTransientModelErrors(previous).catch(() => {})
+                    const message = error instanceof Error
+                        ? error.message
+                        : 'Failed to update every active Cursor session'
+                    return c.json({ error: message }, 409)
+                }
             }
-            if (parsed.data.sessionSummaryInChat !== undefined) {
-                settings.sessionSummaryInChat = parsed.data.sessionSummaryInChat
-            }
-            return {
-                settings,
-                result: toHubSettings(settings)
-            }
-        })
+        }
         c.header('Cache-Control', 'no-store')
+        const [sessionSummaryContract, sessionSummaryInChat, autoBridgeTransientModelErrors] = await Promise.all([
+            readSessionSummaryContractEnabled(dataDir),
+            readSessionSummaryInChatEnabled(dataDir),
+            readAutoBridgeTransientModelErrorsEnabled(dataDir)
+        ])
+        const response: HubSettingsResponse = {
+            sessionSummaryContract,
+            sessionSummaryInChat,
+            autoBridgeTransientModelErrors
+        }
         return c.json(response)
     })
 

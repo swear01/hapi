@@ -16,6 +16,7 @@ type BackendStatics = {
     LATE_FLUSH_INTERVAL_MS: number;
     LATE_FLUSH_QUIET_PERIOD_MS: number;
     LATE_FLUSH_WINDOW_MS: number;
+    BETWEEN_TURN_DRAIN_DEBOUNCE_MS: number;
 };
 
 const backendStatics = AcpSdkBackend as unknown as BackendStatics;
@@ -26,7 +27,8 @@ const originalStatics = {
     prePromptUpdateDrainTimeoutMs: backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS,
     lateFlushIntervalMs: backendStatics.LATE_FLUSH_INTERVAL_MS,
     lateFlushQuietPeriodMs: backendStatics.LATE_FLUSH_QUIET_PERIOD_MS,
-    lateFlushWindowMs: backendStatics.LATE_FLUSH_WINDOW_MS
+    lateFlushWindowMs: backendStatics.LATE_FLUSH_WINDOW_MS,
+    betweenTurnDrainDebounceMs: backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS
 };
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
@@ -45,6 +47,7 @@ afterEach(() => {
     backendStatics.LATE_FLUSH_INTERVAL_MS = originalStatics.lateFlushIntervalMs;
     backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = originalStatics.lateFlushQuietPeriodMs;
     backendStatics.LATE_FLUSH_WINDOW_MS = originalStatics.lateFlushWindowMs;
+    backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = originalStatics.betweenTurnDrainDebounceMs;
     if (originalPlatformDescriptor) {
         Object.defineProperty(process, 'platform', originalPlatformDescriptor);
     }
@@ -687,6 +690,21 @@ describe('AcpSdkBackend', () => {
         });
     });
 
+    it('uses v2 state_update usage when the prompt response omits usage', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const internal = backend as unknown as { transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null; handleSessionUpdate: (params: unknown) => void };
+        const messages: AgentMessage[] = [];
+        internal.transport = {
+            sendRequest: async () => {
+                internal.handleSessionUpdate({ sessionId: 'session-1', update: { sessionUpdate: 'state_update', state: 'idle', usage: { input_tokens: 100, output_tokens: 20, cached_read_tokens: 40 } } });
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+        await backend.prompt('session-1', [{ type: 'text', text: 'hello' }], (message) => messages.push(message));
+        expect(messages).toContainEqual(expect.objectContaining({ type: 'usage', inputTokens: 100, outputTokens: 20, cacheReadTokens: 40 }));
+    });
+
     it('emits straggler chunks before turn_complete', async () => {
         backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
         backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
@@ -778,6 +796,764 @@ describe('AcpSdkBackend', () => {
 
         expect(turn1Text).toContain('straggler from turn 1');
         expect(turn2Text).not.toContain('straggler from turn 1');
+    });
+
+    it('emits between-turn straggler chunks via the previous turn\'s onUpdate without waiting for the next prompt', async () => {
+        // Regression for the "reply only appears after the next message" bug:
+        // a slow-tailing model (DeepSeek V4 Flash) streams a long CoT then
+        // pauses longer than LATE_FLUSH_QUIET_PERIOD_MS before the answer
+        // text, so drainLateBuffers gives up while the final chunks are still
+        // to come. They land in the previous turn's handler with no prompt
+        // active — and previously sat there until the NEXT prompt()'s
+        // pre-swap drain pushed them to the hub, so the web only showed the
+        // reply after the user sent another message (positioned after it).
+        // Between-turn stragglers must be flushed by the backend itself.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 30;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 5;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+
+        const turn1: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // Straggler arrives after turn 1 fully resolved. No turn 2 follows in
+        // this test — only an between-turn flush can deliver it to turn 1.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'straggler from turn 1' }
+            }
+        });
+
+        await sleep(30);
+
+        const turn1Text = turn1
+            .filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text')
+            .map((m) => m.text);
+        expect(turn1Text).toContain('straggler from turn 1');
+    });
+
+    it('does not split a fragmented internal-event envelope across a between-turn drain', async () => {
+        // Regression for the pr-review finding: the between-turn drain timer
+        // was throttled (first update wins the deadline), so a usage_update
+        // could start the 200ms deadline before a fragmented internal-event
+        // envelope arrived. The first fragment was then drained alone, failed
+        // the isInternalEventJson filter (it only matches reassembled JSON),
+        // and leaked as visible session metadata. The timer must be debounced
+        // (deadline reset per update) so the envelope is fully reassembled
+        // before flushText re-checks it.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 30;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 200;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+
+        const turn1: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // A usage_update starts the between-turn drain deadline...
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: 'usage_update', used: 1_000, size: 200_000 }
+        });
+        await sleep(80);
+        // ...then the envelope's first fragment arrives, resetting a debounced
+        // deadline but being ignored by a throttled one.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: '{"type":"output","data":{"parentUuid":null,"se' }
+            }
+        });
+        await sleep(160);
+        // The second fragment lands after the throttled deadline (which would
+        // have already flushed the first fragment alone) but before a
+        // debounced deadline (which waits for this fragment before flushing).
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'ssionId":"s1","userType":"human"}}' }
+            }
+        });
+        // Wait past the reset debounce deadline so the drain has actually run
+        // before asserting — otherwise the test passes even if the timer never
+        // fires or the reassembled envelope is emitted incorrectly.
+        await sleep(backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS + 50);
+
+        // Reassembled, the envelope matches isInternalEventJson and must be
+        // dropped — no fragment may leak as visible text.
+        const turn1Text = turn1
+            .filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text')
+            .map((m) => m.text);
+        expect(turn1Text).toEqual([]);
+    });
+
+    it('does not flush a stale queue snapshot when an update replaces the queue mid-drain', async () => {
+        // Regression for the pr-review finding: runBetweenTurnDrain() awaits
+        // the queue chain that exists when it reaches the await. A later
+        // update can replace sessionUpdateQueue while that await is pending
+        // (the update resets the timer but cannot cancel the already-running
+        // drain). The old drain then resumes before the newer update's
+        // handler runs and flushes a stale buffer snapshot, splitting a
+        // fragmented delta-mode internal envelope — the first fragment leaks
+        // as visible text. The drain must verify the queue it waited on is
+        // still the current one and defer to the newer update's own drain.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 30;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 30;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+
+        const turn1: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // Block the queue so the first between-turn drain parks on its await
+        // instead of completing.
+        let releaseBlocker!: () => void;
+        const blocker = new Promise<void>((resolve) => {
+            releaseBlocker = resolve;
+        });
+        backendInternal.sessionUpdateQueue = backendInternal.sessionUpdateQueue.then(() => blocker);
+
+        // Fragment 1 arrives; the debounce timer is armed but the drain cannot
+        // finish because the queue is blocked.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: '{"type":"output","data":{"parentUuid":null,"se' }
+            }
+        });
+        // Let the debounce deadline elapse so drain #1 starts and parks on the
+        // (now stale) queue chain.
+        await sleep(backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS + 10);
+
+        // Fragment 2 replaces the queue while drain #1 is still awaiting the
+        // old chain. This resets the debounce timer for a second drain.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'ssionId":"s1","userType":"human"}}' }
+            }
+        });
+        await sleep(10);
+
+        // Release the block: drain #1 resumes before fragment 2's handler
+        // runs. It must recognize the queue was replaced and defer, rather
+        // than flushing fragment 1 alone.
+        releaseBlocker();
+
+        // Wait past the reset debounce deadline so the drain armed by
+        // fragment 2 has actually run before asserting — otherwise the test
+        // passes even if the drain never fires or the stale snapshot is
+        // flushed incorrectly.
+        await sleep(backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS + 50);
+
+        // Reassembled, the envelope matches isInternalEventJson and must be
+        // dropped — no fragment may leak as visible text.
+        const turn1Text = turn1
+            .filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text')
+            .map((m) => m.text);
+        expect(turn1Text).toEqual([]);
+    });
+
+    it('emits a late text update before turn_complete when it replaces the final queue snapshot', async () => {
+        // Regression for the pr-review finding: the final drain before
+        // turn_complete awaited the queue chain that existed when it reached
+        // the await. A late update arriving while that await was pending sees
+        // isProcessingMessage === true, so scheduleBetweenTurnDrain() returns
+        // without re-arming its timer — and the drain resumes on the stale
+        // snapshot before the newer handler runs, stranding the late text
+        // until the next prompt. The final drain must wait for the queue
+        // reference to stop changing (waitForQueueSettled), not just settle
+        // once.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 50;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 500;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 30;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+
+        let releaseRequest!: () => void;
+        const requestGate = new Promise<void>((resolve) => {
+            releaseRequest = resolve;
+        });
+
+        const turn1: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => {
+                await requestGate;
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+
+        const promptPromise = backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+        // Let prompt() reach the sendRequest gate (isProcessingMessage=true).
+        await sleep(15);
+        releaseRequest();
+
+        // Let prompt() pass the first (settled) queue await and enter
+        // drainLateBuffers, then block the queue so the *final* drain parks on
+        // it instead of completing.
+        await sleep(15);
+        let releaseBlocker!: () => void;
+        const blocker = new Promise<void>((resolve) => {
+            releaseBlocker = resolve;
+        });
+        backendInternal.sessionUpdateQueue = backendInternal.sessionUpdateQueue.then(() => blocker);
+
+        // Wait out drainLateBuffers' quiet period so the final drain captures
+        // the blocked chain and parks on it.
+        await sleep(60);
+
+        // Late text arrives while the final drain is awaiting the stale chain.
+        // isProcessingMessage is still true, so no between-turn timer is
+        // re-armed — this is what makes the stale drain unrecoverable without
+        // waiting for the queue reference to stabilize.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'late reply' }
+            }
+        });
+        await sleep(5);
+
+        releaseBlocker();
+        await promptPromise;
+
+        // The late text must have been emitted before turn_complete and
+        // before prompt() resolved — not stranded until the next prompt.
+        const lateTextIndex = turn1.findIndex((m) => m.type === 'text' && m.text === 'late reply');
+        const turnCompleteIndex = turn1.findIndex((m) => m.type === 'turn_complete');
+        expect(lateTextIndex).toBeGreaterThan(-1);
+        expect(turnCompleteIndex).toBeGreaterThan(-1);
+        expect(lateTextIndex).toBeLessThan(turnCompleteIndex);
+    });
+
+    it('bounds waitForQueueSettled so a continuously replaced queue cannot wedge prompt()', async () => {
+        // Regression for the pr-review finding: waitForQueueSettled() looped
+        // until the queue reference stopped changing, with no deadline. Every
+        // handleSessionUpdate replaces sessionUpdateQueue, so a sustained
+        // async update stream keeps the reference changing forever after both
+        // the pre-prompt timeout and the late-flush window have expired —
+        // prompt() never reaches turn_complete. The loop must be bounded by
+        // the drain timeout.
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            sessionUpdateQueue: Promise<void>;
+            waitForQueueSettled: (timeoutMs: number) => Promise<boolean>;
+        };
+
+        // Continuously replaced queue: each settle is followed by a new
+        // pending promise, so the reference never stabilizes.
+        let releaseQueue: () => void;
+        const armQueue = () => {
+            backendInternal.sessionUpdateQueue = new Promise<void>((resolve) => {
+                releaseQueue = resolve;
+            });
+        };
+        armQueue();
+
+        const started = Date.now();
+        const waitPromise = backendInternal.waitForQueueSettled(50);
+        // Every tick: swap in a fresh pending chain first, then release the
+        // previous chain the wait is parked on — the reference keeps changing
+        // while the loop keeps advancing.
+        const interval = setInterval(() => {
+            const prevRelease = releaseQueue;
+            armQueue();
+            prevRelease();
+        }, 5);
+        try {
+            const result = await Promise.race([
+                waitPromise.then(() => 'settled'),
+                new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 2000))
+            ]);
+            // Without the deadline the loop never exits and this races to
+            // 'timed-out'; with it, the wait returns once 50ms elapses.
+            expect(result).toBe('settled');
+            const elapsed = Date.now() - started;
+            expect(elapsed).toBeGreaterThanOrEqual(45);
+            expect(elapsed).toBeLessThan(5000);
+        } finally {
+            clearInterval(interval);
+        }
+    });
+
+    it('flushes the queue tail abandoned at the settle deadline via the between-turn drain', async () => {
+        // Regression for the pr-review finding: waitForQueueSettled() returns
+        // at its deadline even when the queue reference is still changing. The
+        // final drain then emits turn_complete as if the queue were stable, but
+        // updates enqueued while the prompt was active already skipped
+        // scheduleBetweenTurnDrain() (isProcessingMessage was true) — when the
+        // abandoned tail later writes into the handler, no timer flushes it and
+        // the reply strands until the next prompt. The deadline path must
+        // re-arm the between-turn drain instead of draining as if stable.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 5;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 500;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 30;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+
+        let releaseRequest!: () => void;
+        const requestGate = new Promise<void>((resolve) => {
+            releaseRequest = resolve;
+        });
+
+        const turn1: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => {
+                await requestGate;
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+
+        const promptPromise = backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // Continuously replaced queue: arm immediately (before the prompt's
+        // pre-swap and final settle waits run) and keep replacing the
+        // reference every 5ms for the whole prompt, so waitForQueueSettled
+        // never sees a stable reference and must hit its deadline.
+        let releaseQueue!: () => void;
+        const armQueue = () => {
+            backendInternal.sessionUpdateQueue = new Promise<void>((resolve) => {
+                releaseQueue = resolve;
+            });
+        };
+        armQueue();
+        const intervalStart = Date.now();
+        let tailEnqueued = false;
+        let releaseTail!: () => void;
+        const tailGate = new Promise<void>((resolve) => {
+            releaseTail = resolve;
+        });
+        const interval = setInterval(() => {
+            const prevRelease = releaseQueue;
+            if (!tailEnqueued && Date.now() - intervalStart >= 70) {
+                // Past the pre-swap settle (isProcessingMessage is true by
+                // now): park a real text update on the current chain, gated
+                // on tailGate so its content lands in the handler only after
+                // the turn resolved — exactly the abandoned-tail scenario.
+                // Its own scheduleBetweenTurnDrain() is skipped because the
+                // prompt is still processing. Re-arm a fresh queue right
+                // after so waitForQueueSettled never captures (and blocks
+                // on) the gated chain; prevRelease() below then resolves
+                // the tail's base, advancing it to the tailGate.
+                tailEnqueued = true;
+                backendInternal.sessionUpdateQueue = backendInternal.sessionUpdateQueue.then(() => tailGate);
+                backendInternal.handleSessionUpdate({
+                    sessionId: 'session-1',
+                    update: {
+                        sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                        content: { type: 'text', text: 'tail reply' }
+                    }
+                });
+                armQueue();
+            } else {
+                armQueue();
+            }
+            prevRelease();
+        }, 5);
+        try {
+            // Let the pre-swap settle churn to its deadline (~50ms) and
+            // reach sendRequest, then release it so the final settle wait
+            // runs against the still-churning queue.
+            await sleep(60);
+            releaseRequest();
+            await promptPromise;
+        } finally {
+            clearInterval(interval);
+        }
+        // The settle deadline abandoned the tail: its text was not in the
+        // handler when the final drain ran, so only the re-armed between-turn
+        // drain can flush it to this turn's onUpdate.
+        releaseQueue();
+        releaseTail();
+        // Wait out the between-turn drain debounce plus the drain itself.
+        await sleep(80);
+
+        expect(turn1.some((m) => m.type === 'text' && m.text === 'tail reply')).toBe(true);
+    });
+
+    it('flushes the previous turn\'s handler tail when the pre-prompt settle times out', async () => {
+        // Regression for the pr-review finding: the pre-swap waitForQueueSettled()
+        // result was ignored before messageHandler was drained and replaced. If the
+        // deadline expires while the queue is still being replaced, pending callbacks
+        // captured against the old handler (enqueue-time capture in
+        // handleSessionUpdate) keep writing into it after the swap — with no drain
+        // reachable, the previous turn's tail is permanently lost. The deadline path
+        // must chain a terminal drain after those callbacks instead of swapping past
+        // them.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 5;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 500;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 30;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+        let interval: ReturnType<typeof setInterval> | undefined;
+        backendInternal.transport = {
+            // Runs right after the pre-swap handler swap. Stop churning the
+            // queue here so the drain chained at the deadline is the last link
+            // and only its explicit release (below) advances it — otherwise
+            // the interval would free it before the gated tail is written.
+            sendRequest: async () => {
+                if (interval) clearInterval(interval);
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+
+        const turn1: AgentMessage[] = [];
+        const turn2: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // Pre-swap tail: enqueued while messageHandler is still turn 1's
+        // handler, gated so its content lands in the old handler only after
+        // the swap. scheduleBetweenTurnDrain() arms a timer here (the prompt
+        // has not started), but runBetweenTurnDrain() no-ops on the churning
+        // queue's identity check — only the chained drain can flush it.
+        // Chain the tail onto the settled turn-1 queue BEFORE the churn
+        // starts: armQueue() overwrites the queue reference, and the interval
+        // tick's prevRelease() would resolve whichever promise releaseQueue
+        // pointed at when the tail was enqueued — stranding the tail chain.
+        let releaseQueue!: () => void;
+        const armQueue = () => {
+            backendInternal.sessionUpdateQueue = new Promise<void>((resolve) => {
+                releaseQueue = resolve;
+            });
+        };
+        let releaseTail!: () => void;
+        const tailGate = new Promise<void>((resolve) => {
+            releaseTail = resolve;
+        });
+        backendInternal.sessionUpdateQueue = backendInternal.sessionUpdateQueue.then(() => tailGate);
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'pre-swap tail' }
+            }
+        });
+        // Now start the churn; the tail chain above is already detached from
+        // the queue reference, so replacing it cannot strand the tail.
+        armQueue();
+        interval = setInterval(() => {
+            const prevRelease = releaseQueue;
+            armQueue();
+            prevRelease();
+        }, 5);
+
+        // Turn 2: the pre-swap settle churns to its deadline (~50ms), then the
+        // handler swap. releaseTail() first (tail writes into the old handler),
+        // then releaseQueue() (the chained terminal drain flushes it) — order
+        // matters, since the drain runs after whatever is already in the chain.
+        const prompt2 = backend.prompt('session-1', [{ type: 'text', text: 'again' }], (m) => turn2.push(m));
+        await sleep(60);
+        // Resolve the gate first and give its adoption microtasks a tick so the
+        // tail's handleUpdate buffers into the old handler; only then release
+        // the queue the terminal drain is chained on — otherwise the drain's
+        // continuation (already queued) runs before the tail is buffered.
+        releaseTail();
+        await sleep(10);
+        releaseQueue();
+        await prompt2;
+
+        expect(turn1.some((m) => m.type === 'text' && m.text === 'pre-swap tail')).toBe(true);
+        expect(turn2.some((m) => m.type === 'text' && m.text === 'pre-swap tail')).toBe(false);
+    });
+
+    it('re-arms the between-turn drain after suppressUpdatesDuring consumed the pending timer', async () => {
+        // Regression for the pr-review finding: a straggler that armed the
+        // debounced between-turn drain right before suppressUpdatesDuring()
+        // nulls messageHandler loses its flush. runBetweenTurnDrain() passes
+        // both guards while suppressed (isProcessingMessage and
+        // promptRequestInFlight are both false), awaits the queue, verifies
+        // its identity — then `this.messageHandler?.drainBuffers()` silently
+        // no-ops on the null handler and the timer is consumed. Restoring the
+        // handler must re-arm the drain, or the straggler strands in the
+        // buffer until the next prompt.
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 30;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        const turn1: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // Straggler arrives and arms the between-turn drain (debounce 30ms).
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'straggler survived suppression' }
+            }
+        });
+
+        // Suppression starts in the same tick; messageHandler is nulled
+        // before the straggler's queued microtask flushes into the previous
+        // handler (the enqueue-time capture keeps that buffering working),
+        // and stays null while fn sleeps past the 30ms debounce deadline so
+        // the drain fires — and no-ops — during suppression.
+        await backend.suppressUpdatesDuring(async () => {
+            await sleep(50);
+            return 'compact result';
+        });
+
+        // With the fix the restore re-arms the drain; give it a debounce plus
+        // margin. Without it the straggler stays in the buffer forever.
+        await sleep(backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS + 50);
+
+        const turn1Text = turn1
+            .filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text')
+            .map((m) => m.text);
+        expect(turn1Text).toContain('straggler survived suppression');
+    });
+
+    it('does not duplicate cumulative dedupe text across between-turn drains', async () => {
+        // Regression for the pr-review finding: appendTextChunk in dedupe mode
+        // (the default for every non-opencode backend) keeps the *cumulative
+        // snapshot* in bufferedText ("Hello" grows to the fuller "Hello world"
+        // via startsWith). drainBuffers() clearing that buffer meant a
+        // between-turn drain emitted "Hello", then the later cumulative "Hello
+        // world" snapshot had no baseline to dedupe against and was emitted as
+        // a second full message — the web rendered "HelloHello world".
+        // Artificial drains must retain the cumulative snapshot and emit only
+        // the suffix not emitted by an earlier artificial drain.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 30;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 5;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        const turn1: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // First cumulative snapshot fragment: "Hello". The between-turn drain
+        // flushes it as "Hello" but must keep it as the dedupe baseline.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'Hello' }
+            }
+        });
+        await sleep(20);
+
+        // Later the fuller cumulative snapshot arrives: "Hello world". The
+        // startsWith dedupe grows the buffer; the next drain must emit only
+        // the " world" suffix, not the whole snapshot again.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'Hello world' }
+            }
+        });
+        await sleep(20);
+
+        const turn1Text = turn1
+            .filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text')
+            .map((m) => m.text);
+        expect(turn1Text.join('')).toBe('Hello world');
+    });
+
+    it('does not leak a fragmented internal envelope when delta text was already drained', async () => {
+        // Regression for the pr-review finding: preserveTextBaseline must only
+        // apply to dedupe streams. OpenCode streams incremental chunks
+        // (textChunkMode: 'delta'); retaining bufferedText there meant a later
+        // fragmented internal-event envelope was appended to the retained
+        // visible prefix, so the reassembled string was "Hello{...envelope}",
+        // no longer matching isInternalEventJson — and the envelope suffix
+        // leaked as visible text. Delta streams clear per drain so a fresh
+        // envelope reassembles standalone.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 30;
+        backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS = 30;
+
+        const backend = new AcpSdkBackend({ command: 'opencode', textChunkMode: 'delta' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            sessionUpdateQueue: Promise<void>;
+        };
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        const turn1: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        // Visible delta text arrives first; the between-turn drain emits it.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'Hello' }
+            }
+        });
+        await sleep(backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS + 20);
+
+        // The fragmented internal envelope arrives (both fragments inside one
+        // debounce window). With the bug the retained "Hello" prefix makes the
+        // reassembled string fail isInternalEventJson and the envelope leaks.
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: '{"type":"output","data":{"parentUuid":null,"se' }
+            }
+        });
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'ssionId":"s1","userType":"human"}}' }
+            }
+        });
+        await sleep(backendStatics.BETWEEN_TURN_DRAIN_DEBOUNCE_MS + 50);
+
+        // Only the visible text may be emitted; the reassembled envelope must
+        // be dropped.
+        const turn1Text = turn1
+            .filter((m): m is Extract<AgentMessage, { type: 'text' }> => m.type === 'text')
+            .map((m) => m.text);
+        expect(turn1Text.join('')).toBe('Hello');
     });
 
     it('exits the late-flush wait once the model is quiet', async () => {
@@ -914,6 +1690,61 @@ describe('AcpSdkBackend', () => {
                 m.type === 'usage' && m.contextTokens !== undefined
         );
         expect(realtimeUsage.map((m) => m.contextTokens)).toEqual([1_000, 2_500]);
+    });
+
+
+
+    it('preserves context fields when a state_update carries only tokens', async () => {
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 25;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 200;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 5;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 10;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 50;
+
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+
+        const messages: AgentMessage[] = [];
+        backendInternal.transport = {
+            sendRequest: async () => {
+                // usage_update first reports context, then a state_update
+                // reports tokens without touching context. The final usage
+                // event must keep the previously reported context values.
+                backendInternal.handleSessionUpdate({
+                    sessionId: 'session-1',
+                    update: { sessionUpdate: 'usage_update', used: 2_000, size: 200_000 }
+                });
+                await sleep(5);
+                backendInternal.handleSessionUpdate({
+                    sessionId: 'session-1',
+                    update: { sessionUpdate: 'state_update', state: 'idle', usage: { input_tokens: 100, output_tokens: 20 } }
+                });
+                await sleep(5);
+                return { stopReason: 'end_turn' };
+            },
+            close: async () => {}
+        };
+
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => messages.push(m));
+
+        const usageMessages = messages.filter(
+            (m): m is Extract<AgentMessage, { type: 'usage' }> => m.type === 'usage'
+        );
+        const final = usageMessages.at(-1);
+        expect(final).toEqual(expect.objectContaining({
+            inputTokens: 100,
+            outputTokens: 20,
+            contextTokens: 2_000,
+            contextWindow: 200_000
+        }));
     });
 
     it('forwards title changes from session_info_update', () => {
@@ -1140,6 +1971,193 @@ describe('AcpSdkBackend', () => {
         backend.registerExtensionRequestHandler('cursor/ask_question', handler);
 
         expect(registered.get('cursor/ask_question')).toBe(handler);
+    });
+
+    it('beginSoftSteerPrompt sends concurrent session/prompt without cancel', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const calls: Array<{ method: string; params: unknown }> = [];
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
+                sendNotification: (method: string, params: unknown) => void;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequestWithDispatch: (method, params) => {
+                calls.push({ method, params });
+                return { dispatched: Promise.resolve(), completed: Promise.resolve({ stopReason: 'end_turn' }) };
+            },
+            sendNotification: () => {},
+            close: async () => {}
+        };
+
+        backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+
+        expect(calls).toEqual([{
+            method: 'session/prompt',
+            params: {
+                sessionId: 'session-1',
+                prompt: [{ type: 'text', text: 'pivot now' }]
+            }
+        }]);
+    });
+
+    it('beginSoftSteerPrompt drains buffered output after completion', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+            waitForSessionUpdateQuiet: (quietMs: number, timeoutMs: number) => Promise<void>;
+            drainLateBuffers: () => Promise<void>;
+            messageHandler: { drainBuffers: () => void } | null;
+        };
+        const events: string[] = [];
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequestWithDispatch: () => {
+                events.push('request');
+                return { dispatched: Promise.resolve(), completed: Promise.resolve({ stopReason: 'end_turn' }) };
+            },
+            close: async () => {}
+        };
+        backendInternal.waitForSessionUpdateQuiet = async () => {
+            events.push('quiet');
+        };
+        backendInternal.messageHandler = {
+            drainBuffers: () => events.push('drain')
+        };
+        backendInternal.drainLateBuffers = async () => {
+            events.push('late');
+        };
+
+        await backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).completed;
+
+        expect(events).toEqual(['request', 'quiet', 'drain', 'late', 'drain']);
+    });
+
+    it('beginSoftSteerPrompt returns a pending promise without blocking the caller', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let resolvePrompt: ((value: unknown) => void) | null = null;
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequestWithDispatch: (method: string, params: unknown, options?: { timeoutMs?: number }) => { dispatched: Promise<void>; completed: Promise<unknown> };
+                sendNotification: (method: string, params: unknown) => void;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequestWithDispatch: () => ({
+                dispatched: Promise.resolve(),
+                completed: new Promise((resolve) => { resolvePrompt = resolve; })
+            }),
+            sendNotification: () => {},
+            close: async () => {}
+        };
+
+        // Must not hang waiting for the ACP prompt response (hub RPC is 30s).
+        let settled = false;
+        const pending = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).completed.then(() => {
+            settled = true;
+        });
+        expect(resolvePrompt).not.toBeNull();
+        expect(settled).toBe(false);
+        resolvePrompt!({ stopReason: 'end_turn' });
+        await pending;
+        expect(settled).toBe(true);
+    });
+
+    it('keeps response completion pending until a concurrent soft steer settles', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let resolvePrompt: ((value: unknown) => void) | null = null;
+        const backendInternal = backend as unknown as {
+            transport: { sendRequestWithDispatch: () => { dispatched: Promise<void>; completed: Promise<unknown> }; close: () => Promise<void> } | null;
+            isProcessingMessage: boolean;
+            activePromptRequests: number;
+            finishPromptRequest: () => void;
+            waitForSessionUpdateQuiet: () => Promise<void>;
+            drainLateBuffers: () => Promise<void>;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.activePromptRequests = 1;
+        backendInternal.transport = {
+            sendRequestWithDispatch: () => ({
+                dispatched: Promise.resolve(),
+                completed: new Promise((resolve) => { resolvePrompt = resolve; })
+            }),
+            close: async () => {}
+        };
+        backendInternal.waitForSessionUpdateQuiet = async () => {};
+        backendInternal.drainLateBuffers = async () => {};
+
+        const pendingSteer = backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]);
+        let responseComplete = false;
+        const responseWait = backend.waitForResponseComplete().then(() => { responseComplete = true; });
+
+        backendInternal.finishPromptRequest();
+        await Promise.resolve();
+        expect(backend.processingMessage).toBe(true);
+        expect(responseComplete).toBe(false);
+
+        resolvePrompt!({ stopReason: 'end_turn' });
+        await pendingSteer.completed;
+        await responseWait;
+        expect(backend.processingMessage).toBe(false);
+        expect(responseComplete).toBe(true);
+    });
+
+    it('softSteerPrompt awaits session/prompt completion', async () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        let resolvePrompt: ((value: unknown) => void) | null = null;
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+                sendNotification: (method: string, params: unknown) => void;
+                close: () => Promise<void>;
+            } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.transport = {
+            sendRequest: () => new Promise((resolve) => {
+                resolvePrompt = resolve;
+            }),
+            sendNotification: () => {},
+            close: async () => {}
+        };
+
+        let done = false;
+        const pending = backend.softSteerPrompt('session-1', [{ type: 'text', text: 'pivot now' }]).then(() => {
+            done = true;
+        });
+        await Promise.resolve();
+        expect(done).toBe(false);
+        resolvePrompt!({ stopReason: 'end_turn' });
+        await pending;
+        expect(done).toBe(true);
+    });
+
+    it('beginSoftSteerPrompt rejects when no prompt is in flight', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const backendInternal = backend as unknown as {
+            transport: { sendRequest: () => Promise<unknown>; close: () => Promise<void> } | null;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = false;
+        backendInternal.transport = {
+            sendRequest: async () => null,
+            close: async () => {}
+        };
+
+        expect(() => backend.beginSoftSteerPrompt('session-1', [{ type: 'text', text: 'x' }]))
+            .toThrow(/No active ACP prompt/);
     });
 
     it('suppressUpdatesDuring drops session/update notifications that would otherwise leak into the previous turn\'s onUpdate, then restores normal forwarding', async () => {
@@ -1413,6 +2431,30 @@ describe('AcpSdkBackend', () => {
         ]);
     });
 
+    it('ignores idle clears while a HAPI prompt turn is still draining', () => {
+        const backend = new AcpSdkBackend({ command: 'agent' });
+        const activity: boolean[] = [];
+        backend.setAgentActivityListener((thinking) => {
+            activity.push(thinking);
+        });
+        const backendInternal = backend as unknown as {
+            handleSessionUpdate: (params: unknown) => void;
+            isProcessingMessage: boolean;
+        };
+        backendInternal.isProcessingMessage = true;
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: 'state_update', state: 'idle' }
+        });
+        expect(activity).toEqual([]);
+        backendInternal.isProcessingMessage = false;
+        backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: { sessionUpdate: 'state_update', state: 'idle' }
+        });
+        expect(activity).toEqual([false]);
+    });
+
     it('notifies agent-activity listener for sustained running + idle, not content/usage noise (#1470/#1502)', () => {
         vi.useFakeTimers();
         const backend = new AcpSdkBackend({ command: 'agent' });
@@ -1476,30 +2518,6 @@ describe('AcpSdkBackend', () => {
         });
         expect(activity.at(-1)).toBe(false);
         vi.useRealTimers();
-    });
-
-    it('ignores idle clears while a HAPI prompt turn is still draining', () => {
-        const backend = new AcpSdkBackend({ command: 'agent' });
-        const activity: boolean[] = [];
-        backend.setAgentActivityListener((thinking) => {
-            activity.push(thinking);
-        });
-        const backendInternal = backend as unknown as {
-            handleSessionUpdate: (params: unknown) => void;
-            isProcessingMessage: boolean;
-        };
-        backendInternal.isProcessingMessage = true;
-        backendInternal.handleSessionUpdate({
-            sessionId: 'session-1',
-            update: { sessionUpdate: 'state_update', state: 'idle' }
-        });
-        expect(activity).toEqual([]);
-        backendInternal.isProcessingMessage = false;
-        backendInternal.handleSessionUpdate({
-            sessionId: 'session-1',
-            update: { sessionUpdate: 'state_update', state: 'idle' }
-        });
-        expect(activity).toEqual([false]);
     });
 
     it('notifies agent-activity listener when a permission request arrives (#1470)', async () => {

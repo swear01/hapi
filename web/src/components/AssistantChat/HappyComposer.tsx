@@ -29,6 +29,7 @@ import {
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
 import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary } from '@/types/api'
+import type { CodexUsage } from '@hapi/protocol/types'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
@@ -41,7 +42,7 @@ import type { PiThinkingLevel } from '@hapi/protocol'
 import { markSkillUsed } from '@/lib/recent-skills'
 import { useComposerDraft } from '@/hooks/useComposerDraft'
 import type { AttachmentDraftInput } from '@/lib/composer-attachment-drafts'
-import { persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
+import { clearComposerDraftSnapshotIfText, persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
 import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
 import { Autocomplete } from '@/components/ChatInput/Autocomplete'
@@ -58,11 +59,14 @@ import { getCodexComposerReasoningEffortOptions } from './codexReasoningEffortOp
 import { getDisplayedCodexServiceTier } from './codexFastMode'
 import { getPiThinkingLevelOptions, getHighestThinkingLevel, isThinkingLevelSupported } from './piThinkingLevelOptions'
 import { groupModelsByProvider } from './piModelGroups'
+import { PiModelPanel } from './PiModelPanel'
+import { PiThinkingLevelPanel } from './PiThinkingLevelPanel'
 import type { ApiClient } from '@/api/client'
 import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
 import { useDictation } from '@/hooks/useDictation'
-import type { ComposerSendIntent } from '@/lib/messageDelivery'
+import { resolveMessageDeliveryMode, type ComposerSendIntent } from '@/lib/messageDelivery'
 import type { MessageDeliveryMode } from '@hapi/protocol'
+import type { SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
 
 export interface TextInputState {
     text: string
@@ -299,6 +303,7 @@ export function HappyComposer(props: {
     contextWindow?: number | null
     /** Model for the context-window heuristic; see StatusBar.contextModel. */
     contextModel?: string | null
+    codexUsage?: CodexUsage | null
     controlledByUser?: boolean
     agentFlavor?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string }>
@@ -367,9 +372,17 @@ export function HappyComposer(props: {
     onClearSendError?: () => void
     onSuppressSendErrorRestore?: (id: number) => void
     /** Emitted by SessionChat after a send is accepted. Null attempt ids are settled scratchlist sends. */
-    sendAcceptance?: { attemptId: string | null } | null
+    sendAcceptance?: {
+        attemptId: string | null
+        sessionId?: string
+        programmaticEditRevision?: number
+    } | null
+    /** Monotonic programmatic Queued Edit revision owned outside this keyed composer. */
+    programmaticEditRevision?: number
     /** Terminal result for a chat mutation, including attachment-bearing failures. */
-    sendSettlement?: { attemptId: string; status: 'success' | 'error' } | null
+    sendSettlement?: SendMessageSettlement | null
+    /** Consume a terminal result after this composer makes its clear/preserve decision. */
+    onConsumeSendSettlement?: (attemptId: string) => void
     /**
      * Resume/handoff path for inactive drafts that only exist in IndexedDB
      * (no visible text/attachments for assistant-ui to append).
@@ -403,6 +416,7 @@ export function HappyComposer(props: {
         contextCacheRead,
         contextWindow,
         contextModel,
+        codexUsage,
         controlledByUser = false,
         agentFlavor,
         availableModelOptions,
@@ -468,7 +482,12 @@ export function HappyComposer(props: {
         provider: voiceInput.provider,
         mode: voiceInput.transcriptionMode,
         getCurrentText: getCurrentComposerText,
-        onTextChange: setComposerText
+        onTextChange: setComposerText,
+        sendMessage: async (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => {
+            if (props.voiceTranscriptionApi) {
+                await props.voiceTranscriptionApi.sendMessage(sessionId, text, null, undefined, undefined, deliveryMode)
+            }
+        }
     }), [
         props.voiceTranscriptionApi,
         voiceInput.provider,
@@ -479,8 +498,28 @@ export function HappyComposer(props: {
     const dictation = useDictation(dictationConfig)
     const dictationActive = voiceInput.voiceMode === 'dictation'
     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
+    const handleDictationToggle = useCallback(async () => {
+        await dictation.toggle()
+    }, [dictation])
+
+    const handleDictationSend = useCallback(async () => {
+        if (!dictationActive || dictation.status !== 'connected') return
+        if (attachments.length > 0 || props.pendingSchedule != null || props.scratchlistMode) {
+            await dictation.toggle()
+            return
+        }
+        const targetSessionId = props.sessionId ?? ''
+        const initialText = api.composer().getState().text
+        api.composer().setText('')
+        if (targetSessionId) {
+            await dictation.stopAndSend?.(targetSessionId, initialText)
+        } else {
+            await dictation.toggle()
+        }
+    }, [api, attachments.length, dictation, dictationActive, props.pendingSchedule, props.scratchlistMode, props.sessionId])
+
     const effectiveVoiceToggle = dictationActive
-        ? (dictation.supported ? dictation.toggle : undefined)
+        ? (dictation.supported ? handleDictationToggle : undefined)
         : onVoiceToggle
     const previousVoiceModeRef = useRef(voiceInput.voiceMode)
     useEffect(() => {
@@ -524,7 +563,16 @@ export function HappyComposer(props: {
     const [isExpanded, setIsExpanded] = useState(false)
     const lastSendAcceptanceRef = useRef(props.sendAcceptance)
     const pendingSendAttemptIdRef = useRef<string | null>(null)
+    const pendingSendEditGenerationRef = useRef<number | null>(null)
+    const acceptedSendEditGenerationRef = useRef<{
+        attemptId: string
+        generation: number
+        startedHere: boolean
+    } | null>(null)
+    const handledSuccessfulSendRef = useRef<string | null>(null)
     const [showSettings, setShowSettings] = useState(false)
+    const [showPiModelPanel, setShowPiModelPanel] = useState(false)
+    const [showPiThinkingPanel, setShowPiThinkingPanel] = useState(false)
     const [isAborting, setIsAborting] = useState(false)
     const [isSwitching, setIsSwitching] = useState(false)
     const [showContinueHint, setShowContinueHint] = useState(false)
@@ -540,10 +588,19 @@ export function HappyComposer(props: {
         lastSendAcceptanceRef.current = acceptance
         if (acceptance.attemptId === null) {
             pendingSendAttemptIdRef.current = null
+            pendingSendEditGenerationRef.current = null
+            acceptedSendEditGenerationRef.current = null
             setIsExpanded(false)
             return
         }
         pendingSendAttemptIdRef.current = acceptance.attemptId
+        const pendingGeneration = pendingSendEditGenerationRef.current
+        acceptedSendEditGenerationRef.current = {
+            attemptId: acceptance.attemptId,
+            generation: pendingGeneration ?? userEditGenerationRef.current,
+            startedHere: pendingGeneration !== null,
+        }
+        pendingSendEditGenerationRef.current = null
         const settlement = props.sendSettlement
         if (!settlement || settlement.attemptId !== acceptance.attemptId) return
         pendingSendAttemptIdRef.current = null
@@ -690,6 +747,78 @@ export function HappyComposer(props: {
             console.warn('[composer-draft] inactive persistence failed', error)
         })
     }, [active, attachmentRevision, draftHydration.complete, draftHydration.sessionId, props.canRestoreAttachments, sessionId])
+
+    // A keyed session remount can hydrate the text that assistant-ui cleared
+    // before the POST settled. Once that exact send succeeds, clear only an
+    // untouched matching draft; a new user edit must win over settlement.
+    useEffect(() => {
+        const settlement = props.sendSettlement
+        if (
+            !settlement
+            || settlement.status !== 'success'
+            || settlement.sessionId !== sessionId
+            || !sessionId
+        ) return
+        const settlementKey = `${settlement.sessionId}:${settlement.attemptId}`
+        if (handledSuccessfulSendRef.current === settlementKey) return
+        const consumeSettlement = () => {
+            handledSuccessfulSendRef.current = settlementKey
+            props.onConsumeSendSettlement?.(settlement.attemptId)
+        }
+
+        // Retry settlements reuse the failed message's local id and do not
+        // represent a composer-accepted send. Consume them without touching a
+        // matching draft that belongs to the operator.
+        if (
+            settlement.source !== 'send'
+            || (
+                props.sendAcceptance?.sessionId !== undefined
+                && props.sendAcceptance.sessionId !== sessionId
+            )
+            || props.sendAcceptance?.attemptId !== settlement.attemptId
+        ) {
+            consumeSettlement()
+            return
+        }
+        if (draftHydration.sessionId !== sessionId || !draftHydration.complete) return
+
+        const acceptedSend = acceptedSendEditGenerationRef.current
+        const sendEditGeneration = acceptedSend?.attemptId === settlement.attemptId
+            ? acceptedSend.generation
+            : pendingSendEditGenerationRef.current
+        const userEditedAfterSend = sendEditGeneration !== null
+            ? userEditGenerationRef.current > sendEditGeneration
+            : userEditGenerationRef.current > 0
+        if (userEditedAfterSend) {
+            consumeSettlement()
+            return
+        }
+
+        if (composerText !== settlement.text && composerText !== '') {
+            consumeSettlement()
+            return
+        }
+
+        const editedProgrammaticallyAfterSend =
+            (props.programmaticEditRevision ?? 0)
+            > (props.sendAcceptance?.programmaticEditRevision ?? 0)
+
+        // Queued-message Edit restores text through the assistant-ui store and
+        // does not fire the composer input handlers. If the accepted send
+        // started in this composer, an exact-text replacement is still newer
+        // state and must survive the settlement. A keyed remount has no local
+        // accepted-send marker, so its hydrated stale draft remains clearable.
+        if (editedProgrammaticallyAfterSend || (composerText === settlement.text && acceptedSend?.startedHere)) {
+            consumeSettlement()
+            return
+        }
+
+        if (composerText === settlement.text) {
+            api.composer().setText('')
+        }
+        clearComposerDraftSnapshotIfText(sessionId, settlement.text)
+        consumeSettlement()
+    }, [api, composerText, draftHydration.complete, draftHydration.sessionId, props.onConsumeSendSettlement, props.programmaticEditRevision, props.sendAcceptance, props.sendSettlement, sessionId])
 
     // assistant-ui clears `composer.text` synchronously the moment a send is
     // invoked AND `SessionChat.handleSend` clears `pendingSchedule` after the
@@ -940,6 +1069,13 @@ export function HappyComposer(props: {
         haptic('light')
     }, [api, suggestions, inputState, autocompletePrefixes, haptic, richMentionsEnabled, handleUserEdit])
 
+    const handleSessionMentionDrop = useCallback((mention: { id: string; title: string }) => {
+        if (mention.id === sessionId) return
+        handleUserEdit()
+        richInputRef.current?.focus()
+        richInputRef.current?.insertSessionMention(mention, [])
+    }, [handleUserEdit, sessionId])
+
     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
     const showSwitchButton = Boolean(controlledByUser && onSwitchToRemote)
@@ -1102,6 +1238,28 @@ export function HappyComposer(props: {
     }, [pendingSendIntentRef])
 
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
+        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
+            const canDirectSend = dictation.status === 'connected'
+                && active
+                && attachments.length === 0
+                && pendingSchedule == null
+                && !props.scratchlistMode
+                && intent === 'default'
+            if (canDirectSend) {
+                richInputRef.current?.flushSerializedText()
+                const targetSessionId = props.sessionId ?? ''
+                const initialText = api.composer().getState().text
+                api.composer().setText('')
+                if (targetSessionId && dictation.stopAndSend) {
+                    await dictation.stopAndSend(targetSessionId, initialText)
+                } else {
+                    await dictation.toggle()
+                }
+            } else {
+                await dictation.toggle()
+            }
+            return
+        }
         // SessionChat preloads the ref only when restoring a rejected send:
         // queue retries remain queue, while an ordinary fresh send always
         // starts from the explicit/default argument. Capture it before the
@@ -1129,11 +1287,19 @@ export function HappyComposer(props: {
             && pendingSchedule == null
             && props.onParkScratchlist
         ) {
-            if (!canSend || parkInFlightRef.current) return
+            const snapshot = api.composer().getState()
+            const liveAttachmentsReady = snapshot.attachments.every((attachment) => {
+                if (attachment.status.type === 'complete') return true
+                if (attachment.status.type !== 'requires-action') return false
+                return Boolean((attachment as { path?: string }).path)
+            })
+            const liveCanSend = (
+                snapshot.text.trim().length > 0 || snapshot.attachments.length > 0
+            ) && liveAttachmentsReady && !controlsDisabled
+            if (!liveCanSend || parkInFlightRef.current) return
             parkInFlightRef.current = true
             setIsParkingScratchlist(true)
             try {
-                const snapshot = api.composer().getState()
                 const prepared = await props.onParkScratchlist(
                     snapshot.text,
                     snapshot.attachments,
@@ -1181,9 +1347,11 @@ export function HappyComposer(props: {
             // Must be adjacent to send(): useHappyRuntime consumes and resets
             // this ref synchronously from assistant-ui's onNew callback.
             if (pendingSendIntentRef) pendingSendIntentRef.current = effectiveIntent
+            pendingSendEditGenerationRef.current = userEditGenerationRef.current
             api.composer().send()
         } catch (error) {
             resetPendingSendIntent()
+            pendingSendEditGenerationRef.current = null
             throw error
         }
         // SessionChat owns clearing the schedule — it clears only after awaiting
@@ -1212,6 +1380,17 @@ export function HappyComposer(props: {
         sendError,
         pendingSendIntentRef,
         resetPendingSendIntent,
+        dictationActive,
+        dictation.status,
+        dictationActive,
+        dictation.status,
+        handleDictationToggle,
+        dictation.toggle,
+        dictation.stopAndSend,
+        props.sessionId,
+        props.agentFlavor,
+        props.thinking,
+        active,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
@@ -1625,19 +1804,97 @@ export function HappyComposer(props: {
 
     const handleModelValueToggle = useCallback(() => {
         if (modelEffortControlsDisabled) return
+        setShowPiModelPanel(false)
+        setShowPiThinkingPanel(false)
         handleSettingsToggle()
     }, [modelEffortControlsDisabled, handleSettingsToggle])
 
     const handleEffortValueToggle = useCallback(() => {
         if (modelEffortControlsDisabled) return
+        setShowPiModelPanel(false)
+        setShowPiThinkingPanel(false)
         handleSettingsToggle()
     }, [modelEffortControlsDisabled, handleSettingsToggle])
+
+    const piModelLabel = agentFlavor === 'pi'
+        ? (selectedPiModel?.name ?? selectedPiModel?.modelId ?? 'Model')
+        : undefined
+    const piThinkingLabel = agentFlavor === 'pi'
+        ? (() => {
+            if (!selectedPiModel) return 'Thinking'
+            const effectiveLevel = effort && isThinkingLevelSupported(effort, selectedPiModel.thinkingLevelMap)
+                ? effort
+                : getHighestThinkingLevel(selectedPiModel.thinkingLevelMap)
+            return effectiveLevel
+                ? (PI_THINKING_LEVEL_LABELS[effectiveLevel as PiThinkingLevel] ?? effectiveLevel)
+                : 'Thinking'
+        })()
+        : undefined
+    const piHasModels = piModels && piModels.length > 0
+
+    const closeAllPanels = useCallback(() => {
+        clearCursorDrillDown()
+        setShowSettings(false)
+        setShowPiModelPanel(false)
+        setShowPiThinkingPanel(false)
+    }, [clearCursorDrillDown])
+
+    const handlePiModelToggle = useCallback(() => {
+        if (configurationControlsDisabled) return
+        setShowPiModelPanel((open) => !open)
+        setShowSettings(false)
+        setShowPiThinkingPanel(false)
+        haptic('light')
+    }, [configurationControlsDisabled, haptic])
+
+    const handlePiThinkingToggle = useCallback(() => {
+        if (configurationControlsDisabled) return
+        setShowPiThinkingPanel((open) => !open)
+        setShowSettings(false)
+        setShowPiModelPanel(false)
+        haptic('light')
+    }, [configurationControlsDisabled, haptic])
 
     const overlayPositionClass = isExpanded
         ? 'absolute z-10 bottom-12 mb-2'
         : 'absolute z-10 bottom-[100%] mb-2'
 
     const overlays = useMemo(() => {
+        if (agentFlavor === 'pi') {
+            const panels: React.ReactNode[] = []
+            if (showPiModelPanel && piModels && piModels.length > 0) {
+                const currentPiModel = selectedPiModel ?? null
+                panels.push(
+                    <div key="model" className={`${overlayPositionClass} left-2 w-64`}>
+                        <PiModelPanel
+                            models={piModels}
+                            currentModel={currentPiModel ? { provider: currentPiModel.provider, modelId: currentPiModel.modelId } : null}
+                            controlsDisabled={configurationControlsDisabled}
+                            onSelect={(piModel) => {
+                                handleModelChange({ provider: piModel.provider, modelId: piModel.modelId })
+                            }}
+                            onClose={closeAllPanels}
+                        />
+                    </div>
+                )
+            }
+            if (showPiThinkingPanel && selectedPiModel?.reasoning !== false) {
+                panels.push(
+                    <div key="thinking" className={`${overlayPositionClass} left-2 w-48`}>
+                        <PiThinkingLevelPanel
+                            currentLevel={effort}
+                            reasoning={selectedPiModel?.reasoning}
+                            thinkingLevelMap={selectedPiModel?.thinkingLevelMap}
+                            controlsDisabled={configurationControlsDisabled}
+                            onSelect={(level) => handleEffortChange(level)}
+                            onClose={closeAllPanels}
+                        />
+                    </div>
+                )
+            }
+            if (panels.length > 0) return <>{panels}</>
+        }
+
         // Unified settings sheet for every flavor (Pi included).
         if (showSettings && (showCollaborationSettings || showCopilotAgentModeSettings || showPermissionSettings || showModelSettings || showModelEffortSettings || showModelReasoningEffortSettings || showEffortSettings || showFastModeSettings)) {
             return (
@@ -1691,44 +1948,48 @@ export function HappyComposer(props: {
                                             })}
                                         </div>
                                     ))
-                                    : modelOptions.map((option) => {
+                                    : modelOptions.map((option, index) => {
                                         const isSelected = selectedModelBase !== undefined
                                             ? selectedModelBase === option.value
                                             : model === option.value
                                         return (
-                                        <button
-                                            key={option.value ?? 'auto'}
-                                            type="button"
-                                            disabled={modelEffortControlsDisabled}
-                                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                                modelEffortControlsDisabled
-                                                    ? 'cursor-not-allowed opacity-50'
-                                                    : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                            }`}
-                                            onClick={() => {
-                                                if (resolveModelVariantsForBase) {
-                                                    handleCursorModelRowClick(option.value)
-                                                } else {
-                                                    handleModelChange(option.value)
-                                                }
-                                            }}
-                                            onMouseDown={(e) => e.preventDefault()}
-                                        >
-                                            <div
-                                                className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                    isSelected
-                                                        ? 'border-[var(--app-link)]'
-                                                        : 'border-[var(--app-hint)]'
-                                                }`}
-                                            >
-                                                {isSelected && (
-                                                    <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                                )}
+                                            <div key={option.value ?? 'auto'}>
+                                                {option.group && option.group !== modelOptions[index - 1]?.group ? (
+                                                    <div className="px-3 pt-2 pb-0.5 text-xs font-medium text-[var(--app-hint)]">{option.group}</div>
+                                                ) : null}
+                                                <button
+                                                    type="button"
+                                                    disabled={modelEffortControlsDisabled}
+                                                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                                        modelEffortControlsDisabled
+                                                            ? 'cursor-not-allowed opacity-50'
+                                                            : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                                                    }`}
+                                                    onClick={() => {
+                                                        if (resolveModelVariantsForBase) {
+                                                            handleCursorModelRowClick(option.value)
+                                                        } else {
+                                                            handleModelChange(option.value)
+                                                        }
+                                                    }}
+                                                    onMouseDown={(e) => e.preventDefault()}
+                                                >
+                                                    <div
+                                                        className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                                                            isSelected
+                                                                ? 'border-[var(--app-link)]'
+                                                                : 'border-[var(--app-hint)]'
+                                                        }`}
+                                                    >
+                                                        {isSelected && (
+                                                            <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                                        )}
+                                                    </div>
+                                                    <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+                                                        {option.label}
+                                                    </span>
+                                                </button>
                                             </div>
-                                            <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
-                                                {option.label}
-                                            </span>
-                                        </button>
                                         )
                                     })}
                             </div>
@@ -2001,7 +2262,6 @@ export function HappyComposer(props: {
                             </div>
                         ) : null}
 
-                        
                     </FloatingOverlay>
                 </div>
             )
@@ -2024,6 +2284,8 @@ export function HappyComposer(props: {
         return null
     }, [
         showSettings,
+        showPiModelPanel,
+        showPiThinkingPanel,
         agentFlavor,
         piModels,
         piSelectedModel,
@@ -2053,6 +2315,7 @@ export function HappyComposer(props: {
         suggestions,
         selectedIndex,
         controlsDisabled,
+        configurationControlsDisabled,
         collaborationMode,
         permissionMode,
         model,
@@ -2072,6 +2335,9 @@ export function HappyComposer(props: {
         handleModelReasoningEffortChange,
         handleEffortChange,
         handleServiceTierChange,
+        handlePiModelToggle,
+        handlePiThinkingToggle,
+        closeAllPanels,
         clearCursorDrillDown,
         resolveModelVariantsForBase,
         handleSuggestionSelect,
@@ -2193,6 +2459,7 @@ export function HappyComposer(props: {
                                         onMirrorChange={handleRichMirrorChange}
                                         onKeyDown={handleKeyDown}
                                         onPaste={handlePaste}
+                                        onSessionMentionDrop={handleSessionMentionDrop}
                                         onFocus={() => engageRichComposerFue()}
                                         resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                                         onEdit={handleRichEdit}
@@ -2286,6 +2553,7 @@ export function HappyComposer(props: {
                             voiceStatus={effectiveVoiceStatus}
                             voiceMicMuted={dictationActive ? false : voiceMicMuted}
                             onVoiceToggle={effectiveVoiceToggle ?? (() => {})}
+                            onVoiceSend={dictationActive ? handleDictationSend : undefined}
                             onVoiceMicToggle={dictationActive ? undefined : onVoiceMicToggle}
                             onSend={handleSend}
                             pendingSchedule={pendingSchedule}
@@ -2303,6 +2571,7 @@ export function HappyComposer(props: {
                             scratchlistMode={props.scratchlistMode}
                             scratchlistCount={props.scratchlistCount}
                             onScratchlistToggle={props.onScratchlistToggle}
+                            codexUsage={agentFlavor === 'codex' ? codexUsage : undefined}
                         />
                     </div>
                 </ComposerPrimitive.Root>
