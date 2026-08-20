@@ -1975,20 +1975,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (!committed) {
                 return;
             }
-            this.conversationHistory.rememberLocalIdTurn(localId, entry.turnId);
-            session.client.updateMetadata((metadata) => ({
-                ...metadata,
-                path: metadata?.path ?? session.path,
-                host: metadata?.host ?? 'unknown',
-                conversationHistoryPoints: {
-                    ...metadata?.conversationHistoryPoints,
-                    [localId]: true as const
-                },
-                conversationHistoryTurns: {
-                    ...metadata?.conversationHistoryTurns,
-                    [localId]: entry.turnId
-                }
-            }));
             messageBuffer.addMessage(entry.batch.message, 'user');
             session.client.emitMessagesConsumed([localId], { steered: true });
         };
@@ -3584,20 +3570,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                             || !session.queue.commitReservation(taken)) {
                             return { steered: false, error: 'Steer cancelled' };
                         }
-                        this.conversationHistory.rememberLocalIdTurn(localId, steerTurnId);
-                        session.client.updateMetadata((metadata) => ({
-                            ...metadata,
-                            path: metadata?.path ?? session.path,
-                            host: metadata?.host ?? 'unknown',
-                            conversationHistoryPoints: {
-                                ...metadata?.conversationHistoryPoints,
-                                [localId]: true as const
-                            },
-                            conversationHistoryTurns: {
-                                ...metadata?.conversationHistoryTurns,
-                                [localId]: steerTurnId
-                            }
-                        }));
                         messageBuffer.addMessage(batch.message, 'user');
                         session.client.emitMessagesConsumed([localId], { steered: true });
                         return { steered: true };

@@ -1153,6 +1153,10 @@ function createSessionStub(
     const resetThreadCalls: string[] = [];
     const collaborationModes: Array<EnhancedMode['collaborationMode'] | undefined> = [];
     const steerDeliveryStateCalls: Array<{ localIds: string[]; state: 'queued' | 'dispatching' }> = [];
+    const metadataUpdates: Array<Record<string, unknown>> = [];
+    const updateMetadata = vi.fn((handler: (metadata: Record<string, unknown>) => Record<string, unknown>) => {
+        metadataUpdates.push(handler({}));
+    });
     const emitMessagesConsumed = vi.fn((_localIds: string[]) => {});
     const emitSteerIndeterminate = vi.fn((_localIds: string[]) => {});
     const setSteerDeliveryState = vi.fn(async (localIds: string[], state: 'queued' | 'dispatching') => {
@@ -1178,7 +1182,7 @@ function createSessionStub(
                 rpcHandlers.set(method, handler);
             }
         },
-        updateMetadata(_handler: (metadata: Record<string, unknown>) => Record<string, unknown>) {},
+        updateMetadata,
         updateAgentState(handler: (state: FakeAgentState) => FakeAgentState) {
             agentState = handler(agentState);
         },
@@ -1261,6 +1265,7 @@ function createSessionStub(
         emitSteerIndeterminate,
         setSteerDeliveryState,
         steerDeliveryStateCalls,
+        metadataUpdates,
         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
             currentPermissionMode = nextMode;
         },
@@ -3506,7 +3511,7 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
                 }]
             }
         };
-        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first message']);
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate, metadataUpdates } = createSessionStub(['first message']);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
 
@@ -3522,6 +3527,10 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
         expect(emitSteerIndeterminate).toHaveBeenCalledWith(['steer-local']);
         await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['steer-local'], { steered: true }), { timeout: 2_000 });
         expect(emitMessagesConsumed).toHaveBeenCalledTimes(1);
+        expect(metadataUpdates.some((metadata) => {
+            const points = metadata.conversationHistoryPoints;
+            return typeof points === 'object' && points !== null && 'steer-local' in points;
+        })).toBe(false);
         expect(queue.cancelByLocalId('steer-local')).toBe('consumed');
         expect(harness.readThreadCalls).toContainEqual({ threadId: 'thread-1', includeTurns: true });
 
@@ -3621,7 +3630,7 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
 
     it('persists dispatching state before writing a steer to Codex', async () => {
         harness.suppressTurnCompletion = true;
-        const { session, rpcHandlers, steerDeliveryStateCalls, emitMessagesConsumed } = createSessionStub(['first message']);
+        const { session, rpcHandlers, steerDeliveryStateCalls, emitMessagesConsumed, metadataUpdates } = createSessionStub(['first message']);
         const runPromise = codexRemoteLauncher(session as never);
         await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
 
@@ -3632,6 +3641,10 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
 
         await expect(steerHandler!({ localId: 'steer-local' })).resolves.toEqual({ steered: true });
         expect(emitMessagesConsumed).toHaveBeenCalledWith(['steer-local'], { steered: true });
+        expect(metadataUpdates.some((metadata) => {
+            const points = metadata.conversationHistoryPoints;
+            return typeof points === 'object' && points !== null && 'steer-local' in points;
+        })).toBe(false);
         expect(steerDeliveryStateCalls).toEqual([{
             localIds: ['steer-local'],
             state: 'dispatching'
