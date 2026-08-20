@@ -62,6 +62,7 @@ const harness = vi.hoisted(() => ({
     transportAbandonedHandler: null as (() => void) | null,
     readThreadCalls: [] as Array<Record<string, unknown>>,
     readThreadError: null as Error | null,
+    deferReadThread: null as Promise<void> | null,
     readThreadResponse: { thread: { turns: [] as unknown[] } } as { thread: { turns?: Array<{ items?: Array<Record<string, unknown>> }> } },
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
@@ -186,6 +187,9 @@ vi.mock('./codexAppServerClient', () => {
             harness.readThreadCalls.push(params ?? {});
             if (harness.readThreadError) {
                 throw harness.readThreadError;
+            }
+            if (harness.deferReadThread) {
+                await harness.deferReadThread;
             }
             return harness.readThreadResponse;
         }
@@ -1321,6 +1325,7 @@ describe('codexRemoteLauncher', () => {
         harness.transportAbandonedHandler = null;
         harness.readThreadCalls = [];
         harness.readThreadError = null;
+        harness.deferReadThread = null;
         harness.readThreadResponse = { thread: { turns: [] } };
         harness.emitFailedCompletionAfterThreadSystemError = false;
         harness.emitCyberPolicyAfterThreadSystemError = false;
@@ -3524,6 +3529,49 @@ describe('codexRemoteLauncher mid-turn steer (#888)', () => {
             status: 'Completed',
             turn: { id: 'turn-1' }
         });
+        queue.close();
+        await runPromise;
+    });
+
+    it('does not consume an indeterminate steer when Abort races reconciliation', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitTurnAbortedOnInterrupt = true;
+        const indeterminate = new Error('Codex app-server response lost');
+        Object.defineProperty(indeterminate, CODEX_APP_SERVER_INDETERMINATE_SYMBOL, { value: true });
+        harness.steerTurnError = indeterminate;
+        harness.readThreadResponse = {
+            thread: {
+                turns: [{
+                    items: [{ type: 'userMessage', clientId: 'steer-local' }]
+                }]
+            }
+        };
+        let releaseRead!: () => void;
+        harness.deferReadThread = new Promise((resolve) => { releaseRead = resolve; });
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first message']);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds).toContain('thread-1'));
+
+        const queue = (session as unknown as { queue: MessageQueue2<EnhancedMode> }).queue;
+        queue.reset();
+        queue.push('steer me', createMode(), 'steer-local');
+        const steerHandler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage);
+
+        await expect(steerHandler!({ localId: 'steer-local' })).resolves.toEqual({
+            steered: false,
+            error: 'Steer outcome is being reconciled'
+        });
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['steer-local']);
+        await vi.waitFor(() => expect(harness.readThreadCalls).toHaveLength(1), { timeout: 2_000 });
+
+        const abortPromise = rpcHandlers.get('abort')?.({});
+        await abortPromise;
+        releaseRead();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['steer-local'], { steered: true });
+        expect(queue.cancelByLocalId('steer-local')).toBe(false);
+
         queue.close();
         await runPromise;
     });

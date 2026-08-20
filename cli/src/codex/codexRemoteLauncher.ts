@@ -1949,6 +1949,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         type PendingSteerReconciliation = {
             threadId: string;
             turnId: string;
+            steerEpoch: number;
             taken: QueueReservation<EnhancedMode>;
             batch: QueuedMessage;
             expiresAt: number;
@@ -1962,7 +1963,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         const commitReconciledSteer = (localId: string, entry: PendingSteerReconciliation): void => {
-            if (pendingSteerReconciliations.get(localId) !== entry || !isSteerReconciliationActive()) {
+            if (pendingSteerReconciliations.get(localId) !== entry
+                || !isSteerReconciliationActive()
+                || entry.steerEpoch !== this.steerEpoch
+                || this.steeringBlocked) {
+                pendingSteerReconciliations.delete(localId);
                 return;
             }
             const committed = session.queue.commitReservation(entry.taken);
@@ -3564,6 +3569,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                                 pendingSteerReconciliations.set(localId, {
                                     threadId: steerThreadId,
                                     turnId: steerTurnId,
+                                    steerEpoch,
                                     taken,
                                     batch,
                                     expiresAt: Date.now() + CODEX_STEER_RECONCILIATION_TIMEOUT_MS
