@@ -18,6 +18,7 @@ interface CopilotLoopOptions {
     api: ApiClient;
     permissionMode?: PermissionMode;
     model?: string;
+    effort?: string | null;
     copilotAgentMode?: CopilotAgentMode;
     resumeSessionId?: string;
     onSessionReady?: (session: CopilotSession) => void;
@@ -41,6 +42,7 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
         startedBy,
         startingMode,
         permissionMode: opts.permissionMode ?? 'default',
+        effort: opts.effort,
         agentMode: opts.copilotAgentMode ?? 'interactive'
     });
 
@@ -59,6 +61,7 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
         }),
         runRemote: (instance) => copilotRemoteLauncher(instance, {
             model: getCurrentModel(),
+            effort: instance.getEffort(),
             onModelRollback: opts.onModelRollback
         }),
         onSessionReady: opts.onSessionReady

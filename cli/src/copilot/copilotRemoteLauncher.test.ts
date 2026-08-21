@@ -12,6 +12,11 @@ type LauncherInternals = {
             id: string;
             options: Array<{ value: string }>;
         } | undefined;
+        getThoughtLevelConfigOption?: (sessionId: string) => {
+            id: string;
+            currentValue?: string;
+            options: Array<{ value: string }>;
+        } | undefined;
     } | null;
     activeSessionId: string | null;
     currentAgentMode: string;
@@ -19,6 +24,7 @@ type LauncherInternals = {
     applyInitialAgentMode: () => Promise<void>;
     currentBackendModel: string | null;
     applyQueuedModel: (model: string) => Promise<string | null>;
+    applyEffort: (effort: string | null) => Promise<string | null>;
     handleAgentMessage: (message: AgentMessage) => void;
 };
 
@@ -30,11 +36,15 @@ function createLauncher(
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
         setModel: vi.fn(),
+        setEffort: vi.fn(),
         pushKeepAlive: vi.fn()
     } as unknown as CopilotSession;
     const launcher = new CopilotRemoteLauncher(session, { onModelRollback });
     const internals = launcher as unknown as LauncherInternals;
-    internals.backend = { setMode };
+    internals.backend = {
+        setMode,
+        getThoughtLevelConfigOption: vi.fn().mockReturnValue(undefined),
+    };
     internals.activeSessionId = 'copilot-session';
     return { launcher, internals, session };
 }
@@ -153,6 +163,25 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
         expect(session.pushKeepAlive).toHaveBeenCalledOnce();
         expect(onModelRollback).toHaveBeenCalledWith('gpt-5.4');
     });
+
+    it('applies ACP thought-level effort through the discovered config option', async () => {
+        const setConfigOption = vi.fn().mockResolvedValue(undefined)
+        const { internals, session } = createLauncher(vi.fn().mockResolvedValue(undefined))
+        internals.backend = {
+            setMode: vi.fn().mockResolvedValue(undefined),
+            setConfigOption,
+            getThoughtLevelConfigOption: vi.fn().mockReturnValue({
+                id: 'thought_level',
+                options: [{ value: 'low' }, { value: 'high' }],
+            }),
+        }
+
+        await expect(internals.applyEffort('high')).resolves.toBe('high')
+
+        expect(setConfigOption).toHaveBeenCalledWith('copilot-session', 'thought_level', 'high')
+        expect(session.setEffort).toHaveBeenCalledWith('high')
+        expect(session.pushKeepAlive).toHaveBeenCalledOnce()
+    })
 
     it('falls back to the model config option when setModel is unavailable', async () => {
         const setModel = vi.fn().mockRejectedValue(new Error('Method not found'));

@@ -17,6 +17,7 @@ interface KimiLoopOptions {
     api: ApiClient;
     permissionMode?: PermissionMode;
     model?: string;
+    effort?: string | null;
     resumeSessionId?: string;
     onSessionReady?: (session: KimiSession) => void;
 }
@@ -37,7 +38,8 @@ export async function kimiLoop(opts: KimiLoopOptions): Promise<void> {
         mode: startingMode,
         startedBy,
         startingMode,
-        permissionMode: opts.permissionMode ?? 'default'
+        permissionMode: opts.permissionMode ?? 'default',
+        effort: opts.effort
     });
 
     if (opts.resumeSessionId) {
@@ -57,7 +59,8 @@ export async function kimiLoop(opts: KimiLoopOptions): Promise<void> {
             model: getCurrentModel()
         }),
         runRemote: (instance) => kimiRemoteLauncher(instance, {
-            model: getCurrentModel()
+            model: getCurrentModel(),
+            effort: instance.getEffort()
         }),
         onSessionReady: opts.onSessionReady
     });

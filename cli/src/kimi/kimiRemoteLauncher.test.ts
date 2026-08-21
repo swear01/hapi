@@ -12,6 +12,12 @@ vi.mock('./utils/kimiBackend', () => ({
         newSession: vi.fn(async () => 'kimi-session-1'),
         loadSession: vi.fn(async () => 'kimi-session-1'),
         setModel: vi.fn(async () => {}),
+        setConfigOption: vi.fn(async () => {}),
+        getThoughtLevelConfigOption: vi.fn(() => ({
+            id: 'thought_level',
+            currentValue: 'medium',
+            options: [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }],
+        })),
         prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
             harness.prompts.push(content)
         }),
@@ -61,6 +67,9 @@ function createSession() {
         },
         queue,
         sessionId: null as string | null,
+        setEffort: vi.fn(),
+        setRemoteEffortApplier: vi.fn(),
+        pushKeepAlive: vi.fn(),
         getPermissionMode: () => 'default' as const,
         onSessionFound(id: string) { session.sessionId = id },
         onThinkingChange: vi.fn(),
