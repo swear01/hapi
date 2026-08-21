@@ -23,6 +23,7 @@ interface CopilotLoopOptions {
     resumeSessionId?: string;
     onSessionReady?: (session: CopilotSession) => void;
     onModelRollback?: (model: string | null) => void;
+    onEffortChange?: (effort: string | null) => void;
 }
 
 export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
@@ -57,12 +58,14 @@ export async function copilotLoop(opts: CopilotLoopOptions): Promise<void> {
         startingMode: opts.startingMode,
         logTag: 'copilot-loop',
         runLocal: (instance) => copilotLocalLauncher(instance, {
-            model: getCurrentModel()
+            model: getCurrentModel(),
+            effort: instance.getEffort()
         }),
         runRemote: (instance) => copilotRemoteLauncher(instance, {
             model: getCurrentModel(),
             effort: instance.getEffort(),
-            onModelRollback: opts.onModelRollback
+            onModelRollback: opts.onModelRollback,
+            onEffortChange: opts.onEffortChange
         }),
         onSessionReady: opts.onSessionReady
     });

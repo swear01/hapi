@@ -23,14 +23,17 @@ type LauncherInternals = {
     displayAgentMode: string | null;
     applyInitialAgentMode: () => Promise<void>;
     currentBackendModel: string | null;
+    defaultBackendEffort: string | null;
     applyQueuedModel: (model: string) => Promise<string | null>;
     applyEffort: (effort: string | null) => Promise<string | null>;
+    syncDiscoveredEffort: (sessionId: string) => void;
     handleAgentMessage: (message: AgentMessage) => void;
 };
 
 function createLauncher(
     setMode: (sessionId: string, mode: string) => Promise<void>,
-    onModelRollback?: (model: string | null) => void
+    onModelRollback?: (model: string | null) => void,
+    onEffortChange?: (effort: string | null) => void
 ) {
     const session = {
         sendSessionEvent: vi.fn(),
@@ -39,7 +42,7 @@ function createLauncher(
         setEffort: vi.fn(),
         pushKeepAlive: vi.fn()
     } as unknown as CopilotSession;
-    const launcher = new CopilotRemoteLauncher(session, { onModelRollback });
+    const launcher = new CopilotRemoteLauncher(session, { onModelRollback, onEffortChange });
     const internals = launcher as unknown as LauncherInternals;
     internals.backend = {
         setMode,
@@ -145,6 +148,31 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
         expect(internals.currentBackendModel).toBe('auto');
     });
 
+    it('publishes the discovered effort after switching models', async () => {
+        const onEffortChange = vi.fn();
+        const setModel = vi.fn().mockResolvedValue(undefined);
+        const { internals, session } = createLauncher(
+            vi.fn().mockResolvedValue(undefined),
+            undefined,
+            onEffortChange
+        );
+        internals.backend = {
+            setMode: vi.fn().mockResolvedValue(undefined),
+            setModel,
+            getThoughtLevelConfigOption: vi.fn().mockReturnValue({
+                id: 'thought_level',
+                currentValue: 'medium',
+                options: [{ value: 'low' }, { value: 'medium' }],
+            }),
+        };
+        internals.currentBackendModel = 'gpt-5.4';
+
+        await expect(internals.applyQueuedModel('gpt-5.6')).resolves.toBe('gpt-5.6');
+
+        expect(session.setEffort).toHaveBeenCalledWith('medium');
+        expect(onEffortChange).toHaveBeenCalledWith('medium');
+    });
+
     it('rolls back the published model when switching fails', async () => {
         const onModelRollback = vi.fn();
         const { internals, session } = createLauncher(
@@ -162,6 +190,24 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
         expect(session.setModel).toHaveBeenCalledWith('gpt-5.4');
         expect(session.pushKeepAlive).toHaveBeenCalledOnce();
         expect(onModelRollback).toHaveBeenCalledWith('gpt-5.4');
+    });
+
+    it('uses the discovered model default when resetting effort', async () => {
+        const setConfigOption = vi.fn().mockResolvedValue(undefined);
+        const { internals } = createLauncher(vi.fn().mockResolvedValue(undefined));
+        internals.defaultBackendEffort = 'medium';
+        internals.backend = {
+            setMode: vi.fn().mockResolvedValue(undefined),
+            setConfigOption,
+            getThoughtLevelConfigOption: vi.fn().mockReturnValue({
+                id: 'thought_level',
+                options: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }],
+            }),
+        };
+
+        await expect(internals.applyEffort(null)).resolves.toBeNull();
+
+        expect(setConfigOption).toHaveBeenCalledWith('copilot-session', 'thought_level', 'medium');
     });
 
     it('applies ACP thought-level effort through the discovered config option', async () => {

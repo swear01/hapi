@@ -1101,14 +1101,23 @@ export function HappyComposer(props: {
                 ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
                 : availableEffortOptions && availableEffortOptions.length > 0
                     ? [
-                        ...(agentFlavor === 'grok' ? [{ value: null, label: 'Default' }] : []),
+                        ...((agentFlavor === 'grok'
+                            || agentFlavor === 'copilot'
+                            || agentFlavor === 'kimi')
+                            && !availableEffortOptions.some((option) => {
+                                const value = option.value.toLowerCase()
+                                const name = option.name?.toLowerCase() ?? ''
+                                return value === 'default' || value === 'auto' || name === 'default' || name === 'auto'
+                            })
+                            ? [{ value: null, label: t('newSession.model.default') }]
+                            : []),
                         ...availableEffortOptions.map((option) => ({
                             value: option.value,
                             label: option.name ?? option.value
                         }))
                     ]
                     : getClaudeComposerEffortOptions(effort),
-        [agentFlavor, effort, piModels, selectedPiModel, availableEffortOptions]
+        [agentFlavor, effort, piModels, selectedPiModel, availableEffortOptions, t]
     )
     const permissionModes = useMemo(
         () => permissionModeOptions.map((option) => option.mode),
@@ -1665,7 +1674,7 @@ export function HappyComposer(props: {
             }
             return candidate.value === normalizedKey
         })
-        return option?.label ?? rawKey ?? undefined
+        return option?.label ?? (normalizedKey === null ? t('newSession.model.default') : rawKey ?? undefined)
     }, [
         isNarrowViewport,
         onModelChange,
@@ -1675,6 +1684,7 @@ export function HappyComposer(props: {
         model,
         modelPickerOptions,
         piSelectedModel,
+        t,
     ])
     const effortValueLabel = useMemo(() => {
         if (isNarrowViewport) return undefined
@@ -1695,7 +1705,7 @@ export function HappyComposer(props: {
         }
         if (showEffortSettings) {
             const option = effortOptions.find((candidate) => candidate.value === effort)
-            return option?.label ?? effort ?? undefined
+            return option?.label ?? (effort == null ? t('newSession.model.default') : effort)
         }
         return undefined
     }, [
@@ -1711,6 +1721,7 @@ export function HappyComposer(props: {
         showEffortSettings,
         effortOptions,
         effort,
+        t,
     ])
 
     // Wrapper for DOM onClick consumers: never leak the MouseEvent into the

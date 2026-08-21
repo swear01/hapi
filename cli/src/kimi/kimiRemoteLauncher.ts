@@ -16,6 +16,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     private readonly session: KimiSession;
     private readonly model?: string;
     private readonly effort?: string | null;
+    private readonly onEffortChange?: (effort: string | null) => void;
     private backend: ReturnType<typeof createKimiBackend> | null = null;
     private permissionHandler: KimiPermissionHandler | null = null;
     private happyServer: { stop: () => void } | null = null;
@@ -24,13 +25,19 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     private displayPermissionMode: PermissionMode | null = null;
     private currentBackendModel: string | null = null;
     private currentBackendEffort: string | null = null;
+    private defaultBackendEffort: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
     private lastDisplayedToolCall = new Map<string, string>();
-    constructor(session: KimiSession, opts: { model?: string; effort?: string | null }) {
+    constructor(session: KimiSession, opts: {
+        model?: string;
+        effort?: string | null;
+        onEffortChange?: (effort: string | null) => void;
+    }) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
         this.model = opts.model;
         this.effort = opts.effort;
+        this.onEffortChange = opts.onEffortChange;
     }
 
     public async launch(): Promise<RemoteLauncherExitReason> {
@@ -126,12 +133,24 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
         }
         this.currentBackendModel = effectiveModel;
         const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
+        this.defaultBackendEffort = discoveredEffort;
         if (this.effort !== undefined && this.effort !== null) {
-            await this.applyEffort(this.effort);
+            try {
+                await this.applyEffort(this.effort);
+            } catch (error) {
+                if (!isEffortUnavailableError(error)) {
+                    throw error;
+                }
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn('[kimi-remote] Startup effort is unavailable for the active model', error);
+                this.publishEffort(discoveredEffort);
+                session.sendSessionEvent({
+                    type: 'message',
+                    message: `Kimi effort ${this.effort} is unavailable for the active model: ${message}. Using ${discoveredEffort ?? 'default'}.`
+                });
+            }
         } else {
-            this.currentBackendEffort = discoveredEffort;
-            session.setEffort(discoveredEffort);
-            session.pushKeepAlive();
+            this.publishEffort(discoveredEffort);
         }
         if (effectiveModel) {
             this.displayModel = effectiveModel;
@@ -166,9 +185,9 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
                         await backend.setModel(acpSessionId, batch.mode.model);
                         this.currentBackendModel = batch.mode.model;
                         this.setModelSupported = true;
-                        this.currentBackendEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
-                        session.setEffort(this.currentBackendEffort);
-                        session.pushKeepAlive();
+                        const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
+                        this.defaultBackendEffort = discoveredEffort;
+                        this.publishEffort(discoveredEffort);
                     } catch (error) {
                         const message = error instanceof Error ? error.message : String(error);
                         const methodNotFound = /method not found/i.test(message);
@@ -192,7 +211,20 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
             }
 
             if (batch.mode.effort !== undefined && batch.mode.effort !== this.currentBackendEffort) {
-                await this.applyEffort(batch.mode.effort);
+                const requestedEffort = batch.mode.effort;
+                try {
+                    await this.applyEffort(requestedEffort);
+                } catch (error) {
+                    if (!isEffortUnavailableError(error)) {
+                        throw error;
+                    }
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.rollbackEffort(batch, this.currentBackendEffort);
+                    session.sendSessionEvent({
+                        type: 'message',
+                        message: `Failed to switch Kimi effort to ${requestedEffort ?? 'default'}: ${message}. Continuing with ${this.currentBackendEffort ?? 'default'}.`
+                    });
+                }
             }
 
             this.applyDisplayMode(batch.mode.permissionMode, batch.mode.model);
@@ -232,6 +264,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+        this.session.setRemoteEffortApplier(null);
 
         if (this.permissionHandler) {
             await this.permissionHandler.cancelAll('Session ended');
@@ -309,7 +342,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
             const value = candidate.value.toLowerCase();
             const name = candidate.name?.toLowerCase() ?? '';
             return value === 'default' || value === 'auto' || name === 'default' || name === 'auto';
-        })?.value;
+        })?.value ?? this.defaultBackendEffort;
         if (!target) {
             throw new Error('Kimi effort reset is unavailable for this session');
         }
@@ -319,10 +352,20 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
 
         await backend.setConfigOption(sessionId, option.id, target);
         const applied = effort === null ? null : target;
-        this.currentBackendEffort = applied;
-        this.session.setEffort(applied);
-        this.session.pushKeepAlive();
+        this.publishEffort(applied);
         return applied;
+    }
+
+    private publishEffort(effort: string | null): void {
+        this.currentBackendEffort = effort;
+        this.session.setEffort(effort);
+        this.session.pushKeepAlive();
+        this.onEffortChange?.(effort);
+    }
+
+    private rollbackEffort(batch: { mode: { effort?: string | null } }, effort: string | null): void {
+        batch.mode.effort = effort;
+        this.publishEffort(effort);
     }
 
     private async applyInitialModel(
@@ -399,6 +442,11 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     }
 }
 
+function isEffortUnavailableError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /unsupported .* effort|effort (?:reset|switching) is unavailable/i.test(message);
+}
+
 function toAcpMcpServers(config: Record<string, { command: string; args: string[] }>): McpServerStdio[] {
     return Object.entries(config).map(([name, entry]) => ({
         name,
@@ -410,7 +458,11 @@ function toAcpMcpServers(config: Record<string, { command: string; args: string[
 
 export async function kimiRemoteLauncher(
     session: KimiSession,
-    opts: { model?: string; effort?: string | null }
+    opts: {
+        model?: string;
+        effort?: string | null;
+        onEffortChange?: (effort: string | null) => void;
+    }
 ): Promise<'switch' | 'exit'> {
     const launcher = new KimiRemoteLauncher(session, opts);
     return launcher.launch();

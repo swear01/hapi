@@ -167,6 +167,34 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
     })
 
+    it('keeps the default AGY model and effort controls visible', () => {
+        renderComposer('agy', {
+            model: null,
+            effort: null,
+            availableModelOptions: [{ value: 'gemini-3.6-flash-low', label: 'Gemini 3.6 Flash (Low)' }],
+        })
+        expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: 'Auto' })).toBeTruthy()
+    })
+
+    it('keeps the default ACP effort control visible and resettable', () => {
+        const effortChanges: Array<string | null> = []
+        renderComposer('copilot', {
+            model: 'gpt-5.6',
+            effort: null,
+            availableEffortOptions: [
+                { value: 'low', name: 'Low' },
+                { value: 'high', name: 'High' },
+            ],
+            onEffortChange: (effort) => effortChanges.push(effort),
+        })
+        const defaultButtons = screen.getAllByRole('button', { name: 'Default' })
+        expect(defaultButtons.length).toBeGreaterThan(0)
+        fireEvent.click(defaultButtons[0]!)
+        fireEvent.click(screen.getAllByRole('button', { name: 'Default' })[0]!)
+        expect(effortChanges).toEqual([null])
+    })
+
     it('shows Antigravity effort through the generic Effort button', () => {
         renderComposer('agy', { effort: 'medium' })
         expect(screen.getByRole('button', { name: 'Medium' })).toBeTruthy()

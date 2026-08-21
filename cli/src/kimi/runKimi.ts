@@ -195,6 +195,9 @@ export async function runKimi(opts: {
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();
+            },
+            onEffortChange: (effort) => {
+                sessionEffort = effort;
             }
         });
     } catch (error) {

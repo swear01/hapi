@@ -1,7 +1,30 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import type { SessionReasoningEffortOption } from '@/types/api'
+import type { SessionReasoningEffortOption, SessionReasoningEffortResponse } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+
+export function shouldRetrySessionReasoningEffortQuery(failureCount: number): boolean {
+    return failureCount < 3
+}
+
+const MAX_SESSION_REASONING_EFFORT_DISCOVERY_POLLS = 10
+
+export function getSessionReasoningEffortRefetchInterval(
+    enabled: boolean,
+    data: SessionReasoningEffortResponse | undefined,
+    pollCount: number
+): 1000 | false {
+    if (!enabled || pollCount >= MAX_SESSION_REASONING_EFFORT_DISCOVERY_POLLS) {
+        return false
+    }
+    if (!data) {
+        return 1000
+    }
+    if (data.success === false) {
+        return 1000
+    }
+    return (data.options?.length ?? 0) > 0 ? false : 1000
+}
 
 export function useSessionReasoningEffortOptions(args: {
     api: ApiClient | null
@@ -25,7 +48,12 @@ export function useSessionReasoningEffortOptions(args: {
         },
         enabled,
         staleTime: 30_000,
-        retry: false,
+        retry: (failureCount) => shouldRetrySessionReasoningEffortQuery(failureCount),
+        refetchInterval: (query) => getSessionReasoningEffortRefetchInterval(
+            enabled,
+            query.state.data as SessionReasoningEffortResponse | undefined,
+            query.state.dataUpdateCount + query.state.errorUpdateCount
+        ),
     })
 
     return {

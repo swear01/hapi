@@ -362,6 +362,9 @@ export async function runCopilot(opts: {
             onModelRollback: (model) => {
                 sessionModel = model;
                 resolvedModel = resolveCopilotQueueModel(model);
+            },
+            onEffortChange: (effort) => {
+                sessionEffort = effort;
             }
         });
     } catch (error) {
