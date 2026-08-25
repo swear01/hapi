@@ -41,6 +41,7 @@ import { HappyThread } from '@/components/AssistantChat/HappyThread'
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
+import { useMachines } from '@/hooks/queries/useMachines'
 import { useSessions } from '@/hooks/queries/useSessions'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { formatSessionMentionTooltip } from '@/lib/sessionReference'
@@ -1002,6 +1003,8 @@ function SessionChatInner(props: SessionChatProps) {
         enabled: agentFlavor === 'cursor' && props.session.active
     })
     const sessionMachineId = props.session.metadata?.machineId ?? null
+    const { machines } = useMachines(props.api, Boolean(sessionMachineId))
+    const machineUptimeSeconds = machines.find((machine) => machine.id === sessionMachineId)?.health?.uptimeSeconds
     const [providerProfiles, setProviderProfiles] = useState<ProviderProfileView[]>([])
     const [providerDefaults, setProviderDefaults] = useState<Partial<Record<AgentProvider, string | null>>>({})
     const providerAgent = agentFlavor === 'gemini' || !agentFlavor || !AGENT_PROVIDER_CAPABILITIES[agentFlavor as AgentProvider] ? null : agentFlavor as AgentProvider
@@ -2104,6 +2107,7 @@ function SessionChatInner(props: SessionChatProps) {
                         thinking={props.session.thinking}
                         agentState={props.session.agentState}
                         backgroundTaskCount={props.session.backgroundTaskCount}
+                        machineUptimeSeconds={machineUptimeSeconds}
                         contextSize={reduced.latestUsage?.contextSize}
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}

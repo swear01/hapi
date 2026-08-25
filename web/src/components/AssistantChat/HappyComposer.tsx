@@ -298,6 +298,7 @@ export function HappyComposer(props: {
     thinking?: boolean
     agentState?: AgentState | null
     backgroundTaskCount?: number
+    machineUptimeSeconds?: number
     contextSize?: number
     contextCacheRead?: number
     contextWindow?: number | null
@@ -412,6 +413,7 @@ export function HappyComposer(props: {
         thinking = false,
         agentState,
         backgroundTaskCount,
+        machineUptimeSeconds,
         contextSize,
         contextCacheRead,
         contextWindow,
@@ -2370,6 +2372,7 @@ export function HappyComposer(props: {
                         thinking={thinking}
                         agentState={agentState}
                         backgroundTaskCount={backgroundTaskCount}
+                        machineUptimeSeconds={machineUptimeSeconds}
                         contextSize={contextSize}
                         contextCacheRead={contextCacheRead}
                         contextWindow={contextWindow}
