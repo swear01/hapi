@@ -119,6 +119,7 @@ function createApp(session: Session, opts?: {
     })
     const listSessionReasoningEffortOptionsForSession = opts?.listSessionReasoningEffortOptionsForSession ?? (async () => ({
         success: true,
+        model: 'gpt-5.6',
         options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }],
         currentValue: 'low'
     }))
@@ -946,6 +947,7 @@ describe('sessions routes', () => {
             expect(response.status).toBe(200)
             expect(await response.json()).toEqual({
                 success: true,
+                model: 'gpt-5.6',
                 options: [
                     { value: 'low', name: 'Low' },
                     { value: 'high', name: 'High' }

@@ -108,6 +108,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
             const option = backend.getThoughtLevelConfigOption(acpSessionId);
             return {
                 success: true,
+                model: this.currentBackendModel,
                 options: option?.options ?? [],
                 currentValue: option?.currentValue ?? null,
             };

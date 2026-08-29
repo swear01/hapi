@@ -105,7 +105,7 @@ All respond `{ok: true}`; apply-failures return 409 with a message. Model/effort
 |---|---|
 | `GET /api/sessions/:id/codex-models`, `/opencode-models`, `/cursor-models`, `/grok-models`, `/copilot-models`, `/pi-models` | Active session of the matching flavor; 400 otherwise |
 | `GET /api/sessions/:id/opencode-reasoning-effort-options`, `/grok-reasoning-effort-options` | Same pattern |
-| `GET /api/sessions/:id/reasoning-effort-options` | ACP thought-level options for active Copilot or Kimi sessions |
+| `GET /api/sessions/:id/reasoning-effort-options` | ACP thought-level options for active Copilot or Kimi sessions; successful responses include the actually applied `model` |
 | `GET /api/machines/:id/agy-models`, `/pi-models`, `/codex-models`, `/cursor-models` | Machine-level (pre-spawn pickers) |
 | `GET /api/machines/:id/opencode-models?cwd=`, `/grok-models?cwd=`, `/copilot-models?cwd=` | `cwd` query required (400 without) |
 

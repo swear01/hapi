@@ -71,6 +71,7 @@ function createSession(
     firstMode: KimiMode = { permissionMode: 'default', model: 'kimi-k2' },
     secondMode: KimiMode = { permissionMode: 'default', model: 'kimi-k2' }
 ) {
+    const rpcHandlers = new Map<string, (...args: unknown[]) => unknown>()
     const queue = new MessageQueue2<KimiMode>((mode) => JSON.stringify(mode))
     queue.pushIsolateAndClear('first', firstMode)
     queue.push('second', secondMode)
@@ -80,7 +81,11 @@ function createSession(
         path: '/tmp/kimi-test',
         logPath: '/tmp/kimi-test/test.log',
         client: {
-            rpcHandlerManager: { registerHandler: vi.fn() },
+            rpcHandlerManager: {
+                registerHandler: vi.fn((method: string, handler: (...args: unknown[]) => unknown) => {
+                    rpcHandlers.set(method, handler)
+                })
+            },
             sendAgentMessage: vi.fn(),
             sendSessionEvent: vi.fn()
         },
@@ -93,7 +98,8 @@ function createSession(
         onSessionFound(id: string) { session.sessionId = id },
         onThinkingChange: vi.fn(),
         sendAgentMessage: vi.fn(),
-        sendSessionEvent: vi.fn()
+        sendSessionEvent: vi.fn(),
+        rpcHandlers
     }
     return session
 }
@@ -120,6 +126,11 @@ describe('kimiRemoteLauncher skill lookup instruction', () => {
         expect(harness.prompts).toHaveLength(2)
         expect(harness.setConfigOptionCalls).not.toContainEqual(['kimi-session-1', 'thought_level', 'high'])
         expect(session.setEffort).toHaveBeenCalledWith('low')
+        await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({
+            success: true,
+            model: 'kimi-new',
+            options: [{ value: 'low', name: 'Low' }]
+        })
     })
 
     it('falls back when the startup effort is unsupported by the model', async () => {

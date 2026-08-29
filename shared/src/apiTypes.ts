@@ -838,6 +838,7 @@ export type SessionReasoningEffortOption = {
 
 export type SessionReasoningEffortResponse = {
     success: boolean
+    model?: string | null
     options?: SessionReasoningEffortOption[]
     currentValue?: string | null
     error?: string

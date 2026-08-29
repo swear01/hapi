@@ -7,23 +7,28 @@ export function shouldRetrySessionReasoningEffortQuery(failureCount: number): bo
     return failureCount < 3
 }
 
-const MAX_SESSION_REASONING_EFFORT_DISCOVERY_POLLS = 10
-
 export function getSessionReasoningEffortRefetchInterval(
     enabled: boolean,
     data: SessionReasoningEffortResponse | undefined,
     pollCount: number
-): 1000 | false {
-    if (!enabled || pollCount >= MAX_SESSION_REASONING_EFFORT_DISCOVERY_POLLS) {
+): number | false {
+    if (!enabled || data?.success === true) {
         return false
     }
-    if (!data) {
-        return 1000
+    return 1000 * 2 ** Math.min(pollCount, 3)
+}
+
+export function selectSessionReasoningEffortResponse(
+    response: SessionReasoningEffortResponse,
+    model?: string | null
+): SessionReasoningEffortResponse {
+    if (response.success && response.model !== (model ?? null)) {
+        return {
+            success: false,
+            error: 'Session model is still switching'
+        }
     }
-    if (data.success === false) {
-        return 1000
-    }
-    return (data.options?.length ?? 0) > 0 ? false : 1000
+    return response
 }
 
 export function useSessionReasoningEffortOptions(args: {
@@ -44,7 +49,8 @@ export function useSessionReasoningEffortOptions(args: {
             : ['session-reasoning-effort-options', 'unknown'] as const,
         queryFn: async () => {
             if (!args.api || !args.sessionId) throw new Error('Session unavailable')
-            return await args.api.getSessionReasoningEffortOptions(args.sessionId)
+            const response = await args.api.getSessionReasoningEffortOptions(args.sessionId)
+            return selectSessionReasoningEffortResponse(response, args.model)
         },
         enabled,
         staleTime: 30_000,
