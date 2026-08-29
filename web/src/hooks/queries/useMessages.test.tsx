@@ -22,10 +22,14 @@ const store = vi.hoisted(() => {
     }
     return {
         state,
+        startsQueuedSync: true,
         syncTailMessages: vi.fn(async () => {}),
         setMessageViewMode: vi.fn((_sessionId: string, mode: 'history' | 'tail') => {
-            store.state.viewMode = mode
-            store.state.isSyncingTail = true
+            store.state = {
+                ...store.state,
+                viewMode: mode,
+                isSyncingTail: store.startsQueuedSync || store.state.isSyncingTail,
+            }
         }),
     }
 })
@@ -42,8 +46,8 @@ vi.mock('@/lib/message-window-store', () => ({
 
 describe('useMessages', () => {
     beforeEach(() => {
-        store.state.viewMode = 'history'
-        store.state.isSyncingTail = false
+        store.state = { ...store.state, viewMode: 'history', isSyncingTail: false }
+        store.startsQueuedSync = true
         vi.clearAllMocks()
     })
 
@@ -56,5 +60,19 @@ describe('useMessages', () => {
 
         expect(store.setMessageViewMode).toHaveBeenCalledWith('session-1', 'tail')
         expect(store.syncTailMessages).not.toHaveBeenCalled()
+    })
+
+    it('keeps the trailing refresh when a tail sync was already running', () => {
+        store.state = { ...store.state, isSyncingTail: true }
+        store.startsQueuedSync = false
+        const api = {} as ApiClient
+        const { result } = renderHook(() => useMessages(api, 'session-1'))
+        store.syncTailMessages.mockClear()
+
+        act(() => result.current.setViewMode('tail'))
+
+        expect(store.syncTailMessages).toHaveBeenCalledWith(api, 'session-1', {
+            ensureAfterCurrent: true,
+        })
     })
 })

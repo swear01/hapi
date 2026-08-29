@@ -87,9 +87,10 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
 
     const setViewMode = useCallback((mode: MessageViewMode) => {
         if (!sessionId) return
-        const previousMode = getMessageWindowState(sessionId).viewMode
+        const previousState = getMessageWindowState(sessionId)
         setMessageViewMode(sessionId, mode)
-        if (mode === 'tail' && previousMode !== 'tail' && api && !getMessageWindowState(sessionId).isSyncingTail) {
+        const queuedSyncStarted = !previousState.isSyncingTail && getMessageWindowState(sessionId).isSyncingTail
+        if (mode === 'tail' && previousState.viewMode !== 'tail' && api && !queuedSyncStarted) {
             void syncTailMessages(api, sessionId, { ensureAfterCurrent: true })
         }
     }, [api, sessionId])
