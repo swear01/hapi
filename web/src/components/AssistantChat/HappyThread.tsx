@@ -1764,7 +1764,10 @@ export function HappyThread(props: {
     const [isNavigationInFlight, setIsNavigationInFlight] = useState(false)
     const promptNavigationTimerRef = useRef<number | null>(null)
     const conversationStartStatusTimerRef = useRef<number | null>(null)
-    const scrollToPromptForMessage = useCallback(async (messageId: string): Promise<boolean> => {
+    const scrollToPromptForMessage = useCallback(async (
+        messageId: string,
+        replyToMessageId?: string
+    ): Promise<boolean> => {
         if (promptNavigationTimerRef.current !== null) {
             window.clearTimeout(promptNavigationTimerRef.current)
             promptNavigationTimerRef.current = null
@@ -1783,6 +1786,17 @@ export function HappyThread(props: {
         const viewport = viewportRef.current
         try {
             if (!viewport) throw new Error('Chat viewport is unavailable')
+            if (replyToMessageId) {
+                const scrolled = await runAfterPendingHistoryLoad(
+                    pendingLoadPromiseRef.current,
+                    () => scrollToMessage(replyToMessageId)
+                )
+                if (scrolled) {
+                    setPromptNavigationStatus('success')
+                    promptNavigationTimerRef.current = window.setTimeout(() => setPromptNavigationStatus('idle'), 1400)
+                    return true
+                }
+            }
             const assistantAnchorState = {
                 current: false,
                 nextAnchorId: null as string | null
@@ -1809,7 +1823,7 @@ export function HappyThread(props: {
         } finally {
             setLoadingPromptMessageId(null)
         }
-    }, [clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom])
+    }, [clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, scrollToMessage])
 
     const jumpToPrompt = useCallback(async (messageId: string, replyToMessageId?: string): Promise<boolean> => {
         if (navigationInFlightRef.current) return false
@@ -1817,20 +1831,13 @@ export function HappyThread(props: {
         setIsNavigationInFlight(true)
         const releaseNavigation = beginOwnedNavigation()
         try {
-            if (replyToMessageId) {
-                const scrolled = await runAfterPendingHistoryLoad(
-                    pendingLoadPromiseRef.current,
-                    () => scrollToMessage(replyToMessageId)
-                )
-                if (scrolled) return true
-            }
-            return await scrollToPromptForMessage(messageId)
+            return await scrollToPromptForMessage(messageId, replyToMessageId)
         } finally {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
             releaseNavigation()
         }
-    }, [scrollToMessage, scrollToPromptForMessage])
+    }, [scrollToPromptForMessage])
 
     const isLoadingConversationStart = conversationStartStatus === 'loading'
     const scrollToConversationStart = useCallback(async (): Promise<boolean> => {

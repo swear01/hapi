@@ -887,20 +887,25 @@ function startTailSync(sessionId: string, controller: TailSyncController): Promi
         }
         controller.running = null
         controller.runningPrefersLatest = false
-        if (!controller.trailingRequested) {
-            return
-        }
-        if (getState(sessionId).navigationLeaseCount > 0) {
-            // A navigation is still in flight: leave the refresh queued and
-            // let the last lease release start it, instead of re-running the
-            // sync mid-load (which would invalidate in-flight older pages).
-            return
-        }
-        controller.trailingRequested = false
-        startTailSync(sessionId, controller)
+        startQueuedTailSyncIfReady(sessionId)
     }
     void running.then(finish, finish)
     return running
+}
+
+function startQueuedTailSyncIfReady(sessionId: string): void {
+    const state = getState(sessionId)
+    const controller = tailSyncControllers.get(sessionId)
+    if (
+        state.viewMode !== 'tail'
+        || state.navigationLeaseCount > 0
+        || !controller?.trailingRequested
+        || controller.running
+    ) {
+        return
+    }
+    controller.trailingRequested = false
+    void startTailSync(sessionId, controller)
 }
 
 async function waitForTailSyncDrain(
@@ -1003,8 +1008,8 @@ export function syncTailMessages(
     if (getState(sessionId).navigationLeaseCount > 0) {
         // A tail refresh requested during an explicit navigation must not be
         // dropped: it would bump olderGeneration and invalidate the in-flight
-        // older-page loads. Queue it and let setNavigationInFlight(false)
-        // start the sync once the navigation has landed.
+        // older-page loads. Queue it until navigation has landed and the
+        // user returns to tail mode.
         controller.trailingRequested = true
         return Promise.resolve()
     }
@@ -1166,6 +1171,7 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
         }
         return enterTailMode(previous)
     }, true)
+    startQueuedTailSyncIfReady(sessionId)
 }
 
 /**
@@ -1178,8 +1184,8 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
  * Leases are reference-counted so overlapping navigations (an outline click
  * while a conversation-start load is still running) cannot clear the state
  * early, and the returned release function is idempotent so component
- * teardown can release safely. The queued tail refresh runs once the last
- * lease is released.
+ * teardown can release safely. A queued tail refresh resumes after the last
+ * lease is released and the user returns to tail mode.
  */
 export function beginNavigation(sessionId: string): () => void {
     const controller = tailSyncControllers.get(sessionId)
@@ -1214,12 +1220,7 @@ export function beginNavigation(sessionId: string): () => void {
         if (!lastLeaseReleased) {
             return
         }
-        // Run any tail refresh that was queued while the navigation was in flight.
-        const controller = tailSyncControllers.get(sessionId)
-        if (controller && controller.trailingRequested && !controller.running) {
-            controller.trailingRequested = false
-            void startTailSync(sessionId, controller)
-        }
+        startQueuedTailSyncIfReady(sessionId)
     }
 }
 

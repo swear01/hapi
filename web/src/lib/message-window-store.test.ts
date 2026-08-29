@@ -1490,6 +1490,7 @@ describe('explicit history navigation', () => {
         const api = createApi(getMessages)
         const firstSync = syncTailMessages(api, id)
         const releaseNavigation = beginNavigation(id)
+        setMessageViewMode(id, 'history')
 
         releaseFirstSync!()
         await firstSync
@@ -1499,6 +1500,11 @@ describe('explicit history navigation', () => {
         expect(getMessageWindowState(id).isSyncingTail).toBe(false)
 
         releaseNavigation()
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(1))
+        expect(getMessageWindowState(id).messages.map((message) => message.id))
+            .toEqual(original.map((message) => message.id))
+
+        setMessageViewMode(id, 'tail')
         await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
         await syncTailMessages(api, id)
     })

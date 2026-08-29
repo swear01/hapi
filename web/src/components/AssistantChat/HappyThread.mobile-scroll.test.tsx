@@ -161,6 +161,17 @@ describe('mobile initial scroll settling', () => {
         })
 
         expect(screen.getByRole('status')).toHaveTextContent('Reached turn input')
+
+        let directPromptJump: Promise<boolean> | null = null
+        act(() => {
+            directPromptJump = context.jumpToPrompt('agent-text:answer', 'user-text:prompt')
+        })
+        expect(screen.getByRole('status')).toHaveTextContent('Loading turn input')
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(250)
+            await directPromptJump
+        })
+        expect(screen.getByRole('status')).toHaveTextContent('Reached turn input')
     })
 
     it('does not snap back after pointer cancellation ends a touch swipe', () => {
