@@ -23,6 +23,7 @@ type LauncherInternals = {
     displayAgentMode: string | null;
     applyInitialAgentMode: () => Promise<void>;
     currentBackendModel: string | null;
+    appliedModelSelection: string | null;
     defaultBackendEffort: string | null;
     applyQueuedModel: (model: string) => Promise<string | null>;
     applyEffort: (effort: string | null) => Promise<string | null>;
@@ -39,6 +40,7 @@ function createLauncher(
         sendSessionEvent: vi.fn(),
         sendAgentMessage: vi.fn(),
         setModel: vi.fn(),
+        getModel: vi.fn(() => null),
         setEffort: vi.fn(),
         pushKeepAlive: vi.fn()
     } as unknown as CopilotSession;
@@ -146,6 +148,7 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
 
         expect(setModel).toHaveBeenCalledWith('copilot-session', 'auto');
         expect(internals.currentBackendModel).toBe('auto');
+        expect(internals.appliedModelSelection).toBeNull();
     });
 
     it('publishes the discovered effort after switching models', async () => {

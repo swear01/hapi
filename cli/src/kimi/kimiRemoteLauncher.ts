@@ -24,6 +24,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     private displayModel: string | null = null;
     private displayPermissionMode: PermissionMode | null = null;
     private currentBackendModel: string | null = null;
+    private appliedModelSelection: string | null = null;
     private currentBackendEffort: string | null = null;
     private defaultBackendEffort: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
@@ -108,7 +109,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
             const option = backend.getThoughtLevelConfigOption(acpSessionId);
             return {
                 success: true,
-                model: this.currentBackendModel,
+                model: this.appliedModelSelection,
                 options: option?.options ?? [],
                 currentValue: option?.currentValue ?? null,
             };
@@ -133,6 +134,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
                 ?? null;
         }
         this.currentBackendModel = effectiveModel;
+        this.recordAppliedModelSelection(effectiveModel);
         const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
         this.defaultBackendEffort = discoveredEffort;
         if (this.effort !== undefined && this.effort !== null) {
@@ -185,6 +187,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
                     try {
                         await backend.setModel(acpSessionId, batch.mode.model);
                         this.currentBackendModel = batch.mode.model;
+                        this.recordAppliedModelSelection(batch.mode.model);
                         this.setModelSupported = true;
                         const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
                         this.defaultBackendEffort = discoveredEffort;
@@ -362,6 +365,13 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
         this.session.setEffort(effort);
         this.session.pushKeepAlive();
         this.onEffortChange?.(effort);
+    }
+
+    private recordAppliedModelSelection(backendModel: string | null): void {
+        const selection = this.session.getModel() ?? null;
+        this.appliedModelSelection = selection === null || selection === backendModel
+            ? selection
+            : backendModel;
     }
 
     private rollbackEffort(batch: { mode: { effort?: string | null } }, effort: string | null): void {

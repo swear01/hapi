@@ -30,6 +30,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
     private displayAgentMode: CopilotAgentMode | null = null;
     private currentAgentMode: CopilotAgentMode = 'interactive';
     private currentBackendModel: string | null = null;
+    private appliedModelSelection: string | null = null;
     private currentBackendEffort: string | null = null;
     private defaultBackendEffort: string | null = null;
     private setModelSupported: boolean | undefined = undefined;
@@ -122,7 +123,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
             const option = backend.getThoughtLevelConfigOption(acpSessionId);
             return {
                 success: true,
-                model: this.currentBackendModel,
+                model: this.appliedModelSelection,
                 options: option?.options ?? [],
                 currentValue: option?.currentValue ?? null,
             };
@@ -144,6 +145,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
                 ?? null;
         }
         this.currentBackendModel = effectiveModel;
+        this.recordAppliedModelSelection(effectiveModel);
         const discoveredEffort = backend.getThoughtLevelConfigOption(acpSessionId)?.currentValue ?? null;
         this.defaultBackendEffort = discoveredEffort;
         if (this.effort !== undefined && this.effort !== null) {
@@ -458,6 +460,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
             try {
                 await backend.setModel(sessionId, model);
                 this.currentBackendModel = model;
+                this.recordAppliedModelSelection(model);
                 this.setModelSupported = true;
                 this.syncDiscoveredEffort(sessionId);
                 return model;
@@ -484,6 +487,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
         try {
             await backend.setConfigOption(sessionId, option.id, model);
             this.currentBackendModel = model;
+            this.recordAppliedModelSelection(model);
             this.syncDiscoveredEffort(sessionId);
             return model;
         } catch (error) {
@@ -501,6 +505,13 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
         const discoveredEffort = this.backend?.getThoughtLevelConfigOption?.(sessionId)?.currentValue ?? null;
         this.defaultBackendEffort = discoveredEffort;
         this.publishEffort(discoveredEffort);
+    }
+
+    private recordAppliedModelSelection(backendModel: string | null): void {
+        const selection = this.session.getModel() ?? null;
+        this.appliedModelSelection = selection === null || selection === backendModel
+            ? selection
+            : backendModel;
     }
 
     private publishEffort(effort: string | null): void {
@@ -547,6 +558,7 @@ export class CopilotRemoteLauncher extends RemoteLauncherBase {
     private rollbackModel(): string | null {
         const model = this.currentBackendModel === 'auto' ? null : this.currentBackendModel;
         this.session.setModel(model);
+        this.recordAppliedModelSelection(this.currentBackendModel);
         this.session.pushKeepAlive();
         this.onModelRollback?.(model);
         return this.currentBackendModel;

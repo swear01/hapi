@@ -33,6 +33,9 @@ vi.mock('./utils/kimiBackend', () => ({
         setConfigOption: vi.fn(async (...args: unknown[]) => {
             harness.setConfigOptionCalls.push(args)
         }),
+        getConfigOptionByCategory: vi.fn((_sessionId: string, category: string) => category === 'model'
+            ? { id: 'model', currentValue: 'kimi-default', options: [{ value: 'kimi-default' }] }
+            : undefined),
         getThoughtLevelConfigOption: vi.fn(() => harness.thoughtLevelOption),
         prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
             harness.prompts.push(content)
@@ -94,6 +97,7 @@ function createSession(
         setEffort: vi.fn(),
         setRemoteEffortApplier: vi.fn(),
         pushKeepAlive: vi.fn(),
+        getModel: () => firstMode.model ?? null,
         getPermissionMode: () => 'default' as const,
         onSessionFound(id: string) { session.sessionId = id },
         onThinkingChange: vi.fn(),
@@ -141,6 +145,18 @@ describe('kimiRemoteLauncher skill lookup instruction', () => {
         expect(harness.prompts).toHaveLength(2)
         expect(harness.setConfigOptionCalls).not.toContainEqual(['kimi-session-1', 'thought_level', 'high'])
         expect(session.setEffort).toHaveBeenCalledWith('medium')
+    })
+
+    it('reports the default HAPI model selection for a concrete backend default', async () => {
+        const defaultMode: KimiMode = { permissionMode: 'default' }
+        const session = createSession(defaultMode, defaultMode)
+
+        await expect(kimiRemoteLauncher(session as never, {})).resolves.toBe('exit')
+
+        await expect(session.rpcHandlers.get('listSessionReasoningEffortOptions')?.()).resolves.toMatchObject({
+            success: true,
+            model: null
+        })
     })
 
     it('does not prepend skill_lookup instructions onto user turns', async () => {
