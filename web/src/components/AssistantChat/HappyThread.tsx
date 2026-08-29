@@ -1698,6 +1698,16 @@ export function HappyThread(props: {
         onViewModeChangeRef.current('history')
     }, [])
 
+    const restoreTailIfViewportIsAtBottom = useCallback(() => {
+        const viewport = viewportRef.current
+        if (!viewport) return
+        const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        if (distanceFromBottom > AUTO_SCROLL_RESUME_THRESHOLD_PX) return
+        autoScrollEnabledRef.current = true
+        atBottomRef.current = true
+        onViewModeChangeRef.current('tail')
+    }, [])
+
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
         // Serialize with response navigation: an outline pick while a jump is
         // loading would race the jump's final scroll for the viewport.
@@ -1724,8 +1734,9 @@ export function HappyThread(props: {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
             releaseNavigation()
+            restoreTailIfViewportIsAtBottom()
         }
-    }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
+    }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange, restoreTailIfViewportIsAtBottom])
 
     const scrollToMessage = useCallback(async (messageId: string): Promise<boolean> => {
         initialScrollDeadlineRef.current = 0
@@ -1836,8 +1847,9 @@ export function HappyThread(props: {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
             releaseNavigation()
+            restoreTailIfViewportIsAtBottom()
         }
-    }, [scrollToPromptForMessage])
+    }, [restoreTailIfViewportIsAtBottom, scrollToPromptForMessage])
 
     const isLoadingConversationStart = conversationStartStatus === 'loading'
     const scrollToConversationStart = useCallback(async (): Promise<boolean> => {
@@ -1892,8 +1904,9 @@ export function HappyThread(props: {
             navigationInFlightRef.current = false
             setIsNavigationInFlight(false)
             releaseNavigation()
+            restoreTailIfViewportIsAtBottom()
         }
-    }, [clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom])
+    }, [clearInitialScrollTimers, loadOlderForNavigation, markExplicitNavigationAwayFromBottom, restoreTailIfViewportIsAtBottom])
 
     useEffect(() => () => {
         if (conversationStartStatusTimerRef.current !== null) {

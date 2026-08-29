@@ -124,6 +124,24 @@ afterEach(() => {
 })
 
 describe('mobile initial scroll settling', () => {
+    it('returns to tail mode after a failed prompt jump from the bottom', async () => {
+        const { viewport, onViewModeChange } = renderThread()
+        const context = happyChatCapture.current
+        if (!context) throw new Error('Happy chat context was not captured')
+        onViewModeChange.mockClear()
+
+        const promptJump = context.jumpToPrompt('agent-text:missing')
+        let result = true
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(250)
+            result = await promptJump
+        })
+
+        expect(result).toBe(false)
+        expect(viewport.scrollTop).toBe(viewport.scrollHeight - viewport.clientHeight)
+        expect(onViewModeChange).toHaveBeenLastCalledWith('tail')
+    })
+
     it('replaces a conversation-start result with the next prompt-jump result', async () => {
         const { container, viewport } = renderThread()
         const context = happyChatCapture.current
