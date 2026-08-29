@@ -16,6 +16,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     private readonly session: KimiSession;
     private readonly model?: string;
     private readonly effort?: string | null;
+    private readonly onModelRollback?: (model: string | null) => void;
     private readonly onEffortChange?: (effort: string | null) => void;
     private backend: ReturnType<typeof createKimiBackend> | null = null;
     private permissionHandler: KimiPermissionHandler | null = null;
@@ -32,12 +33,14 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     constructor(session: KimiSession, opts: {
         model?: string;
         effort?: string | null;
+        onModelRollback?: (model: string | null) => void;
         onEffortChange?: (effort: string | null) => void;
     }) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
         this.model = opts.model;
         this.effort = opts.effort;
+        this.onModelRollback = opts.onModelRollback;
         this.onEffortChange = opts.onEffortChange;
     }
 
@@ -181,7 +184,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
 
             if (batch.mode.model && batch.mode.model !== this.currentBackendModel) {
                 if (!backend.setModel || this.setModelSupported === false) {
-                    batch.mode.model = this.currentBackendModel ?? undefined;
+                    this.rollbackModel(batch);
                 } else {
                     logger.debug(`[kimi-remote] Switching model inline: ${this.currentBackendModel} -> ${batch.mode.model}`);
                     try {
@@ -209,7 +212,7 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
                                 message: `Failed to switch model to ${batch.mode.model}. Continuing with ${this.currentBackendModel}.`
                             });
                         }
-                        batch.mode.model = this.currentBackendModel ?? undefined;
+                        this.rollbackModel(batch);
                     }
                 }
             }
@@ -374,6 +377,13 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
             : backendModel;
     }
 
+    private rollbackModel(batch: { mode: { model?: string } }): void {
+        batch.mode.model = this.currentBackendModel ?? undefined;
+        this.session.setModel(this.appliedModelSelection);
+        this.session.pushKeepAlive();
+        this.onModelRollback?.(this.appliedModelSelection);
+    }
+
     private rollbackEffort(batch: { mode: { effort?: string | null } }, effort: string | null): void {
         batch.mode.effort = effort;
         this.publishEffort(effort);
@@ -472,6 +482,7 @@ export async function kimiRemoteLauncher(
     opts: {
         model?: string;
         effort?: string | null;
+        onModelRollback?: (model: string | null) => void;
         onEffortChange?: (effort: string | null) => void;
     }
 ): Promise<'switch' | 'exit'> {

@@ -5,6 +5,7 @@ import type { KimiMode } from './types'
 const harness = vi.hoisted(() => ({
     prompts: [] as unknown[][],
     setConfigOptionCalls: [] as unknown[][],
+    rejectedModel: null as string | null,
     thoughtLevelOption: {
         id: 'thought_level',
         currentValue: 'medium',
@@ -18,6 +19,9 @@ vi.mock('./utils/kimiBackend', () => ({
         newSession: vi.fn(async () => 'kimi-session-1'),
         loadSession: vi.fn(async () => 'kimi-session-1'),
         setModel: vi.fn(async (_sessionId: string, model: string) => {
+            if (model === harness.rejectedModel) {
+                throw new Error('model rejected')
+            }
             harness.thoughtLevelOption = model === 'kimi-new'
                 ? {
                     id: 'thought_level',
@@ -95,6 +99,7 @@ function createSession(
         queue,
         sessionId: null as string | null,
         setEffort: vi.fn(),
+        setModel: vi.fn(),
         setRemoteEffortApplier: vi.fn(),
         pushKeepAlive: vi.fn(),
         getModel: () => firstMode.model ?? null,
@@ -112,6 +117,7 @@ describe('kimiRemoteLauncher skill lookup instruction', () => {
     afterEach(() => {
         harness.prompts = []
         harness.setConfigOptionCalls = []
+        harness.rejectedModel = null
         harness.thoughtLevelOption = {
             id: 'thought_level',
             currentValue: 'medium',
@@ -157,6 +163,21 @@ describe('kimiRemoteLauncher skill lookup instruction', () => {
             success: true,
             model: null
         })
+    })
+
+    it('rolls the HAPI model back when an inline backend switch fails', async () => {
+        harness.rejectedModel = 'kimi-bad'
+        const session = createSession(
+            { permissionMode: 'default', model: 'kimi-k2' },
+            { permissionMode: 'default', model: 'kimi-bad' }
+        )
+        const onModelRollback = vi.fn()
+        const options = { model: 'kimi-k2', onModelRollback }
+
+        await expect(kimiRemoteLauncher(session as never, options)).resolves.toBe('exit')
+
+        expect(session.setModel).toHaveBeenCalledWith('kimi-k2')
+        expect(onModelRollback).toHaveBeenCalledWith('kimi-k2')
     })
 
     it('does not prepend skill_lookup instructions onto user turns', async () => {

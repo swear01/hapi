@@ -196,6 +196,10 @@ export async function runKimi(opts: {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();
             },
+            onModelRollback: (model) => {
+                sessionModel = model;
+                resolvedModel = model ?? machineDefault;
+            },
             onEffortChange: (effort) => {
                 sessionEffort = effort;
             }

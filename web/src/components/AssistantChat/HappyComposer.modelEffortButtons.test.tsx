@@ -36,6 +36,7 @@ const runtime = vi.hoisted(() => ({
     sentIntents: [] as ComposerSendIntent[],
     narrowViewport: false,
     toolbarLayout: null as ComposerToolbarLayout | null,
+    haptic: { impact: vi.fn(), notification: vi.fn() },
 }))
 
 vi.mock('@assistant-ui/react', async () => {
@@ -107,7 +108,7 @@ vi.mock('@/hooks/useComposerDraft', () => ({
     useComposerDraft: () => ({ sessionId: undefined, complete: true, restoredAny: false, hasStoredAttachments: false }),
 }))
 vi.mock('@/hooks/useComposerEnterBehavior', () => ({ useComposerEnterBehavior: () => ({ composerEnterBehavior: 'send' }) }))
-vi.mock('@/hooks/usePlatform', () => ({ usePlatform: () => ({ haptic: { impact: () => {}, notification: () => {} }, isTouch: false }) }))
+vi.mock('@/hooks/usePlatform', () => ({ usePlatform: () => ({ haptic: runtime.haptic, isTouch: false }) }))
 vi.mock('@/hooks/usePWAInstall', () => ({ usePWAInstall: () => ({ isStandalone: false, isIOS: false }) }))
 vi.mock('@/hooks/useActiveWord', () => ({ useActiveWord: () => null }))
 vi.mock('@/hooks/useActiveSuggestions', () => ({ useActiveSuggestions: () => [[], -1, () => {}, () => {}, () => {}] }))
@@ -337,6 +338,35 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.getByRole('button', { name: 'Gemini 2.5 Pro' })).toBeTruthy()
         expect(screen.getByRole('button', { name: 'High' })).toBeTruthy()
         expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull()
+    })
+
+    it('disables the model shortcut when the Pi catalog loads after mount', () => {
+        const onModelChange = vi.fn()
+        const props = {
+            sessionId: 'composer-test',
+            disabled: false,
+            agentFlavor: 'pi',
+            model: 'gemini-2.5-pro',
+            effort: 'high',
+            permissionMode: 'default',
+            onModelChange,
+            onEffortChange: vi.fn(),
+            onPermissionModeChange: vi.fn(),
+            availableModelOptions: [{ value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' }],
+            piSelectedModel: { provider: 'gemini', modelId: 'gemini-2.5-pro' },
+            pendingSendIntentRef: runtime.pendingSendIntentRef as { current: ComposerSendIntent },
+        } satisfies Parameters<typeof HappyComposer>[0]
+        const view = (piModels: Parameters<typeof HappyComposer>[0]['piModels']) => (
+            <I18nProvider><HappyComposer {...props} piModels={piModels} /></I18nProvider>
+        )
+        const { rerender } = render(view(undefined))
+
+        rerender(view([
+            { provider: 'gemini', modelId: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', reasoning: true },
+        ]))
+        fireEvent.keyDown(window, { key: 'm', ctrlKey: true })
+
+        expect(onModelChange).not.toHaveBeenCalled()
     })
 
     it('opens the settings sheet with provider-grouped model rows for Pi', () => {
