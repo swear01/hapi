@@ -89,7 +89,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
         if (!sessionId) return
         const previousMode = getMessageWindowState(sessionId).viewMode
         setMessageViewMode(sessionId, mode)
-        if (mode === 'tail' && previousMode !== 'tail' && api) {
+        if (mode === 'tail' && previousMode !== 'tail' && api && !getMessageWindowState(sessionId).isSyncingTail) {
             void syncTailMessages(api, sessionId, { ensureAfterCurrent: true })
         }
     }, [api, sessionId])
