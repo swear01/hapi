@@ -1739,6 +1739,7 @@ export function HappyThread(props: {
     }, [clearInitialScrollTimers, markExplicitNavigationAwayFromBottom])
 
     const [promptNavigationStatus, setPromptNavigationStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+    const [conversationStartStatus, setConversationStartStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
     const [loadingPromptMessageId, setLoadingPromptMessageId] = useState<string | null>(null)
     const navigationInFlightRef = useRef(false)
     // Release every in-flight navigation lease on unmount so a session switch
@@ -1762,11 +1763,17 @@ export function HappyThread(props: {
     }, [])
     const [isNavigationInFlight, setIsNavigationInFlight] = useState(false)
     const promptNavigationTimerRef = useRef<number | null>(null)
+    const conversationStartStatusTimerRef = useRef<number | null>(null)
     const scrollToPromptForMessage = useCallback(async (messageId: string): Promise<boolean> => {
         if (promptNavigationTimerRef.current !== null) {
             window.clearTimeout(promptNavigationTimerRef.current)
             promptNavigationTimerRef.current = null
         }
+        if (conversationStartStatusTimerRef.current !== null) {
+            window.clearTimeout(conversationStartStatusTimerRef.current)
+            conversationStartStatusTimerRef.current = null
+        }
+        setConversationStartStatus('idle')
         setLoadingPromptMessageId(messageId)
         setPromptNavigationStatus('loading')
         initialScrollDeadlineRef.current = 0
@@ -1825,8 +1832,6 @@ export function HappyThread(props: {
         }
     }, [scrollToMessage, scrollToPromptForMessage])
 
-    const [conversationStartStatus, setConversationStartStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
-    const conversationStartStatusTimerRef = useRef<number | null>(null)
     const isLoadingConversationStart = conversationStartStatus === 'loading'
     const scrollToConversationStart = useCallback(async (): Promise<boolean> => {
         if (navigationInFlightRef.current) return false
@@ -1837,6 +1842,11 @@ export function HappyThread(props: {
             window.clearTimeout(conversationStartStatusTimerRef.current)
             conversationStartStatusTimerRef.current = null
         }
+        if (promptNavigationTimerRef.current !== null) {
+            window.clearTimeout(promptNavigationTimerRef.current)
+            promptNavigationTimerRef.current = null
+        }
+        setPromptNavigationStatus('idle')
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
         setConversationStartStatus('loading')

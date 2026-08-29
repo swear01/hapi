@@ -1465,6 +1465,44 @@ describe('explicit history navigation', () => {
         await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
     })
 
+    it('does not apply an in-flight tail reset after navigation begins', async () => {
+        const id = sessionId('navigation-cancels-running-tail')
+        const original = [
+            makeAgentMessage({ id: 'original-1', seq: 1, at: 1 }),
+            makeAgentMessage({ id: 'original-2', seq: 2, at: 2 })
+        ]
+        ingestIncomingMessages(id, original)
+        let releaseFirstSync: (() => void) | null = null
+        const firstSyncGate = new Promise<void>((resolve) => {
+            releaseFirstSync = resolve
+        })
+        const getMessages = vi.fn()
+            .mockImplementationOnce(async () => {
+                await firstSyncGate
+                return latestResponse([
+                    makeAgentMessage({ id: 'stale-reset', seq: 3, at: 3 })
+                ], { epoch: 1 })
+            })
+            .mockImplementation(async () => latestResponse([
+                ...original,
+                makeAgentMessage({ id: 'post-navigation', seq: 4, at: 4 })
+            ], { epoch: 1 }))
+        const api = createApi(getMessages)
+        const firstSync = syncTailMessages(api, id)
+        const releaseNavigation = beginNavigation(id)
+
+        releaseFirstSync!()
+        await firstSync
+
+        expect(getMessageWindowState(id).messages.map((message) => message.id))
+            .toEqual(original.map((message) => message.id))
+        expect(getMessageWindowState(id).isSyncingTail).toBe(false)
+
+        releaseNavigation()
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
+        await syncTailMessages(api, id)
+    })
+
     it('keeps both ends of the transcript with an explicit gap marker', () => {
         const id = sessionId('navigation-head-gap-tail')
         const releaseNavigation = beginNavigation(id)

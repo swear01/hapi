@@ -1182,9 +1182,23 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
  * lease is released.
  */
 export function beginNavigation(sessionId: string): () => void {
+    const controller = tailSyncControllers.get(sessionId)
+    let canceledRunningSync = false
     updateState(sessionId, (previous) => {
-        return buildState(previous, { navigationLeaseCount: previous.navigationLeaseCount + 1 })
+        canceledRunningSync = previous.navigationLeaseCount === 0 && Boolean(controller?.running)
+        return buildState(previous, {
+            navigationLeaseCount: previous.navigationLeaseCount + 1,
+            ...(canceledRunningSync
+                ? {
+                    syncGeneration: previous.syncGeneration + 1,
+                    isSyncingTail: false
+                }
+                : {})
+        })
     })
+    if (canceledRunningSync && controller) {
+        controller.trailingRequested = true
+    }
     let released = false
     return () => {
         if (released) {
