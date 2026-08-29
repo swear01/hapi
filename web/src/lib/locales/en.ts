@@ -41,6 +41,7 @@ export default {
   'message.loadingPrompt': 'Loading turn input…',
   'message.reachedPrompt': 'Reached turn input',
   'message.loadPromptFailed': 'Could not load turn input. Try again.',
+  'message.historyGap': 'Some history is not loaded',
 
   // Login / Auth
   'login.title': 'HAPI',

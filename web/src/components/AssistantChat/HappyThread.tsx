@@ -2066,7 +2066,9 @@ export function HappyThread(props: {
 
         let start: Element | null = target
         while (start?.previousElementSibling && start.getAttribute('data-hapi-message-role') !== 'user') {
-            start = start.previousElementSibling
+            const previous: Element = start.previousElementSibling
+            if (previous instanceof HTMLElement && previous.dataset.hapiTranscriptGap === 'true') break
+            start = previous
         }
         if (!start || start.getAttribute('data-hapi-message-role') !== 'user') {
             start = target
@@ -2075,6 +2077,7 @@ export function HappyThread(props: {
         const snapshots: ShareTurnSnapshot[] = []
         let current: Element | null = start
         while (current instanceof HTMLElement) {
+            if (current.dataset.hapiTranscriptGap === 'true') break
             if (current !== start && current.getAttribute('data-hapi-message-role') === 'user') {
                 break
             }

@@ -41,6 +41,7 @@ export default {
   'message.loadingPrompt': '正在加载本轮输入…',
   'message.reachedPrompt': '已定位到本轮输入',
   'message.loadPromptFailed': '加载本轮输入失败，请重试',
+  'message.historyGap': '部分历史消息未加载',
 
   // Login / Auth
   'login.title': 'HAPI',

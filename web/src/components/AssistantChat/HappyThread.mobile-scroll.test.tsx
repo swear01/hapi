@@ -10,8 +10,19 @@ const happyChatCapture = vi.hoisted(() => ({
     current: null as HappyChatContextValue | null
 }))
 
+const shareDialogCapture = vi.hoisted(() => ({
+    snapshots: [] as Array<{ html: string; text: string; role?: 'user' | 'assistant' }>
+}))
+
 vi.mock('@/hooks/queries/useMachines', () => ({
     useMachines: () => ({ machines: [] })
+}))
+
+vi.mock('@/components/AssistantChat/ShareTurnDialog', () => ({
+    ShareTurnDialog: (props: { sourceSnapshots: typeof shareDialogCapture.snapshots }) => {
+        shareDialogCapture.snapshots = props.sourceSnapshots
+        return null
+    }
 }))
 
 vi.mock('@assistant-ui/react', async (importOriginal) => {
@@ -53,7 +64,7 @@ function renderThread(onViewModeChange = vi.fn()) {
             <I18nProvider>
                 <HappyThread
                     api={{ getHubSettings: vi.fn().mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false }) } as unknown as ApiClient}
-                    session={{ metadata: {} } as Session}
+                    session={{ id: 'mobile-scroll-session', metadata: {} } as Session}
                     sessionId="mobile-scroll-session"
                     metadata={null}
                     disabled={false}
@@ -101,6 +112,7 @@ function renderThread(onViewModeChange = vi.fn()) {
 beforeEach(() => {
     vi.useFakeTimers()
     happyChatCapture.current = null
+    shareDialogCapture.snapshots = []
     Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
         configurable: true,
         writable: true,
@@ -124,6 +136,25 @@ afterEach(() => {
 })
 
 describe('mobile initial scroll settling', () => {
+    it('does not share messages across a transcript gap', () => {
+        const { container } = renderThread()
+        const context = happyChatCapture.current
+        if (!context?.onShareTurn) throw new Error('Share handler was not captured')
+        const messages = container.querySelector<HTMLElement>('.happy-thread-messages')
+        if (!messages) throw new Error('Message container was not rendered')
+        messages.innerHTML = `
+            <div data-hapi-message-role="user">head prompt</div>
+            <div data-hapi-message-role="assistant">head answer</div>
+            <div data-hapi-transcript-gap="true">history gap</div>
+            <div id="tail-answer" data-hapi-message-role="assistant">tail answer</div>
+        `
+
+        act(() => context.onShareTurn!(document.getElementById('tail-answer')))
+
+        expect(shareDialogCapture.snapshots).toHaveLength(1)
+        expect(shareDialogCapture.snapshots[0]?.text).toBe('tail answer')
+    })
+
     it('returns to tail mode after a failed prompt jump from the bottom', async () => {
         const { viewport, onViewModeChange } = renderThread()
         const context = happyChatCapture.current
