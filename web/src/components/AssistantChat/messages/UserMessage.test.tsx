@@ -6,7 +6,7 @@ import { I18nProvider } from '@/lib/i18n-context'
 const state = vi.hoisted(() => ({
     message: {
         role: 'user',
-        id: '__transcript-gap__601-801',
+        id: 'user-text:__transcript-gap__601-801',
         content: [{ type: 'text', text: 'synthetic gap text' }],
         metadata: { custom: {} }
     }

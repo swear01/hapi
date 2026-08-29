@@ -47,7 +47,7 @@ export function HappyUserMessage() {
         return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
     if (role !== 'user') return null
-    if (messageId.startsWith('__transcript-gap__')) {
+    if (messageId.startsWith('user-text:__transcript-gap__')) {
         return (
             <MessagePrimitive.Root
                 id={elementId}
