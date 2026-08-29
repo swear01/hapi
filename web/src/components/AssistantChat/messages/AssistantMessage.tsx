@@ -57,8 +57,9 @@ export function HappyAssistantMessage() {
     const messageModel = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.model)
     const turnCount = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.turnCount)
     const replyToMessageId = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.replyToMessageId)
+    const roundSummary = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.roundSummary)
 
-    const metadata = { durationMs, usage, model: messageModel ?? null, turnCount }
+    const metadata = { durationMs, usage, model: messageModel ?? null, turnCount, roundSummary }
 
     const history = ctx.metadata?.capabilities?.conversationHistory
     const showForkCurrent = Boolean(
