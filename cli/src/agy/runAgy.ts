@@ -134,7 +134,7 @@ export async function runAgy(opts: {
                     sessionModel = config.model;
                 }
                 if (config.effort !== undefined) {
-                    sessionEffort = config.effort ?? undefined;
+                    sessionEffort = config.effort;
                 }
             },
             onAfterApply: syncSessionMode
