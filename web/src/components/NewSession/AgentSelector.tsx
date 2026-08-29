@@ -5,9 +5,9 @@ import { useTranslation } from '@/lib/use-translation'
 
 export function AgentSelector(props: {
     agent: AgentType
+    agents: readonly AgentType[]
     isDisabled: boolean
     onAgentChange: (value: AgentType) => void
-    visibleAgents: readonly AgentType[]
 }) {
     const { t } = useTranslation()
 
@@ -17,7 +17,7 @@ export function AgentSelector(props: {
                 {t('newSession.agent')}
             </label>
             <div className="flex flex-wrap gap-x-3 gap-y-2">
-                {props.visibleAgents.map((agentType) => (
+                {props.agents.map((agentType) => (
                     <label
                         key={agentType}
                         className="flex items-center gap-1.5 cursor-pointer"
