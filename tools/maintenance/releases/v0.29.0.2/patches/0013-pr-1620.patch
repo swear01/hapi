@@ -1,0 +1,327 @@
+From 7ab7fd533c36eb677a31c2a0de287c2f641d17ee Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:44:35 +0000
+Subject: [PATCH] carry: upstream PR #1620
+
+---
+ web/src/components/SessionList.test.ts | 176 +++++++++++++++++++++++++
+ web/src/components/SessionList.tsx     |  85 +++++++++++-
+ 2 files changed, 257 insertions(+), 4 deletions(-)
+
+diff --git a/web/src/components/SessionList.test.ts b/web/src/components/SessionList.test.ts
+index 7f87cecf4..fa21001fc 100644
+--- a/web/src/components/SessionList.test.ts
++++ b/web/src/components/SessionList.test.ts
+@@ -15,9 +15,11 @@ import {
+     getSessionDedupKey,
+     getWorktreeSessionLabel,
+     getVisibleSessionPreview,
++    groupSessionsByDirectory,
+     isSidebarEmptySessionStub,
+     normalizeSearch,
+     prepareSidebarSessions,
++    resolveSessionGroupDirectory,
+     sessionMatchesQuery,
+     sessionMatchesTimeRange,
+     shouldShowPinnedDivider,
+@@ -702,3 +704,177 @@ describe('getPullRefreshIndicatorRotation', () => {
+         expect(getPullRefreshIndicatorRotation('ready')).toBe(180)
+     })
+ })
++
++
++describe('resolveSessionGroupDirectory', () => {
++    it('uses worktree.basePath when the session path lives under it', () => {
++        expect(resolveSessionGroupDirectory({
++            path: '/home/heavygee/coding/hapi/worktrees/feat-x',
++            worktree: { basePath: '/home/heavygee/coding/hapi' },
++        })).toBe('/home/heavygee/coding/hapi')
++    })
++
++    it('falls back to metadata.path when basePath is missing', () => {
++        expect(resolveSessionGroupDirectory({
++            path: '/home/heavygee/coding/server-setup',
++        })).toBe('/home/heavygee/coding/server-setup')
++    })
++
++    it('rewrites logical path spelling when realpathed worktreePath sits under basePath', () => {
++        // Estate: CLI realpaths worktreePath/basePath; metadata.path may keep ~/coding.
++        expect(resolveSessionGroupDirectory({
++            path: '/home/heavygee/coding/hapi/worktrees/cursor-mcp-isolation',
++            worktree: {
++                basePath: '/work/coding/hapi',
++                worktreePath: '/work/coding/hapi/worktrees/cursor-mcp-isolation',
++            },
++        })).toBe('/home/heavygee/coding/hapi')
++    })
++
++    it('keeps an external same-suffix worktree under basePath', () => {
++        // worktreePath is NOT under basePath — no alias evidence.
++        expect(resolveSessionGroupDirectory({
++            path: '/home/me/org/repo/worktrees/feature',
++            worktree: {
++                basePath: '/mnt/clone/org/repo',
++                worktreePath: '/home/me/org/repo/worktrees/feature',
++            },
++        })).toBe('/mnt/clone/org/repo')
++    })
++
++    it('keeps a pure realpath session under the realpath root', () => {
++        expect(resolveSessionGroupDirectory({
++            path: '/work/coding/hapi',
++            worktree: { basePath: '/work/coding/hapi' },
++        })).toBe('/work/coding/hapi')
++    })
++
++    it('preserves POSIX and Windows filesystem roots', () => {
++        expect(resolveSessionGroupDirectory({ path: '/' })).toBe('/')
++        expect(resolveSessionGroupDirectory({ path: 'C:\\' })).toBe('C:\\')
++        expect(resolveSessionGroupDirectory({
++            path: 'C:\\',
++            worktree: { basePath: 'C:\\' },
++        })).toBe('C:\\')
++    })
++
++    it('preserves trailing whitespace in filesystem paths', () => {
++        expect(resolveSessionGroupDirectory({
++            path: '/srv/project ',
++        })).toBe('/srv/project ')
++        expect(resolveSessionGroupDirectory({
++            path: '/srv/project /worktrees/feature',
++            worktree: { basePath: '/srv/project ' },
++        })).toBe('/srv/project ')
++    })
++
++    it('preserves trailing backslash on POSIX paths', () => {
++        expect(resolveSessionGroupDirectory({
++            path: '/srv/project\\',
++        })).toBe('/srv/project\\')
++    })
++
++    it('returns Other when neither path nor basePath is set', () => {
++        expect(resolveSessionGroupDirectory({})).toBe('Other')
++    })
++})
++
++describe('groupSessionsByDirectory symlink coalesce', () => {
++    it('places symlink-prefix and realpath basePath sessions in one project group', () => {
++        const homeSpelling = makeSession({
++            id: 'home',
++            updatedAt: 2,
++            metadata: {
++                machineId: 'machine-oos',
++                path: '/home/heavygee/coding/hapi',
++                worktree: {
++                    basePath: '/home/heavygee/coding/hapi',
++                    branch: 'main',
++                    name: 'driver',
++                    worktreePath: '/home/heavygee/coding/hapi/driver',
++                },
++            },
++        })
++        const realpathBase = makeSession({
++            id: 'work',
++            updatedAt: 1,
++            active: true,
++            metadata: {
++                machineId: 'machine-oos',
++                path: '/home/heavygee/coding/hapi/worktrees/feat-x',
++                worktree: {
++                    basePath: '/work/coding/hapi',
++                    branch: 'feat/x',
++                    name: 'feat-x',
++                    worktreePath: '/work/coding/hapi/worktrees/feat-x',
++                },
++            },
++        })
++
++        const groups = groupSessionsByDirectory([homeSpelling, realpathBase])
++        expect(groups).toHaveLength(1)
++        expect(groups[0]?.directory).toBe('/home/heavygee/coding/hapi')
++        expect(groups[0]?.displayName).toBe('coding/hapi')
++        expect(groups[0]?.sessions.map((s) => s.id).sort()).toEqual(['home', 'work'])
++    })
++
++    it('does not invent a home root for an external same-suffix worktree alone', () => {
++        const external = makeSession({
++            id: 'external-wt',
++            updatedAt: 1,
++            metadata: {
++                machineId: 'machine-oos',
++                path: '/home/me/org/repo/worktrees/feature',
++                worktree: {
++                    basePath: '/mnt/clone/org/repo',
++                    branch: 'feature',
++                    name: 'feature',
++                    worktreePath: '/home/me/org/repo/worktrees/feature',
++                },
++            },
++        })
++
++        const groups = groupSessionsByDirectory([external])
++        expect(groups).toHaveLength(1)
++        expect(groups[0]?.directory).toBe('/mnt/clone/org/repo')
++        expect(groups[0]?.displayName).toBe('org/repo')
++    })
++
++    it('keeps an external worktree separate from an unrelated same-suffix clone', () => {
++        const unrelatedClone = makeSession({
++            id: 'clone',
++            updatedAt: 2,
++            metadata: {
++                machineId: 'machine-oos',
++                path: '/home/me/org/repo',
++                worktree: {
++                    basePath: '/home/me/org/repo',
++                    branch: 'main',
++                    name: 'main',
++                    worktreePath: '/home/me/org/repo',
++                },
++            },
++        })
++        const external = makeSession({
++            id: 'external-wt',
++            updatedAt: 1,
++            metadata: {
++                machineId: 'machine-oos',
++                path: '/home/me/org/repo/worktrees/feature',
++                worktree: {
++                    basePath: '/mnt/clone/org/repo',
++                    branch: 'feature',
++                    name: 'feature',
++                    worktreePath: '/home/me/org/repo/worktrees/feature',
++                },
++            },
++        })
++
++        const groups = groupSessionsByDirectory([unrelatedClone, external])
++        expect(groups).toHaveLength(2)
++        expect(groups.map((g) => g.directory).sort()).toEqual([
++            '/home/me/org/repo',
++            '/mnt/clone/org/repo',
++        ])
++    })
++})
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 5f7e260c9..c17369614 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -213,6 +213,83 @@ function getGroupDisplayName(directory: string): string {
+     return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
+ }
+ 
++function usesWindowsSeparators(path: string): boolean {
++    return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\/.test(path)
++}
++
++function stripTrailingSeparators(path: string): string {
++    if (!usesWindowsSeparators(path)) {
++        if (/^\/+$/.test(path)) return '/'
++        return path.replace(/\/+$/, '')
++    }
++    if (/^[A-Za-z]:[\\/]+$/.test(path)) return path.slice(0, 3)
++    return path.replace(/[\\/]+$/, '')
++}
++
++function normalizePathForCompare(path: string): string {
++    const stripped = stripTrailingSeparators(path)
++    return usesWindowsSeparators(path) ? stripped.replace(/\\/g, '/') : stripped
++}
++
++function pathIsUnder(parent: string, child: string): boolean {
++    const parentNorm = normalizePathForCompare(parent)
++    const childNorm = normalizePathForCompare(child)
++    return childNorm === parentNorm || childNorm.startsWith(`${parentNorm}/`)
++}
++
++export type SessionGroupDirectorySource = {
++    path?: string | null
++    worktree?: { basePath?: string | null; worktreePath?: string | null } | null
++}
++
++/**
++ * Directory used as the sidebar project-group key.
++ *
++ * Prefer worktree.basePath when the session path lives under it. When basePath
++ * is a realpath of a symlink prefix (CLI realpaths worktreePath/basePath while
++ * metadata.path may still use the logical spelling), require worktreePath to
++ * sit under basePath before rewriting the group root from path — display-name
++ * collision alone is not alias evidence.
++ */
++export function resolveSessionGroupDirectory(source: SessionGroupDirectorySource): string {
++    // Do not trim(): trailing/leading spaces are valid POSIX path characters and
++    // group.directory feeds Copy Path / New Session.
++    const path = source.path ?? ''
++    const basePath = source.worktree?.basePath ?? ''
++    const worktreePath = source.worktree?.worktreePath ?? ''
++    if (!basePath && !path) return 'Other'
++    if (!basePath) return stripTrailingSeparators(path)
++    if (!path) return stripTrailingSeparators(basePath)
++
++    const normBase = stripTrailingSeparators(basePath)
++    if (pathIsUnder(normBase, path)) {
++        return normBase
++    }
++
++    // Alias evidence: realpathed worktreePath under realpathed basePath, while
++    // path still uses a logical spelling of the same checkout.
++    if (!worktreePath || !pathIsUnder(normBase, worktreePath)) {
++        return normBase
++    }
++
++    const baseNorm = normalizePathForCompare(normBase)
++    const worktreeNorm = normalizePathForCompare(worktreePath)
++    const pathNorm = normalizePathForCompare(path)
++    const suffix = worktreeNorm.slice(baseNorm.length)
++    if (!suffix) return normBase
++
++    const suffixIndex = pathNorm.lastIndexOf(`${suffix}/`)
++    if (suffixIndex !== -1) {
++        const logicalRoot = pathNorm.slice(0, suffixIndex)
++        return usesWindowsSeparators(path) ? logicalRoot.replace(/\//g, '\\') : logicalRoot
++    }
++    if (pathNorm.endsWith(suffix)) {
++        const logicalRoot = pathNorm.slice(0, -suffix.length) || normBase
++        return usesWindowsSeparators(path) ? logicalRoot.replace(/\//g, '\\') : logicalRoot
++    }
++    return normBase
++}
++
+ export const UNKNOWN_MACHINE_ID = '__unknown__'
+ export const GROUP_SESSION_PREVIEW_LIMIT = DEFAULT_SESSION_PREVIEW_LIMIT
+ 
+@@ -334,11 +411,11 @@ export function getPreviousSessionVisibleCount(current: number, step: number): n
+     return Math.max(normalizedStep, current - normalizedStep)
+ }
+ 
+-function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
++export function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
+     const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[] }>()
+ 
+     sessions.forEach(session => {
+-        const path = session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
++        const path = resolveSessionGroupDirectory(session.metadata ?? {})
+         const machineId = session.metadata?.machineId ?? null
+         const key = `${machineId ?? UNKNOWN_MACHINE_ID}::${path}`
+         if (!groups.has(key)) {
+@@ -1760,7 +1837,7 @@ export function SessionList(props: {
+                                             selected={s.id === selectedSessionId}
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
+-                                            projectLabel={getGroupDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
++                                            projectLabel={getGroupDisplayName(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
+                                                 : undefined}
+@@ -2213,7 +2290,7 @@ export function SessionList(props: {
+                                             selected={s.id === selectedSessionId}
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
+-                                            projectLabel={getGroupDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
++                                            projectLabel={getGroupDisplayName(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
+                                                 : undefined}
+-- 
+2.43.0
+

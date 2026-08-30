@@ -1,0 +1,455 @@
+From fdb1e73c125b13522f3d064c9d70e8a8eea6799a Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:31:50 +0000
+Subject: [PATCH] carry: upstream PR #1604
+
+---
+ cli/src/agent/sessionFactory.test.ts          |  71 +++++++++++-
+ cli/src/agent/sessionFactory.ts               |   3 +
+ cli/src/codex/codexRemoteLauncher.test.ts     | 106 +++++++++++++++++-
+ cli/src/codex/codexRemoteLauncher.ts          |   7 ++
+ cli/src/codex/runCodex.test.ts                |   8 +-
+ cli/src/codex/runCodex.ts                     |   8 +-
+ hub/src/sync/conversationHistoryCodex.test.ts |  40 +++++++
+ hub/src/sync/rpcGateway.ts                    |   4 +-
+ hub/src/sync/syncEngine.ts                    |  17 ++-
+ shared/src/apiTypes.ts                        |   6 +
+ 10 files changed, 260 insertions(+), 10 deletions(-)
+ create mode 100644 hub/src/sync/conversationHistoryCodex.test.ts
+
+diff --git a/cli/src/agent/sessionFactory.test.ts b/cli/src/agent/sessionFactory.test.ts
+index 221a3816a..9b74a6947 100644
+--- a/cli/src/agent/sessionFactory.test.ts
++++ b/cli/src/agent/sessionFactory.test.ts
+@@ -105,7 +105,8 @@ describe('bootstrapExistingSession', () => {
+     it('loads an existing HAPI session and reports it to the runner', async () => {
+         const session = createSession()
+         const sessionClient = {
+-            updateMetadata: vi.fn()
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => true)
+         }
+         getSessionMock.mockResolvedValue(session)
+         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+@@ -145,7 +146,10 @@ describe('bootstrapExistingSession', () => {
+             cursorSessionId: 'cursor-csid-1',
+             cursorSessionProtocol: 'acp'
+         }
+-        const sessionClient = { updateMetadata: vi.fn() }
++        const sessionClient = {
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => true)
++        }
+         getSessionMock.mockResolvedValue(session)
+         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+         sessionSyncClientMock.mockReturnValue(sessionClient)
+@@ -226,7 +230,8 @@ describe('bootstrapExistingSession', () => {
+             }
+         }
+         const sessionClient = {
+-            updateMetadata: vi.fn()
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => true)
+         }
+         getSessionMock.mockResolvedValue(session)
+         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+@@ -319,6 +324,66 @@ describe('bootstrapExistingSession', () => {
+         )
+     })
+ 
++    it('clears stale history capabilities before reporting a Codex session as started', async () => {
++        const session = createSession()
++        const existingMetadata = session.metadata
++        if (!existingMetadata) throw new Error('expected test session metadata')
++
++        session.metadata = {
++            ...existingMetadata,
++            capabilities: {
++                terminal: true,
++                conversationHistory: { forkCurrent: true }
++            }
++        }
++        let releaseMetadataFlush: (() => void) | undefined
++        let resolveMetadataFlushStarted: (() => void) | undefined
++        const metadataFlushStarted = new Promise<void>((resolve) => {
++            resolveMetadataFlushStarted = resolve
++        })
++        const sessionClient = {
++            updateMetadata: vi.fn(),
++            flushMetadata: vi.fn(async () => {
++                resolveMetadataFlushStarted?.()
++                await new Promise<void>((resolve) => {
++                    releaseMetadataFlush = resolve
++                })
++                return true
++            })
++        }
++        getSessionMock.mockResolvedValue(session)
++        getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
++        sessionSyncClientMock.mockReturnValue(sessionClient)
++        readSettingsMock.mockResolvedValue({ machineId: 'machine-1' })
++
++        const bootstrapPromise = bootstrapExistingSession({
++            sessionId: 'hapi-session-1',
++            flavor: 'codex',
++            workingDirectory: '/tmp/project',
++            metadataOverrides: {
++                capabilities: {
++                    terminal: true,
++                    conversationHistory: undefined
++                }
++            }
++        })
++        await metadataFlushStarted
++        expect(notifyRunnerSessionStartedMock).not.toHaveBeenCalled()
++        releaseMetadataFlush!()
++        const result = await bootstrapPromise
++
++        expect(result.metadata.capabilities).toEqual({ terminal: true })
++        const updateHandler = sessionClient.updateMetadata.mock.calls[0][0]
++        expect(updateHandler(session.metadata).capabilities).toEqual({ terminal: true })
++        expect(sessionClient.flushMetadata).toHaveBeenCalledOnce()
++        expect(notifyRunnerSessionStartedMock).toHaveBeenCalledWith(
++            'hapi-session-1',
++            expect.objectContaining({
++                capabilities: { terminal: true }
++            })
++        )
++    })
++
+     it('advertises remote terminal capability in session metadata', () => {
+         const metadata = buildSessionMetadata({
+             flavor: 'codex',
+diff --git a/cli/src/agent/sessionFactory.ts b/cli/src/agent/sessionFactory.ts
+index c4ab5f712..65d3e4c08 100644
+--- a/cli/src/agent/sessionFactory.ts
++++ b/cli/src/agent/sessionFactory.ts
+@@ -378,6 +378,9 @@ export async function bootstrapExistingSession(options: {
+ 
+     const session = api.sessionSyncClient(sessionInfo)
+     session.updateMetadata(buildUpdatedMetadata)
++    if (!await session.flushMetadata()) {
++        throw new Error('Unable to persist existing-session metadata')
++    }
+ 
+     exportHapiSessionEnv(sessionInfo.id)
+ 
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index dfd12e091..e6663bec9 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -1233,11 +1233,17 @@ function createMode(): EnhancedMode {
+     };
+ }
+ 
++type SessionStubOptions = {
++    deferMetadataUpdates?: boolean;
++};
++
+ function createSessionStub(
+     messages = ['hello from launcher test'],
+     mode = createMode(),
+     isolateMessages = false,
+-    closeQueue = true
++    closeQueue = true,
++    initialMetadata: Record<string, unknown> = {},
++    options: SessionStubOptions = {}
+ ) {
+     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
+     messages.forEach((message, index) => {
+@@ -1269,6 +1275,16 @@ function createSessionStub(
+         requests: {},
+         completedRequests: {}
+     };
++    let metadata = initialMetadata;
++    let pendingMetadata: Record<string, unknown> | null = null;
++    let resolveMetadataFlushStarted: (() => void) | null = null;
++    let releaseMetadataFlush: (() => void) | null = null;
++    const metadataFlushStarted = options.deferMetadataUpdates
++        ? new Promise<void>((resolve) => {
++            resolveMetadataFlushStarted = resolve;
++        })
++        : null;
++    const metadataUpdates: Record<string, unknown>[] = [];
+ 
+     const rpcHandlers = new Map<string, (params: unknown) => unknown>();
+     const client = {
+@@ -1277,7 +1293,33 @@ function createSessionStub(
+                 rpcHandlers.set(method, handler);
+             }
+         },
+-        updateMetadata(_handler: (metadata: Record<string, unknown>) => Record<string, unknown>) {},
++        getMetadata() {
++            return metadata;
++        },
++        updateMetadata(handler: (metadata: Record<string, unknown>) => Record<string, unknown>) {
++            const updated = handler(pendingMetadata ?? metadata);
++            metadataUpdates.push(updated);
++            if (options.deferMetadataUpdates) {
++                pendingMetadata = updated;
++            } else {
++                metadata = updated;
++            }
++        },
++        async flushMetadata() {
++            if (!options.deferMetadataUpdates) {
++                return true;
++            }
++            resolveMetadataFlushStarted?.();
++            resolveMetadataFlushStarted = null;
++            await new Promise<void>((resolve) => {
++                releaseMetadataFlush = resolve;
++            });
++            if (pendingMetadata) {
++                metadata = pendingMetadata;
++                pendingMetadata = null;
++            }
++            return true;
++        },
+         updateAgentState(handler: (state: FakeAgentState) => FakeAgentState) {
+             agentState = handler(agentState);
+         },
+@@ -1379,6 +1421,10 @@ function createSessionStub(
+         foundSessionIds,
+         resetThreadCalls,
+         rpcHandlers,
++        getMetadata: () => metadata,
++        metadataUpdates,
++        metadataFlushStarted,
++        releaseMetadataFlush: () => releaseMetadataFlush?.(),
+         emitMessagesConsumed: client.emitMessagesConsumed,
+         emitSteerIndeterminate: client.emitSteerIndeterminate,
+         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
+@@ -1638,6 +1684,62 @@ describe('codexRemoteLauncher', () => {
+         harness.scannerReplayOnCreate = [];
+     });
+ 
++    it('clears stale history capabilities until a resumed native thread is ready', async () => {
++        const { session, getMetadata } = createSessionStub([], createMode(), false, true, {
++            capabilities: {
++                conversationHistory: {
++                    forkCurrent: true,
++                    forkAtMessage: true,
++                    rewindToMessage: true
++                },
++                otherCapability: true
++            }
++        });
++        session.sessionId = 'native-thread';
++
++        await codexRemoteLauncher(session as never);
++
++        expect(getMetadata()).toMatchObject({
++            capabilities: { otherCapability: true }
++        });
++        expect(getMetadata().capabilities).not.toHaveProperty('conversationHistory');
++    });
++
++    it('waits for stale history capability removal to persist before registering history RPC handlers', async () => {
++        const { session, getMetadata, rpcHandlers, metadataFlushStarted, releaseMetadataFlush } = createSessionStub(
++            [],
++            createMode(),
++            false,
++            true,
++            {
++                capabilities: {
++                    conversationHistory: {
++                        forkCurrent: true,
++                        forkAtMessage: true,
++                        rewindToMessage: true
++                    },
++                    otherCapability: true
++                }
++            },
++            { deferMetadataUpdates: true }
++        );
++        session.sessionId = 'native-thread';
++
++        const launcherPromise = codexRemoteLauncher(session as never);
++        await metadataFlushStarted!;
++
++        expect(getMetadata().capabilities).toHaveProperty('conversationHistory');
++        expect(rpcHandlers.has(RPC_METHODS.ForkConversation)).toBe(false);
++        expect(rpcHandlers.has(RPC_METHODS.RewindConversation)).toBe(false);
++
++        releaseMetadataFlush();
++        await launcherPromise;
++
++        expect(getMetadata().capabilities).not.toHaveProperty('conversationHistory');
++        expect(rpcHandlers.has(RPC_METHODS.ForkConversation)).toBe(true);
++        expect(rpcHandlers.has(RPC_METHODS.RewindConversation)).toBe(true);
++    });
++
+     it('finishes a turn and emits ready when task lifecycle events include turn_id', async () => {
+         const {
+             session,
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index 9eec21d00..c776fc491 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -3795,6 +3795,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 ? session.client.getMetadata()?.conversationHistoryTurns
+                 : undefined
+         )
++        // Session reactivation preserves the last published history capabilities,
++        // but this launcher starts without a live in-memory native thread. Hide
++        // history actions until the first resume/turn probes the current runtime.
++        await publishConversationHistoryCapabilities()
++        if (!await session.client.flushMetadata()) {
++            throw new Error('Unable to clear stale conversation-history capabilities')
++        }
+         session.client.rpcHandlerManager.registerHandler(RPC_METHODS.ForkConversation, async (payload: unknown) => {
+             const messageLocalId = payload && typeof payload === 'object' && typeof (payload as { messageLocalId?: unknown }).messageLocalId === 'string'
+                 ? (payload as { messageLocalId: string }).messageLocalId
+diff --git a/cli/src/codex/runCodex.test.ts b/cli/src/codex/runCodex.test.ts
+index 94a59269c..0fddafb3b 100644
+--- a/cli/src/codex/runCodex.test.ts
++++ b/cli/src/codex/runCodex.test.ts
+@@ -147,7 +147,13 @@ describe('runCodex', () => {
+ 
+         expect(harness.bootstrapArgs[0]).toEqual(expect.objectContaining({
+             sessionId: 'hapi-session-1',
+-            workingDirectory: '/tmp/project'
++            workingDirectory: '/tmp/project',
++            metadataOverrides: {
++                capabilities: {
++                    terminal: true,
++                    conversationHistory: undefined
++                }
++            }
+         }))
+         expect(harness.loopArgs[0]).toEqual(expect.objectContaining({
+             resumeSessionId: 'codex-thread-1',
+diff --git a/cli/src/codex/runCodex.ts b/cli/src/codex/runCodex.ts
+index a931b1972..9ff229e0e 100644
+--- a/cli/src/codex/runCodex.ts
++++ b/cli/src/codex/runCodex.ts
+@@ -49,7 +49,13 @@ export async function runCodex(opts: {
+             sessionId: opts.existingSessionId,
+             flavor: 'codex',
+             startedBy,
+-            workingDirectory
++            workingDirectory,
++            metadataOverrides: {
++                capabilities: {
++                    terminal: true,
++                    conversationHistory: undefined
++                }
++            }
+         })
+         : await (useLazyBootstrap ? bootstrapLazySession : bootstrapSession)({
+             flavor: 'codex',
+diff --git a/hub/src/sync/conversationHistoryCodex.test.ts b/hub/src/sync/conversationHistoryCodex.test.ts
+new file mode 100644
+index 000000000..60c03c6ff
+--- /dev/null
++++ b/hub/src/sync/conversationHistoryCodex.test.ts
+@@ -0,0 +1,40 @@
++import { describe, expect, it } from 'bun:test'
++import { Store } from '../store'
++import { RpcRegistry } from '../socket/rpcRegistry'
++import { SyncEngine } from './syncEngine'
++
++function createEngine() {
++    const store = new Store(':memory:')
++    const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
++    return { store, engine }
++}
++
++describe('Codex conversation-history hub integration', () => {
++    it('forwards serialized Fork RPC errors instead of using the missing-id fallback', async () => {
++        const { store, engine } = createEngine()
++        try {
++            const session = engine.getOrCreateSession('codex-fork-not-ready', {
++                path: '/tmp/project',
++                host: 'localhost',
++                machineId: 'machine-1',
++                flavor: 'codex',
++                codexSessionId: 'native-thread',
++                capabilities: { conversationHistory: { forkCurrent: true } }
++            }, null, 'default')
++            engine.handleSessionAlive({ sid: session.id, time: Date.now(), mode: 'remote' })
++            store.messages.addMessage(session.id, { role: 'user', content: 'boundary' }, 'local-boundary')
++            store.messages.markMessagesInvoked(session.id, ['local-boundary'], Date.now())
++
++            ;(engine as any).rpcGateway.forkConversation = async () => ({
++                error: 'Codex thread is not ready'
++            })
++
++            await expect(engine.forkConversation(session.id, 'default')).resolves.toEqual({
++                type: 'error',
++                message: 'Codex thread is not ready'
++            })
++        } finally {
++            engine.stop()
++        }
++    })
++})
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 6492b670c..cd17fc32d 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -525,13 +525,13 @@ export class RpcGateway {
+     async forkConversation(
+         sessionId: string,
+         params: { messageLocalId?: string }
+-    ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResult> {
++    ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResponse> {
+         return await this.sessionRpc(
+             sessionId,
+             RPC_METHODS.ForkConversation,
+             params,
+             120_000
+-        ) as import('@hapi/protocol/apiTypes').ForkConversationRpcResult
++        ) as import('@hapi/protocol/apiTypes').ForkConversationRpcResponse
+     }
+ 
+     async rewindConversation(
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 3a591dfeb..07c17d3d0 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -1991,7 +1991,22 @@ export class SyncEngine {
+             return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+         }
+ 
+-        if (!rpcResult?.nativeSessionId) {
++        if (
++            rpcResult &&
++            typeof rpcResult === 'object' &&
++            'error' in rpcResult &&
++            typeof rpcResult.error === 'string' &&
++            rpcResult.error.trim()
++        ) {
++            return { type: 'error', message: rpcResult.error }
++        }
++
++        if (
++            !rpcResult ||
++            typeof rpcResult !== 'object' ||
++            !('nativeSessionId' in rpcResult) ||
++            !rpcResult.nativeSessionId
++        ) {
+             return { type: 'error', message: 'Native fork did not return a session id' }
+         }
+ 
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index cdaeadd18..58ee33785 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -679,6 +679,12 @@ export type ForkConversationRpcResult = {
+     forkSession?: boolean
+ }
+ 
++/** Raw RPC response, including generic serialized handler failures. */
++export type ForkConversationRpcResponse = ForkConversationRpcResult | {
++    /** Serialized CLI handler failure returned through the generic RPC layer. */
++    error: string
++}
++
+ export type RewindConversationRpcResult = {
+     success: true
+     /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
+-- 
+2.43.0
+

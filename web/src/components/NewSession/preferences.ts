@@ -1,6 +1,9 @@
 import {
     CREATABLE_AGENT_FLAVORS,
+    GROK_PERMISSION_MODES,
     getPermissionModesForFlavor,
+    type CodexCollaborationMode,
+    type GrokPermissionMode,
     type PermissionMode
 } from '@hapi/protocol'
 import {
@@ -9,7 +12,9 @@ import {
     MODEL_OPTIONS,
     type AgentType,
     type CodexReasoningEffort,
-    type LaunchEffort
+    type LaunchEffort,
+    type NewSessionServiceTier,
+    type SessionType
 } from './types'
 import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
 
@@ -22,12 +27,16 @@ export type PreferredLaunchSettings = {
     cursorSelectedBase: string
     effort: LaunchEffort
     modelReasoningEffort: CodexReasoningEffort
+    serviceTier?: NewSessionServiceTier
+    collaborationMode?: CodexCollaborationMode
+    grokPermissionMode?: GrokPermissionMode
+    sessionType?: SessionType
     permissionMode?: PermissionMode
 }
 
 // Only launchable flavors are valid defaults; a stale 'gemini' preference
 // (no longer creatable) falls back to 'claude'.
-const VALID_AGENTS = CREATABLE_AGENT_FLAVORS
+const VALID_AGENTS: readonly AgentType[] = CREATABLE_AGENT_FLAVORS
 
 export function loadPreferredAgent(): AgentType {
     try {
@@ -95,6 +104,12 @@ export function loadPreferredLaunchSettings(
             modelReasoningEffort: typeof parsed.modelReasoningEffort === 'string'
                 ? parsed.modelReasoningEffort
                 : 'default',
+            serviceTier: parsed.serviceTier === 'fast' ? 'fast' : 'standard',
+            collaborationMode: parsed.collaborationMode === 'plan' ? 'plan' : 'default',
+            grokPermissionMode: (GROK_PERMISSION_MODES as readonly string[]).includes(parsed.grokPermissionMode ?? '')
+                ? (parsed.grokPermissionMode as GrokPermissionMode)
+                : 'default',
+            sessionType: parsed.sessionType === 'worktree' ? 'worktree' : 'simple',
             ...(permissionMode ? { permissionMode } : {})
         }
     } catch {
@@ -167,6 +182,12 @@ export function resolvePreferredLaunchSettings(
         cursorSelectedBase: preferred?.cursorSelectedBase ?? 'auto',
         effort,
         modelReasoningEffort,
+        serviceTier: preferred?.serviceTier === 'fast' ? 'fast' : 'standard',
+        collaborationMode: preferred?.collaborationMode === 'plan' ? 'plan' : 'default',
+        grokPermissionMode: (GROK_PERMISSION_MODES as readonly string[]).includes(preferred?.grokPermissionMode ?? '')
+            ? (preferred!.grokPermissionMode as GrokPermissionMode)
+            : 'default',
+        sessionType: preferred?.sessionType === 'worktree' ? 'worktree' : 'simple',
         ...(permissionMode ? { permissionMode } : {})
     }
 }

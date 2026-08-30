@@ -35,3 +35,15 @@ describe('AgentSelector', () => {
         expect(renderedAgentValues(['claude', 'codex'])).toEqual(['claude', 'codex'])
     })
 })
+
+it('only renders agents enabled in settings', () => {
+    const { container } = render(
+        <AgentSelector
+            agent={'claude' as AgentType}
+            agents={['claude', 'codex']}
+            isDisabled={false}
+            onAgentChange={() => {}}
+        />
+    )
+    expect(Array.from(container.querySelectorAll('input[type="radio"]')).map((el) => (el as HTMLInputElement).value)).toEqual(['claude', 'codex'])
+})

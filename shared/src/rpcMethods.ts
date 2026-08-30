@@ -32,6 +32,7 @@ export const RPC_METHODS = {
     ListPiModelsForMachine: 'listPiModelsForMachine',
     ListCodexSessions: 'listCodexSessions',
     ArchiveCodexSession: 'archiveCodexSession',
+    ListClaudeSessions: 'listClaudeSessions',
     ListCursorModels: 'listCursorModels',
     ListPiModels: 'listPiModels',
     ListPiSessions: 'listPiSessions',
@@ -43,11 +44,14 @@ export const RPC_METHODS = {
     ListCopilotModelsForCwd: 'listCopilotModelsForCwd',
     ListCopilotModels: 'listCopilotModels',
     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+    ListSessionReasoningEffortOptions: 'listSessionReasoningEffortOptions',
     ListAgyModels: 'listAgyModels',
+    /** Deliver one queued message into the active turn (Codex turn/steer / Cursor interrupt+prompt). */
     /** Deliver one queued message into the active Pi turn (native steer). */
     SteerQueuedMessage: 'steer-queued-message',
     ForkConversation: 'fork-conversation',
     RewindConversation: 'rewind-conversation',
+    RunnerSelfUpgrade: 'runner-self-upgrade',
 } as const
 
 export const RPC_TARGET_MISSING_ERROR_CODE = 'rpc_target_missing' as const

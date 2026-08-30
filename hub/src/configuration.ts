@@ -12,10 +12,21 @@
  * - SERVERCHAN_SENDKEY: Server酱 SendKey/AppKey for push notifications
  * - SERVERCHAN_NOTIFICATION: Enable/disable Server酱 notifications (default: true)
  * - SERVERCHAN_BACKGROUND_ONLY: Only send Server酱 notifications without visible HAPI clients (default: false)
+ * - WXPUSHER_APP_TOKEN: WxPusher App token for push notifications
+ * - WXPUSHER_UIDS: Comma-separated WxPusher recipient UIDs
+ * - WXPUSHER_TOPIC_IDS: Comma-separated WxPusher topic IDs
+ * - WXPUSHER_NOTIFICATION: Enable/disable WxPusher notifications (default: true)
+ * - WXPUSHER_BACKGROUND_ONLY: Only send WxPusher notifications without visible HAPI clients (default: false)
+ * - HAPI_WEBHOOK_URL: HTTP(S) URL of a relay that accepts HAPI's notification JSON
+ *   (not a drop-in for Bark/PushPlus/WxPusher; the relay forwards onward)
+ * - HAPI_WEBHOOK_KEY: Optional shared key sent as a `key` query param and `X-HAPI-Webhook-Key` header
+ * - HAPI_WEBHOOK_NOTIFICATION: Enable/disable webhook notifications (default: true)
+ * - HAPI_WEBHOOK_BACKGROUND_ONLY: Only send webhook notifications without visible HAPI clients (default: false)
  * - HAPI_LISTEN_HOST: Host/IP to bind the HTTP service (default: 127.0.0.1)
  * - HAPI_LISTEN_PORT: Port for HTTP service (default: 3006)
  * - HAPI_PUBLIC_URL: Public URL for external access (e.g., Telegram Mini App)
  * - CORS_ORIGINS: Comma-separated CORS origins
+ * - HAPI_TITLE_PROVIDER_TIMEOUT_MS: Title provider request timeout in milliseconds (default: 10000)
  * - HAPI_RELAY_API: Relay API domain for tunwg (default: relay.hapi.run)
  * - HAPI_RELAY_AUTH: Relay auth key override (default: per-hub key issued by the relay)
  * - HAPI_RELAY_FORCE_TCP: Force TCP relay mode when UDP is unavailable (true/1)
@@ -37,6 +48,7 @@ import { getOrCreateCliApiToken } from './config/cliApiToken'
 import { applyProviderCredentialsFromSettings } from './config/providerCredentials'
 import { getSettingsFile } from './config/settings'
 import { loadServerSettings, type ServerSettings, type ServerSettingsResult } from './config/serverSettings'
+import { readTitleProviderConfig, type OpenAICompatibleTitleProviderConfig } from './sync/titleSuggestion'
 
 export type ConfigSource = 'env' | 'file' | 'default'
 
@@ -46,6 +58,15 @@ export interface ConfigSources {
     serverChanSendKey: ConfigSource
     serverChanNotification: ConfigSource
     serverChanBackgroundOnly: ConfigSource
+    wxPusherAppToken: ConfigSource
+    wxPusherUids: ConfigSource
+    wxPusherTopicIds: ConfigSource
+    wxPusherNotification: ConfigSource
+    wxPusherBackgroundOnly: ConfigSource
+    webhookUrl: ConfigSource
+    webhookKey: ConfigSource
+    webhookNotification: ConfigSource
+    webhookBackgroundOnly: ConfigSource
     listenHost: ConfigSource
     listenPort: ConfigSource
     publicUrl: ConfigSource
@@ -80,6 +101,32 @@ class Configuration {
     /** Only send Server酱 notifications when no visible HAPI client exists */
     public readonly serverChanBackgroundOnly: boolean
 
+    /** WxPusher App token */
+    public readonly wxPusherAppToken: string | null
+
+    /** WxPusher recipient UIDs */
+    public readonly wxPusherUids: string[]
+
+    /** WxPusher recipient topic IDs */
+    public readonly wxPusherTopicIds: number[]
+
+    /** WxPusher notifications enabled */
+    public readonly wxPusherNotification: boolean
+
+    /** Only send WxPusher notifications when no visible HAPI client exists */
+    public readonly wxPusherBackgroundOnly: boolean
+    /** HTTP(S) URL of a relay that accepts HAPI notification JSON */
+    public readonly webhookUrl: string | null
+
+    /** Optional shared key sent with webhook requests */
+    public readonly webhookKey: string | null
+
+    /** Webhook notifications enabled */
+    public readonly webhookNotification: boolean
+
+    /** Only send webhook notifications when no visible HAPI client exists */
+    public readonly webhookBackgroundOnly: boolean
+
     /** CLI auth token (shared secret) */
     public cliApiToken: string
 
@@ -110,6 +157,8 @@ class Configuration {
     /** Allowed CORS origins for Mini App + Socket.IO (comma-separated env override) */
     public readonly corsOrigins: string[]
 
+    /** Effective on-demand session title provider configuration. */
+    public readonly titleProviderConfig: OpenAICompatibleTitleProviderConfig | null
     // Push delivery (FCM + iOS/APNs) — nullable strings interpreted by
     // fcm/fcmConfig.ts and push-ios/iosPushConfig.ts.
     public readonly fcmServiceAccountPath: string | null
@@ -142,10 +191,20 @@ class Configuration {
         this.serverChanSendKey = serverSettings.serverChanSendKey
         this.serverChanNotification = serverSettings.serverChanNotification
         this.serverChanBackgroundOnly = serverSettings.serverChanBackgroundOnly
+        this.wxPusherAppToken = serverSettings.wxPusherAppToken
+        this.wxPusherUids = serverSettings.wxPusherUids
+        this.wxPusherTopicIds = serverSettings.wxPusherTopicIds
+        this.wxPusherNotification = serverSettings.wxPusherNotification
+        this.wxPusherBackgroundOnly = serverSettings.wxPusherBackgroundOnly
+        this.webhookUrl = serverSettings.webhookUrl
+        this.webhookKey = serverSettings.webhookKey
+        this.webhookNotification = serverSettings.webhookNotification
+        this.webhookBackgroundOnly = serverSettings.webhookBackgroundOnly
         this.listenHost = serverSettings.listenHost
         this.listenPort = serverSettings.listenPort
         this.publicUrl = serverSettings.publicUrl
         this.corsOrigins = serverSettings.corsOrigins
+        this.titleProviderConfig = readTitleProviderConfig(process.env, serverSettings.titleProvider)
         this.fcmServiceAccountPath = serverSettings.fcmServiceAccountPath
         this.iosPushMode = serverSettings.iosPushMode
         this.iosPushRelayUrl = serverSettings.iosPushRelayUrl

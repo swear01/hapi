@@ -15,6 +15,8 @@
         "./modes": "./src/modes.ts",
         "./rpcMethods": "./src/rpcMethods.ts",
         "./runnerCapabilities": "./src/runnerCapabilities.ts",
+        "./machineRegistration": "./src/machineRegistration.ts",
+        "./upgradeChannel": "./src/upgradeChannel.ts",
         "./schemas": "./src/schemas.ts",
         "./sessionCitation": "./src/sessionCitation.ts",
         "./sessionExport": "./src/sessionExport.ts",
@@ -35,6 +37,9 @@
         "zod": "^4.2.1"
     },
     "devDependencies": {
-        "@types/proper-lockfile": "^4.1.4"
+        "@types/node": "^26.2.0",
+        "@types/proper-lockfile": "^4.1.4",
+        "bun-types": "^1.3.14",
+        "vitest": "^4.1.10"
     }
 }

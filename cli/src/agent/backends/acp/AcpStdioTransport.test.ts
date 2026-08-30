@@ -21,6 +21,7 @@ const spawnState = vi.hoisted(() => ({
     stdoutDataHandlers: [] as Array<(chunk: string) => void>,
     stdinEnd: vi.fn(),
     stdinWrite: vi.fn<(chunk: string) => boolean>(() => true),
+    stdinWriteCompletes: true,
     kill: vi.fn(),
     exitCode: null as number | null,
     pid: 424242 as number | undefined,
@@ -74,7 +75,11 @@ vi.mock('node:child_process', () => ({
             },
             stdin: {
                 end: (...args: unknown[]) => spawnState.stdinEnd(...args),
-                write: (chunk: string) => spawnState.stdinWrite(chunk)
+                write: (chunk: string, callback?: (error?: Error | null) => void) => {
+                    const result = spawnState.stdinWrite(chunk);
+                    if (spawnState.stdinWriteCompletes) callback?.();
+                    return result;
+                }
             },
             on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
                 if (event === 'exit') {
@@ -258,6 +263,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
     afterEach(() => {
         spawnState.stdinWrite.mockReset();
         spawnState.stdinWrite.mockReturnValue(true);
+        spawnState.stdinWriteCompletes = true;
         spawnState.stdinEnd.mockClear();
         spawnState.exitCode = null;
         spawnState.exitHandlers = [];
@@ -597,6 +603,7 @@ describe('AcpStdioTransport closed stdin writes', () => {
     test('bounds a stalled stdin dispatch and rejects both promises', async () => {
         vi.useFakeTimers();
         try {
+            spawnState.stdinWriteCompletes = false;
             const transport = await AcpStdioTransport.create({ command: 'gemini' });
             const request = transport.sendRequestWithDispatch('session/prompt', {}, {
                 timeoutMs: Infinity,

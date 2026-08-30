@@ -31,6 +31,14 @@ export const MACHINE_CAPABILITIES = {
     AgentAvailability: RPC_METHODS.AgentAvailability,
     CursorChatStoreStatus: RPC_METHODS.CursorChatStoreStatus,
     StopRunner: RPC_METHODS.StopRunner,
+    RunnerSelfUpgrade: RPC_METHODS.RunnerSelfUpgrade,
+    /**
+     * Marker (not an RPC): this runner understands hub-artifact
+     * `targetGeneration` fingerprints. Pre-generation binaries omit it, so the
+     * hub's offer still forces an apply at the same semver instead of a false
+     * "Already at X" no-op that leaves the skew banner stuck forever.
+     */
+    CliArtifactGeneration: 'cli-artifact-generation',
 } as const
 
 export type MachineCapability =
@@ -41,6 +49,8 @@ export const CURRENT_MACHINE_CAPABILITIES: readonly MachineCapability[] = [
     MACHINE_CAPABILITIES.AgentAvailability,
     MACHINE_CAPABILITIES.CursorChatStoreStatus,
     MACHINE_CAPABILITIES.StopRunner,
+    MACHINE_CAPABILITIES.RunnerSelfUpgrade,
+    MACHINE_CAPABILITIES.CliArtifactGeneration,
 ]
 
 /**

@@ -105,7 +105,8 @@ describe('bootstrapExistingSession', () => {
     it('loads an existing HAPI session and reports it to the runner', async () => {
         const session = createSession()
         const sessionClient = {
-            updateMetadata: vi.fn()
+            updateMetadata: vi.fn(),
+            flushMetadata: vi.fn(async () => true)
         }
         getSessionMock.mockResolvedValue(session)
         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
@@ -135,6 +136,44 @@ describe('bootstrapExistingSession', () => {
         )
     })
 
+    it('exports the requested existing session id for Cursor runner resume (#1404)', async () => {
+        // Runner passes --existing-session-id (buildCliArgs); child bootstrap must
+        // publish that same hub row into HAPI_SESSION_ID for shell `hapi job run`.
+        const session = createSession()
+        session.metadata = {
+            ...session.metadata!,
+            flavor: 'cursor',
+            cursorSessionId: 'cursor-csid-1',
+            cursorSessionProtocol: 'acp'
+        }
+        const sessionClient = {
+            updateMetadata: vi.fn(),
+            flushMetadata: vi.fn(async () => true)
+        }
+        getSessionMock.mockResolvedValue(session)
+        getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+        sessionSyncClientMock.mockReturnValue(sessionClient)
+        readSettingsMock.mockResolvedValue({ machineId: 'machine-1' })
+
+        await bootstrapExistingSession({
+            sessionId: 'hapi-session-1',
+            flavor: 'cursor',
+            startedBy: 'runner',
+            workingDirectory: '/tmp/project'
+        })
+
+        expect(getSessionMock).toHaveBeenCalledWith('hapi-session-1')
+        expect(process.env[HAPI_SESSION_ID_ENV]).toBe('hapi-session-1')
+        expect(notifyRunnerSessionStartedMock).toHaveBeenCalledWith(
+            'hapi-session-1',
+            expect.objectContaining({
+                flavor: 'cursor',
+                startedBy: 'runner',
+                startedFromRunner: true
+            })
+        )
+    })
+
     it('preserves existing native resume metadata when reactivating a session', async () => {
         const session = createSession()
         const existingMetadata = session.metadata
@@ -143,7 +182,24 @@ describe('bootstrapExistingSession', () => {
         session.metadata = {
             ...existingMetadata,
             claudeSessionId: 'claude-thread-1',
+            claudeImportState: {
+                state: 'complete',
+                machineId: 'machine-1',
+                claudeSessionId: 'claude-thread-1',
+                sourceFile: '/tmp/claude-thread-1.jsonl',
+                startedAt: 100,
+                updatedAt: 200
+            },
             codexSessionId: 'codex-thread-1',
+            codexUsage: {
+                contextWindow: {
+                    usedTokens: 1200,
+                    limitTokens: 128000,
+                    percent: 1,
+                    updatedAt: 456
+                },
+                rateLimits: {}
+            },
             geminiSessionId: 'gemini-thread-1',
             opencodeSessionId: 'opencode-thread-1',
             grokSessionId: 'grok-thread-1',
@@ -174,7 +230,8 @@ describe('bootstrapExistingSession', () => {
             }
         }
         const sessionClient = {
-            updateMetadata: vi.fn()
+            updateMetadata: vi.fn(),
+            flushMetadata: vi.fn(async () => true)
         }
         getSessionMock.mockResolvedValue(session)
         getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
@@ -189,7 +246,20 @@ describe('bootstrapExistingSession', () => {
 
         expect(result.metadata).toEqual(expect.objectContaining({
             claudeSessionId: 'claude-thread-1',
+            claudeImportState: expect.objectContaining({
+                state: 'complete',
+                claudeSessionId: 'claude-thread-1'
+            }),
             codexSessionId: 'codex-thread-1',
+            codexUsage: {
+                contextWindow: {
+                    usedTokens: 1200,
+                    limitTokens: 128000,
+                    percent: 1,
+                    updatedAt: 456
+                },
+                rateLimits: {}
+            },
             geminiSessionId: 'gemini-thread-1',
             opencodeSessionId: 'opencode-thread-1',
             grokSessionId: 'grok-thread-1',
@@ -223,6 +293,15 @@ describe('bootstrapExistingSession', () => {
         const updateHandler = sessionClient.updateMetadata.mock.calls[0][0]
         expect(updateHandler(session.metadata)).toEqual(expect.objectContaining({
             codexSessionId: 'codex-thread-1',
+            codexUsage: {
+                contextWindow: {
+                    usedTokens: 1200,
+                    limitTokens: 128000,
+                    percent: 1,
+                    updatedAt: 456
+                },
+                rateLimits: {}
+            },
             grokSessionId: 'grok-thread-1',
             conversationHistoryEntryIds: { 'local-user-1': 'pi-entry-1' }
         }))
@@ -230,8 +309,77 @@ describe('bootstrapExistingSession', () => {
             'hapi-session-1',
             expect.objectContaining({
                 codexSessionId: 'codex-thread-1',
+                codexUsage: {
+                    contextWindow: {
+                        usedTokens: 1200,
+                        limitTokens: 128000,
+                        percent: 1,
+                        updatedAt: 456
+                    },
+                    rateLimits: {}
+                },
                 grokSessionId: 'grok-thread-1',
                 conversationHistoryEntryIds: { 'local-user-1': 'pi-entry-1' }
+            })
+        )
+    })
+
+    it('clears stale history capabilities before reporting a Codex session as started', async () => {
+        const session = createSession()
+        const existingMetadata = session.metadata
+        if (!existingMetadata) throw new Error('expected test session metadata')
+
+        session.metadata = {
+            ...existingMetadata,
+            capabilities: {
+                terminal: true,
+                conversationHistory: { forkCurrent: true }
+            }
+        }
+        let releaseMetadataFlush: (() => void) | undefined
+        let resolveMetadataFlushStarted: (() => void) | undefined
+        const metadataFlushStarted = new Promise<void>((resolve) => {
+            resolveMetadataFlushStarted = resolve
+        })
+        const sessionClient = {
+            updateMetadata: vi.fn(),
+            flushMetadata: vi.fn(async () => {
+                resolveMetadataFlushStarted?.()
+                await new Promise<void>((resolve) => {
+                    releaseMetadataFlush = resolve
+                })
+                return true
+            })
+        }
+        getSessionMock.mockResolvedValue(session)
+        getOrCreateMachineMock.mockResolvedValue({ id: 'machine-1' })
+        sessionSyncClientMock.mockReturnValue(sessionClient)
+        readSettingsMock.mockResolvedValue({ machineId: 'machine-1' })
+
+        const bootstrapPromise = bootstrapExistingSession({
+            sessionId: 'hapi-session-1',
+            flavor: 'codex',
+            workingDirectory: '/tmp/project',
+            metadataOverrides: {
+                capabilities: {
+                    terminal: true,
+                    conversationHistory: undefined
+                }
+            }
+        })
+        await metadataFlushStarted
+        expect(notifyRunnerSessionStartedMock).not.toHaveBeenCalled()
+        releaseMetadataFlush!()
+        const result = await bootstrapPromise
+
+        expect(result.metadata.capabilities).toEqual({ terminal: true })
+        const updateHandler = sessionClient.updateMetadata.mock.calls[0][0]
+        expect(updateHandler(session.metadata).capabilities).toEqual({ terminal: true })
+        expect(sessionClient.flushMetadata).toHaveBeenCalledOnce()
+        expect(notifyRunnerSessionStartedMock).toHaveBeenCalledWith(
+            'hapi-session-1',
+            expect.objectContaining({
+                capabilities: { terminal: true }
             })
         )
     })

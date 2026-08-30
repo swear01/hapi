@@ -15,11 +15,16 @@ function safeJsonParse(value: string): unknown {
     }
 }
 
+function isAbortError(error: unknown): boolean {
+    return Boolean(error && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError')
+}
+
 export class RpcHandlerManager {
     private handlers: RpcHandlerMap = new Map()
     private readonly scopePrefix: string
     private readonly logger: (message: string, data?: any) => void
     private socket: Socket | null = null
+    private readonly inFlightRequests = new Map<string, AbortController>()
 
     constructor(config: RpcHandlerConfig) {
         this.scopePrefix = config.scopePrefix
@@ -40,6 +45,13 @@ export class RpcHandlerManager {
     }
 
     async handleRequest(request: RpcRequest): Promise<string> {
+        const requestId = request.requestId
+        const abortController = requestId ? new AbortController() : null
+        if (requestId && abortController) {
+            this.inFlightRequests.get(requestId)?.abort()
+            this.inFlightRequests.set(requestId, abortController)
+        }
+
         try {
             const handler = this.handlers.get(request.method)
             if (!handler) {
@@ -48,9 +60,13 @@ export class RpcHandlerManager {
             }
 
             const params = safeJsonParse(request.params)
-            const result = await handler(params as any)
+            const result = await handler(params as any, abortController?.signal)
             return JSON.stringify(result)
         } catch (error) {
+            if (isAbortError(error)) {
+                return JSON.stringify({ error: 'Request aborted' })
+            }
+
             const details = error instanceof Error
                 ? { message: error.message, stack: error.stack }
                 : { error: String(error) }
@@ -58,18 +74,50 @@ export class RpcHandlerManager {
             return JSON.stringify({
                 error: error instanceof Error ? error.message : 'Unknown error'
             })
+        } finally {
+            if (requestId && abortController && this.inFlightRequests.get(requestId) === abortController) {
+                this.inFlightRequests.delete(requestId)
+            }
         }
+    }
+
+    cancelRequest(requestId: string): boolean {
+        const controller = this.inFlightRequests.get(requestId)
+        if (!controller) {
+            return false
+        }
+
+        controller.abort()
+        return true
     }
 
     onSocketConnect(socket: Socket): void {
         this.socket = socket
+        this.reregisterAll()
+    }
+
+    /**
+     * Re-emit every known handler as `rpc-register`. Safe to call from
+     * keepalive: hub registration is idempotent per socket, and this heals
+     * fire-and-forget drops after hub restart without waiting for a full
+     * reconnect (machine-alive can keep the row "active" while the registry
+     * is empty).
+     */
+    reregisterAll(): void {
+        if (!this.socket) {
+            return
+        }
         for (const [prefixedMethod] of this.handlers) {
-            socket.emit('rpc-register', { method: prefixedMethod })
+            this.socket.emit('rpc-register', { method: prefixedMethod })
         }
     }
 
     onSocketDisconnect(): void {
         this.socket = null
+        for (const controller of this.inFlightRequests.values()) {
+            controller.abort()
+        }
+        this.inFlightRequests.clear()
     }
 
     getHandlerCount(): number {

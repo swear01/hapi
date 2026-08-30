@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Outlet, useLocation, useMatchRoute, useRouter } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
+import { configureTelegramWebApp, getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
 import { initializeChatSurfaceColors } from '@/hooks/useChatSurfaceColors'
 import { initializeTheme } from '@/hooks/useTheme'
 import { initializeThemeColors } from '@/hooks/useThemeColors'
@@ -14,6 +14,7 @@ import { useSyncingState } from '@/hooks/useSyncingState'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { useViewportHeight } from '@/hooks/useViewportHeight'
 import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
+import { usePlatform, type HapticNotification } from '@/hooks/usePlatform'
 import { queryKeys } from '@/lib/query-keys'
 import { AppContextProvider } from '@/lib/app-context'
 import { clearMessageWindow, syncTailMessages } from '@/lib/message-window-store'
@@ -35,11 +36,21 @@ import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
 import { PwaUpdateProvider } from '@/lib/pwa-update-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
+import { NamespaceLocaleSync } from '@/components/NamespaceLocaleSync'
+import { getNotificationClickHref, NOTIFICATION_CLICK_ACK_TYPE } from '@/lib/notificationClick'
 import type { SyncEvent } from '@/types/api'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
 const REQUIRE_SERVER_URL = requireHubUrlForLogin()
+
+function getToastHapticNotification(title: string): HapticNotification | null {
+    const normalizedTitle = title.trim()
+    if (normalizedTitle === 'Task completed') return 'success'
+    if (normalizedTitle === 'Task failed') return 'error'
+    if (normalizedTitle === 'Permission Request' || normalizedTitle === 'Ready for input') return 'warning'
+    return null
+}
 
 function withPwaBanner(content: ReactNode) {
     return (
@@ -71,6 +82,7 @@ function AppInner() {
     const matchRoute = useMatchRoute()
     const router = useRouter()
     const { addToast } = useToast()
+    const { haptic } = usePlatform()
 
     useEffect(() => {
         let cancelled = false
@@ -99,7 +111,26 @@ function AppInner() {
         initializeTheme()
         initializeThemeColors()
         initializeChatSurfaceColors()
+        configureTelegramWebApp()
     }, [])
+
+    useEffect(() => {
+        if (!('serviceWorker' in navigator)) {
+            return
+        }
+
+        const handleServiceWorkerMessage = (event: MessageEvent<unknown>) => {
+            const href = getNotificationClickHref(event.data, window.location.origin)
+            if (!href) return
+            router.history.push(href)
+            event.ports[0]?.postMessage({ type: NOTIFICATION_CLICK_ACK_TYPE })
+        }
+
+        navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage)
+        return () => {
+            navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage)
+        }
+    }, [router])
 
     // Track visual viewport height for mobile keyboard avoidance (see useViewportHeight.ts)
     useViewportHeight()
@@ -350,10 +381,22 @@ function AppInner() {
             }
         }
 
+        if (normalizedTitle === 'Session completed') {
+            return {
+                title: t('toast.session.completed'),
+                body: normalizedBody
+            }
+        }
+
         return { title, body }
     }, [t])
 
     const handleToast = useCallback((event: ToastEvent) => {
+        const feedback = getToastHapticNotification(event.data.title)
+        if (feedback && isTelegramApp()) {
+            haptic.notification(feedback)
+        }
+
         const localized = translateIncomingToast(event.data.title, event.data.body)
         addToast({
             title: localized.title,
@@ -361,7 +404,7 @@ function AppInner() {
             sessionId: event.data.sessionId,
             url: event.data.url
         })
-    }, [addToast, translateIncomingToast])
+    }, [addToast, haptic, translateIncomingToast])
 
     const globalEventSubscription = useMemo(() => getAppGlobalSseSubscription(), [])
     const sessionEventSubscription = useMemo(
@@ -485,6 +528,7 @@ function AppInner() {
 
     return (
         <AppContextProvider value={{ api, token, baseUrl, titleSuggestionAvailable }}>
+            <NamespaceLocaleSync />
             <VoiceProvider>
                 <PwaUpdateBannerWithStatusOffset
                     isSyncing={isSyncing}

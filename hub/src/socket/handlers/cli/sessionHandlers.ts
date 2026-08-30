@@ -53,7 +53,8 @@ const messageSchema = z.object({
     // Client-provided origin timestamp (epoch ms) — e.g. a Claude transcript
     // entry's own `timestamp`. Only honored for agent messages (no localId);
     // see addMessage in messages.ts.
-    createdAt: z.number().optional()
+    createdAt: z.number().optional(),
+    positionAt: z.number().optional()
 })
 
 const updateMetadataSchema = z.object({
@@ -68,7 +69,15 @@ const updateStateSchema = z.object({
     agentState: z.unknown().nullable()
 })
 
-const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
+// Hub-only merge/clear links. CLI update-metadata must not forge or erase them
+// (same strip/restore as supersededBySessionId — see sessionHandlers.test.ts).
+const HUB_OWNED_METADATA_KEYS = [
+    'supersededBySessionId',
+    'opencodeClearOperation',
+    'jobsAcceptedFromSessionIds',
+    'jobsTransferredToSessionId',
+    'jobKeyRedirects',
+] as const
 
 function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
     if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
@@ -109,7 +118,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const { sid, localId, createdAt } = parsed.data
+        const { sid, localId, createdAt, positionAt } = parsed.data
         const raw = parsed.data.message
 
         const content = typeof raw === 'string'
@@ -133,7 +142,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
+        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt, positionAt)
 
         // A reasoning stream arrives as a series of growing snapshots under one
         // stable id, so a stream should cost one row rather than one per
