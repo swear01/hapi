@@ -1,0 +1,133 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1725	heavygee	fa9a3dbaa757574260607dde3e09cfd78c833f83	defer	ready	clear	findings	fa9a3dbaa757574260607dde3e09cfd78c833f83	proportional	preserve	depends on absent #1717 Blocked estate UI and exact-head bot reports Major repeated auto-Continue plus Minor Unicode truncation findings
+pr-1722	techotaku39	694c7e0cefaad5baeeed3d01ba08b072ab186f2a	defer	ready	clear	clean	694c7e0cefaad5baeeed3d01ba08b072ab186f2a	proportional	preserve	non-essential common composer attachment retry redesign with substantial release-overlay conflict and no maintainer acceptance
+pr-1721	Zwanan-github	02840df43b4f07bbb8ce60ea55264199287dd295	carry	ready	clear	clean	02840df43b4f07bbb8ce60ea55264199287dd295	proportional	preserve	focused Windows Pi command-shim launch and process-tree cleanup fix with reported manual validation
+pr-1720	techotaku39	3d7fdb1cada8c896a4104a77c57f4762778b9f94	carry	ready	clear	clean	3d7fdb1cada8c896a4104a77c57f4762778b9f94	proportional	preserve	focused tested mobile layout fix keeps code gutters clear across renderers
+pr-1719	HongChenGG	eb5d0f02e29d3554f36dc1939d9399705ee449ae	defer	ready	clear	clean	eb5d0f02e29d3554f36dc1939d9399705ee449ae	proportional	preserve	Pi title parity adds common-path generated extension startup behavior without packaged-loader validation or maintainer acceptance
+pr-1718	heavygee	bbc8d25f05b4e082330ec772ae598748da277293	defer	ready	clear	findings	bbc8d25f05b4e082330ec772ae598748da277293	proportional	preserve	exact-head bot reports two Major and one Minor finding
+pr-1716	junmo-kim	4bf45206924a7f0c09832edb025164b7dad1240c	defer	ready	clear	clean	4bf45206924a7f0c09832edb025164b7dad1240c	exception	preserve	large OpenCode variant-discovery stack depends on process scanning, resident serve, and internal /provider API
+pr-1715	HongChenGG	bfbde726b9e5dcb9f5f6ad18ce666419135405ae	carry	ready	clear	clean	bfbde726b9e5dcb9f5f6ad18ce666419135405ae	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1714	new-TonyWang	a227310e3e7438b5940089748367339d060536b1	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1713	techotaku39	f95fe0ad169cfd644c16448785bd3cde7ff46691	defer	ready	clear	clean	f95fe0ad169cfd644c16448785bd3cde7ff46691	proportional	preserve	optional mobile attachment-source picker without maintainer acceptance
+pr-1712	techotaku39	073de1de51b051dcbe63355a43d68413ee3c66f0	defer	ready	clear	clean	073de1de51b051dcbe63355a43d68413ee3c66f0	exception	preserve	huge filesystem deletion and recovery feature
+pr-1711	techotaku39	36dcc12b3bf6f66d84b33ca087e85f2fa2a7d6f8	defer	ready	clear	clean	36dcc12b3bf6f66d84b33ca087e85f2fa2a7d6f8	proportional	preserve	optional mobile header scrolling and metadata expansion without maintainer acceptance
+pr-1708	KevinFun	73630bbd3f3058b3eca9f77df0fe392ca1c4940e	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1707	techotaku39	710c01c2ae2ff631d41b48c9ad74fb9687b6149a	carry	ready	clear	clean	710c01c2ae2ff631d41b48c9ad74fb9687b6149a	proportional	preserve	exact-head clean safety fix prevents confirmed Codex Web Rewind transcript/context divergence
+pr-1706	heavygee	26c1615ae754ddb16b43fdbae4850f90ea7d6d85	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1704	techotaku39	7bd0a9bde5378166b9c1865a3a32da872765b6ce	defer	ready	clear	clean	7bd0a9bde5378166b9c1865a3a32da872765b6ce	proportional	preserve	preference-only split for an already-configurable Agent icon; substantial release-overlay conflict and no maintainer acceptance
+pr-1702	techotaku39	af8667d9a94f1f0c112920bf2360c7d70e7e3496	carry	ready	clear	clean	af8667d9a94f1f0c112920bf2360c7d70e7e3496	proportional	preserve	exact-head clean; empty retrigger only and focused cross-layer file-search cancellation fix
+pr-1695	techotaku39	de2f96ad729263a7ab2960773e35e42b2d819986	defer	ready	clear	clean	de2f96ad729263a7ab2960773e35e42b2d819986	proportional	preserve	non-essential share fullscreen changes invalidate fork-only Linux and Windows golden images; Windows snapshot cannot be regenerated on this release host
+pr-1694	techotaku39	ec7f502fbdeaf4ebe2a2e72df43dbe4271b56c4a	carry	ready	clear	clean	ec7f502fbdeaf4ebe2a2e72df43dbe4271b56c4a	proportional	preserve	exact-head clean; empty retrigger only and focused tested scroll control
+pr-1693	techotaku39	e2bb5c7f3b81fc35df95822764b3b4c3afa6fc18	defer	ready	clear	clean	e2bb5c7f3b81fc35df95822764b3b4c3afa6fc18	exception	preserve	oversized 3.3k-line table viewer/export feature without maintainer acceptance
+pr-1692	techotaku39	6823582d16dd83331f802a04e342d043a0c3cbee	defer	ready	clear	clean	6823582d16dd83331f802a04e342d043a0c3cbee	exception	preserve	oversized 26-file cross-stack agent inventory feature without maintainer acceptance
+pr-1691	junmo-kim	8486600423596f0c7b9c84d8fde18cb571ba6053	defer	checks-failed	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: checks failed at audited head
+pr-1685	techotaku39	283e3153e380b0b7cfb4234060bee462115d89f8	carry	ready	clear	clean	283e3153e380b0b7cfb4234060bee462115d89f8	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1684	techotaku39	b477f2655f1faab45446824fa6f400d7f828badc	defer	ready	clear	clean	b477f2655f1faab45446824fa6f400d7f828badc	exception	preserve	huge schema/storage/native attachment rewrite
+pr-1683	renqiancheng	08fa9726e8d0dce5a5a263987fb54cb2ce649d21	carry	ready	clear	clean	08fa9726e8d0dce5a5a263987fb54cb2ce649d21	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1680	LinespottingPrivate	62a2218d4458559374e52302a2c6f0f2f76e578e	drop	ready	clear	findings	62a2218d4458559374e52302a2c6f0f2f76e578e	exception	accepted-change	exact-head bot reports two Major and one Minor finding
+pr-1679	junmo-kim	4db160525bb65016758f333a6969d29888a5cc47	carry	ready	clear	clean	4db160525bb65016758f333a6969d29888a5cc47	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1678	junmo-kim	c4c28624db1da06f27bee573d83201692ab7c778	carry	ready	clear	clean	c4c28624db1da06f27bee573d83201692ab7c778	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1677	junmo-kim	1279cb64d47613c40842b67bd8639fc54dea4234	defer	ready	clear	clean	1279cb64d47613c40842b67bd8639fc54dea4234	exception	preserve	large full-stack import feature awaiting upstream acceptance
+pr-1676	junmo-kim	14a379802b5963cd65b11a700784ae0793d7cff2	defer	ready	clear	clean	14a379802b5963cd65b11a700784ae0793d7cff2	exception	preserve	large undocumented OpenCode HTTP dependency
+pr-1675	rzsgsfm	a816ff9bc70cb0294e8c6fbde5a84bba19ba42c2	defer	ready	clear	findings	a816ff9bc70cb0294e8c6fbde5a84bba19ba42c2	proportional	preserve	exact-head bot Minor advertises unsupported OpenCode /clear
+pr-1673	junmo-kim	1eb1265f4c9a9e14baca2a2fe5d1ed0a25454460	defer	checks-failed	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: checks failed at audited head
+pr-1672	junmo-kim	8d6e67d2061e402728cc609ade172ff3d6af2985	defer	ready	clear	clean	8d6e67d2061e402728cc609ade172ff3d6af2985	proportional	unjustified-change	reverses intentionally merged title precedence
+pr-1671	junmo-kim	a5635e594e340cc950511c2567245401fe7ecfa3	carry	ready	clear	clean	a5635e594e340cc950511c2567245401fe7ecfa3	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1668	junmo-kim	d729baf5290f63e40079a1d9a059ba8d2e06484f	defer	ready	clear	clean	d729baf5290f63e40079a1d9a059ba8d2e06484f	exception	preserve	large OpenCode internal-API carrier surface
+pr-1666	techotaku39	e32370634d51ec93a8caf5d5ca278f0bba98eb73	carry	ready	clear	clean	e32370634d51ec93a8caf5d5ca278f0bba98eb73	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1665	techotaku39	7dd55a12888166b2197ddd349a620039768250db	defer	ready	clear	clean	7dd55a12888166b2197ddd349a620039768250db	proportional	unjustified-change	preference-driven toolbar rearrangement
+pr-1664	yellowdog01	dac80dd1d94060889d786df9b9416216b07b0547	carry	ready	clear	clean	dac80dd1d94060889d786df9b9416216b07b0547	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1662	swear01	a97f6ebd9a2d5026691b18bc728c01d98afece1f	carry	ready	policy-exception	clean	a97f6ebd9a2d5026691b18bc728c01d98afece1f	exception	accepted-change	personal auto-carry; latest exact-head fixes bind catalogs to applied models, sync runtime updates, and persist AGY Auto resets
+pr-1660	techotaku39	bf182f8ced3ddeb4a474c9a86b2396dd0c472e56	carry	ready	clear	clean	bf182f8ced3ddeb4a474c9a86b2396dd0c472e56	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1659	techotaku39	d743a300bb512d8e10d7c5edb1c2fd4898096507	defer	ready	clear	clean	d743a300bb512d8e10d7c5edb1c2fd4898096507	proportional	preserve	new common-path composer semantics without maintainer acceptance
+pr-1658	techotaku39	36df9164850c72a2edd4c9fe4f99e53db0dd305e	defer	ready	clear	clean	36df9164850c72a2edd4c9fe4f99e53db0dd305e	proportional	unjustified-change	unsolicited global Alt+S behavior
+pr-1657	techotaku39	410c2acd1a8c12a2b76712072f3034e7d912d84b	defer	ready	clear	clean	410c2acd1a8c12a2b76712072f3034e7d912d84b	proportional	preserve	new metadata RPC surface conflicts with selected media fix
+pr-1656	techotaku39	fb962536e280b94f643aeb66f9b0de8cf873eb72	carry	ready	clear	clean	fb962536e280b94f643aeb66f9b0de8cf873eb72	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1654	0xshawn	ed7c1802368f8366f315d6b46466f23b657825a7	defer	ready	clear	clean	ed7c1802368f8366f315d6b46466f23b657825a7	exception	preserve	oversized cross-platform process teardown change
+pr-1644	junmo-kim	d608fb3d9d916ee943af2b7805c8ae94ee131ff3	carry	ready	clear	clean	d608fb3d9d916ee943af2b7805c8ae94ee131ff3	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1642	junmo-kim	ccc098bf7bb5df49acc5e432a93fe132c4a06dcb	defer	checks-failed	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: checks-failed
+pr-1640	wu736139669	b86a3b6c16c90ab80636a99f07ae9ca58bc129a4	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1637	techotaku39	f72aaa79c77939d7ded12dfc74660b6018b8e5b2	carry	ready	clear	clean	f72aaa79c77939d7ded12dfc74660b6018b8e5b2	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1636	techotaku39	60db9468d95b5197cbc49984f022256057f25dbe	carry	ready	clear	clean	60db9468d95b5197cbc49984f022256057f25dbe	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1635	swear01	6c65104bb7c8878c232cb20c22669b9998cd6fb5	carry	ready	clear	clean	6c65104bb7c8878c232cb20c22669b9998cd6fb5	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1633	NightWatcher314	4e597e4739022eabadc49d328148ae4d01392d97	carry	ready	clear	clean	4e597e4739022eabadc49d328148ae4d01392d97	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1629	Overbaker	a084ba83b531ec4436786d6f703e9ca7ff9b0fd5	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1625	techotaku39	9aa1668bc6f76e6d205b1f26e677902c2bec5f59	defer	ready	clear	clean	9aa1668bc6f76e6d205b1f26e677902c2bec5f59	proportional	preserve	assets predate current merged branding
+pr-1621	techotaku39	ed16db47cd02a8a6ee3691111ef270c043d2b63b	carry	ready	clear	clean	ed16db47cd02a8a6ee3691111ef270c043d2b63b	exception	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1620	heavygee	725fd69452ad2eb660b2af419f28c72e43de29c0	carry	ready	clear	clean	725fd69452ad2eb660b2af419f28c72e43de29c0	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1618	heavygee	70b9174470b1cb2fe4da2f6b21882897bb22433c	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1617	techotaku39	ea5ec5c3c1dc240dee87ab54282e4a47622ee3f0	defer	ready	clear	clean	ea5ec5c3c1dc240dee87ab54282e4a47622ee3f0	proportional	unjustified-change	unjustified copy-direction reversal
+pr-1616	techotaku39	455917d62f10cbc2034dc08de5b51ee957ee18ee	carry	ready	clear	clean	455917d62f10cbc2034dc08de5b51ee957ee18ee	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1615	techotaku39	1732dcfc1edf4c879f483a2c0ee6c04d46169c3b	carry	ready	clear	clean	1732dcfc1edf4c879f483a2c0ee6c04d46169c3b	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1614	MAOJIASONG	64770fb335544e95bbbc549c55e3d587b428d8d0	defer	ready	clear	findings	64770fb335544e95bbbc549c55e3d587b428d8d0	proportional	preserve	exact-head bot has two Major findings
+pr-1613	heavygee	82caab248e7a20255eea0059432edd9f2a9af88f	defer	ready	clear	findings	82caab248e7a20255eea0059432edd9f2a9af88f	proportional	preserve	exact-head bot Major on symlinked Cursor MCP overlay cleanup
+pr-1611	techotaku39	cf3ddb9e9630f4be7bbd1d649b56439085299bea	defer	ready	clear	clean	cf3ddb9e9630f4be7bbd1d649b56439085299bea	exception	preserve	oversized ordering and scheduling feature with schema conflict
+pr-1610	swear01	39ebb03180f998e143826d1e9dd85864af420ce3	carry	ready	clear	clean	39ebb03180f998e143826d1e9dd85864af420ce3	exception	preserve	core accepted from upstream #1609; retained hardening without duplicate replay
+pr-1607	swear01	17d22112e96917d0ff0ffdfe95de750f571b823c	carry	ready	clear	clean	17d22112e96917d0ff0ffdfe95de750f571b823c	exception	accepted-change	audited current head integrated and verified in v0.29.0.2
+pr-1605	junmo-kim	f53eb2cb66a2a6e045a2d38dbf7fedeabaecabb2	defer	checks-failed	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: checks failed at audited head
+pr-1604	techotaku39	365cb88345014d9a0e152e38faad4548dba4d61f	carry	ready	clear	clean	365cb88345014d9a0e152e38faad4548dba4d61f	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1603	techotaku39	2fbdb4f1f4c5e89da4890e1244e9be93dd70bb71	defer	ready	clear	clean	2fbdb4f1f4c5e89da4890e1244e9be93dd70bb71	proportional	unjustified-change	cosmetic preference change superseded by message-action refactor
+pr-1599	techotaku39	cc28570fc5fee2527f6f62d0c8690c747f0c0f23	defer	ready	clear	clean	cc28570fc5fee2527f6f62d0c8690c747f0c0f23	proportional	unjustified-change	preference-driven display rewrite without acceptance
+pr-1598	techotaku39	14ed44c4d58eecbd8cf7547de48bc31118174221	defer	ready	clear	clean	14ed44c4d58eecbd8cf7547de48bc31118174221	exception	preserve	oversized FTS/windowing/native feature with schema conflict
+pr-1597	swear01	263807f87ec00e4771447ba1590e7792d14421ef	drop	ready	clear	clean	263807f87ec00e4771447ba1590e7792d14421ef	exception	accepted-change	operator ruling remains: assistant response navigation stays dropped despite exact-head fixes
+pr-1592	techotaku39	67112915c48b949df6f2311d4de7cf040c1019aa	carry	ready	clear	clean	67112915c48b949df6f2311d4de7cf040c1019aa	proportional	preserve	retained in regenerated overlay; current behavior verified without duplicate replay
+pr-1581	techotaku39	e44672f506450804dfbeadad3572dd00786cc451	carry	ready	clear	clean	e44672f506450804dfbeadad3572dd00786cc451	exception	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1567	3em0	aa7fdf0f5bfbacf811cf745409ae7aacb9c84bc3	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1564	heavygee	6e9620f7bfe5f0295c589a6ed794174657f13f22	defer	ready	clear	clean	6e9620f7bfe5f0295c589a6ed794174657f13f22	exception	preserve	oversized 137-file display-links feature without maintainer acceptance
+pr-1543	techotaku39	2d6dbd4de8e78209d0ac06c57fc27dcc6ec8a373	carry	ready	clear	clean	2d6dbd4de8e78209d0ac06c57fc27dcc6ec8a373	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1542	swear01	7d8c12c4d4d363f3cc7b2ee6f06fa0969b5e24b3	carry	ready	clear	clean	7d8c12c4d4d363f3cc7b2ee6f06fa0969b5e24b3	exception	accepted-change	audited current head integrated and verified in v0.29.0.2
+pr-1537	zj1123581321	693aed6e40beed850caeb65ac32fb4e6d68442d5	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1528	7bata	3517c527077d71033ec3782185ca4cf6d280d0f4	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1527	7bata	597c28d6bcb5dd2fc8938197d60e5dea9d327821	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1525	7bata	85e5ec888140097893bdf30dfe1b101145d2c54e	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1523	techotaku39	9cb4ec763a34c377979f29b676d99875ca63fa6f	defer	ready	clear	clean	9cb4ec763a34c377979f29b676d99875ca63fa6f	proportional	preserve	mixed plan parsing, backfill and UI scope with migration conflicts
+pr-1517	TimChesko	d9767f92f0beb3a245ed2329030126441676e8e0	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1512	techotaku39	46939c05fb8eb4515c6845d472d71a21a31fe201	defer	ready	clear	clean	46939c05fb8eb4515c6845d472d71a21a31fe201	exception	preserve	oversized 92-file reply-clock/unread/schema rewrite changes default recency without maintainer acceptance
+pr-1511	heavygee	52c51ba51c0d13a7c56b99ac0be161d5e4eebefe	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-1468	swear01	2936e0f780032eea5d6eb86173b47b3694369d22	carry	checks-failed	policy-exception	clean	2936e0f780032eea5d6eb86173b47b3694369d22	exception	accepted-change	audited current head integrated and verified in v0.29.0.2
+pr-1451	swear01	c6f4021e33d03cbf28a9b887cb2bb2e880f88431	carry	ready	clear	clean	c6f4021e33d03cbf28a9b887cb2bb2e880f88431	proportional	preserve	upstream-only merge drift; feature commits are range-diff exact and retained
+pr-1447	wu736139669	19daba6f54b3bc99d4645dd3be25cdc6d2be7b4b	defer	ready	clear	findings	19daba6f54b3bc99d4645dd3be25cdc6d2be7b4b	proportional	preserve	exact-head bot Minor leaves action-only project header untested
+pr-1443	wu736139669	1888de0e1e3fd9ae84001d49e56e8d607b4b67f8	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1436	swear01	155ec33a04b8b748279f0495ed0bd7518c98eee3	carry	ready	clear	clean	155ec33a04b8b748279f0495ed0bd7518c98eee3	exception	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1429	wu736139669	5d3f41bb10bb22e7186d1abc0fc45e5659be479d	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1424	heavygee	67d3a037dbefd41e47c6db1637a76f70d3ebd69a	carry	ready	clear	clean	67d3a037dbefd41e47c6db1637a76f70d3ebd69a	exception	accepted-change	audited current head integrated and verified in v0.29.0.2
+pr-1422	techotaku39	825d3a6e95ccec7896bc45782e906fe3201b1b1a	carry	ready	clear	clean	825d3a6e95ccec7896bc45782e906fe3201b1b1a	proportional	preserve	retained in regenerated overlay; current behavior verified without duplicate replay
+pr-1421	swear01	23d0a8d65dcbfadca4ef586d01b827a0fdedf2f9	carry	ready	clear	clean	23d0a8d65dcbfadca4ef586d01b827a0fdedf2f9	proportional	preserve	upstream-only merge drift; feature commits are range-diff exact and retained
+pr-1419	swear01	cb64200637941ed429855a82ffcf2db977610416	carry	ready	clear	clean	cb64200637941ed429855a82ffcf2db977610416	proportional	preserve	behavior coalesced into current #1436 patch
+pr-1418	swear01	dd0d0331e4af8282d5e756ecc894b05ca23e2b59	carry	ready	clear	clean	dd0d0331e4af8282d5e756ecc894b05ca23e2b59	proportional	preserve	audited current head integrated and verified in v0.29.0.2
+pr-1414	techotaku39	b7230bd4b9809abdc30345ed37fd5f7e734b26bf	carry	ready	clear	clean	b7230bd4b9809abdc30345ed37fd5f7e734b26bf	proportional	preserve	retained in regenerated overlay; current behavior verified without duplicate replay
+pr-1361	Himehane	e1e7e8c3fbcfcdaaff872398c1d08758d3dcef0f	defer	ready	clear	clean	e1e7e8c3fbcfcdaaff872398c1d08758d3dcef0f	proportional	preserve	unaccepted busy-transcript import semantics
+pr-1360	wu736139669	b9c9975ae1afa1455385fdd69509c3f8c169c728	defer	ready	clear	findings	b9c9975ae1afa1455385fdd69509c3f8c169c728	exception	preserve	exact-head bot Minor and conflicting notification schema work
+pr-1351	yin1245	feb70174798df546512ebd9096768c94ddead945	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1309	techotaku39	01a98c4efd4ddcfb0b8278c936ddd346f7e30936	defer	draft	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: draft
+pr-1257	hqhq1025	6957978424f74209dca9295699137179282e80ad	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1242	hqhq1025	2c7a46f98f49a23e638f5188a6960ddc937cade3	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1212	hqhq1025	93d8678da8535c3a812e166f43961c1c4ff50f92	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1193	mimoren	999f1d1170d382cc4fd5e5fdf6e0a6ab4a0bf65f	defer	draft	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: draft
+pr-1189	tiann	5f949783ad2123d865d758a921681245683f899d	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1188	tiann	1f23f857e4173a25f969879ef139487ec1c9955e	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1163	heavygee	b4e0f589d6167e88769765ab968f808bd1f10fd1	defer	ready	clear	clean	b4e0f589d6167e88769765ab968f808bd1f10fd1	exception	preserve	oversized cross-stack external-reference feature without maintainer acceptance
+pr-1158	techotaku39	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	carry	ready	clear	clean	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	proportional	preserve	retained in regenerated overlay; current behavior verified without duplicate replay
+pr-1126	GoldenZqqq	31ce48080df1a62150e9fe7e0a86fde511ef3cc2	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1099	NPUlrk	91116cd9089107625d95ae2bc99fa615ef87d6a6	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1093	techotaku39	b2cbe6cc1a41f114de12371103382c55ba9efb86	drop	draft	clear	not-required	-	exception	accepted-change	operator ruling: assistant response navigation remains dropped
+pr-1092	zulinliu	4427e6e08b2fed4429c793af2841f7f47fb70bac	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1091	zulinliu	0cf0d70310e9c58c5a41509793260a003822a9b4	drop	merge-dirty	clear	not-required	-	exception	accepted-change	operator ruling: managed provider profiles remain dropped
+pr-1059	Arnie97	37deeeba5263ceb402429c069e911eac96eb406e	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-1054	DullJZ	9cbe9b1fa24edec152bb610e0b1049930c723432	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-987	heavygee	0648c56eee5ad94ab641a8446eecb3f1ef97def8	defer	ready	clear	findings	0648c56eee5ad94ab641a8446eecb3f1ef97def8	exception	preserve	exact-head bot Minor plus oversized partial model-error stack
+pr-975	KorenKrita	344c6009b53e20829978e44367fa50b5870986fe	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-945	heavygee	95b53c80c96c0f76c18e69edb9cb7691f62a2ba8	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-942	dzshzx	f1f93474f042381818f0d605b1d64b3fb42cb02b	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-847	heavygee	34b315d82712e173f0e2aa92e9136bbf0c67efcd	defer	merge-unstable	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-unstable
+pr-663	SpartaGeorge	5dbf6d406a6bb8507dc07598ba2aecc8cd98ee0f	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-658	yrom	f7d8ca3ea0f8ae47245443ce2c0cfec612263e62	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-553	wzxjohn	6e3da463f4fb213afc6a95d3005232e647f39ec6	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-536	dsus4wang	1de72788e93c6aae6511a5af8bb05bda631093c0	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-535	dsus4wang	abcf3a4bff8b685a70ceeb77008f4f217b43b67c	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-518	duxiaoxiong	72cceea333addd3a8b39948b722750056433d39b	defer	draft	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: draft
+pr-490	tehao999	745acf545461ad7f8c615ebd178f3a15df869fb2	defer	draft	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: draft
+pr-484	YiwenZhu77	641a01266de65d4944ec5c609a40c717cd41662a	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-394	koenzhao	fb5f201ec230e0b7abdc15dcf26483d67a56a1be	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-325	MrHeB	c12df55ff52d2544ff40f313b702b24dc0732cf8	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty
+pr-312	just4zeroq	572d489bbd359fe1ca9b4eb96a852804e42e69ac	defer	merge-dirty	not-reviewed	not-required	-	not-reviewed	not-reviewed	not release-ready: merge-dirty

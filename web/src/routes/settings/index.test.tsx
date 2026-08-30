@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { I18nProvider } from '@/lib/i18n-context'
 import SettingsHubPage from './index'
 import SettingsGeneralPage from './general'
+import SettingsRunnerManagementPage from './runner-management'
 import SettingsDisplayPage from './display'
 import SettingsChatPage from './chat'
 import SettingsAboutPage from './about'
@@ -11,7 +12,7 @@ import SettingsVoicePage from './voice'
 import SettingsVoiceVoicesPage from './voice-voices'
 import SettingsVoiceAdvancedPage from './voice-advanced'
 
-const { context, navigate, setAppearance, setColorTheme, setFontScale, setTerminalFontSize, setComposerEnterBehavior, setCodexExplorationCollapsed, setVoice } = vi.hoisted(() => ({
+const { context, navigate, setAppearance, setColorTheme, setFontScale, setTerminalFontSize, setComposerEnterBehavior, setCodexExplorationCollapsed, setVoice, setFleetPolicy } = vi.hoisted(() => ({
     context: { token: '' },
     navigate: vi.fn(),
     setAppearance: vi.fn(),
@@ -21,10 +22,17 @@ const { context, navigate, setAppearance, setColorTheme, setFontScale, setTermin
     setComposerEnterBehavior: vi.fn(),
     setCodexExplorationCollapsed: vi.fn(),
     setVoice: vi.fn(),
+    setFleetPolicy: vi.fn(),
 }))
 
-const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false })
-const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryContract: true, sessionSummaryInChat: false })
+const getHubSettings = vi.fn().mockResolvedValue({
+    sessionSummaryContract: false,
+    sessionSummaryInChat: false
+})
+const updateHubSettings = vi.fn().mockResolvedValue({
+    sessionSummaryContract: true,
+    sessionSummaryInChat: false
+})
 
 vi.mock('@/hooks/useColorTheme', () => ({
     useColorTheme: () => ({ colorTheme: 'default', setColorTheme }),
@@ -39,9 +47,22 @@ vi.mock('@/hooks/useColorTheme', () => ({
 
 vi.mock('@tanstack/react-router', () => ({
     useNavigate: () => navigate,
+    Navigate: ({ to, replace }: { to: string; replace?: boolean }) => {
+        navigate({ to, replace: Boolean(replace) })
+        return null
+    },
 }))
 
-vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1 }))
+vi.mock('@hapi/protocol', () => ({ PROTOCOL_VERSION: 1, CREATABLE_AGENT_FLAVORS: ['claude', 'codex'], getFlavorLabel: (agent: string) => agent }))
+
+vi.mock('@/lib/app-context', () => ({
+    useAppContext: () => ({ api: null, token: context.token }),
+}))
+
+vi.mock('@/hooks/queries/useUpgradeInfo', () => ({
+    useUpgradeInfo: () => ({ info: null, isLoading: false }),
+    useSetFleetUpgradePolicy: () => ({ mutate: setFleetPolicy }),
+}))
 
 vi.mock('@/hooks/useTheme', () => ({
     useAppearance: () => ({ appearance: 'system', setAppearance }),
@@ -82,7 +103,12 @@ vi.mock('@/hooks/useShowActiveSessionsOnly', () => ({
 }))
 
 vi.mock('@/hooks/usePinInProgressSessions', () => ({
-    usePinInProgressSessions: () => ({ pinInProgressSessions: false, setPinInProgressSessions: vi.fn() }),
+    usePinInProgressSessions: () => ({
+        pinInProgressMode: 'off' as const,
+        setPinInProgressMode: vi.fn(),
+        pinInProgressSessions: false,
+        setPinInProgressSessions: vi.fn(),
+    }),
 }))
 
 vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
@@ -90,6 +116,7 @@ vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
         preferences: {
             showLabels: true,
             agent: true,
+            project: true,
             model: true,
             reasoning: true,
             fastMode: true,
@@ -160,7 +187,7 @@ vi.mock('@/hooks/useChatSurfaceColors', () => ({
 
 vi.mock('@/lib/app-context', () => ({
     useAppContext: () => ({
-        api: { getHubSettings, updateHubSettings },
+        api: { getHubSettings, updateHubSettings, getSessions: vi.fn().mockResolvedValue({ sessions: [] }) },
         baseUrl: 'http://127.0.0.1:3006',
         token: context.token,
     }),
@@ -216,8 +243,14 @@ describe('responsive settings pages', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
-        getHubSettings.mockResolvedValue({ sessionSummaryContract: false, sessionSummaryInChat: false })
-        updateHubSettings.mockResolvedValue({ sessionSummaryContract: true, sessionSummaryInChat: false })
+        getHubSettings.mockResolvedValue({
+            sessionSummaryContract: false,
+            sessionSummaryInChat: false
+        })
+        updateHubSettings.mockResolvedValue({
+            sessionSummaryContract: true,
+            sessionSummaryInChat: false
+        })
         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`
     })
 
@@ -251,6 +284,35 @@ describe('responsive settings pages', () => {
         expect(localStorage.getItem('hapi-lang')).toBe('zh-CN')
     })
 
+    it('buries runner management behind a link row on General (not a front-and-center switch)', () => {
+        renderPage(<SettingsGeneralPage />)
+        // The 3-pole switch must NOT be present on the General page itself.
+        expect(screen.queryByRole('radio', { name: /Auto-upgrade/ })).not.toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: /Runner management/ }))
+        expect(navigate).toHaveBeenCalledWith({ to: '/settings/general/runners' })
+    })
+
+    it('hides runner management from tenant namespaces on General', () => {
+        context.token = `x.${btoa(JSON.stringify({ ns: 'tenant' }))}.x`
+        renderPage(<SettingsGeneralPage />)
+        expect(screen.queryByRole('button', { name: /Runner management/ })).not.toBeInTheDocument()
+    })
+
+    it('renders the 3-pole policy switch on the runner management sub-page', () => {
+        renderPage(<SettingsRunnerManagementPage />)
+        expect(screen.getByRole('radio', { name: /^No alert/ })).toBeInTheDocument()
+        expect(screen.getByRole('radio', { name: /^Alert/ })).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('radio', { name: /^Auto-upgrade/ }))
+        expect(setFleetPolicy).toHaveBeenCalledWith('auto')
+    })
+
+    it('redirects tenant namespaces away from the runner management route', () => {
+        context.token = `x.${btoa(JSON.stringify({ ns: 'tenant' }))}.x`
+        renderPage(<SettingsRunnerManagementPage />)
+        expect(navigate).toHaveBeenCalledWith({ to: '/settings/general', replace: true })
+        expect(screen.queryByRole('radio', { name: /^Auto-upgrade/ })).not.toBeInTheDocument()
+    })
+
     it('renders compact display controls without dropdown popovers', () => {
         renderPage(<SettingsDisplayPage />)
         expect(screen.getByRole('radio', { name: 'OLED Black' })).toBeInTheDocument()
@@ -259,12 +321,27 @@ describe('responsive settings pages', () => {
         expect(screen.getByRole('radio', { name: '120%' })).toBeInTheDocument()
         expect(screen.getByRole('spinbutton', { name: 'Sessions Before Folding' })).toHaveValue(8)
         expect(screen.getByRole('checkbox', { name: 'Show field labels' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'Project' })).toBeChecked()
         expect(screen.getByRole('checkbox', { name: 'Reasoning effort' })).toBeChecked()
         expect(screen.getByRole('checkbox', { name: 'Machine' })).toBeChecked()
         expect(screen.getByRole('checkbox', { name: 'Active time' })).toBeChecked()
         expect(screen.getByRole('checkbox', { name: 'Created time' })).not.toBeChecked()
         expect(screen.getByRole('checkbox', { name: 'Updated time' })).not.toBeChecked()
         expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    })
+
+    it('persists Create agent visibility across remounts', () => {
+        const first = renderPage(<SettingsDisplayPage />)
+        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'codex' })).toBeChecked()
+
+        fireEvent.click(screen.getByRole('checkbox', { name: 'codex' }))
+        expect(JSON.parse(localStorage.getItem('hapi:newSession:agentVisibility:v1') ?? '{}')).toEqual({ claude: true, codex: false })
+        first.unmount()
+
+        renderPage(<SettingsDisplayPage />)
+        expect(screen.getByRole('checkbox', { name: 'claude' })).toBeChecked()
+        expect(screen.getByRole('checkbox', { name: 'codex' })).not.toBeChecked()
     })
 
     it('keeps the session status description visible with its choice group', () => {
@@ -291,6 +368,19 @@ describe('responsive settings pages', () => {
         expect(toggle).toBeChecked()
         fireEvent.click(toggle)
         expect(setCodexExplorationCollapsed).toHaveBeenCalledWith(false)
+    })
+
+    it('renders the collapse-reasoning switch with its streaming behavior', () => {
+        renderPage(<SettingsChatPage />)
+        expect(screen.getByRole('checkbox', { name: 'Collapse reasoning' })).not.toBeChecked()
+        expect(screen.getByText('Keep AI reasoning content collapsed. It will not auto-expand while streaming.')).toBeInTheDocument()
+    })
+
+    it('renders the updated collapse-reasoning copy in Chinese', () => {
+        localStorage.setItem('hapi-lang', 'zh-CN')
+        renderPage(<SettingsChatPage />)
+        expect(screen.getByRole('checkbox', { name: '折叠思考' })).not.toBeChecked()
+        expect(screen.getByText('AI思考内容保持折叠，流式输出期间也不会自动展开。')).toBeInTheDocument()
     })
 
     it('renders About metadata on its own route page', () => {

@@ -1,0 +1,583 @@
+From 96bcf2e3a402f25cda319bc8b8d5082f30a9a9b2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:54:17 +0000
+Subject: [PATCH] carry: upstream PR #1637
+
+---
+ .github/workflows/test.yml                    |   2 +-
+ e2e/session-sidebar-toggle.spec.ts            | 105 +++++++++++++++++
+ .../session-sidebar-toggle-fixture.html       |  12 ++
+ .../session-sidebar-toggle-fixture.tsx        |  41 +++++++
+ web/src/components/SidebarToggle.test.tsx     |  60 ++++++++++
+ web/src/components/SidebarToggle.tsx          |  70 +++++++++++
+ web/src/index.css                             | 110 +++++++++++++++++-
+ web/src/lib/locales/en.ts                     |   2 +
+ web/src/lib/locales/zh-CN.ts                  |   2 +
+ web/src/router.tsx                            |  35 ++++--
+ 10 files changed, 426 insertions(+), 13 deletions(-)
+ create mode 100644 e2e/session-sidebar-toggle.spec.ts
+ create mode 100644 web/e2e-fixtures/session-sidebar-toggle-fixture.html
+ create mode 100644 web/e2e-fixtures/session-sidebar-toggle-fixture.tsx
+ create mode 100644 web/src/components/SidebarToggle.test.tsx
+ create mode 100644 web/src/components/SidebarToggle.tsx
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index f77bd9c56..0faea04d9 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -13,7 +13,7 @@ jobs:
+             - run: bun install --frozen-lockfile
+             - run: bun typecheck
+             - run: bunx playwright install --with-deps chromium
+-            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts share-turn.spec.ts
++            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts share-turn.spec.ts session-sidebar-toggle.spec.ts
+             - run: bun run test
+ 
+     # Serial runner-integration suite: starts real detached runner/session
+diff --git a/e2e/session-sidebar-toggle.spec.ts b/e2e/session-sidebar-toggle.spec.ts
+new file mode 100644
+index 000000000..e21854351
+--- /dev/null
++++ b/e2e/session-sidebar-toggle.spec.ts
+@@ -0,0 +1,105 @@
++import { expect, test, type Page } from '@playwright/test'
++
++const splitViewport = { width: 1024, height: 768 }
++
++async function assertTouchToggle(page: Page) {
++    await page.goto('/e2e-fixtures/session-sidebar-toggle-fixture.html')
++
++    const modes = await page.evaluate(() => ({
++        width: window.innerWidth,
++        hasTouch: navigator.maxTouchPoints > 0,
++        coarsePointer: window.matchMedia('(pointer: coarse)').matches,
++        anyCoarsePointer: window.matchMedia('(any-pointer: coarse)').matches,
++    }))
++    expect(modes).toMatchObject({ width: 1024, hasTouch: true })
++    expect(modes.coarsePointer || modes.anyCoarsePointer).toBe(true)
++
++    const hideButton = page.getByRole('button', { name: 'Hide session list' })
++    await expect(hideButton).toBeVisible()
++    await expect(hideButton).toHaveCSS('pointer-events', 'auto')
++
++    await hideButton.tap()
++    await expect(page.getByRole('button', { name: 'Show session list' })).toBeVisible()
++
++    await page.getByRole('button', { name: 'Show session list' }).tap()
++    await expect(hideButton).toBeVisible()
++}
++
++test.describe('session sidebar toggle', () => {
++    test.describe('coarse primary pointer', () => {
++        test.use({
++            viewport: splitViewport,
++            isMobile: true,
++            hasTouch: true,
++        })
++
++        test('keeps the hide action visible and tappable on split layouts', async ({ page }) => {
++            await assertTouchToggle(page)
++        })
++
++        test('keeps the hybrid-pointer override after fine-pointer and before drag-state rules', async ({ page }) => {
++            await page.goto('/e2e-fixtures/session-sidebar-toggle-fixture.html')
++
++            const rule = await page.evaluate(() => {
++                for (const sheet of Array.from(document.styleSheets)) {
++                    let rules: CSSRuleList
++                    try {
++                        rules = sheet.cssRules
++                    } catch {
++                        continue
++                    }
++
++                    const finePointerIndex = Array.from(rules).findIndex((candidate) => (
++                        candidate instanceof CSSMediaRule
++                        && candidate.conditionText === '(hover: hover) and (pointer: fine)'
++                    ))
++                    const anyPointerIndex = Array.from(rules).findIndex((candidate) => (
++                        candidate instanceof CSSMediaRule
++                        && candidate.conditionText === '(any-pointer: coarse)'
++                    ))
++                    const dragStateIndex = Array.from(rules).findIndex((candidate) => (
++                        candidate instanceof CSSStyleRule
++                        && candidate.selectorText.includes('[data-dragging] .sidebar-hide-button')
++                    ))
++                    const anyPointerRule = Array.from(rules).find((candidate) => (
++                        candidate instanceof CSSMediaRule
++                        && candidate.conditionText === '(any-pointer: coarse)'
++                    ))
++                    if (!(anyPointerRule instanceof CSSMediaRule)) {
++                        continue
++                    }
++
++                    const hideRule = Array.from(anyPointerRule.cssRules).find((candidate) => (
++                        candidate instanceof CSSStyleRule
++                        && candidate.selectorText === '.sidebar-hide-button'
++                    ))
++                    if (!(hideRule instanceof CSSStyleRule)) {
++                        continue
++                    }
++
++                    return {
++                        finePointerIndex,
++                        anyPointerIndex,
++                        dragStateIndex,
++                        opacity: hideRule.style.opacity,
++                        pointerEvents: hideRule.style.pointerEvents,
++                        transform: hideRule.style.transform,
++                    }
++                }
++                return null
++            })
++
++            expect(rule).toEqual({
++                finePointerIndex: expect.any(Number),
++                anyPointerIndex: expect.any(Number),
++                dragStateIndex: expect.any(Number),
++                opacity: '1',
++                pointerEvents: 'auto',
++                transform: 'translate(-50%, -50%) scale(1)',
++            })
++            expect(rule!.finePointerIndex).toBeGreaterThanOrEqual(0)
++            expect(rule!.finePointerIndex).toBeLessThan(rule!.anyPointerIndex)
++            expect(rule!.anyPointerIndex).toBeLessThan(rule!.dragStateIndex)
++        })
++    })
++})
+diff --git a/web/e2e-fixtures/session-sidebar-toggle-fixture.html b/web/e2e-fixtures/session-sidebar-toggle-fixture.html
+new file mode 100644
+index 000000000..2453c3ebd
+--- /dev/null
++++ b/web/e2e-fixtures/session-sidebar-toggle-fixture.html
+@@ -0,0 +1,12 @@
++<!doctype html>
++<html lang="en">
++    <head>
++        <meta charset="UTF-8" />
++        <meta name="viewport" content="width=device-width, initial-scale=1" />
++        <title>HAPI session sidebar toggle fixture</title>
++    </head>
++    <body>
++        <div id="root"></div>
++        <script type="module" src="./session-sidebar-toggle-fixture.tsx"></script>
++    </body>
++</html>
+diff --git a/web/e2e-fixtures/session-sidebar-toggle-fixture.tsx b/web/e2e-fixtures/session-sidebar-toggle-fixture.tsx
+new file mode 100644
+index 000000000..e11d0748b
+--- /dev/null
++++ b/web/e2e-fixtures/session-sidebar-toggle-fixture.tsx
+@@ -0,0 +1,41 @@
++import React, { useState } from 'react'
++import ReactDOM from 'react-dom/client'
++import '../src/index.css'
++import { SidebarResizeHandle, SidebarShowButton } from '../src/components/SidebarToggle'
++
++function Harness() {
++    const [sidebarVisible, setSidebarVisible] = useState(true)
++
++    return (
++        <div className="flex h-screen min-h-0 bg-[var(--app-bg)]">
++            {sidebarVisible ? (
++                <>
++                    <aside className="flex w-80 shrink-0 items-center justify-center border-r border-[var(--app-border)]">
++                        Session list
++                    </aside>
++                    <SidebarResizeHandle
++                        canHide={true}
++                        hideLabel="Hide session list"
++                        onHide={() => setSidebarVisible(false)}
++                        onPointerDown={() => {}}
++                    />
++                </>
++            ) : null}
++            <main className="relative flex min-w-0 flex-1 items-center justify-center">
++                {!sidebarVisible ? (
++                    <SidebarShowButton
++                        showLabel="Show session list"
++                        onShow={() => setSidebarVisible(true)}
++                    />
++                ) : null}
++                Session detail
++            </main>
++        </div>
++    )
++}
++
++ReactDOM.createRoot(document.getElementById('root')!).render(
++    <React.StrictMode>
++        <Harness />
++    </React.StrictMode>
++)
+diff --git a/web/src/components/SidebarToggle.test.tsx b/web/src/components/SidebarToggle.test.tsx
+new file mode 100644
+index 000000000..a4b487971
+--- /dev/null
++++ b/web/src/components/SidebarToggle.test.tsx
+@@ -0,0 +1,60 @@
++import { fireEvent, render, screen } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++import { SidebarResizeHandle, SidebarShowButton } from './SidebarToggle'
++
++describe('SidebarResizeHandle', () => {
++    it('hides the sidebar without forwarding the button pointer event to resizing', () => {
++        const onHide = vi.fn()
++        const onPointerDown = vi.fn()
++
++        render(
++            <SidebarResizeHandle
++                canHide={true}
++                hideLabel="Hide session list"
++                onHide={onHide}
++                onPointerDown={onPointerDown}
++            />
++        )
++
++        const button = screen.getByRole('button', { name: 'Hide session list' })
++        fireEvent.pointerDown(button)
++        fireEvent.click(button)
++
++        expect(onHide).toHaveBeenCalledOnce()
++        expect(onPointerDown).not.toHaveBeenCalled()
++        expect(button.querySelectorAll('path')).toHaveLength(1)
++        expect(button.querySelector('rect'))
++            .toHaveAttribute('rx', '3')
++        expect(button.querySelector('rect'))
++            .toHaveAttribute('fill', 'var(--app-bg)')
++    })
++
++    it('does not render a hide button on the sessions index', () => {
++        render(
++            <SidebarResizeHandle
++                canHide={false}
++                hideLabel="Hide session list"
++                onHide={vi.fn()}
++                onPointerDown={vi.fn()}
++            />
++        )
++
++        expect(screen.queryByRole('button', { name: 'Hide session list' })).not.toBeInTheDocument()
++    })
++})
++
++describe('SidebarShowButton', () => {
++    it('restores the hidden sidebar', () => {
++        const onShow = vi.fn()
++        render(<SidebarShowButton showLabel="Show session list" onShow={onShow} />)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Show session list' }))
++
++        expect(onShow).toHaveBeenCalledOnce()
++        const svg = screen.getByRole('button', { name: 'Show session list' }).querySelector('svg')
++        expect(svg).toHaveAttribute('viewBox', '0 0 24 40')
++        expect(svg).not.toHaveAttribute('preserveAspectRatio')
++        expect(svg).toHaveAttribute('shape-rendering', 'geometricPrecision')
++        expect(svg).toHaveAttribute('stroke-width', '2')
++    })
++})
+diff --git a/web/src/components/SidebarToggle.tsx b/web/src/components/SidebarToggle.tsx
+new file mode 100644
+index 000000000..a8e46b03b
+--- /dev/null
++++ b/web/src/components/SidebarToggle.tsx
+@@ -0,0 +1,70 @@
++import type { PointerEventHandler } from 'react'
++
++function SidebarIcon(props: { direction: 'hide' | 'show' }) {
++    const arrowPath = props.direction === 'hide'
++        ? 'M15 12l-6 8 6 8'
++        : 'M9 12l6 8-6 8'
++
++    return (
++        <svg
++            xmlns="http://www.w3.org/2000/svg"
++            viewBox="0 0 24 40"
++            fill="none"
++            stroke="currentColor"
++            strokeWidth="2"
++            strokeLinecap="round"
++            strokeLinejoin="round"
++            shapeRendering="geometricPrecision"
++            aria-hidden="true"
++        >
++            <rect x="3" y="2" width="18" height="36" rx="3" fill="var(--app-bg)" />
++            <path d={arrowPath} />
++        </svg>
++    )
++}
++
++export function SidebarResizeHandle(props: {
++    canHide: boolean
++    hideLabel: string
++    isDragging?: boolean
++    onHide: () => void
++    onPointerDown: PointerEventHandler<HTMLDivElement>
++}) {
++    return (
++        <div
++            className="sidebar-resize-handle hidden split:block shrink-0"
++            data-dragging={props.isDragging || undefined}
++            onPointerDown={props.onPointerDown}
++        >
++            {props.canHide ? (
++                <button
++                    type="button"
++                    className="sidebar-hide-button"
++                    aria-label={props.hideLabel}
++                    title={props.hideLabel}
++                    onPointerDown={(event) => event.stopPropagation()}
++                    onClick={props.onHide}
++                >
++                    <SidebarIcon direction="hide" />
++                </button>
++            ) : null}
++        </div>
++    )
++}
++
++export function SidebarShowButton(props: {
++    showLabel: string
++    onShow: () => void
++}) {
++    return (
++        <button
++            type="button"
++            className="sidebar-show-button hidden split:flex"
++            aria-label={props.showLabel}
++            title={props.showLabel}
++            onClick={props.onShow}
++        >
++            <SidebarIcon direction="show" />
++        </button>
++    )
++}
+diff --git a/web/src/index.css b/web/src/index.css
+index 2e5a087da..501f27bcb 100644
+--- a/web/src/index.css
++++ b/web/src/index.css
+@@ -416,21 +416,123 @@ html:has(.chat-scroll-y) #root {
+ 
+ /* Sidebar resize handle */
+ .sidebar-resize-handle {
++    position: relative;
+     width: 4px;
+     cursor: col-resize;
+-    background: var(--app-divider);
++    background: transparent;
+     transition: background-color 0.15s;
++    overflow: visible;
++}
++
++.sidebar-resize-handle::before {
++    position: absolute;
++    z-index: 0;
++    inset: 0;
++    content: '';
++    pointer-events: none;
++    background: var(--app-divider);
++    transition: background-color 0.15s, opacity 0.15s;
+ }
+ 
+-.sidebar-resize-handle:hover,
+-.sidebar-resize-handle[data-dragging] {
++.sidebar-resize-handle:hover::before {
+     background: var(--app-link);
+ }
+ 
+-.sidebar-resize-handle[data-dragging] {
++.sidebar-resize-handle[data-dragging]::before {
++    background: var(--app-link);
+     opacity: 0.6;
+ }
+ 
++/* Keep the divider's 4px drag target unchanged; reveal the separate action on hover. */
++.sidebar-hide-button {
++    position: absolute;
++    top: 50%;
++    left: 50%;
++    z-index: 10;
++    display: flex;
++    width: 36px;
++    height: 48px;
++    cursor: pointer;
++    align-items: center;
++    justify-content: center;
++    transform: translate(-50%, -50%) scale(1);
++    border: 0;
++    background: transparent;
++    opacity: 1;
++    pointer-events: auto;
++    color: var(--app-hint);
++    transition: opacity 0.15s, transform 0.15s, color 0.15s;
++}
++
++.sidebar-hide-button svg,
++.sidebar-show-button svg {
++    width: 24px;
++    height: 40px;
++    display: block;
++    flex-shrink: 0;
++}
++
++@media (hover: hover) and (pointer: fine) {
++    .sidebar-hide-button {
++        transform: translate(-50%, -50%) scale(0.85);
++        opacity: 0;
++        pointer-events: none;
++    }
++
++    .sidebar-resize-handle:hover .sidebar-hide-button,
++    .sidebar-resize-handle:focus-within .sidebar-hide-button,
++    .sidebar-hide-button:focus-visible {
++        transform: translate(-50%, -50%) scale(1);
++        opacity: 1;
++        pointer-events: auto;
++    }
++}
++
++/* Hybrid devices may keep a fine primary pointer while also exposing touch. */
++@media (any-pointer: coarse) {
++    .sidebar-hide-button {
++        transform: translate(-50%, -50%) scale(1);
++        opacity: 1;
++        pointer-events: auto;
++    }
++}
++
++.sidebar-resize-handle[data-dragging] .sidebar-hide-button {
++    transform: translate(-50%, -50%) scale(0.85);
++    opacity: 0;
++    pointer-events: none;
++}
++
++.sidebar-hide-button:hover,
++.sidebar-show-button:hover {
++    color: var(--app-hint);
++}
++
++.sidebar-hide-button:focus-visible,
++.sidebar-show-button:focus-visible {
++    color: var(--app-link);
++    outline: 2px solid var(--app-link);
++    outline-offset: 2px;
++}
++
++.sidebar-show-button {
++    position: absolute;
++    top: 50%;
++    left: 0;
++    z-index: 20;
++    width: 36px;
++    height: 48px;
++    cursor: pointer;
++    align-items: center;
++    justify-content: flex-start;
++    padding: 0;
++    transform: translateY(-50%);
++    border: 0;
++    background: transparent;
++    color: var(--app-hint);
++    transition: color 0.15s;
++}
++
+ /*
+  * Keep message layout fully realized while scrolling. `content-visibility: auto`
+  * made Chromium replace rough intrinsic heights as older messages entered view,
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 675418c2d..943c934c9 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -229,6 +229,8 @@ export default {
+   'session.title': 'Files',
+   'session.view.returnToChat': 'Return to conversation',
+   'session.more': 'More actions',
++  'session.sidebar.hide': 'Hide session list',
++  'session.sidebar.show': 'Show session list',
+   'session.outline.open': 'Conversation outline',
+   'session.outline.close': 'Close outline',
+   'session.outline.title': 'Outline',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 85c579932..fcbc0f889 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -229,6 +229,8 @@ export default {
+   'session.title': '文件',
+   'session.view.returnToChat': '返回会话',
+   'session.more': '更多操作',
++  'session.sidebar.hide': '隐藏会话列表',
++  'session.sidebar.show': '显示会话列表',
+   'session.outline.open': '会话大纲',
+   'session.outline.close': '关闭大纲',
+   'session.outline.title': '大纲',
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 626df045d..fb0ad9afc 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -21,6 +21,7 @@ import {
+ import { App } from '@/App'
+ import { SessionChat } from '@/components/SessionChat'
+ import { SessionList } from '@/components/SessionList'
++import { SidebarResizeHandle, SidebarShowButton } from '@/components/SidebarToggle'
+ import { NewSession } from '@/components/NewSession'
+ import { WorkspaceBrowser } from '@/components/WorkspaceBrowser'
+ import { LoadingState } from '@/components/LoadingState'
+@@ -216,6 +217,15 @@ function SessionsPage() {
+         markSessionSeen(selectedSessionId, selectedSession.updatedAt)
+     }, [selectedSessionId, selectedSession?.updatedAt])
+     const isSessionsIndex = pathname === '/sessions' || pathname === '/sessions/'
++    const [isSidebarVisible, setIsSidebarVisible] = useState(true)
++    const showSidebar = useCallback(() => setIsSidebarVisible(true), [])
++    const hideSidebar = useCallback(() => setIsSidebarVisible(false), [])
++    useEffect(() => {
++        if (isSessionsIndex) {
++            showSidebar()
++        }
++    }, [isSessionsIndex, showSidebar])
++    const shouldShowSidebar = isSessionsIndex || isSidebarVisible
+     const sidebar = useSidebarResize()
+     const handleNewSessionInDirectory = useCallback((args: { machineId: string | null; directory: string }) => {
+         navigate({
+@@ -231,7 +241,7 @@ function SessionsPage() {
+         <>
+             <div className="flex h-full min-h-0">
+             <div
+-                className={`${isSessionsIndex ? 'flex' : 'hidden split:flex'} w-full shrink-0 flex-col bg-[var(--app-bg)]`}
++                className={`${shouldShowSidebar ? (isSessionsIndex ? 'flex' : 'hidden split:flex') : 'hidden'} w-full shrink-0 flex-col bg-[var(--app-bg)]`}
+                 style={{ '--sidebar-w': `${sidebar.width}px` } as React.CSSProperties}
+             >
+                 <div className="flex min-h-0 flex-1 flex-col pt-[env(safe-area-inset-top)]">
+@@ -295,14 +305,23 @@ function SessionsPage() {
+                 </div>
+             </div>
+ 
+-            {/* Resize handle - desktop only */}
+-            <div
+-                className="sidebar-resize-handle hidden split:block shrink-0"
+-                data-dragging={sidebar.isDragging || undefined}
+-                onPointerDown={sidebar.onPointerDown}
+-            />
++            {shouldShowSidebar ? (
++                <SidebarResizeHandle
++                    canHide={!isSessionsIndex}
++                    hideLabel={t('session.sidebar.hide')}
++                    isDragging={sidebar.isDragging}
++                    onHide={hideSidebar}
++                    onPointerDown={sidebar.onPointerDown}
++                />
++            ) : null}
+ 
+-            <div className={`${isSessionsIndex ? 'hidden split:flex' : 'flex'} min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
++            <div className={`${isSessionsIndex ? 'hidden split:flex' : 'flex'} relative min-w-0 flex-1 flex-col bg-[var(--app-bg)]`}>
++                {!shouldShowSidebar ? (
++                    <SidebarShowButton
++                        showLabel={t('session.sidebar.show')}
++                        onShow={showSidebar}
++                    />
++                ) : null}
+                 <div className="flex-1 min-h-0">
+                     <Outlet />
+                 </div>
+-- 
+2.43.0
+

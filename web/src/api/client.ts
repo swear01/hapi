@@ -10,6 +10,9 @@ import type {
     CodexArchiveSessionResponse,
     DecryptedMessage,
     CodexCollaborationMode,
+    ClaudeImportSessionsRequest,
+    ClaudeImportSessionsResponse,
+    ClaudeLocalSessionsResponse,
     CopilotAgentMode,
     FileSearchResponse,
     MachinesResponse,
@@ -17,9 +20,14 @@ import type {
     PermissionMode,
     PiImportSessionsResponse,
     PiLocalSessionsResponse,
+    NotificationCopyConfig,
+    NotificationCopyResponse,
+    NotificationPreferences,
+    NotificationPreferencesUpdate,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
     PushVapidPublicKeyResponse,
+    TestPushResponse,
     SlashCommandsResponse,
     SkillsResponse,
     SpawnResponse,
@@ -49,18 +57,28 @@ import type {
     MachinePathsExistsResponse,
     OpencodeModelsResponse,
     OpencodeReasoningEffortResponse,
+    SessionReasoningEffortResponse,
     PiModelsResponse,
     QueuedStateResponse,
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
+    VacuumStorageResponse,
     HubSettingsResponse,
     UpdateHubSettingsRequest,
+    NamespaceSettingsResponse,
+    UpdateNamespaceSettingsRequest,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+import type { FleetUpgradePolicy, HubUpgradeOffer } from '@hapi/protocol/upgradeChannel'
+
+export type UpgradeInfoResponse = {
+    offer: HubUpgradeOffer
+    policy: FleetUpgradePolicy
+}
 
 export type RetryIndeterminateMessageResponse =
     | { status: 'retried' | 'already-queued' | 'retry-unavailable'; localId: string | null }
@@ -272,6 +290,37 @@ export class ApiClient {
         })
     }
 
+    async getNotificationPreferences(): Promise<NotificationPreferences> {
+        return await this.request<NotificationPreferences>('/api/notification-preferences')
+    }
+
+    async updateNotificationPreferences(
+        update: NotificationPreferencesUpdate
+    ): Promise<NotificationPreferences> {
+        return await this.request<NotificationPreferences>('/api/notification-preferences', {
+            method: 'PUT',
+            body: JSON.stringify(update)
+        })
+    }
+
+    async sendTestPush(): Promise<TestPushResponse> {
+        return await this.request<TestPushResponse>('/api/push/test', {
+            method: 'POST',
+            body: JSON.stringify({})
+        })
+    }
+
+    async getNotificationCopy(): Promise<NotificationCopyResponse> {
+        return await this.request<NotificationCopyResponse>('/api/notification-copy')
+    }
+
+    async updateNotificationCopy(copy: NotificationCopyConfig): Promise<NotificationCopyResponse> {
+        return await this.request<NotificationCopyResponse>('/api/notification-copy', {
+            method: 'PUT',
+            body: JSON.stringify(copy)
+        })
+    }
+
     async syncCodexSession(payload?: CodexDesktopSyncRequest): Promise<CodexDesktopScriptResponse> {
         // 中文注释：当前按钮语义已改为“从 Codex 导入到 Hapi”；这里提交的是本地 transcript 对应的 Codex thread ID 列表。
         return await this.request<CodexDesktopScriptResponse>('/api/codex/sync-session', {
@@ -294,6 +343,21 @@ export class ApiClient {
         if (machineId?.trim()) params.set('machineId', machineId.trim())
         const query = params.size ? `?${params.toString()}` : ''
         return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
+    }
+
+    async getClaudeSessions(cwd?: string | null, machineId?: string | null): Promise<ClaudeLocalSessionsResponse> {
+        const params = new URLSearchParams()
+        if (cwd?.trim()) params.set('cwd', cwd.trim())
+        if (machineId?.trim()) params.set('machineId', machineId.trim())
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.request<ClaudeLocalSessionsResponse>(`/api/claude/sessions${query}`)
+    }
+
+    async importClaudeSessions(payload: ClaudeImportSessionsRequest): Promise<ClaudeImportSessionsResponse> {
+        return await this.request<ClaudeImportSessionsResponse>('/api/claude/import-sessions', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })
     }
 
     async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
@@ -428,7 +492,7 @@ export class ApiClient {
         return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-diff-file?${params.toString()}`)
     }
 
-    async searchSessionFiles(sessionId: string, query: string, limit?: number): Promise<FileSearchResponse> {
+    async searchSessionFiles(sessionId: string, query: string, limit?: number, signal?: AbortSignal): Promise<FileSearchResponse> {
         const params = new URLSearchParams()
         if (query) {
             params.set('query', query)
@@ -437,7 +501,10 @@ export class ApiClient {
             params.set('limit', `${limit}`)
         }
         const qs = params.toString()
-        return await this.request<FileSearchResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`)
+        return await this.request<FileSearchResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`,
+            { signal }
+        )
     }
 
     async getGeneratedImageBlob(sessionId: string, imageId: string, attempt: number = 0, overrideToken?: string | null): Promise<Blob> {
@@ -558,6 +625,14 @@ export class ApiClient {
         return response as CancelMessageResponse
     }
 
+    async steerQueuedMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
+        const response = await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
+            { method: 'POST', body: JSON.stringify({}) }
+        )
+        return response as SteerQueuedMessageResponse
+    }
+
     async steerMessage(sessionId: string, messageId: string): Promise<SteerQueuedMessageResponse> {
         const response = await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/steer`,
@@ -604,6 +679,13 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
             method: 'POST',
             body: JSON.stringify({})
+        })
+    }
+
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-error/acknowledge`, {
+            method: 'POST',
+            body: JSON.stringify({ eventId })
         })
     }
 
@@ -759,12 +841,29 @@ export class ApiClient {
         return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
     }
 
+    async vacuumStorage(): Promise<VacuumStorageResponse> {
+        return await this.request<VacuumStorageResponse>('/api/storage/vacuum', {
+            method: 'POST',
+        })
+    }
+
     async getHubSettings(): Promise<HubSettingsResponse> {
         return await this.request<HubSettingsResponse>('/api/hub-settings')
     }
 
     async updateHubSettings(settings: UpdateHubSettingsRequest): Promise<HubSettingsResponse> {
         return await this.request<HubSettingsResponse>('/api/hub-settings', {
+            method: 'PUT',
+            body: JSON.stringify(settings)
+        })
+    }
+
+    async getNamespaceSettings(): Promise<NamespaceSettingsResponse> {
+        return await this.request<NamespaceSettingsResponse>('/api/namespace-settings')
+    }
+
+    async updateNamespaceSettings(settings: UpdateNamespaceSettingsRequest): Promise<NamespaceSettingsResponse> {
+        return await this.request<NamespaceSettingsResponse>('/api/namespace-settings', {
             method: 'PUT',
             body: JSON.stringify(settings)
         })
@@ -785,6 +884,24 @@ export class ApiClient {
         return await this.request<{ message: string }>(
             `/api/machines/${encodeURIComponent(machineId)}/restart-runner`,
             { method: 'POST', body: '{}' }
+        )
+    }
+
+    async upgradeMachineRunner(machineId: string): Promise<{ message: string; response?: unknown }> {
+        return await this.request<{ message: string; response?: unknown }>(
+            `/api/machines/${encodeURIComponent(machineId)}/upgrade-runner`,
+            { method: 'POST', body: '{}' }
+        )
+    }
+
+    async getUpgradeInfo(): Promise<UpgradeInfoResponse> {
+        return await this.request<UpgradeInfoResponse>('/api/upgrade/offer')
+    }
+
+    async setFleetUpgradePolicy(policy: FleetUpgradePolicy): Promise<{ policy: FleetUpgradePolicy }> {
+        return await this.request<{ policy: FleetUpgradePolicy }>(
+            '/api/upgrade/policy',
+            { method: 'PUT', body: JSON.stringify({ policy }) }
         )
     }
 
@@ -831,6 +948,7 @@ export class ApiClient {
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
         effort?: string,
+        resumeSessionId?: string,
         permissionMode?: PermissionMode,
         serviceTier?: 'fast' | 'standard',
         collaborationMode?: CodexCollaborationMode,
@@ -848,6 +966,7 @@ export class ApiClient {
                 sessionType,
                 worktreeName,
                 effort,
+                resumeSessionId,
                 permissionMode,
                 serviceTier,
                 collaborationMode,
@@ -890,6 +1009,12 @@ export class ApiClient {
     async getSessionOpencodeReasoningEffortOptions(sessionId: string): Promise<OpencodeReasoningEffortResponse> {
         return await this.request<OpencodeReasoningEffortResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/opencode-reasoning-effort-options`
+        )
+    }
+
+    async getSessionReasoningEffortOptions(sessionId: string): Promise<SessionReasoningEffortResponse> {
+        return await this.request<SessionReasoningEffortResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/reasoning-effort-options`
         )
     }
 
@@ -982,10 +1107,10 @@ export class ApiClient {
         )
     }
 
-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
+    async updateSessionSummary(sessionId: string, text: string, clearName = false): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/summary`, {
             method: 'PATCH',
-            body: JSON.stringify({ text })
+            body: JSON.stringify({ text, ...(clearName ? { clearName: true } : {}) })
         })
     }
 
@@ -996,9 +1121,19 @@ export class ApiClient {
         })
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    async deleteSession(sessionId: string, options?: { requireArchived?: boolean }): Promise<void> {
+        const params = new URLSearchParams()
+        if (options?.requireArchived) params.set('requireArchived', '1')
+        const suffix = params.size > 0 ? `?${params}` : ''
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, {
             method: 'DELETE'
+        })
+    }
+
+    async deleteArchivedSessions(options: { sessionIds: string[]; requireAllArchived: true }): Promise<void> {
+        await this.request('/api/sessions/delete-archived', {
+            method: 'POST',
+            body: JSON.stringify(options)
         })
     }
 

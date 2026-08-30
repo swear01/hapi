@@ -191,6 +191,15 @@ On first run, HAPI:
 | `SERVERCHAN_SENDKEY` | - | `serverChanSendKey` | Server酱 (ServerChan) SendKey for push notifications |
 | `SERVERCHAN_NOTIFICATION` | `true` | `serverChanNotification` | Enable ServerChan notifications |
 | `SERVERCHAN_BACKGROUND_ONLY` | `false` | `serverChanBackgroundOnly` | Only send ServerChan notifications when no visible HAPI connection exists in the namespace |
+| `WXPUSHER_APP_TOKEN` | - | `wxPusherAppToken` | WxPusher application token for App/client notifications |
+| `WXPUSHER_UIDS` | - | `wxPusherUids` | Comma-separated WxPusher recipient UIDs |
+| `WXPUSHER_TOPIC_IDS` | - | `wxPusherTopicIds` | Comma-separated WxPusher topic IDs |
+| `WXPUSHER_NOTIFICATION` | `true` | `wxPusherNotification` | Enable WxPusher notifications |
+| `WXPUSHER_BACKGROUND_ONLY` | `false` | `wxPusherBackgroundOnly` | Only send WxPusher notifications when no visible HAPI connection exists in the namespace |
+| `HAPI_WEBHOOK_URL` | - | `webhookUrl` | HTTP(S) URL of a relay that accepts HAPI notification JSON (not a drop-in for Bark/PushPlus) |
+| `HAPI_WEBHOOK_KEY` | - | `webhookKey` | Optional shared key sent as a `key` query param and `X-HAPI-Webhook-Key` header on every webhook request |
+| `HAPI_WEBHOOK_NOTIFICATION` | `true` | `webhookNotification` | Enable webhook notifications |
+| `HAPI_WEBHOOK_BACKGROUND_ONLY` | `false` | `webhookBackgroundOnly` | Only send webhook notifications when no visible HAPI connection exists in the namespace |
 | `HAPI_RELAY_API` | `relay.hapi.run` | - | Relay API domain for the public relay |
 | `HAPI_RELAY_AUTH` | Per-hub key issued by the relay | `relayAuthKey` | Relay auth key override (set only when an operator provides a key) |
 | `HAPI_RELAY_FORCE_TCP` | `false` | - | Force TCP mode for relay |
@@ -207,25 +216,33 @@ On first run, HAPI:
 | `TRANSCRIPTION_BASE_URL` | - | Settings / env | OpenAI-compatible/local transcription base URL |
 | `TRANSCRIPTION_MODEL` | - | Settings / env | Model for the OpenAI-compatible transcription endpoint |
 | `TRANSCRIPTION_API_KEY` | - | Settings / env | Optional bearer token for that endpoint |
-| `HAPI_TITLE_PROVIDER_BASE_URL` | - | - | Server-only OpenAI-compatible Chat Completions base URL for generated session titles |
-| `HAPI_TITLE_PROVIDER_API_KEY` | - | - | Server-only API key for generated session titles; never sent to the browser |
-| `HAPI_TITLE_PROVIDER_MODEL` | - | - | Server-only lightweight model used for generated session titles |
+| `HAPI_TITLE_PROVIDER_BASE_URL` | - | `titleProvider.baseUrl` | Server-only OpenAI-compatible Chat Completions base URL for generated session titles |
+| `HAPI_TITLE_PROVIDER_API_KEY` | - | `titleProvider.apiKey` | Server-only API key for generated session titles; never sent to the browser |
+| `HAPI_TITLE_PROVIDER_MODEL` | - | `titleProvider.model` | Server-only lightweight model used for generated session titles |
+| `HAPI_TITLE_PROVIDER_TIMEOUT_MS` | `10000` | `titleProvider.timeoutMs` | Provider request timeout in milliseconds |
 | `HAPI_TITLE_SUGGESTION_RATE_LIMIT` | `5` | - | Maximum title suggestions per session in the rate-limit window |
 | `HAPI_TITLE_SUGGESTION_RATE_WINDOW_MS` | `600000` | - | Title suggestion rate-limit window in milliseconds |
 </details>
 
-The session rename dialog's **Generate** action is unavailable until all three
-`HAPI_TITLE_PROVIDER_*` variables are configured on the Hub. The provider is
-called only on demand; the existing manual rename flow does not require these
-variables. Each request sends recent visible user/assistant conversation text
-(up to 200 stored messages and a bounded prompt) to that configured provider.
+The session rename dialog always shows **Generate** when a Hub connection is
+available, so the feature remains discoverable. If the provider is not
+configured, clicking **Generate** shows the configuration instructions and the
+existing manual rename flow remains available. The provider is called only on
+demand; each request sends recent visible user/assistant conversation text (up
+to 200 stored messages and a bounded prompt) to that configured provider.
 
 <details>
 <summary>settings.json example</summary>
 
 Configuration priority: **ENV > settings.json > default**
 
-When ENV values are set and not present in settings.json, they are automatically saved.
+For supported general settings, environment values that are not already present
+in `settings.json` are automatically saved.
+For title generation, each `HAPI_TITLE_PROVIDER_*` environment variable
+overrides its corresponding `titleProvider.*` field. Environment-only title
+provider values are not automatically saved to `settings.json`, so API keys
+are not persisted unexpectedly. Changes to title provider settings take effect
+after restarting the Hub.
 `HAPI_EXTRA_HEADERS_JSON` is not automatically saved, so access credentials are not persisted unexpectedly.
 
 ```json
@@ -234,6 +251,12 @@ When ENV values are set and not present in settings.json, they are automatically
   "listenHost": "0.0.0.0",
   "listenPort": 3006,
   "publicUrl": "https://your-domain.com",
+  "titleProvider": {
+    "baseUrl": "https://api.example.com/v1",
+    "apiKey": "your-api-key",
+    "model": "your-lightweight-model",
+    "timeoutMs": 10000
+  },
   "extraHeaders": {
     "Cookie": "CF_Authorization=..."
   }
@@ -347,7 +370,9 @@ For running the hub and runner as persistent background services (pm2, launchd, 
 
 ### Multi-machine hubs
 
-You can run **one hub** and **runners on many machines** (each machine installs its own CLI). When you upgrade the hub, upgrade the HAPI CLI on every machine that parents sessions. After the CLI binary on disk changes, that machine’s runner normally **self-restarts** via version handoff (unless `HAPI_DISABLE_VERSION_HANDOFF=1`). Until a runner reports the capabilities the hub requires, the web UI shows a **Runner out of date** banner (minimizable / snoozeable) with the host name and upgrade steps. The banner’s per-host **Restart** is only an escape hatch when handoff is stuck or disabled — the hub never downloads or installs packages on remotes.
+You can run **one hub** and **runners on many machines** (each machine installs its own CLI). When you upgrade the hub, connected runners that are missing required capabilities are offered a **fleet upgrade**: the hub detects whether it is a published install (`npm`) or a source/soup tree (`hub-artifact`), then asks each skewed runner to install the matching CLI and restart. The web UI shows a dismissible **Runner out of date** banner with per-host **Upgrade**. Set `HAPI_UPGRADE_CHANNEL=off` to disable. Soft-fail reopen remains the safety net while upgrades are in flight.
+
+**First rollout caveat:** a machine that looks online can still have an empty live RPC registry after a hub restart. Upgrade/spawn then fail with `RPC handler not registered` until that runner reconnects cleanly (or the current CLI re-registers on keepalive). See [Deployment → Fleet upgrade after a hub update](./deployment.md#fleet-upgrade-after-a-hub-update) for the checklist.
 
 ## Security notes
 

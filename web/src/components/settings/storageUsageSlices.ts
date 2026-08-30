@@ -1,7 +1,8 @@
-export type StorageUsageSliceKey = 'database' | 'wal' | 'shm'
+export type StorageUsageSliceKey = 'used' | 'freelist' | 'wal' | 'shm'
 
 export type StorageUsageBytes = {
-    databaseBytes: number
+    usedBytes: number
+    freelistBytes: number
     walBytes: number
     shmBytes: number
 }
@@ -14,13 +15,14 @@ export type StorageUsageSlice = {
     endAngle: number
 }
 
-const SLICE_ORDER: StorageUsageSliceKey[] = ['database', 'wal', 'shm']
+const SLICE_ORDER: StorageUsageSliceKey[] = ['used', 'freelist', 'wal', 'shm']
 const FULL_CIRCLE = 360
 /** Start at 12 o'clock so the first slice reads top-heavy on mobile. */
 const START_ANGLE = -90
 
 function bytesForKey(usage: StorageUsageBytes, key: StorageUsageSliceKey): number {
-    if (key === 'database') return usage.databaseBytes
+    if (key === 'used') return usage.usedBytes
+    if (key === 'freelist') return usage.freelistBytes
     if (key === 'wal') return usage.walBytes
     return usage.shmBytes
 }

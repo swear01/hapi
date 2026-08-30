@@ -1,0 +1,1152 @@
+From a8be177e9cbb5373c869b067982f7a6206ebcdd1 Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Thu, 27 Aug 2026 21:56:03 +0800
+Subject: [PATCH 1/2] fix(web): debounce and cancel stale file searches
+
+---
+ cli/src/api/apiMachine.ts                     |   6 +-
+ cli/src/api/apiSession.ts                     |   6 +-
+ cli/src/api/rpc/RpcHandlerManager.test.ts     |  68 ++++++++++
+ cli/src/api/rpc/RpcHandlerManager.ts          |  36 +++++-
+ cli/src/api/rpc/types.ts                      |   4 +-
+ cli/src/modules/common/handlers/ripgrep.ts    |   4 +-
+ cli/src/modules/ripgrep/index.test.ts         |   8 ++
+ cli/src/modules/ripgrep/index.ts              |  37 +++++-
+ cli/src/runner/README.md                      |   1 +
+ hub/README.md                                 |   3 +-
+ hub/src/sync/rpcGateway.test.ts               |  50 ++++++++
+ hub/src/sync/rpcGateway.ts                    |  63 +++++++--
+ hub/src/sync/syncEngine.ts                    |   8 +-
+ hub/src/web/routes/git.test.ts                |  37 ++++++
+ hub/src/web/routes/git.ts                     |   5 +-
+ shared/src/socket.ts                          |   3 +-
+ web/src/api/client.test.ts                    |  16 +++
+ web/src/api/client.ts                         |   7 +-
+ .../queries/useSessionFileSearch.test.tsx     | 121 ++++++++++++++++++
+ web/src/hooks/queries/useSessionFileSearch.ts |  27 +++-
+ 20 files changed, 479 insertions(+), 31 deletions(-)
+ create mode 100644 cli/src/api/rpc/RpcHandlerManager.test.ts
+ create mode 100644 web/src/hooks/queries/useSessionFileSearch.test.tsx
+
+diff --git a/cli/src/api/apiMachine.ts b/cli/src/api/apiMachine.ts
+index d2cc18ae3..2f4bfb344 100644
+--- a/cli/src/api/apiMachine.ts
++++ b/cli/src/api/apiMachine.ts
+@@ -652,10 +652,14 @@ export class ApiMachineClient {
+             this.stopKeepAlive()
+         })
+ 
+-        this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
++        this.socket.on('rpc-request', async (data: { method: string; params: string; requestId?: string }, callback: (response: string) => void) => {
+             callback(await this.rpcHandlerManager.handleRequest(data))
+         })
+ 
++        this.socket.on('rpc-cancel', ({ requestId }) => {
++            this.rpcHandlerManager.cancelRequest(requestId)
++        })
++
+         this.socket.on('update', (data: Update) => {
+             if (data.body.t !== 'update-machine') {
+                 return
+diff --git a/cli/src/api/apiSession.ts b/cli/src/api/apiSession.ts
+index 877b92125..29c006898 100644
+--- a/cli/src/api/apiSession.ts
++++ b/cli/src/api/apiSession.ts
+@@ -283,10 +283,14 @@ export class ApiSessionClient extends EventEmitter {
+             })
+         })
+ 
+-        this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
++        this.socket.on('rpc-request', async (data: { method: string; params: string; requestId?: string }, callback: (response: string) => void) => {
+             callback(await this.rpcHandlerManager.handleRequest(data))
+         })
+ 
++        this.socket.on('rpc-cancel', ({ requestId }) => {
++            this.rpcHandlerManager.cancelRequest(requestId)
++        })
++
+         this.socket.on('disconnect', (reason) => {
+             logger.debug('[API] Socket disconnected:', reason)
+             this.rpcHandlerManager.onSocketDisconnect()
+diff --git a/cli/src/api/rpc/RpcHandlerManager.test.ts b/cli/src/api/rpc/RpcHandlerManager.test.ts
+new file mode 100644
+index 000000000..45629c89e
+--- /dev/null
++++ b/cli/src/api/rpc/RpcHandlerManager.test.ts
+@@ -0,0 +1,68 @@
++import { describe, expect, it } from 'vitest'
++import { RpcHandlerManager } from './RpcHandlerManager'
++
++describe('RpcHandlerManager cancellation', () => {
++    it('aborts an in-flight request by request id', async () => {
++        const manager = new RpcHandlerManager({ scopePrefix: 'session-1' })
++        manager.registerHandler('long-operation', async (_data, signal) => {
++            return await new Promise<{ cancelled: boolean }>((resolve) => {
++                signal?.addEventListener('abort', () => resolve({ cancelled: true }), { once: true })
++            })
++        })
++
++        const request = manager.handleRequest({
++            method: 'session-1:long-operation',
++            params: '{}',
++            requestId: 'request-1',
++        })
++
++        expect(manager.cancelRequest('request-1')).toBe(true)
++        await expect(request).resolves.toBe(JSON.stringify({ cancelled: true }))
++        expect(manager.cancelRequest('request-1')).toBe(false)
++    })
++
++    it('aborts active requests when the socket disconnects', async () => {
++        const manager = new RpcHandlerManager({ scopePrefix: 'session-1' })
++        manager.registerHandler('long-operation', async (_data, signal) => {
++            return await new Promise<{ cancelled: boolean }>((resolve) => {
++                signal?.addEventListener('abort', () => resolve({ cancelled: true }), { once: true })
++            })
++        })
++
++        const request = manager.handleRequest({
++            method: 'session-1:long-operation',
++            params: '{}',
++            requestId: 'request-2',
++        })
++
++        manager.onSocketDisconnect()
++        await expect(request).resolves.toBe(JSON.stringify({ cancelled: true }))
++    })
++
++    it('does not log expected abort errors', async () => {
++        const logs: unknown[] = []
++        const manager = new RpcHandlerManager({
++            scopePrefix: 'session-1',
++            logger: (...args) => logs.push(args),
++        })
++        manager.registerHandler('long-operation', async (_data, signal) => {
++            return await new Promise<never>((_resolve, reject) => {
++                signal?.addEventListener('abort', () => {
++                    const error = new Error('Request aborted')
++                    error.name = 'AbortError'
++                    reject(error)
++                }, { once: true })
++            })
++        })
++
++        const request = manager.handleRequest({
++            method: 'session-1:long-operation',
++            params: '{}',
++            requestId: 'request-3',
++        })
++
++        expect(manager.cancelRequest('request-3')).toBe(true)
++        await expect(request).resolves.toBe(JSON.stringify({ error: 'Request aborted' }))
++        expect(logs).toEqual([])
++    })
++})
+diff --git a/cli/src/api/rpc/RpcHandlerManager.ts b/cli/src/api/rpc/RpcHandlerManager.ts
+index 28ac12bb9..47f513f93 100644
+--- a/cli/src/api/rpc/RpcHandlerManager.ts
++++ b/cli/src/api/rpc/RpcHandlerManager.ts
+@@ -15,11 +15,16 @@ function safeJsonParse(value: string): unknown {
+     }
+ }
+ 
++function isAbortError(error: unknown): boolean {
++    return Boolean(error && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError')
++}
++
+ export class RpcHandlerManager {
+     private handlers: RpcHandlerMap = new Map()
+     private readonly scopePrefix: string
+     private readonly logger: (message: string, data?: any) => void
+     private socket: Socket | null = null
++    private readonly inFlightRequests = new Map<string, AbortController>()
+ 
+     constructor(config: RpcHandlerConfig) {
+         this.scopePrefix = config.scopePrefix
+@@ -40,6 +45,13 @@ export class RpcHandlerManager {
+     }
+ 
+     async handleRequest(request: RpcRequest): Promise<string> {
++        const requestId = request.requestId
++        const abortController = requestId ? new AbortController() : null
++        if (requestId && abortController) {
++            this.inFlightRequests.get(requestId)?.abort()
++            this.inFlightRequests.set(requestId, abortController)
++        }
++
+         try {
+             const handler = this.handlers.get(request.method)
+             if (!handler) {
+@@ -48,9 +60,13 @@ export class RpcHandlerManager {
+             }
+ 
+             const params = safeJsonParse(request.params)
+-            const result = await handler(params as any)
++            const result = await handler(params as any, abortController?.signal)
+             return JSON.stringify(result)
+         } catch (error) {
++            if (isAbortError(error)) {
++                return JSON.stringify({ error: 'Request aborted' })
++            }
++
+             const details = error instanceof Error
+                 ? { message: error.message, stack: error.stack }
+                 : { error: String(error) }
+@@ -58,7 +74,21 @@ export class RpcHandlerManager {
+             return JSON.stringify({
+                 error: error instanceof Error ? error.message : 'Unknown error'
+             })
++        } finally {
++            if (requestId && abortController && this.inFlightRequests.get(requestId) === abortController) {
++                this.inFlightRequests.delete(requestId)
++            }
++        }
++    }
++
++    cancelRequest(requestId: string): boolean {
++        const controller = this.inFlightRequests.get(requestId)
++        if (!controller) {
++            return false
+         }
++
++        controller.abort()
++        return true
+     }
+ 
+     onSocketConnect(socket: Socket): void {
+@@ -84,6 +114,10 @@ export class RpcHandlerManager {
+ 
+     onSocketDisconnect(): void {
+         this.socket = null
++        for (const controller of this.inFlightRequests.values()) {
++            controller.abort()
++        }
++        this.inFlightRequests.clear()
+     }
+ 
+     getHandlerCount(): number {
+diff --git a/cli/src/api/rpc/types.ts b/cli/src/api/rpc/types.ts
+index 3e266b9e5..926640af3 100644
+--- a/cli/src/api/rpc/types.ts
++++ b/cli/src/api/rpc/types.ts
+@@ -8,7 +8,8 @@
+  * @template TResponse - The response data type
+  */
+ export type RpcHandler<TRequest = any, TResponse = any> = (
+-    data: TRequest
++    data: TRequest,
++    signal?: AbortSignal
+ ) => TResponse | Promise<TResponse>;
+ 
+ /**
+@@ -22,6 +23,7 @@ export type RpcHandlerMap = Map<string, RpcHandler>;
+ export interface RpcRequest {
+     method: string;
+     params: string; // JSON string
++    requestId?: string;
+ }
+ 
+ /**
+diff --git a/cli/src/modules/common/handlers/ripgrep.ts b/cli/src/modules/common/handlers/ripgrep.ts
+index 397739ac1..46ceacb31 100644
+--- a/cli/src/modules/common/handlers/ripgrep.ts
++++ b/cli/src/modules/common/handlers/ripgrep.ts
+@@ -20,7 +20,7 @@ interface RipgrepResponse {
+ }
+ 
+ export function registerRipgrepHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string): void {
+-    rpcHandlerManager.registerHandler<RipgrepRequest, RipgrepResponse>(RPC_METHODS.Ripgrep, async (data) => {
++    rpcHandlerManager.registerHandler<RipgrepRequest, RipgrepResponse>(RPC_METHODS.Ripgrep, async (data, signal) => {
+         logger.debug('Ripgrep request with args:', data.args, 'cwd:', data.cwd)
+ 
+         if (data.cwd) {
+@@ -32,7 +32,7 @@ export function registerRipgrepHandlers(rpcHandlerManager: RpcHandlerManager, wo
+ 
+         try {
+             const result = data.fileSearch
+-                ? await runFileSearch(data.args, { ...data.fileSearch, cwd: data.cwd })
++                ? await runFileSearch(data.args, { ...data.fileSearch, cwd: data.cwd }, signal)
+                 : await runRipgrep(data.args, { cwd: data.cwd })
+             return {
+                 success: true,
+diff --git a/cli/src/modules/ripgrep/index.test.ts b/cli/src/modules/ripgrep/index.test.ts
+index c7cd3cff8..56bffe5af 100644
+--- a/cli/src/modules/ripgrep/index.test.ts
++++ b/cli/src/modules/ripgrep/index.test.ts
+@@ -60,4 +60,12 @@ describe('ripgrep low-level wrapper', () => {
+         expect(paths).toHaveLength(1)
+         expect(matchesFileSearchPath(paths[0], query)).toBe(true)
+     })
++
++    it('should reject before spawning when file search is already aborted', async () => {
++        const controller = new AbortController()
++        controller.abort()
++
++        await expect(runFileSearch(['--files'], { query: 'src', limit: 1 }, controller.signal))
++            .rejects.toMatchObject({ name: 'AbortError' })
++    })
+ })
+diff --git a/cli/src/modules/ripgrep/index.ts b/cli/src/modules/ripgrep/index.ts
+index 23433d65c..fb4f6582a 100644
+--- a/cli/src/modules/ripgrep/index.ts
++++ b/cli/src/modules/ripgrep/index.ts
+@@ -26,6 +26,12 @@ export interface FileSearchOptions {
+     limit: number
+ }
+ 
++function createAbortError(): Error {
++    const error = new Error('Request aborted')
++    error.name = 'AbortError'
++    return error
++}
++
+ function getBinaryPath(): string {
+     const platformName = platform();
+     const binaryName = platformName === 'win32' ? 'rg.exe' : 'rg';
+@@ -84,8 +90,12 @@ export function selectFileSearchPaths(paths: Iterable<string>, query: string, li
+     return matches
+ }
+ 
+-export function runFileSearch(args: string[], options: FileSearchOptions): Promise<RipgrepResult> {
++export function runFileSearch(args: string[], options: FileSearchOptions, signal?: AbortSignal): Promise<RipgrepResult> {
+     const binaryPath = getBinaryPath();
++    if (signal?.aborted) {
++        return Promise.reject(createAbortError())
++    }
++
+     const limit = Math.max(1, options.limit)
+     return new Promise((resolve, reject) => {
+         const child = spawn(binaryPath, args, {
+@@ -99,6 +109,21 @@ export function runFileSearch(args: string[], options: FileSearchOptions): Promi
+         const matchedPaths: string[] = [];
+         let stderr = '';
+         let settled = false;
++        let aborted = false;
++
++        const abortHandler = () => {
++            aborted = true
++            if (child.exitCode === null && !child.killed) {
++                child.kill()
++            }
++        }
++
++        const cleanupSignal = () => {
++            signal?.removeEventListener('abort', abortHandler)
++        }
++
++        signal?.addEventListener('abort', abortHandler, { once: true })
++        if (signal?.aborted) abortHandler()
+ 
+         child.stderr.on('data', (data) => {
+             stderr += data.toString();
+@@ -118,6 +143,11 @@ export function runFileSearch(args: string[], options: FileSearchOptions): Promi
+             if (settled) return;
+             settled = true;
+             lines.close();
++            cleanupSignal()
++            if (aborted) {
++                reject(createAbortError())
++                return
++            }
+             resolve({
+                 exitCode: code || 0,
+                 stdout: matchedPaths.length > 0 ? `${matchedPaths.join('\n')}\n` : '',
+@@ -129,6 +159,11 @@ export function runFileSearch(args: string[], options: FileSearchOptions): Promi
+             if (settled) return;
+             settled = true;
+             lines.close();
++            cleanupSignal()
++            if (aborted) {
++                reject(createAbortError())
++                return
++            }
+             reject(err);
+         });
+     });
+diff --git a/cli/src/runner/README.md b/cli/src/runner/README.md
+index 186fc32bb..2b4f75ef9 100644
+--- a/cli/src/runner/README.md
++++ b/cli/src/runner/README.md
+@@ -258,6 +258,7 @@ Graceful runner shutdown.
+   - `spawn-happy-session` - spawn new session
+   - `stop-session` - stop session by ID
+   - `stop-runner` - request shutdown
++- `rpc-cancel` - cancel an in-flight `rpc-request` by request ID
+ 
+ All data is plain JSON over TLS; authentication is `CLI_API_TOKEN` (no end-to-end encryption).
+ 
+diff --git a/hub/README.md b/hub/README.md
+index 9e84bb696..a87b19edc 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -198,7 +198,8 @@ Namespace: `/cli`
+ ### Hub events (hub to clients)
+ 
+ - `update` - Broadcast session/message updates.
+-- `rpc-request` - Incoming RPC call.
++- `rpc-request` - Incoming RPC call; cancellable requests carry a `requestId`.
++- `rpc-cancel` - Cancel an in-flight RPC by `requestId`.
+ 
+ See `src/socket/rpcRegistry.ts` for RPC routing.
+ 
+diff --git a/hub/src/sync/rpcGateway.test.ts b/hub/src/sync/rpcGateway.test.ts
+index 4f72d5994..a5ac2ecec 100644
+--- a/hub/src/sync/rpcGateway.test.ts
++++ b/hub/src/sync/rpcGateway.test.ts
+@@ -158,3 +158,53 @@ describe('RpcGateway no-target diagnostics (tiann/hapi#916)', () => {
+         expect((error as RpcTargetMissingError).code).toBe('socket-disconnected')
+     })
+ })
++
++describe('RpcGateway cancellation', () => {
++    it('sends a cancel event and rejects the aborted RPC', async () => {
++        const emitted: Array<{ event: string; data: unknown }> = []
++        let resolveAck!: (value: string) => void
++        const socket = {
++            emit(event: string, data: unknown) {
++                emitted.push({ event, data })
++            },
++            timeout() {
++                return {
++                    emitWithAck: () => new Promise<string>((resolve) => {
++                        resolveAck = resolve
++                    })
++                }
++            }
++        }
++        const io = {
++            of() {
++                return { sockets: { get: () => socket } }
++            }
++        } as unknown as Server
++        const rpcRegistry = {
++            getSocketIdForMethod() { return 'socket-1' }
++        } as unknown as RpcRegistry
++        const gateway = new RpcGateway(io, rpcRegistry)
++        const controller = new AbortController()
++
++        const pending = gateway.runRipgrep(
++            'session-1',
++            ['--files'],
++            '/workspace',
++            { query: 'src', limit: 200 },
++            controller.signal,
++        )
++        controller.abort()
++
++        await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
++        expect(emitted).toHaveLength(1)
++        expect(emitted[0]).toMatchObject({
++            event: 'rpc-cancel',
++            data: { requestId: expect.any(String) },
++        })
++
++        // Let the underlying ack promise settle too; the caller has already
++        // observed the abort, but the socket operation remains in flight until
++        // the CLI finishes handling the cancellation.
++        resolveAck(JSON.stringify({ success: true }))
++    })
++})
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index fc7b2a393..64122bc1f 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -1,3 +1,4 @@
++import { randomUUID } from 'node:crypto'
+ import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, PermissionMode } from '@hapi/protocol/types'
+ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+ import {
+@@ -354,8 +355,8 @@ export class RpcGateway {
+         return await this.sessionRpc(sessionId, RPC_METHODS.ListDirectory, { path }) as RpcListDirectoryResponse
+     }
+ 
+-    async statFiles(sessionId: string, paths: string[]): Promise<RpcStatFilesResponse> {
+-        return await this.sessionRpc(sessionId, RPC_METHODS.StatFiles, { paths }) as RpcStatFilesResponse
++    async statFiles(sessionId: string, paths: string[], signal?: AbortSignal): Promise<RpcStatFilesResponse> {
++        return await this.sessionRpc(sessionId, RPC_METHODS.StatFiles, { paths }, DEFAULT_RPC_TIMEOUT_MS, signal) as RpcStatFilesResponse
+     }
+ 
+     async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<RpcUploadFileResponse> {
+@@ -366,8 +367,8 @@ export class RpcGateway {
+         return await this.sessionRpc(sessionId, RPC_METHODS.DeleteUpload, { sessionId, path }) as RpcDeleteUploadResponse
+     }
+ 
+-    async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions): Promise<RpcCommandResponse> {
+-        return await this.sessionRpc(sessionId, RPC_METHODS.Ripgrep, { args, cwd, fileSearch }) as RpcCommandResponse
++    async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions, signal?: AbortSignal): Promise<RpcCommandResponse> {
++        return await this.sessionRpc(sessionId, RPC_METHODS.Ripgrep, { args, cwd, fileSearch }, DEFAULT_RPC_TIMEOUT_MS, signal) as RpcCommandResponse
+     }
+ 
+     async listSlashCommands(sessionId: string, agent: string): Promise<SlashCommandsResponse> {
+@@ -545,9 +546,10 @@ export class RpcGateway {
+         sessionId: string,
+         method: string,
+         params: unknown,
+-        timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
++        timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS,
++        signal?: AbortSignal
+     ): Promise<unknown> {
+-        return await this.rpcCall(`${sessionId}:${method}`, params, timeoutMs)
++        return await this.rpcCall(`${sessionId}:${method}`, params, timeoutMs, signal)
+     }
+ 
+     private async machineRpc(
+@@ -559,7 +561,7 @@ export class RpcGateway {
+         return await this.rpcCall(`${machineId}:${method}`, params, timeoutMs)
+     }
+ 
+-    private async rpcCall(method: string, params: unknown, timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS): Promise<unknown> {
++    private async rpcCall(method: string, params: unknown, timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS, signal?: AbortSignal): Promise<unknown> {
+         const socketId = this.rpcRegistry.getSocketIdForMethod(method)
+         if (!socketId) {
+             throw new RpcTargetMissingError(method, 'handler-not-registered')
+@@ -570,10 +572,45 @@ export class RpcGateway {
+             throw new RpcTargetMissingError(method, 'socket-disconnected')
+         }
+ 
+-        const response = await socket.timeout(timeoutMs).emitWithAck('rpc-request', {
++        if (signal?.aborted) {
++            throw createAbortError()
++        }
++
++        const requestId = signal ? randomUUID() : undefined
++        const responsePromise = socket.timeout(timeoutMs).emitWithAck('rpc-request', {
+             method,
+-            params: JSON.stringify(params)
+-        }) as unknown
++            params: JSON.stringify(params),
++            ...(requestId ? { requestId } : {})
++        }) as Promise<unknown>
++
++        const response = requestId && signal
++            ? await new Promise<unknown>((resolve, reject) => {
++                let settled = false
++                const cleanup = () => signal.removeEventListener('abort', onAbort)
++                const onAbort = () => {
++                    if (settled) return
++                    settled = true
++                    socket.emit('rpc-cancel', { requestId })
++                    cleanup()
++                    reject(createAbortError())
++                }
++
++                signal.addEventListener('abort', onAbort, { once: true })
++                responsePromise.then((value) => {
++                    if (settled) return
++                    settled = true
++                    cleanup()
++                    resolve(value)
++                }, (error: unknown) => {
++                    if (settled) return
++                    settled = true
++                    cleanup()
++                    reject(error)
++                })
++
++                if (signal.aborted) onAbort()
++            })
++            : await responsePromise
+ 
+         if (typeof response !== 'string') {
+             return response
+@@ -586,3 +623,9 @@ export class RpcGateway {
+         }
+     }
+ }
++
++function createAbortError(): Error {
++    const error = new Error('Request aborted')
++    error.name = 'AbortError'
++    return error
++}
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index a2d796494..ebce70266 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -4368,8 +4368,8 @@ export class SyncEngine {
+         return await this.rpcGateway.listDirectory(sessionId, path)
+     }
+ 
+-    async statFiles(sessionId: string, paths: string[]): Promise<RpcStatFilesResponse> {
+-        return await this.rpcGateway.statFiles(sessionId, paths)
++    async statFiles(sessionId: string, paths: string[], signal?: AbortSignal): Promise<RpcStatFilesResponse> {
++        return await this.rpcGateway.statFiles(sessionId, paths, signal)
+     }
+ 
+     async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<RpcUploadFileResponse> {
+@@ -4380,8 +4380,8 @@ export class SyncEngine {
+         return await this.rpcGateway.deleteUploadFile(sessionId, path)
+     }
+ 
+-    async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions): Promise<RpcCommandResponse> {
+-        return await this.rpcGateway.runRipgrep(sessionId, args, cwd, fileSearch)
++    async runRipgrep(sessionId: string, args: string[], cwd?: string, fileSearch?: FileSearchOptions, signal?: AbortSignal): Promise<RpcCommandResponse> {
++        return await this.rpcGateway.runRipgrep(sessionId, args, cwd, fileSearch, signal)
+     }
+ 
+     async listSlashCommands(sessionId: string, agent: string): Promise<SlashCommandsResponse> {
+diff --git a/hub/src/web/routes/git.test.ts b/hub/src/web/routes/git.test.ts
+index a368c3ad4..5172e6a23 100644
+--- a/hub/src/web/routes/git.test.ts
++++ b/hub/src/web/routes/git.test.ts
+@@ -114,6 +114,43 @@ describe('file search route', () => {
+         expect(fileSearchQuery).toBe('src/nested/file.ts')
+     })
+ 
++    it('forwards the request signal to search and metadata RPCs', async () => {
++        const session = {
++            id: 'session-1',
++            namespace: 'default',
++            active: true,
++            metadata: { path: '/project' }
++        } as unknown as Session
++        const signals: Array<AbortSignal | undefined> = []
++        const engine = {
++            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
++            runRipgrep: async (
++                _sessionId: string,
++                _args: string[],
++                _cwd: string,
++                _fileSearch: { query: string; limit: number },
++                signal?: AbortSignal,
++            ) => {
++                signals.push(signal)
++                return { success: true, stdout: 'README.md\n' }
++            },
++            statFiles: async (_sessionId: string, paths: string[], signal?: AbortSignal) => {
++                signals.push(signal)
++                return {
++                    success: true,
++                    entries: paths.map((path) => ({ path, size: 1, modified: 1 }))
++                }
++            }
++        } as unknown as Partial<SyncEngine>
++
++        const response = await buildApp(engine).request('/api/sessions/session-1/files?query=README')
++
++        expect(response.status).toBe(200)
++        expect(signals).toHaveLength(2)
++        expect(signals[0]).toBeInstanceOf(AbortSignal)
++        expect(signals[1]).toBe(signals[0])
++    })
++
+     it('preserves backslashes in POSIX search queries', async () => {
+         const session = {
+             id: 'session-1',
+diff --git a/hub/src/web/routes/git.ts b/hub/src/web/routes/git.ts
+index 24dde9c5e..83c95c6ee 100644
+--- a/hub/src/web/routes/git.ts
++++ b/hub/src/web/routes/git.ts
+@@ -244,7 +244,8 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
+             sessionResult.sessionId,
+             args,
+             sessionPath,
+-            { query: normalizedQuery, limit }
++            { query: normalizedQuery, limit },
++            c.req.raw.signal
+         ))
+         if (!result.success) {
+             return c.json({ success: false, error: result.error ?? 'Failed to list files' })
+@@ -262,7 +263,7 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
+             .filter((path) => !normalizedQuery || matchesSearchQuery(path, normalizedQuery))
+             .slice(0, limit)
+ 
+-        const metadataResult = await runRpc(() => engine.statFiles(sessionResult.sessionId, paths))
++        const metadataResult = await runRpc(() => engine.statFiles(sessionResult.sessionId, paths, c.req.raw.signal))
+         const metadataByPath = new Map(
+             metadataResult.success
+                 ? (metadataResult.entries ?? []).map((entry) => [entry.path, entry] as const)
+diff --git a/shared/src/socket.ts b/shared/src/socket.ts
+index 538b23e4d..60b59fe07 100644
+--- a/shared/src/socket.ts
++++ b/shared/src/socket.ts
+@@ -235,7 +235,8 @@ export type MachineUpdateStateAck = {
+ 
+ export interface ServerToClientEvents {
+     update: (data: Update, ack?: (response: CancelQueuedMessageAck & { accepted?: boolean }) => void) => void
+-    'rpc-request': (data: { method: string; params: string }, callback: (response: string) => void) => void
++    'rpc-request': (data: { method: string; params: string; requestId?: string }, callback: (response: string) => void) => void
++    'rpc-cancel': (data: { requestId: string }) => void
+     'terminal:open': (data: TerminalOpenPayload) => void
+     'terminal:write': (data: TerminalWritePayload) => void
+     'terminal:resize': (data: TerminalResizePayload) => void
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index a7574cc24..1cb90a3bf 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -134,6 +134,22 @@ describe('ApiClient error mapping', () => {
+         expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%20cursor/cursor-chat-store')
+     })
+ 
++    it('forwards an abort signal to session file search', async () => {
++        fetchMock.mockResolvedValueOnce(
++            new Response(JSON.stringify({ success: true, files: [] }), { status: 200 })
++        )
++
++        const controller = new AbortController()
++        const api = new ApiClient('test-token')
++        await expect(api.searchSessionFiles('session-1', 'src', 50, controller.signal)).resolves.toEqual({
++            success: true,
++            files: [],
++        })
++
++        const [, init] = fetchMock.mock.calls[0] ?? []
++        expect(init?.signal).toBe(controller.signal)
++    })
++
+     it('generates a title and saves the summary through separate session endpoints', async () => {
+         fetchMock
+             .mockResolvedValueOnce(new Response(JSON.stringify({ title: 'Generated title' }), { status: 200 }))
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 9cd45e8ba..4eae3e22c 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -492,7 +492,7 @@ export class ApiClient {
+         return await this.request<GitCommandResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/git-diff-file?${params.toString()}`)
+     }
+ 
+-    async searchSessionFiles(sessionId: string, query: string, limit?: number): Promise<FileSearchResponse> {
++    async searchSessionFiles(sessionId: string, query: string, limit?: number, signal?: AbortSignal): Promise<FileSearchResponse> {
+         const params = new URLSearchParams()
+         if (query) {
+             params.set('query', query)
+@@ -501,7 +501,10 @@ export class ApiClient {
+             params.set('limit', `${limit}`)
+         }
+         const qs = params.toString()
+-        return await this.request<FileSearchResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`)
++        return await this.request<FileSearchResponse>(
++            `/api/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ''}`,
++            { signal }
++        )
+     }
+ 
+     async getGeneratedImageBlob(sessionId: string, imageId: string, attempt: number = 0, overrideToken?: string | null): Promise<Blob> {
+diff --git a/web/src/hooks/queries/useSessionFileSearch.test.tsx b/web/src/hooks/queries/useSessionFileSearch.test.tsx
+new file mode 100644
+index 000000000..6061bac64
+--- /dev/null
++++ b/web/src/hooks/queries/useSessionFileSearch.test.tsx
+@@ -0,0 +1,121 @@
++import { act, renderHook } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import type { ReactNode } from 'react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { ApiClient } from '@/api/client'
++import type { FileSearchResponse } from '@/types/api'
++import {
++    SESSION_FILE_SEARCH_DEBOUNCE_MS,
++    useSessionFileSearch,
++} from './useSessionFileSearch'
++
++type PendingRequest = {
++    query: string
++    signal: AbortSignal | undefined
++    resolve: (response: FileSearchResponse) => void
++}
++
++function createWrapper(queryClient: QueryClient) {
++    return function Wrapper({ children }: { children: ReactNode }) {
++        return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
++    }
++}
++
++describe('useSessionFileSearch', () => {
++    beforeEach(() => {
++        vi.useFakeTimers()
++    })
++
++    afterEach(() => {
++        vi.useRealTimers()
++    })
++
++    it('debounces changed queries and aborts the previous request', async () => {
++        const pending: PendingRequest[] = []
++        const api = {
++            searchSessionFiles: vi.fn((_sessionId: string, query: string, _limit?: number, signal?: AbortSignal) => (
++                new Promise<FileSearchResponse>((resolve) => {
++                    pending.push({ query, signal, resolve })
++                })
++            ))
++        } as unknown as ApiClient
++        const queryClient = new QueryClient({
++            defaultOptions: { queries: { retry: false } },
++        })
++        const rendered = renderHook(
++            ({ query }) => useSessionFileSearch(api, 'session-1', query, { enabled: true }),
++            {
++                initialProps: { query: 'src' },
++                wrapper: createWrapper(queryClient),
++            },
++        )
++
++        await act(async () => {
++            await Promise.resolve()
++        })
++        expect(pending.map((request) => request.query)).toEqual(['src'])
++
++        await act(async () => {
++            rendered.rerender({ query: 'src/components' })
++            await Promise.resolve()
++        })
++        expect(pending[0]?.signal?.aborted).toBe(true)
++        expect(pending).toHaveLength(1)
++        expect(rendered.result.current.isLoading).toBe(true)
++
++        await act(async () => {
++            vi.advanceTimersByTime(SESSION_FILE_SEARCH_DEBOUNCE_MS - 1)
++            await Promise.resolve()
++        })
++        expect(pending).toHaveLength(1)
++
++        await act(async () => {
++            vi.advanceTimersByTime(1)
++            await Promise.resolve()
++            await Promise.resolve()
++        })
++        expect(pending.map((request) => request.query)).toEqual(['src', 'src/components'])
++        expect(pending[1]?.signal?.aborted).toBe(false)
++
++        pending[0]?.resolve({ success: true, files: [] })
++        pending[1]?.resolve({ success: true, files: [] })
++        await act(async () => {
++            await Promise.resolve()
++        })
++        rendered.unmount()
++    })
++
++    it('aborts an in-flight request immediately when search is cleared', async () => {
++        const pending: PendingRequest[] = []
++        const api = {
++            searchSessionFiles: vi.fn((_sessionId: string, query: string, _limit?: number, signal?: AbortSignal) => (
++                new Promise<FileSearchResponse>((resolve) => {
++                    pending.push({ query, signal, resolve })
++                })
++            ))
++        } as unknown as ApiClient
++        const queryClient = new QueryClient({
++            defaultOptions: { queries: { retry: false } },
++        })
++        const rendered = renderHook(
++            ({ query }) => useSessionFileSearch(api, 'session-1', query, { enabled: Boolean(query) }),
++            {
++                initialProps: { query: 'src' },
++                wrapper: createWrapper(queryClient),
++            },
++        )
++
++        await act(async () => {
++            await Promise.resolve()
++            rendered.rerender({ query: '' })
++            await Promise.resolve()
++        })
++
++        expect(pending).toHaveLength(1)
++        expect(pending[0]?.signal?.aborted).toBe(true)
++        expect(rendered.result.current.isLoading).toBe(false)
++
++        pending[0]?.resolve({ success: true, files: [] })
++        rendered.unmount()
++    })
++})
+diff --git a/web/src/hooks/queries/useSessionFileSearch.ts b/web/src/hooks/queries/useSessionFileSearch.ts
+index 3809fbbe6..bd4c929ec 100644
+--- a/web/src/hooks/queries/useSessionFileSearch.ts
++++ b/web/src/hooks/queries/useSessionFileSearch.ts
+@@ -1,8 +1,23 @@
++import { useEffect, useState } from 'react'
+ import { useQuery } from '@tanstack/react-query'
+ import type { ApiClient } from '@/api/client'
+ import type { FileSearchItem } from '@/types/api'
+ import { queryKeys } from '@/lib/query-keys'
+ 
++export const SESSION_FILE_SEARCH_DEBOUNCE_MS = 300
++
++function useDebouncedValue(value: string, delayMs: number): string {
++    const [debouncedValue, setDebouncedValue] = useState(value)
++
++    useEffect(() => {
++        if (value === debouncedValue) return
++        const timer = window.setTimeout(() => setDebouncedValue(value), delayMs)
++        return () => window.clearTimeout(timer)
++    }, [debouncedValue, delayMs, value])
++
++    return debouncedValue
++}
++
+ export function useSessionFileSearch(
+     api: ApiClient | null,
+     sessionId: string | null,
+@@ -17,20 +32,24 @@ export function useSessionFileSearch(
+     const resolvedSessionId = sessionId ?? 'unknown'
+     const limit = options?.limit ?? 200
+     const enabled = options?.enabled ?? Boolean(api && sessionId)
++    const debouncedQuery = useDebouncedValue(query, SESSION_FILE_SEARCH_DEBOUNCE_MS)
++    const querySettled = query === debouncedQuery
+ 
+     const result = useQuery({
++        // Keep the raw query in the key so React Query aborts the previous
++        // request immediately; gate the new key until the 300ms debounce ends.
+         queryKey: queryKeys.sessionFiles(resolvedSessionId, query),
+-        queryFn: async () => {
++        queryFn: async ({ signal }) => {
+             if (!api || !sessionId) {
+                 throw new Error('Session unavailable')
+             }
+-            const response = await api.searchSessionFiles(sessionId, query, limit)
++            const response = await api.searchSessionFiles(sessionId, query, limit, signal)
+             if (!response.success) {
+                 return { files: [], error: response.error ?? 'Failed to search files' }
+             }
+             return { files: response.files ?? [], error: null }
+         },
+-        enabled,
++        enabled: enabled && querySettled,
+     })
+ 
+     const queryError = result.error instanceof Error
+@@ -42,7 +61,7 @@ export function useSessionFileSearch(
+     return {
+         files: result.data?.files ?? [],
+         error: queryError ?? result.data?.error ?? null,
+-        isLoading: result.isLoading,
++        isLoading: result.isLoading || (enabled && !querySettled),
+         refetch: result.refetch
+     }
+ }
+-- 
+2.43.0
+
+
+From 7b1ec83e58c12a2bae942c1da80a2c6bc57b203c Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Thu, 27 Aug 2026 23:31:14 +0800
+Subject: [PATCH 2/2] fix(cli): complete file search cancellation
+
+---
+ .../common/handlers/directories.test.ts       | 54 ++++++++++++++++++-
+ .../modules/common/handlers/directories.ts    | 40 +++++++++-----
+ .../modules/common/handlers/ripgrep.test.ts   | 38 +++++++++++++
+ cli/src/modules/common/handlers/ripgrep.ts    |  7 +++
+ 4 files changed, 124 insertions(+), 15 deletions(-)
+ create mode 100644 cli/src/modules/common/handlers/ripgrep.test.ts
+
+diff --git a/cli/src/modules/common/handlers/directories.test.ts b/cli/src/modules/common/handlers/directories.test.ts
+index 0c50735da..093c40cd6 100644
+--- a/cli/src/modules/common/handlers/directories.test.ts
++++ b/cli/src/modules/common/handlers/directories.test.ts
+@@ -1,10 +1,17 @@
+-import { beforeEach, describe, expect, it } from 'vitest'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import { mkdir, rm, symlink, writeFile } from 'fs/promises'
+ import { join } from 'path'
+ import { tmpdir } from 'os'
+ import { RpcHandlerManager } from '../../../api/rpc/RpcHandlerManager'
+ import { registerDirectoryHandlers } from './directories'
+ 
++const { statMock } = vi.hoisted(() => ({ statMock: vi.fn() }))
++
++vi.mock('fs/promises', async () => {
++    const actual = await vi.importActual<typeof import('fs/promises')>('fs/promises')
++    return { ...actual, stat: statMock }
++})
++
+ async function createTempDir(prefix: string): Promise<string> {
+     const base = tmpdir()
+     const path = join(base, `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+@@ -17,6 +24,10 @@ describe('directory RPC handlers', () => {
+     let rpc: RpcHandlerManager
+ 
+     beforeEach(async () => {
++        const actual = await vi.importActual<typeof import('fs/promises')>('fs/promises')
++        statMock.mockReset()
++        statMock.mockImplementation(actual.stat)
++
+         if (rootDir) {
+             await rm(rootDir, { recursive: true, force: true })
+         }
+@@ -81,6 +92,47 @@ describe('directory RPC handlers', () => {
+         expect(parsed.entries?.[2]).toEqual({ path: 'missing.txt' })
+     })
+ 
++    it('stops starting later stat batches after cancellation', async () => {
++        const paths = Array.from({ length: 32 }, (_, index) => `file-${index}.txt`)
++        await Promise.all(paths.map((path) => writeFile(join(rootDir, path), path)))
++
++        let firstStatStarted!: () => void
++        const firstStat = new Promise<void>((resolve) => {
++            firstStatStarted = resolve
++        })
++        let releaseFirstStat!: () => void
++        const firstStatRelease = new Promise<void>((resolve) => {
++            releaseFirstStat = resolve
++        })
++        const originalStat = (await vi.importActual<typeof import('fs/promises')>('fs/promises')).stat
++        let statCallCount = 0
++        statMock.mockImplementation(async (path: Parameters<typeof originalStat>[0]) => {
++            statCallCount += 1
++            if (statCallCount === 1) {
++                firstStatStarted()
++                await firstStatRelease
++            }
++            return await originalStat(path)
++        })
++
++        try {
++            const request = rpc.handleRequest({
++                method: 'session-test:statFiles',
++                params: JSON.stringify({ paths }),
++                requestId: 'stat-files-cancel'
++            })
++
++            await firstStat
++            expect(rpc.cancelRequest('stat-files-cancel')).toBe(true)
++            releaseFirstStat()
++
++            await expect(request).resolves.toBe(JSON.stringify({ error: 'Request aborted' }))
++            expect(statCallCount).toBe(16)
++        } finally {
++            statMock.mockReset()
++        }
++    })
++
+     it('rejects stat paths outside the session working directory', async () => {
+         const response = await rpc.handleRequest({
+             method: 'session-test:statFiles',
+diff --git a/cli/src/modules/common/handlers/directories.ts b/cli/src/modules/common/handlers/directories.ts
+index 532ef1b29..85b72b5b6 100644
+--- a/cli/src/modules/common/handlers/directories.ts
++++ b/cli/src/modules/common/handlers/directories.ts
+@@ -20,6 +20,24 @@ interface StatFilesRequest {
+     paths: string[]
+ }
+ 
++const STAT_FILES_BATCH_SIZE = 16
++
++type StatFileEntry = NonNullable<StatFilesResponse['entries']>[number]
++
++async function statFile(path: string, workingDirectory: string): Promise<StatFileEntry> {
++    try {
++        const stats = await stat(resolve(workingDirectory, path))
++        return {
++            path,
++            size: stats.size,
++            modified: stats.mtime.getTime()
++        }
++    } catch (error) {
++        logger.debug(`Failed to stat ${path}:`, error)
++        return { path }
++    }
++}
++
+ interface TreeNode {
+     name: string
+     path: string
+@@ -97,7 +115,7 @@ export function registerDirectoryHandlers(rpcHandlerManager: RpcHandlerManager,
+         }
+     })
+ 
+-    rpcHandlerManager.registerHandler<StatFilesRequest, StatFilesResponse>(RPC_METHODS.StatFiles, async (data) => {
++    rpcHandlerManager.registerHandler<StatFilesRequest, StatFilesResponse>(RPC_METHODS.StatFiles, async (data, signal) => {
+         if (!Array.isArray(data.paths) || data.paths.length > 500) {
+             return rpcError('Invalid file paths')
+         }
+@@ -109,19 +127,13 @@ export function registerDirectoryHandlers(rpcHandlerManager: RpcHandlerManager,
+             }
+         }
+ 
+-        const entries = await Promise.all(data.paths.map(async (path) => {
+-            try {
+-                const stats = await stat(resolve(workingDirectory, path))
+-                return {
+-                    path,
+-                    size: stats.size,
+-                    modified: stats.mtime.getTime()
+-                }
+-            } catch (error) {
+-                logger.debug(`Failed to stat ${path}:`, error)
+-                return { path }
+-            }
+-        }))
++        const entries: StatFileEntry[] = []
++        for (let index = 0; index < data.paths.length; index += STAT_FILES_BATCH_SIZE) {
++            signal?.throwIfAborted()
++            const batch = data.paths.slice(index, index + STAT_FILES_BATCH_SIZE)
++            entries.push(...await Promise.all(batch.map((path) => statFile(path, workingDirectory))))
++        }
++        signal?.throwIfAborted()
+ 
+         return { success: true, entries }
+     })
+diff --git a/cli/src/modules/common/handlers/ripgrep.test.ts b/cli/src/modules/common/handlers/ripgrep.test.ts
+new file mode 100644
+index 000000000..3e43a3cbe
+--- /dev/null
++++ b/cli/src/modules/common/handlers/ripgrep.test.ts
+@@ -0,0 +1,38 @@
++import { describe, expect, it, vi } from 'vitest'
++import { RpcHandlerManager } from '../../../api/rpc/RpcHandlerManager'
++import { registerRipgrepHandlers } from './ripgrep'
++
++const { runFileSearchMock } = vi.hoisted(() => ({ runFileSearchMock: vi.fn() }))
++
++vi.mock('@/modules/ripgrep/index', () => ({
++    run: vi.fn(),
++    runFileSearch: runFileSearchMock
++}))
++
++describe('ripgrep RPC handlers', () => {
++    it('passes AbortError through without logging it as a ripgrep failure', async () => {
++        const logs: unknown[] = []
++        const manager = new RpcHandlerManager({
++            scopePrefix: 'session-test',
++            logger: (...args) => logs.push(args)
++        })
++        registerRipgrepHandlers(manager, '/workspace')
++
++        const abortError = new Error('Request aborted')
++        abortError.name = 'AbortError'
++        runFileSearchMock.mockRejectedValueOnce(abortError)
++
++        const response = await manager.handleRequest({
++            method: 'session-test:ripgrep',
++            params: JSON.stringify({
++                args: ['--files'],
++                cwd: '/workspace',
++                fileSearch: { query: 'src', limit: 1 }
++            }),
++            requestId: 'ripgrep-cancel'
++        })
++
++        expect(response).toBe(JSON.stringify({ error: 'Request aborted' }))
++        expect(logs).toEqual([])
++    })
++})
+diff --git a/cli/src/modules/common/handlers/ripgrep.ts b/cli/src/modules/common/handlers/ripgrep.ts
+index 46ceacb31..3260c7f03 100644
+--- a/cli/src/modules/common/handlers/ripgrep.ts
++++ b/cli/src/modules/common/handlers/ripgrep.ts
+@@ -19,6 +19,10 @@ interface RipgrepResponse {
+     error?: string
+ }
+ 
++function isAbortError(error: unknown): error is Error {
++    return error instanceof Error && error.name === 'AbortError'
++}
++
+ export function registerRipgrepHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string): void {
+     rpcHandlerManager.registerHandler<RipgrepRequest, RipgrepResponse>(RPC_METHODS.Ripgrep, async (data, signal) => {
+         logger.debug('Ripgrep request with args:', data.args, 'cwd:', data.cwd)
+@@ -41,6 +45,9 @@ export function registerRipgrepHandlers(rpcHandlerManager: RpcHandlerManager, wo
+                 stderr: result.stderr.toString()
+             }
+         } catch (error) {
++            if (isAbortError(error)) {
++                throw error
++            }
+             logger.debug('Failed to run ripgrep:', error)
+             return rpcError(getErrorMessage(error, 'Failed to run ripgrep'))
+         }
+-- 
+2.43.0
+

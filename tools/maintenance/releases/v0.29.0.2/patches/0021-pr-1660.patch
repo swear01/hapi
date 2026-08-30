@@ -1,0 +1,339 @@
+From 5d2f659cbc274738f074250c16460979946c973e Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:57:58 +0000
+Subject: [PATCH] carry: upstream PR #1660
+
+---
+ .../AssistantChat/HappyComposer.tsx           |  3 +-
+ .../AssistantChat/RichComposerInput.tsx       |  5 +--
+ web/src/hooks/queries/useSkills.ts            | 13 +++++---
+ web/src/lib/autocomplete.test.ts              | 26 ++++++++++++++++
+ web/src/lib/autocomplete.ts                   | 31 +++++++++++++++++++
+ web/src/lib/composerSegments.test.ts          |  9 ++++++
+ web/src/lib/composerSegments.ts               |  5 +--
+ web/src/router.tsx                            |  5 +--
+ web/src/utils/applySuggestion.test.ts         | 18 +++++++++++
+ web/src/utils/applySuggestion.ts              |  3 +-
+ web/src/utils/findActiveWord.test.ts          | 24 ++++++++++++++
+ 11 files changed, 129 insertions(+), 13 deletions(-)
+ create mode 100644 web/src/lib/autocomplete.test.ts
+ create mode 100644 web/src/lib/autocomplete.ts
+ create mode 100644 web/src/utils/applySuggestion.test.ts
+
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 28518e05d..37121b91d 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -36,6 +36,7 @@ import type { ConversationStatus } from '@/realtime/types'
+ import { useActiveWord } from '@/hooks/useActiveWord'
+ import { useActiveSuggestions } from '@/hooks/useActiveSuggestions'
+ import { applySuggestion } from '@/utils/applySuggestion'
++import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { usePWAInstall } from '@/hooks/usePWAInstall'
+ import { supportsEffort, supportsModelChange, PI_THINKING_LEVEL_LABELS } from '@hapi/protocol'
+@@ -465,7 +466,7 @@ export function HappyComposer(props: {
+         onSwitchToRemote,
+         onTerminal,
+         terminalUnsupported = false,
+-        autocompletePrefixes = ['@', '/', '$'],
++        autocompletePrefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES],
+         autocompleteSuggestions = defaultSuggestionHandler,
+         voiceStatus = 'disconnected',
+         voiceMicMuted = false,
+diff --git a/web/src/components/AssistantChat/RichComposerInput.tsx b/web/src/components/AssistantChat/RichComposerInput.tsx
+index 1382b67dd..e1bab2ec7 100644
+--- a/web/src/components/AssistantChat/RichComposerInput.tsx
++++ b/web/src/components/AssistantChat/RichComposerInput.tsx
+@@ -27,6 +27,7 @@ import {
+     type ComposerSegment,
+     type ComposerSelection,
+ } from '@/lib/composerSegments'
++import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
+ import {
+     formatSessionMentionTooltip,
+     type SessionMentionTooltipModel,
+@@ -790,7 +791,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+             })
+             return serialized
+         },
+-        insertSessionMention: (mention, prefixes = ['@', '/', '$']) => {
++        insertSessionMention: (mention, prefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES]) => {
+             const root = rootRef.current
+             if (!root) {
+                 return { text: value, selection: { start: value.length, end: value.length } }
+@@ -809,7 +810,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
+             })
+             return { text: serialized, selection: result.selection }
+         },
+-        applyPlainSuggestion: (suggestionText, prefixes = ['@', '/', '$']) => {
++        applyPlainSuggestion: (suggestionText, prefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES]) => {
+             const root = rootRef.current
+             if (!root) {
+                 return { text: value, selection: { start: value.length, end: value.length } }
+diff --git a/web/src/hooks/queries/useSkills.ts b/web/src/hooks/queries/useSkills.ts
+index 29d3ef1f6..d55f45de3 100644
+--- a/web/src/hooks/queries/useSkills.ts
++++ b/web/src/hooks/queries/useSkills.ts
+@@ -5,6 +5,7 @@ import type { SkillSummary } from '@/types/api'
+ import type { Suggestion } from '@/hooks/useActiveSuggestions'
+ import { queryKeys } from '@/lib/query-keys'
+ import { getRecentSkills } from '@/lib/recent-skills'
++import { normalizeSkillAutocompleteQuery } from '@/lib/autocomplete'
+ 
+ function levenshteinDistance(a: string, b: string): number {
+     if (a.length === 0) return b.length
+@@ -49,7 +50,8 @@ export function useSkills(
+         // Skills change only when the user edits files on the machine, so
+         // polling them on a timer just burns relay bandwidth on an answer
+         // that is almost always identical. getSuggestions() refetches when
+-        // the user actually types "$", which is the moment freshness matters.
++        // the user actually types a skill prefix, which is the moment
++        // freshness matters.
+         staleTime: 5 * 60_000,
+         refetchOnWindowFocus: true,
+         gcTime: 30 * 60 * 1000,
+@@ -64,17 +66,18 @@ export function useSkills(
+     }, [query.data])
+ 
+     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {
++        const normalizedQuery = normalizeSkillAutocompleteQuery(queryText)
+         // Fire-and-forget for the same reason as useSlashCommands: the RPC can
+         // stall behind a wedged CLI, and the menu must not block on it.
+-        if (queryText === '$') {
++        if (normalizedQuery === '$') {
+             void query.refetch()
+         }
+         const currentSkills = skills
+         const recent = getRecentSkills()
+         const getRecency = (name: string) => recent[name] ?? 0
+-        const searchTerm = queryText.startsWith('$')
+-            ? queryText.slice(1).toLowerCase()
+-            : queryText.toLowerCase()
++        const searchTerm = normalizedQuery.startsWith('$')
++            ? normalizedQuery.slice(1).toLowerCase()
++            : normalizedQuery.toLowerCase()
+ 
+         if (!searchTerm) {
+             return [...currentSkills]
+diff --git a/web/src/lib/autocomplete.test.ts b/web/src/lib/autocomplete.test.ts
+new file mode 100644
+index 000000000..a839de5a4
+--- /dev/null
++++ b/web/src/lib/autocomplete.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it } from 'vitest'
++import {
++    isSkillAutocompleteQuery,
++    normalizeSkillAutocompleteQuery,
++} from './autocomplete'
++
++describe('skill autocomplete aliases', () => {
++    it('recognizes dollar and yen prefixes', () => {
++        expect(isSkillAutocompleteQuery('$')).toBe(true)
++        expect(isSkillAutocompleteQuery('$browser')).toBe(true)
++        expect(isSkillAutocompleteQuery('￥')).toBe(true)
++        expect(isSkillAutocompleteQuery('￥browser')).toBe(true)
++        expect(isSkillAutocompleteQuery('\u00A5')).toBe(true)
++        expect(isSkillAutocompleteQuery('\u00A5browser')).toBe(true)
++        expect(isSkillAutocompleteQuery('/help')).toBe(false)
++    })
++
++    it('normalizes yen signs to the canonical dollar syntax', () => {
++        expect(normalizeSkillAutocompleteQuery('￥browser')).toBe('$browser')
++        expect(normalizeSkillAutocompleteQuery('￥')).toBe('$')
++        expect(normalizeSkillAutocompleteQuery('\u00A5browser')).toBe('$browser')
++        expect(normalizeSkillAutocompleteQuery('\u00A5')).toBe('$')
++        expect(normalizeSkillAutocompleteQuery('$browser')).toBe('$browser')
++        expect(normalizeSkillAutocompleteQuery('/help')).toBe('/help')
++    })
++})
+diff --git a/web/src/lib/autocomplete.ts b/web/src/lib/autocomplete.ts
+new file mode 100644
+index 000000000..387a65b99
+--- /dev/null
++++ b/web/src/lib/autocomplete.ts
+@@ -0,0 +1,31 @@
++/** Yen aliases emitted by Chinese IMEs in place of ASCII `$`. */
++export const FULL_WIDTH_YEN_SIGN = '\uFFE5'
++export const NARROW_YEN_SIGN = '\u00A5'
++
++export const DEFAULT_AUTOCOMPLETE_PREFIXES = [
++    '@',
++    '/',
++    '$',
++    FULL_WIDTH_YEN_SIGN,
++    NARROW_YEN_SIGN,
++] as const
++
++const SKILL_AUTOCOMPLETE_PREFIXES = [
++    '$',
++    FULL_WIDTH_YEN_SIGN,
++    NARROW_YEN_SIGN,
++] as const
++const YEN_SIGN_PREFIXES = [FULL_WIDTH_YEN_SIGN, NARROW_YEN_SIGN] as const
++
++export function isSkillAutocompleteQuery(query: string): boolean {
++    return SKILL_AUTOCOMPLETE_PREFIXES.some((prefix) => query.startsWith(prefix))
++}
++
++export function normalizeSkillAutocompleteQuery(query: string): string {
++    // Keep `$skill-name` as the only syntax passed to the existing skill provider.
++    const yenPrefix = YEN_SIGN_PREFIXES.find((prefix) => query.startsWith(prefix))
++    if (yenPrefix) {
++        return `$${query.slice(yenPrefix.length)}`
++    }
++    return query
++}
+diff --git a/web/src/lib/composerSegments.test.ts b/web/src/lib/composerSegments.test.ts
+index 3c6070fb0..5f6185c42 100644
+--- a/web/src/lib/composerSegments.test.ts
++++ b/web/src/lib/composerSegments.test.ts
+@@ -145,6 +145,15 @@ describe('insertSessionMentionInComposerSegments', () => {
+ })
+ 
+ describe('insertPlainTextInComposerSegments', () => {
++    it('replaces a full-width yen skill query with canonical dollar syntax', () => {
++        const result = insertPlainTextInComposerSegments(
++            [{ type: 'text', text: '￥b' }],
++            { start: 2, end: 2 },
++            '$browser'
++        )
++        expect(serializeComposerSegments(result.segments)).toBe('$browser ')
++    })
++
+     it('keeps existing session atoms when inserting a slash command', () => {
+         const segments = parseComposerSegments('ref [Peer A](/sessions/aaa) /hel')
+         const caret = mirrorComposerSegments(segments).length
+diff --git a/web/src/lib/composerSegments.ts b/web/src/lib/composerSegments.ts
+index ab11e74b1..3fc534bb1 100644
+--- a/web/src/lib/composerSegments.ts
++++ b/web/src/lib/composerSegments.ts
+@@ -1,6 +1,7 @@
+ import { buildSessionReferencePath, parseSessionPathHref } from '@/lib/sessionReference'
+ import { truncateGraphemes } from '@/lib/graphemes'
+ import { findActiveWord } from '@/utils/findActiveWord'
++import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
+ 
+ /** Object Replacement Character — one mirror slot per session atom. */
+ export const COMPOSER_MENTION_MIRROR_CHAR = '\uFFFC'
+@@ -167,7 +168,7 @@ export function insertSessionMentionInComposerSegments(
+     segments: readonly ComposerSegment[],
+     selection: ComposerSelection,
+     mention: { id: string; title: string },
+-    prefixes: string[] = ['@', '/', '$']
++    prefixes: string[] = [...DEFAULT_AUTOCOMPLETE_PREFIXES]
+ ): { segments: ComposerSegment[]; selection: ComposerSelection } {
+     const mirror = mirrorComposerSegments(segments)
+     const active = findActiveWord(mirror, selection, prefixes)
+@@ -226,7 +227,7 @@ export function insertPlainTextInComposerSegments(
+     segments: readonly ComposerSegment[],
+     selection: ComposerSelection,
+     text: string,
+-    prefixes: string[] = ['@', '/', '$'],
++    prefixes: string[] = [...DEFAULT_AUTOCOMPLETE_PREFIXES],
+     addSpace: boolean = true
+ ): { segments: ComposerSegment[]; selection: ComposerSelection } {
+     const mirror = mirrorComposerSegments(segments)
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index fb0ad9afc..5db4325c9 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -39,6 +39,7 @@ import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
+ import { useSkills } from '@/hooks/queries/useSkills'
+ import { getSessionTitle } from '@/lib/sessionTitle'
+ import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
++import { isSkillAutocompleteQuery, normalizeSkillAutocompleteQuery } from '@/lib/autocomplete'
+ import type { Suggestion } from '@/hooks/useActiveSuggestions'
+ import { useSendMessage, type SendErrorInfo } from '@/hooks/mutations/useSendMessage'
+ import type { ComposerSendError } from '@/components/AssistantChat/HappyComposer'
+@@ -761,8 +762,8 @@ function SessionPage() {
+ 
+             return [...sessionHits, ...fileHits]
+         }
+-        if (query.startsWith('$')) {
+-            return await getSkillSuggestions(query)
++        if (isSkillAutocompleteQuery(query)) {
++            return await getSkillSuggestions(normalizeSkillAutocompleteQuery(query))
+         }
+         return await getSlashSuggestions(query)
+     }, [
+diff --git a/web/src/utils/applySuggestion.test.ts b/web/src/utils/applySuggestion.test.ts
+new file mode 100644
+index 000000000..172e5f61f
+--- /dev/null
++++ b/web/src/utils/applySuggestion.test.ts
+@@ -0,0 +1,18 @@
++import { describe, expect, it } from 'vitest'
++import { applySuggestion } from './applySuggestion'
++
++describe('applySuggestion', () => {
++    it('replaces a full-width yen skill query with canonical dollar syntax', () => {
++        expect(applySuggestion('￥b', { start: 2, end: 2 }, '$browser')).toEqual({
++            text: '$browser ',
++            cursorPosition: 9,
++        })
++    })
++
++    it('replaces a narrow yen skill query with canonical dollar syntax', () => {
++        expect(applySuggestion('\u00A5b', { start: 2, end: 2 }, '$browser')).toEqual({
++            text: '$browser ',
++            cursorPosition: 9,
++        })
++    })
++})
+diff --git a/web/src/utils/applySuggestion.ts b/web/src/utils/applySuggestion.ts
+index 49f56c532..08dd60090 100644
+--- a/web/src/utils/applySuggestion.ts
++++ b/web/src/utils/applySuggestion.ts
+@@ -1,4 +1,5 @@
+ import { findActiveWord } from '@/utils/findActiveWord'
++import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
+ 
+ interface Selection {
+     start: number
+@@ -18,7 +19,7 @@ export function applySuggestion(
+     content: string,
+     selection: Selection,
+     suggestion: string,
+-    prefixes: string[] = ['@', '/'],
++    prefixes: string[] = [...DEFAULT_AUTOCOMPLETE_PREFIXES],
+     addSpace: boolean = true
+ ): { text: string; cursorPosition: number } {
+     // Find the active word at the current position
+diff --git a/web/src/utils/findActiveWord.test.ts b/web/src/utils/findActiveWord.test.ts
+index 6f174dd14..14854d008 100644
+--- a/web/src/utils/findActiveWord.test.ts
++++ b/web/src/utils/findActiveWord.test.ts
+@@ -27,4 +27,28 @@ describe('findActiveWord', () => {
+         expect(hit?.activeWord).toBe('@peer')
+         expect(hit?.offset).toBe(4)
+     })
++
++    it('recognizes the full-width yen sign at the same boundaries as $', () => {
++        const atStart = findActiveWord('￥browser', { start: 8, end: 8 }, ['@', '/', '$', '￥'])
++        expect(atStart?.activeWord).toBe('￥browser')
++        expect(atStart?.offset).toBe(0)
++
++        const afterSpace = findActiveWord('run ￥browser', { start: 12, end: 12 }, ['@', '/', '$', '￥'])
++        expect(afterSpace?.activeWord).toBe('￥browser')
++        expect(afterSpace?.offset).toBe(4)
++
++        expect(findActiveWord('run￥browser', { start: 11, end: 11 }, ['@', '/', '$', '￥'])).toBeUndefined()
++    })
++
++    it('recognizes the narrow yen sign at the same boundaries as $', () => {
++        const atStart = findActiveWord('\u00A5browser', { start: 8, end: 8 }, ['@', '/', '$', '￥', '\u00A5'])
++        expect(atStart?.activeWord).toBe('\u00A5browser')
++        expect(atStart?.offset).toBe(0)
++
++        const afterSpace = findActiveWord('run \u00A5browser', { start: 12, end: 12 }, ['@', '/', '$', '￥', '\u00A5'])
++        expect(afterSpace?.activeWord).toBe('\u00A5browser')
++        expect(afterSpace?.offset).toBe(4)
++
++        expect(findActiveWord('run\u00A5browser', { start: 11, end: 11 }, ['@', '/', '$', '￥', '\u00A5'])).toBeUndefined()
++    })
+ })
+-- 
+2.43.0
+

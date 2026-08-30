@@ -1,0 +1,1008 @@
+From ddf4d5dcbe526d4fea01838c45156eb57458b781 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 18:14:33 +0000
+Subject: [PATCH] carry: upstream PR #1679
+
+---
+ cli/src/claude/claudeRemote.ts                |  63 +++++-
+ cli/src/claude/claudeRemoteLauncher.ts        | 109 ++++++++++-
+ cli/src/claude/conversationHistory.test.ts    | 178 +++++++++++++++++
+ cli/src/claude/conversationHistory.ts         | 134 +++++++++++++
+ cli/src/claude/runClaude.ts                   | 179 +++++++++++++++++-
+ cli/src/claude/sdk/query.ts                   |   4 +
+ cli/src/claude/sdk/types.ts                   |   7 +
+ .../session.consumeOneTimeFlags.test.ts       |  12 ++
+ cli/src/claude/session.ts                     |  30 +++
+ shared/src/conversationHistory.test.ts        |   3 +-
+ shared/src/conversationHistory.ts             |   2 +-
+ 11 files changed, 713 insertions(+), 8 deletions(-)
+ create mode 100644 cli/src/claude/conversationHistory.test.ts
+ create mode 100644 cli/src/claude/conversationHistory.ts
+
+diff --git a/cli/src/claude/claudeRemote.ts b/cli/src/claude/claudeRemote.ts
+index e2494ccc9..6eed87c50 100644
+--- a/cli/src/claude/claudeRemote.ts
++++ b/cli/src/claude/claudeRemote.ts
+@@ -90,6 +90,28 @@ export async function claudeRemote(opts: {
+     }
+     const forkedFrom = forkSession ? startFrom : null;
+ 
++    // One-shot rewind flags (set by the RewindConversation handler) pass through
++    // claudeArgs; filterCatalogAffectingClaudeArgs strips them from additionalArgs,
++    // so they must be parsed here into first-class SDK options.
++    let resumeSessionAt: string | undefined;
++    const resumeDropsTurn: string[] = [];
++    if (opts.claudeArgs) {
++        for (let i = 0; i < opts.claudeArgs.length; i++) {
++            if (opts.claudeArgs[i] === '--resume-session-at' && i + 1 < opts.claudeArgs.length) {
++                resumeSessionAt = opts.claudeArgs[++i];
++            } else if (opts.claudeArgs[i] === '--resume-drops-turn' && i + 1 < opts.claudeArgs.length) {
++                resumeDropsTurn.push(opts.claudeArgs[++i]);
++            }
++        }
++    }
++    // A rewind restart must spawn Claude immediately (no user prompt yet):
++    // the native truncation only materializes once the new process starts with
++    // the resume flags, and the launcher waits for that before reporting
++    // success to the hub. Like --fork-session, start query() without waiting
++    // for an initial child prompt; stream-json input stays open for later turns.
++    let awaitingRewindInit = resumeSessionAt !== undefined;
++    const REWIND_READY_DELAY_MS = 4_000;
++
+     // Mode starts from the persisted session for fork bootstrap; updated when
+     // the first child prompt arrives. plan/auto must be present at process start.
+     const bootstrapMode: EnhancedMode = opts.bootstrapMode ?? { permissionMode: 'default' };
+@@ -163,6 +185,8 @@ export async function claudeRemote(opts: {
+         cwd: opts.path,
+         resume: startFrom ?? undefined,
+         forkSession,
++        resumeSessionAt,
++        resumeDropsTurn: resumeDropsTurn.length > 0 ? resumeDropsTurn : undefined,
+         mcpServers: opts.mcpServers,
+         permissionMode: bootstrapMode.permissionMode,
+         model: bootstrapMode.model,
+@@ -185,7 +209,7 @@ export async function claudeRemote(opts: {
+         additionalDirectories: [getHapiBlobsDir()],
+     }
+ 
+-    if (!awaitingForkInit) {
++    if (!awaitingForkInit && !awaitingRewindInit) {
+         const first = await applyInitialTurn();
+         if (!first) {
+             return;
+@@ -277,7 +301,27 @@ export async function claudeRemote(opts: {
+         })();
+     };
+ 
+-    updateThinking(true);
++    // A rewind respawn starts with no running turn: booting into "thinking"
++    // would leave the session permanently generating. Report idle once the
++    // process has survived long enough to prove the resume flags were accepted
++    // (a rejected resume exits almost immediately). The timer must not outlive
++    // this attempt — a rejected resume exits before it fires, and a stale
++    // callback would steal the queue waiter from the launcher's next attempt.
++    let rewindReadyTimer: ReturnType<typeof setTimeout> | null = null;
++    if (awaitingRewindInit) {
++        rewindReadyTimer = setTimeout(() => {
++            rewindReadyTimer = null;
++            awaitingRewindInit = false;
++            updateThinking(false);
++            void opts.onReady?.();
++            // No result message will ever arrive for the skipped initial turn,
++            // so the queue consumer must be started here or user messages
++            // sent after the rewind would never reach Claude.
++            scheduleNextMessage();
++        }, REWIND_READY_DELAY_MS);
++    } else {
++        updateThinking(true);
++    }
+     try {
+         logger.debug(`[claudeRemote] Starting to iterate over response`);
+ 
+@@ -340,6 +384,17 @@ export async function claudeRemote(opts: {
+                     }
+                     initial = first;
+                 }
++
++                // Rewind restart: no child prompt was fed, so nothing is running.
++                // Clear the boot-time thinking state and report ready — otherwise
++                // the session looks permanently "generating" until the next turn.
++                if (awaitingRewindInit) {
++                    awaitingRewindInit = false;
++                    updateThinking(false);
++                    if (opts.onReady) {
++                        await opts.onReady();
++                    }
++                }
+             }
+ 
+             // Capture the /compact outcome. Only a reported failure is recorded:
+@@ -417,6 +472,10 @@ export async function claudeRemote(opts: {
+             `${debugPrefix} finally ` +
+             `(streamMessages=${streamMessageSeq}, results=${resultSeq}, nextFetches=${nextMessageFetchSeq}, inputEnded=${inputEnded})`
+         );
++        if (rewindReadyTimer) {
++            clearTimeout(rewindReadyTimer);
++            rewindReadyTimer = null;
++        }
+         updateThinking(false);
+     }
+ }
+diff --git a/cli/src/claude/claudeRemoteLauncher.ts b/cli/src/claude/claudeRemoteLauncher.ts
+index 4a99e556b..7beb6471e 100644
+--- a/cli/src/claude/claudeRemoteLauncher.ts
++++ b/cli/src/claude/claudeRemoteLauncher.ts
+@@ -36,6 +36,12 @@ interface PermissionsField {
+ // is dropped, so a later unrelated failure gets its own fresh budget. Only
+ // the one message is given up on -- the session/process itself is not ended.
+ const MAX_IMMEDIATE_RESPAWN_FAILURES = 3;
++/**
++ * A rewind respawn emits no system/init until its first prompt, but a rejected
++ * resume exits within moments of spawn. If the new attempt survives this long,
++ * the resume flags were accepted and the truncation is treated as applied.
++ */
++const REWIND_CONFIRM_MS = 8_000;
+ 
+ function getRespawnBackoffMs(): number {
+     const raw = process.env.CLAUDE_REMOTE_RESPAWN_BACKOFF_MS;
+@@ -49,6 +55,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+     private readonly session: Session;
+     private abortController: AbortController | null = null;
+     private abortFuture: Future<void> | null = null;
++    private restartRequested = false;
+     private permissionHandler: PermissionHandler | null = null;
+     private handleSessionFound: ((sessionId: string) => void) | null = null;
+ 
+@@ -114,6 +121,17 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+         await this.handleSwitchRequest();
+     }
+ 
++    /**
++     * Abort the current SDK attempt (without an exit reason) so the main loop
++     * respawns Claude with fresh one-shot args. Used by rewind, which needs a
++     * process restart to apply --resume-session-at.
++     */
++    public async requestRestart(): Promise<void> {
++        logger.debug('[remote]: doRestart');
++        this.restartRequested = true;
++        await this.abort();
++    }
++
+     public async launch(): Promise<RemoteLauncherExitReason> {
+         return this.start({
+             onExit: () => this.handleExitFromUi(),
+@@ -128,6 +146,8 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+         const session = this.session;
+         const messageBuffer = this.messageBuffer;
+ 
++        session.requestRemoteRestart = () => this.requestRestart();
++
+         this.setupAbortHandlers(session.client.rpcHandlerManager, {
+             onAbort: () => this.handleAbortRequest(),
+             onSwitch: () => this.handleSwitchRequest()
+@@ -153,6 +173,13 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+ 
+         const handleSessionFound = (sessionId: string) => {
+             sdkToLogConverter.updateSessionId(sessionId);
++            // Rewind restart: system/init means the respawned process started
++            // with the resume flags accepted — the native truncation is real.
++            if (session.rewindAck) {
++                const ack = session.rewindAck;
++                session.rewindAck = null;
++                ack(true);
++            }
+         };
+         this.handleSessionFound = handleSessionFound;
+         session.addSessionFoundCallback(handleSessionFound);
+@@ -336,6 +363,21 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                 }
+ 
+                 previousSessionId = session.sessionId;
++                // A restart flag only concerns the attempt that was aborted; the
++                // fresh attempt must classify its own aborts normally.
++                this.restartRequested = false;
++                // Rewind confirmation: surviving this window means the resume
++                // flags were accepted (a rejected resume exits almost immediately).
++                let rewindConfirmTimer: ReturnType<typeof setTimeout> | null = null;
++                if (session.rewindAck) {
++                    rewindConfirmTimer = setTimeout(() => {
++                        if (session.rewindAck) {
++                            const ack = session.rewindAck;
++                            session.rewindAck = null;
++                            ack(true);
++                        }
++                    }, REWIND_CONFIRM_MS);
++                }
+                 const controller = new AbortController();
+                 this.abortController = controller;
+                 this.abortFuture = new Future<void>();
+@@ -513,7 +555,15 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                             // respawn-storm guard. The turn that led here is no
+                             // longer "in flight" either.
+                             reachedReadyThisAttempt = true;
++                            // The in-flight batch's native turn just completed:
++                            // record rewind locators only now, after the result,
++                            // so a retry after a crash never double-books them.
++                            const completedLocalIds = inFlightMessage?.items
++                                .flatMap((item) => item.localId ? [item.localId] : []) ?? [];
+                             inFlightMessage = null;
++                            if (completedLocalIds.length > 0) {
++                                session.onUserTurnCompleted?.(completedLocalIds);
++                            }
+ 
+                             await messageQueue.flush();
+ 
+@@ -536,8 +586,32 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                         signal: controller.signal,
+                     });
+ 
++                    // Attempt finished cleanly: the resume flags were accepted —
++                    // unless this return was really an abort (claudeRemote swallows
++                    // AbortError) or the launcher is exiting, in which case the
++                    // outcome is unknown rather than applied.
++                    if (rewindConfirmTimer) {
++                        clearTimeout(rewindConfirmTimer);
++                        rewindConfirmTimer = null;
++                        if (session.rewindAck) {
++                            if (controller.signal.aborted && this.restartRequested) {
++                                // Our own rewind abort tearing down the previous
++                                // attempt — keep the ack armed for the respawn.
++                            } else {
++                                const confirmed = !controller.signal.aborted && !this.exitReason;
++                                const ack = session.rewindAck;
++                                session.rewindAck = null;
++                                ack(confirmed, confirmed ? undefined : 'unconfirmed');
++                            }
++                        }
++                    }
++
+                     if (!this.exitReason && controller.signal.aborted) {
+-                        session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
++                        if (this.restartRequested) {
++                            this.restartRequested = false;
++                        } else {
++                            session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
++                        }
+                     }
+ 
+                     // A full attempt completed without throwing. Clear the
+@@ -567,6 +641,21 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                     }
+                 } catch (e) {
+                     logger.debug('[remote]: launch error', e);
++                    if (rewindConfirmTimer) {
++                        clearTimeout(rewindConfirmTimer);
++                        rewindConfirmTimer = null;
++                    }
++                    // A deterministic resume rejection means the native state is
++                    // unchanged — report failure immediately instead of letting
++                    // the rewind handler time out.
++                    if (session.rewindAck) {
++                        const detail0 = e instanceof Error ? e.message : String(e);
++                        if (/Resume rejected|resume-drops-turn|would discard/i.test(detail0)) {
++                            const ack = session.rewindAck;
++                            session.rewindAck = null;
++                            ack(false, detail0);
++                        }
++                    }
+ 
+                     // Restores a message batch that was already
+                     // dequeued+acked from the queue (see
+@@ -627,6 +716,23 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                                 message: `Process exited unexpectedly ${MAX_IMMEDIATE_RESPAWN_FAILURES} times in a row: ${detail}. Dropping the queued message; resolve the issue and resend it.`
+                             });
+                             immediateFailureCount = 0;
++                        } else if (this.restartRequested) {
++                            // Intentional restart (rewind): the aborted in-flight
++                            // turn belongs to the pre-rewind history. Re-delivering
++                            // it into the respawned (truncated) process would
++                            // diverge native history from the hub transcript.
++                            for (const item of inFlightMessage?.items ?? []) {
++                                if (item.localId) {
++                                    session.client.discardPendingHubPromptEcho(item.localId)
++                                }
++                            }
++                            if (inFlightMessage?.deliveredText) {
++                                session.client.discardPendingHubPromptEchoText(inFlightMessage.deliveredText)
++                            }
++                            inFlightMessage = null;
++                            session.client.sendSessionEvent({ type: 'message', message: `Process exited unexpectedly: ${detail}` });
++                            await this.respawnBackoff(getRespawnBackoffMs(), controller.signal);
++                            continue;
+                         } else {
+                             restoreInFlightMessage();
+                             session.client.sendSessionEvent({ type: 'message', message: `Process exited unexpectedly: ${detail}` });
+@@ -675,6 +781,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+ 
+     protected async cleanup(): Promise<void> {
+         this.clearAbortHandlers(this.session.client.rpcHandlerManager);
++        this.session.requestRemoteRestart = null;
+ 
+         if (this.handleSessionFound) {
+             this.session.removeSessionFoundCallback(this.handleSessionFound);
+diff --git a/cli/src/claude/conversationHistory.test.ts b/cli/src/claude/conversationHistory.test.ts
+new file mode 100644
+index 000000000..040380a42
+--- /dev/null
++++ b/cli/src/claude/conversationHistory.test.ts
+@@ -0,0 +1,178 @@
++import { describe, expect, it } from 'vitest'
++import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { readNativeTurns, resolveRewindPlan, supportsNativeRewind } from './conversationHistory'
++
++const CWD = '/tmp/rewind-fixture-project'
++
++function line(entry: Record<string, unknown>): string {
++    return JSON.stringify(entry)
++}
++
++function prompt(uuid: string, text: string): string {
++    return line({ type: 'user', uuid, message: { role: 'user', content: [{ type: 'text', text }] } })
++}
++
++function toolResult(uuid: string, parentUuid?: string): string {
++    return line({
++        type: 'user',
++        uuid,
++        parentUuid,
++        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'ok' }] }
++    })
++}
++
++function assistant(uuid: string, text: string): string {
++    return line({ type: 'assistant', uuid, message: { role: 'assistant', content: [{ type: 'text', text }] } })
++}
++
++function attachment(uuid: string): string {
++    return line({ type: 'attachment', uuid })
++}
++
++function sidechain(uuid: string): string {
++    return line({ type: 'assistant', uuid, isSidechain: true, message: { role: 'assistant', content: [] } })
++}
++
++function writeTranscript(lines: string[]): string {
++    const projectDir = join(mkdtempSync(join(tmpdir(), 'hapi-rewind-')), 'projects')
++    mkdirSync(projectDir, { recursive: true })
++    // getProjectPath encodes every non-alphanumeric char of the cwd as '-'
++    const projectId = CWD.replace(/[^a-zA-Z0-9]/g, '-')
++    const dir = join(projectDir, projectId)
++    mkdirSync(dir, { recursive: true })
++    writeFileSync(join(dir, 'session-a.jsonl'), lines.join('\n') + '\n')
++    return projectDir
++}
++
++describe('readNativeTurns', () => {
++    it('collects ordered turns from prompts and assistant entries only', () => {
++        const root = writeTranscript([
++            line({ type: 'queue-operation', uuid: 'q1' }),
++            attachment('a0'),
++            line({ type: 'user', uuid: 'u1', parentUuid: 'a0', message: { role: 'user', content: [{ type: 'text', text: 'Say ONE' }] } }),
++            line({ type: 'assistant', uuid: 'as1', parentUuid: 'u1', message: { role: 'assistant', content: [{ type: 'text', text: 'ONE' }] } }),
++            toolResult('tr1', 'as1'),
++            line({ type: 'user', uuid: 'u2', parentUuid: 'tr1', message: { role: 'user', content: [{ type: 'text', text: 'Say TWO' }] } }),
++            line({ type: 'assistant', uuid: 'as2', parentUuid: 'u2', message: { role: 'assistant', content: [{ type: 'text', text: 'TWO' }] } }),
++            sidechain('sc1'),
++            line({ type: 'user', uuid: 'u3', parentUuid: 'as2', message: { role: 'user', content: [{ type: 'text', text: 'Say THREE' }] } })
++        ])
++        try {
++            process.env.CLAUDE_CONFIG_DIR = root.replace(/\/projects$/, '')
++            expect(readNativeTurns(CWD, 'session-a')).toEqual([
++                { promptUuid: 'u1', endUuid: 'as1' },
++                { promptUuid: 'u2', endUuid: 'as2' },
++                { promptUuid: 'u3', endUuid: 'u3' }
++            ])
++        } finally {
++            delete process.env.CLAUDE_CONFIG_DIR
++            rmSync(root, { recursive: true, force: true })
++        }
++    })
++
++    it('returns empty for a missing transcript', () => {
++        process.env.CLAUDE_CONFIG_DIR = join(tmpdir(), 'hapi-rewind-missing-config')
++        try {
++            expect(readNativeTurns('/nonexistent-cwd', 'nope')).toEqual([])
++        } finally {
++            delete process.env.CLAUDE_CONFIG_DIR
++        }
++    })
++})
++
++describe('supportsNativeRewind', () => {
++    it('accepts versions at or above 2.1.223', () => {
++        expect(supportsNativeRewind('2.1.240 (Claude Code)')).toBe(true)
++        expect(supportsNativeRewind('2.2.0 (Claude Code)')).toBe(true)
++        expect(supportsNativeRewind('3.0.1')).toBe(true)
++        expect(supportsNativeRewind('2.1.223 (Claude Code)')).toBe(true)
++    })
++
++    it('rejects older and undetectable binaries', () => {
++        expect(supportsNativeRewind('2.1.222 (Claude Code)')).toBe(false)
++        expect(supportsNativeRewind('2.0.55')).toBe(false)
++        expect(supportsNativeRewind(null)).toBe(false)
++        expect(supportsNativeRewind('Claude Code')).toBe(false)
++    })
++})
++
++describe('resolveRewindPlan', () => {
++    const turns = [
++        { promptUuid: 'u1', endUuid: 'as1' },
++        { promptUuid: 'u2', endUuid: 'as2' },
++        { promptUuid: 'u3', endUuid: 'as3' }
++    ]
++
++    it('keeps the previous turn boundary and drops the selected turn onward', () => {
++        expect(resolveRewindPlan(turns, 'u2')).toEqual({
++            resumeSessionAt: 'as1',
++            dropsTurns: ['u2', 'u3']
++        })
++    })
++
++    it('rejects unknown prompts and dropping the first turn', () => {
++        expect(() => resolveRewindPlan(turns, 'nope')).toThrow('No native history point')
++        expect(() => resolveRewindPlan(turns, 'u1')).toThrow('Cannot rewind the first message')
++    })
++})
++
++describe('readNativeTurns active chain', () => {
++    function writeLines(lines: string[]): void {
++        const root = writeTranscript(lines)
++        process.env.CLAUDE_CONFIG_DIR = root.replace(/\/projects$/, '')
++    }
++
++    it('ignores orphaned branches left by a previous rewind', () => {
++        // u1 -> as1 -> (orphaned: u2 -> as2) ; after rewind the new turn re-parents onto as1
++        const lines = [
++            line({ type: 'user', uuid: 'u1', parentUuid: 'p0', message: { role: 'user', content: 'Say ONE' } }),
++            line({ type: 'assistant', uuid: 'as1', parentUuid: 'x0', message: { role: 'assistant', content: [{ type: 'text', text: 'ONE' }] } }),
++            line({ type: 'user', uuid: 'u2', parentUuid: 'as1', message: { role: 'user', content: 'Say TWO' } }),
++            line({ type: 'assistant', uuid: 'as2', parentUuid: 'u2', message: { role: 'assistant', content: [{ type: 'text', text: 'TWO' }] } })
++        ]
++        try {
++            writeLines(lines)
++            // tail is as2; walking parents from as2 only reaches the orphaned branch
++            expect(readNativeTurns(CWD, 'session-a')).toEqual([
++                { promptUuid: 'u2', endUuid: 'as2' }
++            ])
++        } finally {
++            delete process.env.CLAUDE_CONFIG_DIR
++        }
++    })
++
++    it('follows re-parented turns across a rewind boundary', () => {
++        const lines = [
++            line({ type: 'user', uuid: 'u1', parentUuid: 'p0', message: { role: 'user', content: 'Say ONE' } }),
++            line({ type: 'attachment', uuid: 'att', parentUuid: 'u1' }),
++            line({ type: 'assistant', uuid: 'as1', parentUuid: 'att', message: { role: 'assistant', content: [{ type: 'text', text: 'ONE' }] } }),
++            // orphaned branch
++            line({ type: 'user', uuid: 'u2', parentUuid: 'as1', message: { role: 'user', content: 'Say TWO' } }),
++            line({ type: 'assistant', uuid: 'as2', parentUuid: 'u2', message: { role: 'assistant', content: [{ type: 'text', text: 'TWO' }] } }),
++            // new turn re-parented onto as1
++            line({
++                type: 'user',
++                uuid: 'inj',
++                parentUuid: 'as1',
++                isMeta: true,
++                message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>context</system-reminder>' }] }
++            }),
++            line({ type: 'user', uuid: 'u3', parentUuid: 'as1', message: { role: 'user', content: 'Say THREE' } }),
++            line({ type: 'user', uuid: 'u4', parentUuid: 'u3', message: { role: 'user', content: [{ type: 'text', text: '<task-notification>done</task-notification>' }] } }),
++            line({ type: 'assistant', uuid: 'as3', parentUuid: 'u4', message: { role: 'assistant', content: [{ type: 'text', text: 'THREE' }] } })
++        ]
++        try {
++            writeLines(lines)
++            const turns = readNativeTurns(CWD, 'session-a')
++            expect(turns.map((t) => t.promptUuid)).toEqual(['u1', 'u3'])
++            expect(resolveRewindPlan(turns, 'u3')).toEqual({
++                resumeSessionAt: 'as1',
++                dropsTurns: ['u3']
++            })
++        } finally {
++            delete process.env.CLAUDE_CONFIG_DIR
++        }
++    })
++})
+diff --git a/cli/src/claude/conversationHistory.ts b/cli/src/claude/conversationHistory.ts
+new file mode 100644
+index 000000000..bd54b02c9
+--- /dev/null
++++ b/cli/src/claude/conversationHistory.ts
+@@ -0,0 +1,134 @@
++import { existsSync, readFileSync } from 'node:fs'
++import { join } from 'node:path'
++import { getProjectPath } from './utils/path'
++import { isExternalUserMessage } from '@/api/apiSession'
++import type { RawJSONLines } from '@/claude/types'
++
++export type NativeTurn = {
++    /** uuid of the user prompt entry that starts the turn. */
++    promptUuid: string
++    /** uuid of the last user/assistant entry belonging to the turn on the active chain. */
++    endUuid: string
++}
++
++type TranscriptEntry = {
++    type?: string
++    uuid?: unknown
++    parentUuid?: unknown
++    isSidechain?: boolean
++    message?: { content?: unknown }
++}
++
++/**
++ * Parse the native Claude transcript for a session into ordered turns.
++ *
++ * The transcript is append-only: rewinds re-parent new turns, so dropped
++ * entries remain in the file as orphaned branches. Turns are therefore
++ * resolved over the ACTIVE parentUuid chain — the one reachable backwards
++ * from the last entry in the file — never over raw file order.
++ */
++export function readNativeTurns(workingDirectory: string, sessionId: string): NativeTurn[] {
++    const file = join(getProjectPath(workingDirectory), `${sessionId}.jsonl`)
++    if (!existsSync(file)) return []
++
++    type Node = { entry: TranscriptEntry; parent: string | null }
++    const byUuid = new Map<string, Node>()
++    let tailUuid: string | null = null
++    for (const line of readFileSync(file, 'utf-8').split('\n')) {
++        if (!line.trim()) continue
++        let entry: TranscriptEntry
++        try {
++            entry = JSON.parse(line)
++        } catch {
++            continue
++        }
++        if (entry.isSidechain) continue
++        if (typeof entry.uuid !== 'string') continue
++        byUuid.set(entry.uuid, {
++            entry,
++            parent: typeof entry.parentUuid === 'string' ? entry.parentUuid : null
++        })
++        tailUuid = entry.uuid
++    }
++    if (!tailUuid) return []
++
++    // Walk parents from the tail; entries not on this chain are orphaned branches.
++    const chain: TranscriptEntry[] = []
++    const visited = new Set<string>()
++    let cursor: string | null = tailUuid
++    while (cursor && !visited.has(cursor)) {
++        visited.add(cursor)
++        const node = byUuid.get(cursor)
++        if (!node) break
++        chain.push(node.entry)
++        cursor = node.parent
++    }
++    chain.reverse()
++
++    const turns: NativeTurn[] = []
++    for (const entry of chain) {
++        if (entry.type !== 'user' && entry.type !== 'assistant') continue
++        const uuid = entry.uuid as string
++        if (entry.type === 'user') {
++            // Reuse HAPI's classifier: Claude also writes system reminders, task
++            // notifications and command caveats as text-bearing user entries —
++            // those are not human turns and must not become rewind boundaries.
++            if (!isExternalUserMessage(entry as RawJSONLines)) continue
++            turns.push({ promptUuid: uuid, endUuid: uuid })
++        } else if (turns.length > 0) {
++            turns[turns.length - 1]!.endUuid = uuid
++        }
++    }
++    return turns
++}
++
++export type RewindPlan = {
++    resumeSessionAt?: string
++    dropsTurns: string[]
++}
++
++/** Native `--resume-session-at` truncation landed in Claude Code v2.1.223. */
++export const NATIVE_REWIND_MIN_VERSION = [2, 1, 223] as const
++
++export function parseClaudeVersion(versionOutput: string | null | undefined): number[] | null {
++    if (!versionOutput) return null
++    const match = /(\d+)\.(\d+)\.(\d+)/.exec(versionOutput)
++    if (!match) return null
++    return [Number(match[1]), Number(match[2]), Number(match[3])]
++}
++
++/**
++ * Whether the installed Claude Code supports resume-time truncation.
++ * `null`/unparseable output (detection failed) conservatively reports false so
++ * the rewind capability is not advertised against an unknown binary.
++ */
++export function supportsNativeRewind(versionOutput: string | null | undefined): boolean {
++    const version = parseClaudeVersion(versionOutput)
++    if (!version) return false
++    for (let i = 0; i < NATIVE_REWIND_MIN_VERSION.length; i++) {
++        const actual = version[i] ?? 0
++        const min = NATIVE_REWIND_MIN_VERSION[i]!
++        if (actual !== min) return actual > min
++    }
++    return true
++}
++
++/**
++ * Build the resume flags to drop the turn started by `promptUuid` and every
++ * turn after it on the active chain. The kept boundary is the last entry of
++ * the previous turn; dropping every turn including the first is not
++ * representable and is rejected.
++ */
++export function resolveRewindPlan(turns: NativeTurn[], dropFromPromptUuid: string): RewindPlan {
++    const index = turns.findIndex((turn) => turn.promptUuid === dropFromPromptUuid)
++    if (index < 0) {
++        throw new Error(`No native history point for message prompt ${dropFromPromptUuid}`)
++    }
++    if (index === 0) {
++        throw new Error('Cannot rewind the first message')
++    }
++    return {
++        resumeSessionAt: turns[index - 1]!.endUuid,
++        dropsTurns: turns.slice(index).map((turn) => turn.promptUuid)
++    }
++}
+diff --git a/cli/src/claude/runClaude.ts b/cli/src/claude/runClaude.ts
+index b8bccece8..0da16fc96 100644
+--- a/cli/src/claude/runClaude.ts
++++ b/cli/src/claude/runClaude.ts
+@@ -1,4 +1,6 @@
+ import { logger } from '@/ui/logger';
++import { execFileSync } from 'node:child_process';
++import { getDefaultClaudeCodePath } from './sdk/utils';
+ import { loop } from '@/claude/loop';
+ import { AgentState, SessionEffort, SessionModel } from '@/api/types';
+ import { EnhancedMode, PermissionMode } from './loop';
+@@ -27,6 +29,7 @@ import {
+     CLAUDE_CONVERSATION_HISTORY,
+     toConversationHistoryCapabilities
+ } from '@hapi/protocol/conversationHistory';
++import { readNativeTurns, resolveRewindPlan, supportsNativeRewind } from './conversationHistory';
+ import { listSkills, type SkillSummary } from '@/modules/common/skills';
+ 
+ export interface StartOptions {
+@@ -233,7 +236,23 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
+     registerKillSessionHandler(session.rpcHandlerManager, lifecycle);
+     registerLocalHandoffHandler(session.rpcHandlerManager, lifecycle);
+ 
+-    const conversationHistory = toConversationHistoryCapabilities(CLAUDE_CONVERSATION_HISTORY)
++    // Rewind needs native --resume-session-at (Claude Code v2.1.223+); fork
++    // current works on any version. Detect the actual binary version once at
++    // startup so the web UI only shows the Rewind affordance when it can work.
++    let claudeVersionOutput: string | null = null
++    try {
++        claudeVersionOutput = execFileSync(getDefaultClaudeCodePath(), ['--version'], {
++            encoding: 'utf8',
++            timeout: 10_000,
++            stdio: ['pipe', 'pipe', 'pipe']
++        }).trim()
++    } catch (error) {
++        logger.debug(`[claude] --version probe failed: ${error instanceof Error ? error.message : String(error)}`)
++    }
++    const conversationHistory = toConversationHistoryCapabilities({
++        ...CLAUDE_CONVERSATION_HISTORY,
++        rewindToMessage: supportsNativeRewind(claudeVersionOutput) ? 'supported' : 'unsupported'
++    })
+     session.updateMetadata((metadata) => ({
+         ...metadata,
+         path: metadata?.path ?? workingDirectory,
+@@ -257,8 +276,125 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
+         }
+         return { nativeSessionId, forkSession: true as const }
+     })
+-    session.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, async () => {
+-        throw new Error('Rewind is not supported for Claude')
++    // Rewind bookkeeping. Each completed user-turn batch (one batch = one
++    // joined native prompt) is mapped to its native prompt uuid when the turn
++    // completes; the map is mirrored into session metadata
++    // (`conversationHistoryEntryIds`) so it survives CLI restarts, and the hub
++    // scrubs truncated entries automatically via `conversationHistoryPoints`.
++    const promptUuidByLocalId = new Map<string, string>()
++    const localIdsByPromptUuid = new Map<string, string[]>()
++    const REWIND_ACK_TIMEOUT_MS = 60_000
++    const stripRewindFlags = (args: string[] | undefined): string[] | undefined => {
++        if (!args) return undefined
++        const filtered: string[] = []
++        for (let i = 0; i < args.length; i++) {
++            if ((args[i] === '--resume-session-at' || args[i] === '--resume-drops-turn') && i + 1 < args.length) {
++                i++
++                continue
++            }
++            filtered.push(args[i]!)
++        }
++        return filtered.length > 0 ? filtered : undefined
++    }
++    session.rpcHandlerManager.registerHandler(RPC_METHODS.RewindConversation, async (payload: unknown) => {
++        const rejected = (error: string) => ({ success: false as const, outcome: 'rejected' as const, error })
++        if (!payload || typeof payload !== 'object' || typeof (payload as { messageLocalId?: unknown }).messageLocalId !== 'string') {
++            return rejected('messageLocalId is required')
++        }
++        const messageLocalId = (payload as { messageLocalId: string }).messageLocalId
++        // Known pre-mutation rejections must use success:false — throwing would make
++        // the hub treat the outcome as unknown and diverge the session history.
++        const claudeSession = currentSessionRef.current
++        if (!claudeSession?.requestRemoteRestart) {
++            return rejected('Rewind requires a running remote Claude session')
++        }
++        if (claudeSession.queue.size() > 0) {
++            return rejected('Session is busy')
++        }
++        const nativeSessionId = claudeSession.sessionId
++        if (!nativeSessionId) {
++            // No metadata fallback: a stale id would truncate an unrelated native session.
++            return rejected('Claude session id is not ready')
++        }
++
++        // Map the requested message to its native prompt uuid. In-memory first;
++        // metadata covers turns completed before a CLI restart.
++        const promptUuid = promptUuidByLocalId.get(messageLocalId)
++            ?? session.getMetadata()?.conversationHistoryEntryIds?.[messageLocalId]
++            ?? sessionInfo.metadata?.conversationHistoryEntryIds?.[messageLocalId]
++            ?? null
++        if (!promptUuid) {
++            return rejected(`No native history point for message ${messageLocalId}`)
++        }
++        const turns = readNativeTurns(workingDirectory, nativeSessionId)
++        let plan
++        try {
++            plan = resolveRewindPlan(turns, promptUuid)
++        } catch (error) {
++            return rejected(error instanceof Error ? error.message : String(error))
++        }
++        // A joined batch is dropped as one native turn: the truncation boundary
++        // for the hub must be the batch's FIRST local id, never a later one.
++        const batchLocalIds = localIdsByPromptUuid.get(promptUuid)
++        const truncateFromLocalId = batchLocalIds?.[0] ?? messageLocalId
++
++        // One-shot flags consumed by the respawned process; Session.consumeOneTimeFlags
++        // strips them after onSessionFound so they never leak into later launches.
++        const flags = ['--resume', nativeSessionId]
++        if (plan.resumeSessionAt) flags.push('--resume-session-at', plan.resumeSessionAt)
++        for (const dropTurn of plan.dropsTurns) flags.push('--resume-drops-turn', dropTurn)
++        claudeSession.claudeArgs = [...(claudeSession.claudeArgs ?? []), ...flags]
++
++        // The respawn starts Claude immediately with the resume flags. Claude
++        // emits no init until the first prompt, but a rejected resume exits
++        // within moments of spawn — so the launcher confirms application once
++        // the new attempt survives a short stability window, and reports
++        // failure immediately on a deterministic resume rejection. Until then
++        // the hub must not truncate its transcript.
++        let confirmed = false
++        // Arm the ack BEFORE requesting the restart: the launcher respawns
++        // synchronously during the abort and needs the armed callback then.
++        const ackPromise = new Promise<{ applied: boolean; error?: string }>((resolve) => {
++            claudeSession.rewindAck = (applied, error) => resolve({ applied, error })
++        })
++        try {
++            await claudeSession.requestRemoteRestart()
++            const result = await Promise.race([
++                ackPromise,
++                new Promise<{ applied: boolean; error?: string }>((resolve) => {
++                    setTimeout(() => resolve({ applied: false, error: 'unconfirmed' }), REWIND_ACK_TIMEOUT_MS)
++                })
++            ])
++            if (!result.applied) {
++                // Disarm and strip any unconsumed flags so state stays "not rewound".
++                claudeSession.rewindAck = null
++                claudeSession.claudeArgs = stripRewindFlags(claudeSession.claudeArgs)
++                if (result.error === 'unconfirmed') {
++                    // Cannot prove either way — native may or may not have been
++                    // truncated. Throw outside the rejection conversion below so
++                    // the hub marks history diverged instead of allowing more
++                    // history actions against an unknown state.
++                    throw new Error('Rewind could not be confirmed; session history requires reconciliation')
++                }
++                return rejected(result.error ?? 'Rewind could not be applied')
++            }
++            confirmed = true
++        } finally {
++            claudeSession.rewindAck = null
++            if (!confirmed) {
++                claudeSession.claudeArgs = stripRewindFlags(claudeSession.claudeArgs)
++            }
++        }
++        // Truncation confirmed: forget the dropped turns' mappings (the hub scrubs
++        // the persisted copies together with its truncated rows).
++        const dropIndex = turns.findIndex((turn) => turn.promptUuid === promptUuid)
++        for (const [localId, uuid] of [...promptUuidByLocalId]) {
++            const keptIndex = turns.findIndex((turn) => turn.promptUuid === uuid)
++            if (keptIndex < 0 || keptIndex >= dropIndex) {
++                promptUuidByLocalId.delete(localId)
++            }
++        }
++        return { success: true as const, truncateFromLocalId }
+     })
+ 
+     // Set initial agent state
+@@ -570,6 +706,43 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
+             onSessionReady: (sessionInstance) => {
+                 currentSessionRef.current = sessionInstance;
+                 resolveSessionReady(sessionInstance);
++                sessionInstance.onUserTurnCompleted = (localIds) => {
++                    if (localIds.length === 0 || !sessionInstance.sessionId) return
++                    // The just-completed turn is the tail of the active chain.
++                    const turn = readNativeTurns(workingDirectory, sessionInstance.sessionId).at(-1)
++                    if (!turn) return
++                    // A joined batch is dropped natively as one turn: only its
++                    // FIRST local id is a rewind point. Advertising later ones
++                    // would let the hub truncate mid-batch while Claude drops
++                    // the whole batch, and the boundary must survive restarts.
++                    const boundaryLocalId = localIds[0]!
++                    promptUuidByLocalId.set(boundaryLocalId, turn.promptUuid)
++                    localIdsByPromptUuid.set(turn.promptUuid, [boundaryLocalId])
++                    // Web renders the Rewind affordance from this per-message flag
++                    // (same contract as codex/pi/grok); the hub scrubs truncated
++                    // points and entry ids together with its message rows.
++                    sessionInstance.client.updateMetadata((metadata) => ({
++                        ...metadata,
++                        conversationHistoryPoints: {
++                            ...metadata?.conversationHistoryPoints,
++                            [boundaryLocalId]: true as const
++                        },
++                        conversationHistoryEntryIds: {
++                            ...metadata?.conversationHistoryEntryIds,
++                            [boundaryLocalId]: turn.promptUuid
++                        }
++                    }))
++                };
++                sessionInstance.onNativeSessionReset = () => {
++                    // /clear drops the native session; turn tracking is no longer valid.
++                    promptUuidByLocalId.clear()
++                    localIdsByPromptUuid.clear()
++                    sessionInstance.client.updateMetadata((metadata) => ({
++                        ...metadata,
++                        conversationHistoryPoints: {},
++                        conversationHistoryEntryIds: {}
++                    }))
++                };
+                 if (nativeSkills) {
+                     sessionInstance.setNativeSkillNames(nativeSkills.map((skill) => skill.name));
+                 }
+diff --git a/cli/src/claude/sdk/query.ts b/cli/src/claude/sdk/query.ts
+index f8d433488..4e14584ef 100644
+--- a/cli/src/claude/sdk/query.ts
++++ b/cli/src/claude/sdk/query.ts
+@@ -311,6 +311,8 @@ export function query(config: {
+             continue: continueConversation,
+             resume,
+             forkSession,
++            resumeSessionAt,
++            resumeDropsTurn,
+             model,
+             effort,
+             fallbackModel,
+@@ -344,6 +346,8 @@ export function query(config: {
+     if (continueConversation) args.push('--continue')
+     if (resume) args.push('--resume', resume)
+     if (forkSession) args.push('--fork-session')
++    if (resumeSessionAt) args.push('--resume-session-at', resumeSessionAt)
++    for (const dropTurn of resumeDropsTurn ?? []) args.push('--resume-drops-turn', dropTurn)
+     args.push(...additionalArgs)
+     if (settingsPath) args.push('--settings', settingsPath)
+     if (allowedTools.length > 0) args.push('--allowedTools', allowedTools.join(','))
+diff --git a/cli/src/claude/sdk/types.ts b/cli/src/claude/sdk/types.ts
+index a05bbf669..3c6d40924 100644
+--- a/cli/src/claude/sdk/types.ts
++++ b/cli/src/claude/sdk/types.ts
+@@ -200,6 +200,13 @@ export interface QueryOptions {
+      * existing Claude session id.
+      */
+     forkSession?: boolean
++    /**
++     * Resume the session truncated to the entry with this uuid (everything at
++     * and after the dropped turns is discarded). Requires Claude Code v2.1.223+.
++     */
++    resumeSessionAt?: string
++    /** Prompt uuids of the turns dropped by `resumeSessionAt` (repeatable flag). */
++    resumeDropsTurn?: string[]
+     model?: string
+     effort?: string
+     fallbackModel?: string
+diff --git a/cli/src/claude/session.consumeOneTimeFlags.test.ts b/cli/src/claude/session.consumeOneTimeFlags.test.ts
+index bda3f1e1b..0ae436a9d 100644
+--- a/cli/src/claude/session.consumeOneTimeFlags.test.ts
++++ b/cli/src/claude/session.consumeOneTimeFlags.test.ts
+@@ -40,4 +40,16 @@ describe('Session.consumeOneTimeFlags', () => {
+         session.consumeOneTimeFlags()
+         expect(session.claudeArgs).toEqual(['--permission-mode', 'acceptEdits'])
+     })
++
++    it('consumes rewind flags with their values', () => {
++        const session = makeSession([
++            '--resume', 'claude-session-id',
++            '--resume-session-at', 'kept-uuid',
++            '--resume-drops-turn', 'drop-1',
++            '--resume-drops-turn', 'drop-2',
++            '--permission-mode', 'default'
++        ])
++        session.consumeOneTimeFlags()
++        expect(session.claudeArgs).toEqual(['--permission-mode', 'default'])
++    })
+ })
+diff --git a/cli/src/claude/session.ts b/cli/src/claude/session.ts
+index 06fd37ce8..e3762b2c2 100644
+--- a/cli/src/claude/session.ts
++++ b/cli/src/claude/session.ts
+@@ -24,6 +24,29 @@ export class Session extends AgentSessionBase<EnhancedMode> {
+     readonly startingMode: 'local' | 'remote';
+     localLaunchFailure: LocalLaunchFailure | null = null;
+     private nativeSkillNames = new Set<string>();
++    /**
++     * Set by the remote launcher while it is running. Invoking it aborts the
++     * current SDK attempt so the main loop respawns Claude with fresh args
++     * (used by rewind, which requires a process restart). Cleared on cleanup.
++     */
++    requestRemoteRestart: (() => Promise<void>) | null = null;
++    /**
++     * Set by the remote launcher when a user turn completes natively (result
++     * reached). Reports the hub localIds of the completed batch so rewind
++     * locators are only recorded for turns that really happened.
++     */
++    onUserTurnCompleted: ((localIds: string[]) => void) | null = null;
++    /** Invoked when the native session id is dropped (/clear); rewind tracking must reset. */
++    onNativeSessionReset: (() => void) | null = null;
++    /**
++     * Armed by the RewindConversation handler before it requests a restart.
++     * The remote launcher resolves it with `true` once the respawned process
++     * reports its session (system/init with the resume flags accepted), or
++     * `false` when the attempt fails while rewinding. The handler must not
++     * report success to the hub before this resolves — the native transcript
++     * is only guaranteed truncated after the new process actually started.
++     */
++    rewindAck: ((applied: boolean, error?: string) => void) | null = null;
+ 
+     constructor(opts: {
+         api: ApiClient;
+@@ -118,6 +141,7 @@ export class Session extends AgentSessionBase<EnhancedMode> {
+      */
+     clearSessionId = (): void => {
+         this.sessionId = null;
++        this.onNativeSessionReset?.();
+         logger.debug('[Session] Session ID cleared');
+     };
+ 
+@@ -151,6 +175,12 @@ export class Session extends AgentSessionBase<EnhancedMode> {
+                 }
+             } else if (this.claudeArgs[i] === '--fork-session') {
+                 logger.debug('[Session] Consumed --fork-session flag');
++            } else if (
++                (this.claudeArgs[i] === '--resume-session-at' || this.claudeArgs[i] === '--resume-drops-turn')
++                && i + 1 < this.claudeArgs.length
++            ) {
++                logger.debug(`[Session] Consumed ${this.claudeArgs[i]} flag`);
++                i++; // Skip the uuid value
+             } else {
+                 filteredArgs.push(this.claudeArgs[i]);
+             }
+diff --git a/shared/src/conversationHistory.test.ts b/shared/src/conversationHistory.test.ts
+index 81971b397..4c25c977a 100644
+--- a/shared/src/conversationHistory.test.ts
++++ b/shared/src/conversationHistory.test.ts
+@@ -8,7 +8,8 @@ import {
+ describe('conversationHistory capabilities', () => {
+     it('only exposes supported flags', () => {
+         expect(toConversationHistoryCapabilities(CLAUDE_CONVERSATION_HISTORY)).toEqual({
+-            forkCurrent: true
++            forkCurrent: true,
++            rewindToMessage: true
+         })
+     })
+ 
+diff --git a/shared/src/conversationHistory.ts b/shared/src/conversationHistory.ts
+index f6aedffad..f18c87b3c 100644
+--- a/shared/src/conversationHistory.ts
++++ b/shared/src/conversationHistory.ts
+@@ -48,7 +48,7 @@ export const UNSUPPORTED_CONVERSATION_HISTORY: ConversationHistoryCapabilityStat
+ export const CLAUDE_CONVERSATION_HISTORY: ConversationHistoryCapabilityStates = {
+     forkCurrent: 'supported',
+     forkAtMessage: 'unsupported',
+-    rewindToMessage: 'unsupported'
++    rewindToMessage: 'supported'
+ }
+ 
+ export const CODEX_CONVERSATION_HISTORY_INITIAL: ConversationHistoryCapabilityStates = {
+-- 
+2.43.0
+

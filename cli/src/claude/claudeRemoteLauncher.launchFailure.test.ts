@@ -102,6 +102,43 @@ describe('claudeRemoteLauncher launch-failure recovery', () => {
         delete process.env.CLAUDE_REMOTE_RESPAWN_BACKOFF_MS;
     });
 
+    it('restarts intentionally without an unexpected-exit banner or respawn backoff', async () => {
+        const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
+        queue.push('hello', { permissionMode: 'default' }, 'local-id');
+
+        const client = makeClient();
+        const session = makeSession(queue, client);
+        process.env.CLAUDE_REMOTE_RESPAWN_BACKOFF_MS = '250';
+
+        let callCount = 0;
+        claudeRemoteMock.mockImplementation(async (opts: any) => {
+            callCount += 1;
+            if (callCount === 1) {
+                await opts.nextMessage();
+                void session.requestRemoteRestart?.();
+                throw new Error('aborted for rewind');
+            }
+            triggerSwitch(client);
+            throw new Error('ending test');
+        });
+
+        const { claudeRemoteLauncher } = await import('./claudeRemoteLauncher');
+        const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+        try {
+            await claudeRemoteLauncher(session);
+
+            expect(callCount).toBe(2);
+            expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 250)).toBe(false);
+            expect(client.sendSessionEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+                type: 'message',
+                message: expect.stringContaining('Process exited unexpectedly')
+            }));
+            expect(client.discardPendingHubPromptEcho).toHaveBeenCalledWith('local-id');
+        } finally {
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
     it('restores the dequeued message into the queue when claudeRemote throws before onReady', async () => {
         const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
         queue.push('hello', { permissionMode: 'default' });

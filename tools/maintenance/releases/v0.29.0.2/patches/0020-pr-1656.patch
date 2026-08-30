@@ -1,0 +1,406 @@
+From 723dd8cd6127b11a64d805420f2038323c649a45 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:57:02 +0000
+Subject: [PATCH] carry: upstream PR #1656
+
+---
+ .../SessionList.directory-action.test.tsx     |  49 ++++++++
+ web/src/hooks/useLongPress.test.tsx           |  53 ++++++++-
+ web/src/hooks/useLongPress.ts                 | 105 +++++++++++++-----
+ 3 files changed, 176 insertions(+), 31 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 9516507d0..88e07b26e 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -380,6 +380,55 @@ describe('SessionList action menu parity', () => {
+     })
+ })
+ 
++describe('SessionList selection', () => {
++    it('does not select the row that moves under the pointer during a live reorder', () => {
++        const onSelect = vi.fn()
++        const first = makeSession({
++            id: 'session-first',
++            active: true,
++            updatedAt: 200,
++            metadata: { path: '/work/hapi', name: 'First session', flavor: 'codex' }
++        })
++        const second = makeSession({
++            id: 'session-second',
++            active: true,
++            updatedAt: 100,
++            metadata: { path: '/work/hapi', name: 'Second session', flavor: 'codex' }
++        })
++
++        const renderList = (sessions: SessionSummary[]) => (
++            <QueryClientProvider client={new QueryClient()}>
++                <ToastProvider>
++                    <I18nProvider>
++                        <SessionList
++                            sessions={sessions}
++                            selectedSessionId={null}
++                            onSelect={onSelect}
++                            onNewSession={vi.fn()}
++                            onRefresh={vi.fn()}
++                            isLoading={false}
++                            renderHeader={false}
++                            api={null}
++                        />
++                    </I18nProvider>
++                </ToastProvider>
++            </QueryClientProvider>
++        )
++
++        const { rerender } = render(renderList([first, second]))
++        fireEvent.mouseDown(screen.getByRole('button', { name: /First session/ }), { button: 0 })
++
++        rerender(renderList([
++            { ...first, updatedAt: 200 },
++            { ...second, updatedAt: 300 }
++        ]))
++
++        fireEvent.mouseUp(screen.getByRole('button', { name: /Second session/ }), { button: 0 })
++
++        expect(onSelect).not.toHaveBeenCalled()
++    })
++})
++
+ describe('SessionList collapse behavior', () => {
+     function renderSessionList(
+         sessions: SessionSummary[],
+diff --git a/web/src/hooks/useLongPress.test.tsx b/web/src/hooks/useLongPress.test.tsx
+index 227faabbc..2ade735d8 100644
+--- a/web/src/hooks/useLongPress.test.tsx
++++ b/web/src/hooks/useLongPress.test.tsx
+@@ -1,5 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+-import { act, cleanup, fireEvent, render } from '@testing-library/react'
++import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+ import { useLongPress } from './useLongPress'
+ 
+ function Probe(props: { onClick: () => void; onLongPress?: () => void }) {
+@@ -32,6 +32,15 @@ function NativeButtonProbe(props: {
+     )
+ }
+ 
++function LongPressButton(props: { onClick: () => void; onLongPress: () => void }) {
++    const handlers = useLongPress({
++        onClick: props.onClick,
++        onLongPress: props.onLongPress,
++    })
++
++    return <button type="button" {...handlers}>Session</button>
++}
++
+ describe('useLongPress', () => {
+     let now = 10_000
+ 
+@@ -55,6 +64,7 @@ describe('useLongPress', () => {
+ 
+         fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
+         fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.click(row)
+ 
+         expect(onClick).toHaveBeenCalledTimes(1)
+     })
+@@ -96,6 +106,7 @@ describe('useLongPress', () => {
+         })
+         fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
+         fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.click(row)
+ 
+         expect(touchEndPrevented).toBe(true)
+         expect(onClick).toHaveBeenCalledTimes(1)
+@@ -138,6 +149,7 @@ describe('useLongPress', () => {
+ 
+         fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
+         fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.click(row)
+         expect(onClick).toHaveBeenCalledTimes(1)
+     })
+ 
+@@ -153,6 +165,7 @@ describe('useLongPress', () => {
+             vi.advanceTimersByTime(500)
+         })
+         fireEvent.touchEnd(row, { changedTouches: [{ clientX: 10, clientY: 10 }] })
++        fireEvent.click(row)
+ 
+         expect(onLongPress).toHaveBeenCalledTimes(1)
+         expect(onClick).not.toHaveBeenCalled()
+@@ -175,6 +188,7 @@ describe('useLongPress', () => {
+         })
+         fireEvent.mouseDown(row, { button: 0, clientX: 10, clientY: 10 })
+         fireEvent.mouseUp(row, { button: 0, clientX: 10, clientY: 10 })
++        fireEvent.click(row)
+ 
+         expect(onClick).toHaveBeenCalledTimes(2)
+     })
+@@ -366,4 +380,41 @@ describe('useLongPress', () => {
+         expect(onLongPress).not.toHaveBeenCalled()
+         expect(onClick).toHaveBeenCalledOnce()
+     })
++
++    it('uses the native click event for a regular activation', () => {
++        const onClick = vi.fn()
++        render(<LongPressButton onClick={onClick} onLongPress={vi.fn()} />)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Session' }))
++
++        expect(onClick).toHaveBeenCalledOnce()
++    })
++
++    it('suppresses the click emitted after a long press', () => {
++        const onClick = vi.fn()
++        const onLongPress = vi.fn()
++        render(<LongPressButton onClick={onClick} onLongPress={onLongPress} />)
++        const button = screen.getByRole('button', { name: 'Session' })
++
++        fireEvent.mouseDown(button, { button: 0, clientX: 10, clientY: 20 })
++        vi.advanceTimersByTime(500)
++        fireEvent.mouseUp(button, { button: 0 })
++        fireEvent.click(button)
++
++        expect(onLongPress).toHaveBeenCalledWith({ x: 10, y: 20 })
++        expect(onClick).not.toHaveBeenCalled()
++    })
++
++    it('cancels the pending long press when release lands on another element', () => {
++        const onLongPress = vi.fn()
++        render(<LongPressButton onClick={vi.fn()} onLongPress={onLongPress} />)
++
++        fireEvent.mouseDown(screen.getByRole('button', { name: 'Session' }), { button: 0 })
++        fireEvent.mouseUp(document.body, { button: 0 })
++        act(() => {
++            vi.advanceTimersByTime(500)
++        })
++
++        expect(onLongPress).not.toHaveBeenCalled()
++    })
+ })
+diff --git a/web/src/hooks/useLongPress.ts b/web/src/hooks/useLongPress.ts
+index 119648eda..1e33d29cf 100644
+--- a/web/src/hooks/useLongPress.ts
++++ b/web/src/hooks/useLongPress.ts
+@@ -7,10 +7,11 @@ type UseLongPressOptions = {
+     threshold?: number
+     disabled?: boolean
+     /**
+-     * `legacy` preserves the original list-row contract: this hook emits
+-     * clicks itself from mouse/touch/key handlers. `touch-only-native-click`
+-     * is for an existing native button: only touch may long-press, while
+-     * click/keyboard accessibility remain browser-native.
++     * 'legacy' preserves the original list-row contract: touch and keyboard
++     * activations are emitted by the hook, while mouse activation uses the
++     * browser's native click target. 'touch-only-native-click' is for an
++     * existing native button: only touch may long-press, while click/keyboard
++     * accessibility remain browser-native.
+      */
+     interaction?: 'legacy' | 'touch-only-native-click'
+     /** Disable just the long-press gesture while retaining the normal click. */
+@@ -22,10 +23,9 @@ type UseLongPressOptions = {
+ // 700ms covers that with margin without affecting genuine later mouse input.
+ const GHOST_MOUSE_WINDOW_MS = 700
+ // Native buttons retain their platform click behavior. A touch long-press has
+-// already performed its action, so only the compatibility click emitted just
+-// after that touch should be discarded. Keep this in the same bounded window
+-// as touch compatibility mouse events; a missing compatibility click must not
+-// poison a later mouse, keyboard, or assistive activation.
++// already sent its action when the browser produces the following native click,
++// so consume exactly that one click without changing later mouse/keyboard
++// behavior.
+ const NATIVE_CLICK_SUPPRESSION_WINDOW_MS = GHOST_MOUSE_WINDOW_MS
+ 
+ type UseLongPressHandlers = {
+@@ -57,6 +57,10 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+     const isLongPressRef = useRef(false)
+     const touchMoved = useRef(false)
+     const pressPointRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
++    const globalEndListenersRef = useRef<Array<{
++        type: 'mouseup' | 'touchend' | 'touchcancel'
++        listener: EventListener
++    }>>([])
+     // Used only by the native-button mode. A long touch has already sent its
+     // action when the browser produces the following native click, so consume
+     // exactly that one click without changing later mouse/keyboard behavior.
+@@ -65,7 +69,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+     // Timestamp of the most recent touch interaction. Touch browsers emit
+     // compatibility mouse events (mousedown/mouseup/click) after a tap for any
+     // touch the page did not preventDefault. Since we bind BOTH touch and
+-    // mouse handlers, those "ghost" mouse events would fire onClick a second
++    // mouse handlers, those ghost mouse events would fire onClick a second
+     // time — on a persistent list (tablet sidebar) the second click lands on
+     // whatever row slid under the finger, navigating to the wrong session.
+     const lastTouchAtRef = useRef(0)
+@@ -75,6 +79,10 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+             clearTimeout(timerRef.current)
+             timerRef.current = null
+         }
++        for (const { type, listener } of globalEndListenersRef.current) {
++            window.removeEventListener(type, listener)
++        }
++        globalEndListenersRef.current = []
+     }, [])
+ 
+     const clearNativeClickSuppression = useCallback(() => {
+@@ -99,7 +107,11 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         clearNativeClickSuppression()
+     }, [clearTimer, clearNativeClickSuppression])
+ 
+-    const startTimer = useCallback((clientX: number, clientY: number) => {
++    const startTimer = useCallback((
++        clientX: number,
++        clientY: number,
++        input: 'mouse' | 'touch',
++    ) => {
+         if (disabled || !longPressEnabled) return
+ 
+         clearTimer()
+@@ -111,9 +123,21 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+             isLongPressRef.current = true
+             onLongPress(pressPointRef.current)
+         }, threshold)
++
++        const endTypes = input === 'mouse'
++            ? ['mouseup'] as const
++            : ['touchend', 'touchcancel'] as const
++        // The pressed element can move under a stationary pointer (for
++        // example when a live session list re-sorts), so it may never receive
++        // the end event itself. Always cancel the timer from the window too.
++        for (const type of endTypes) {
++            const listener = () => clearTimer()
++            globalEndListenersRef.current.push({ type, listener })
++            window.addEventListener(type, listener, { once: true })
++        }
+     }, [disabled, longPressEnabled, clearTimer, onLongPress, threshold])
+ 
+-    const handleEnd = useCallback((shouldTriggerClick: boolean) => {
++    const handleTouchEnd = useCallback((shouldTriggerClick: boolean) => {
+         clearTimer()
+ 
+         if (shouldTriggerClick && !isLongPressRef.current && !touchMoved.current && onClick) {
+@@ -134,7 +158,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+     const onMouseDown = useCallback<React.MouseEventHandler>((e) => {
+         if (e.button !== 0) return
+         if (isGhostMouseEvent()) return
+-        startTimer(e.clientX, e.clientY)
++        startTimer(e.clientX, e.clientY, 'mouse')
+     }, [startTimer, isGhostMouseEvent])
+ 
+     const onMouseUp = useCallback<React.MouseEventHandler>((e) => {
+@@ -142,13 +166,16 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         // (e.g. opening a context menu) must not trigger onClick.
+         if (e.button !== 0) return
+         if (isGhostMouseEvent()) return
+-        handleEnd(!isLongPressRef.current)
+-    }, [handleEnd, isGhostMouseEvent])
++        // Do not synthesize a click from this row's mouseup. If rows swap
++        // between press and release, native click targeting must decide
++        // whether the original button was actually activated.
++        clearTimer()
++    }, [clearTimer, isGhostMouseEvent])
+ 
+     const onMouseLeave = useCallback<React.MouseEventHandler>(() => {
+         if (isGhostMouseEvent()) return
+-        handleEnd(false)
+-    }, [handleEnd, isGhostMouseEvent])
++        clearTimer()
++    }, [clearTimer, isGhostMouseEvent])
+ 
+     // HTML5 drag supersedes the press gesture: once the pointer turns into a
+     // drag, the long-press timer must not fire mid-drag (that would pop the
+@@ -171,22 +198,47 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+     const onTouchStart = useCallback<React.TouchEventHandler>((e) => {
+         lastTouchAtRef.current = Date.now()
+         const touch = e.touches[0]
+-        startTimer(touch.clientX, touch.clientY)
++        startTimer(touch.clientX, touch.clientY, 'touch')
+     }, [startTimer])
+ 
+     const onTouchEnd = useCallback<React.TouchEventHandler>((e) => {
+         lastTouchAtRef.current = Date.now()
+-        // Prevent the browser's compatibility mouse/click sequence from firing
+-        // on the row that ends up under the finger after navigation/reordering.
++        // Prevent the browser's compatibility mouse/click sequence from
++        // firing on the row that ends up under the finger after navigation or
++        // reordering. The hook emits the normal touch tap itself.
+         e.preventDefault()
+-        handleEnd(!isLongPressRef.current)
+-    }, [handleEnd])
++        handleTouchEnd(!isLongPressRef.current)
++    }, [handleTouchEnd])
+ 
+     const onTouchMove = useCallback<React.TouchEventHandler>(() => {
+         touchMoved.current = true
+         clearTimer()
+     }, [clearTimer])
+ 
++    const onTouchCancel = useCallback<React.TouchEventHandler>(() => {
++        lastTouchAtRef.current = Date.now()
++        clearTimer()
++        isLongPressRef.current = false
++        touchMoved.current = false
++        clearNativeClickSuppression()
++    }, [clearTimer, clearNativeClickSuppression])
++
++    const handleClick = useCallback<React.MouseEventHandler>((e) => {
++        if (isGhostMouseEvent()) {
++            e.preventDefault()
++            return
++        }
++        if (isLongPressRef.current || touchMoved.current) {
++            e.preventDefault()
++            isLongPressRef.current = false
++            touchMoved.current = false
++            return
++        }
++        isLongPressRef.current = false
++        touchMoved.current = false
++        onClick?.()
++    }, [isGhostMouseEvent, onClick])
++
+     const onContextMenu = useCallback<React.MouseEventHandler>((e) => {
+         if (!disabled) {
+             e.preventDefault()
+@@ -204,13 +256,6 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         }
+     }, [disabled, onClick])
+ 
+-    const onTouchCancel = useCallback<React.TouchEventHandler>(() => {
+-        clearTimer()
+-        isLongPressRef.current = false
+-        touchMoved.current = false
+-        clearNativeClickSuppression()
+-    }, [clearTimer, clearNativeClickSuppression])
+-
+     const onNativeTouchStart = useCallback<React.TouchEventHandler>((e) => {
+         const touch = e.touches[0]
+         if (!touch) return
+@@ -218,7 +263,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         // long touch did not yield a browser click at all, do not suppress this
+         // later genuine activation.
+         clearNativeClickSuppression()
+-        startTimer(touch.clientX, touch.clientY)
++        startTimer(touch.clientX, touch.clientY, 'touch')
+     }, [clearNativeClickSuppression, startTimer])
+ 
+     const onNativeTouchEnd = useCallback<React.TouchEventHandler>(() => {
+@@ -259,7 +304,6 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+     }, [clearNativeClickSuppression, disabled, onClick])
+ 
+     if (interaction === 'touch-only-native-click') {
+-
+         return {
+             // Existing button semantics own desktop mouse and keyboard clicks.
+             onMouseDown: () => {},
+@@ -287,6 +331,7 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
+         onTouchEnd,
+         onTouchMove,
+         onTouchCancel,
++        onClick: handleClick,
+         onContextMenu,
+         onKeyDown
+     }
+-- 
+2.43.0
+

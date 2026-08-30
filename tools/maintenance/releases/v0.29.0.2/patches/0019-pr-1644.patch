@@ -1,0 +1,1331 @@
+From 8c2c15760ce22c11825aec3a29ec819b8e1c9b02 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:55:36 +0000
+Subject: [PATCH] carry: upstream PR #1644
+
+---
+ .../backends/acp/AcpMessageHandler.test.ts    | 176 ++++++++++++-
+ .../agent/backends/acp/AcpMessageHandler.ts   |  42 +++-
+ cli/src/agent/utils.test.ts                   | 231 +++++++++++++++++-
+ cli/src/agent/utils.ts                        |  72 ++++++
+ cli/src/opencode/opencodeLocalLauncher.ts     |  96 ++++++--
+ .../utils/opencodeLocalToolParse.test.ts      | 211 +++++++++++++++-
+ .../opencode/utils/opencodeLocalToolParse.ts  |  20 +-
+ web/src/components/ToolCard/knownTools.tsx    |  10 +-
+ .../ToolCard/views/_results.test.tsx          |  90 +++++++
+ .../components/ToolCard/views/_results.tsx    |  30 ++-
+ 10 files changed, 920 insertions(+), 58 deletions(-)
+
+diff --git a/cli/src/agent/backends/acp/AcpMessageHandler.test.ts b/cli/src/agent/backends/acp/AcpMessageHandler.test.ts
+index 5d65e2677..ad51249bf 100644
+--- a/cli/src/agent/backends/acp/AcpMessageHandler.test.ts
++++ b/cli/src/agent/backends/acp/AcpMessageHandler.test.ts
+@@ -769,7 +769,7 @@ describe('AcpMessageHandler', () => {
+             }
+         });
+ 
+-        it('keeps full edit rawInput (filePath/oldString/newString) over locations-only fallback', () => {
++        it('keeps full edit rawInput over locations-only fallback (canonicalized to the Edit view shape)', () => {
+             const messages: AgentMessage[] = [];
+             const handler = new AcpMessageHandler((message) => messages.push(message));
+ 
+@@ -783,11 +783,6 @@ describe('AcpMessageHandler', () => {
+                 rawInput: {}
+             });
+ 
+-            const fullInput = {
+-                filePath: '/tmp/a.ts',
+-                oldString: 'foo',
+-                newString: 'bar'
+-            };
+             handler.handleUpdate({
+                 sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                 toolCallId: 'oc-edit-1',
+@@ -795,13 +790,178 @@ describe('AcpMessageHandler', () => {
+                 kind: 'edit',
+                 status: 'in_progress',
+                 locations: [{ path: '/tmp/a.ts' }],
+-                rawInput: fullInput
++                rawInput: {
++                    filePath: '/tmp/a.ts',
++                    oldString: 'foo',
++                    newString: 'bar'
++                }
++            });
++
++            const calls = messages.filter(
++                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
++            );
++            // The full args must survive instead of the locations-only
++            // fallback — now in the canonical shape the web Edit view renders.
++            expect(calls[calls.length - 1].name).toBe('Edit');
++            expect(calls[calls.length - 1].input).toEqual({
++                file_path: '/tmp/a.ts',
++                old_string: 'foo',
++                new_string: 'bar'
++            });
++        });
++
++        it('canonicalizes the OpenCode edit lifecycle to the Edit view shape', () => {
++            // Recorded wire shape (opencode v1.18.x acp/tool.ts): pending with
++            // rawInput {}, running with native camelCase args, completed with a
++            // text block FIRST and a diff block WITHOUT _meta.kind second.
++            const messages: AgentMessage[] = [];
++            const handler = new AcpMessageHandler((message) => messages.push(message));
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
++                toolCallId: 'oc-edit-canonical-1',
++                title: 'edit',
++                kind: 'edit',
++                status: 'pending',
++                locations: [{ path: '/tmp/a.ts' }],
++                rawInput: {}
++            });
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
++                toolCallId: 'oc-edit-canonical-1',
++                title: 'a.ts',
++                kind: 'edit',
++                status: 'in_progress',
++                locations: [{ path: '/tmp/a.ts' }],
++                rawInput: {
++                    filePath: '/tmp/a.ts',
++                    oldString: 'const x = 1\n',
++                    newString: 'const x = 2\n'
++                }
++            });
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
++                toolCallId: 'oc-edit-canonical-1',
++                status: 'completed',
++                content: [
++                    { type: 'content', content: { type: 'text', text: 'Edit applied successfully.' } },
++                    { type: 'diff', path: '/tmp/a.ts', oldText: 'const x = 1\n', newText: 'const x = 2\n' }
++                ],
++                rawOutput: { output: 'Edit applied successfully.' }
++            });
++
++            const calls = messages.filter(
++                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
++            );
++            expect(calls[calls.length - 1].name).toBe('Edit');
++            expect(calls[calls.length - 1].input).toEqual({
++                file_path: '/tmp/a.ts',
++                old_string: 'const x = 1\n',
++                new_string: 'const x = 2\n'
++            });
++
++            const results = messages.filter(
++                (m): m is Extract<AgentMessage, { type: 'tool_result' }> => m.type === 'tool_result'
++            );
++            expect(results).toHaveLength(1);
++            expect(results[0].status).toBe('completed');
++        });
++
++        it('canonicalizes an OpenCode edit as soon as rawInput arrives on the initial tool_call', () => {
++            const messages: AgentMessage[] = [];
++            const handler = new AcpMessageHandler((message) => messages.push(message));
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
++                toolCallId: 'oc-edit-canonical-2',
++                title: 'edit',
++                kind: 'edit',
++                status: 'pending',
++                locations: [{ path: '/tmp/a.ts' }],
++                rawInput: { filePath: '/tmp/a.ts', oldString: 'foo', newString: 'bar' }
++            });
++
++            const calls = messages.filter(
++                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
++            );
++            expect(calls).toHaveLength(1);
++            expect(calls[0].name).toBe('Edit');
++            expect(calls[0].input).toEqual({ file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' });
++        });
++
++        it('canonicalizes the OpenCode write lifecycle to the Write view shape', () => {
++            // OpenCode maps write to kind=edit and its completed content carries
++            // no diff block at all (diffContent requires oldString), so only
++            // rawInput-based canonicalization can produce the Write view shape.
++            const messages: AgentMessage[] = [];
++            const handler = new AcpMessageHandler((message) => messages.push(message));
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
++                toolCallId: 'oc-write-canonical-1',
++                title: 'write',
++                kind: 'edit',
++                status: 'pending',
++                locations: [{ path: '/tmp/b.txt' }],
++                rawInput: {}
++            });
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
++                toolCallId: 'oc-write-canonical-1',
++                title: 'b.txt',
++                kind: 'edit',
++                status: 'in_progress',
++                locations: [{ path: '/tmp/b.txt' }],
++                rawInput: { filePath: '/tmp/b.txt', content: 'hello\n' }
++            });
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
++                toolCallId: 'oc-write-canonical-1',
++                status: 'completed',
++                content: [
++                    { type: 'content', content: { type: 'text', text: 'Wrote 6 bytes to /tmp/b.txt' } }
++                ],
++                rawOutput: { output: 'Wrote 6 bytes to /tmp/b.txt' }
++            });
++
++            const calls = messages.filter(
++                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
++            );
++            expect(calls[calls.length - 1].name).toBe('Write');
++            expect(calls[calls.length - 1].input).toEqual({ file_path: '/tmp/b.txt', content: 'hello\n' });
++        });
++
++        it('leaves non-diff OpenCode rawInput untouched (bash command args)', () => {
++            const messages: AgentMessage[] = [];
++            const handler = new AcpMessageHandler((message) => messages.push(message));
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
++                toolCallId: 'oc-bash-canonical-1',
++                title: 'bash',
++                kind: 'execute',
++                status: 'pending',
++                rawInput: {}
++            });
++
++            handler.handleUpdate({
++                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
++                toolCallId: 'oc-bash-canonical-1',
++                title: 'bash',
++                kind: 'execute',
++                status: 'in_progress',
++                rawInput: { command: 'ls -la /tmp' }
+             });
+ 
+             const calls = messages.filter(
+                 (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+             );
+-            expect(calls[calls.length - 1].input).toEqual(fullInput);
++            expect(calls[calls.length - 1].name).toBe('bash');
++            expect(calls[calls.length - 1].input).toEqual({ command: 'ls -la /tmp' });
+         });
+     });
+ 
+diff --git a/cli/src/agent/backends/acp/AcpMessageHandler.ts b/cli/src/agent/backends/acp/AcpMessageHandler.ts
+index 50998cc31..c851eb58b 100644
+--- a/cli/src/agent/backends/acp/AcpMessageHandler.ts
++++ b/cli/src/agent/backends/acp/AcpMessageHandler.ts
+@@ -4,7 +4,7 @@ import type { AgentMessage, PlanItem } from '@/agent/types';
+ import { registerGeneratedImageFromAcpBlock } from '@/modules/common/generatedImages';
+ import type { InlineMediaSource } from '@/modules/common/inlineMediaSource';
+ import { asString, isObject } from '@hapi/protocol';
+-import { deriveToolNameWithSource, isPlaceholderToolName } from '@/agent/utils';
++import { canonicalizeDiffToolInput, deriveToolNameWithSource, isPlaceholderToolName } from '@/agent/utils';
+ import { parseRateLimitText } from '@/agent/rateLimitParser';
+ import { isInternalEventJson } from '@/agent/internalEventFilter';
+ import { ACP_SESSION_UPDATE_TYPES } from './constants';
+@@ -782,7 +782,7 @@ export class AcpMessageHandler {
+             rawInput: update.rawInput,
+             metaKind: null
+         });
+-        const name = derivedName.name;
++        let name = derivedName.name;
+         // Priority: usable rawInput > kind+title fallback > content JSON fallback.
+         // Empty `{}` is treated as missing (OpenCode tool-start / permission clobber).
+         // Kimi ACP streams tool arguments as JSON text in the content array
+@@ -796,9 +796,20 @@ export class AcpMessageHandler {
+                 update.content
+             );
+         // Content JSON can be `{}` (same as unusable rawInput); never lock that in.
+-        const input = isUsableRawInput(candidate) ? candidate : null;
++        let input = isUsableRawInput(candidate) ? candidate : null;
+         const status = normalizeStatus(update.status);
+ 
++        // Agents that keep native argument shapes (OpenCode: {filePath,
++        // oldString, newString} / {filePath, content}) must be canonicalized to
++        // the Claude-shaped Edit/Write inputs the web diff views render — the
++        // same contract as hoistDiffContentIntoInput for Gemini's diff blocks.
++        // Gate on the kind so an arbitrary non-edit tool isn't misclassified.
++        const canonical = input == null ? null : canonicalizeDiffToolInput(input, asString(update.kind) ?? derivedName.name);
++        if (canonical) {
++            name = canonical.name;
++            input = canonical.input;
++        }
++
+         this.toolCalls.set(toolCallId, { name, input });
+ 
+         this.onMessage({
+@@ -825,8 +836,16 @@ export class AcpMessageHandler {
+ 
+         if (isUsableRawInput(update.rawInput)) {
+             const derivedName = deriveToolNameFromUpdate(update);
+-            const name = this.selectToolNameForUpdate(existing?.name ?? null, derivedName);
+-            const input = update.rawInput;
++            let name = this.selectToolNameForUpdate(existing?.name ?? null, derivedName);
++            let input: unknown = update.rawInput;
++            // Native-shape args (OpenCode) arrive here as the first usable
++            // input; canonicalize before storing so the web diff views match.
++            // Gate on the kind so an arbitrary non-edit tool isn't misclassified.
++            const canonical = canonicalizeDiffToolInput(input, asString(update.kind) ?? derivedName.name);
++            if (canonical) {
++                name = canonical.name;
++                input = canonical.input;
++            }
+             this.toolCalls.set(toolCallId, { name, input });
+             this.onMessage({
+                 type: 'tool_call',
+@@ -853,9 +872,16 @@ export class AcpMessageHandler {
+                     update.content
+                 );
+                 if (isUsableRawInput(fallback)) {
+-                    input = fallback;
+-                    const derivedName = deriveToolNameFromUpdate(update);
+-                    name = this.selectToolNameForUpdate(existing.name ?? null, derivedName);
++                    let nextInput: unknown = fallback;
++                    const canonical = canonicalizeDiffToolInput(fallback, existing.name);
++                    if (canonical) {
++                        name = canonical.name;
++                        nextInput = canonical.input;
++                    } else {
++                        const derivedName = deriveToolNameFromUpdate(update);
++                        name = this.selectToolNameForUpdate(existing.name ?? null, derivedName);
++                    }
++                    input = nextInput;
+                     this.toolCalls.set(toolCallId, { name, input });
+                     rederived = true;
+                 }
+diff --git a/cli/src/agent/utils.test.ts b/cli/src/agent/utils.test.ts
+index 1030fd3f0..9569db844 100644
+--- a/cli/src/agent/utils.test.ts
++++ b/cli/src/agent/utils.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from 'vitest';
+-import { deriveToolName, deriveToolNameWithSource, isPlaceholderToolName } from './utils';
++import { canonicalizeDiffToolInput, deriveToolName, deriveToolNameWithSource, isPlaceholderToolName } from './utils';
+ 
+ describe('agent tool name helpers', () => {
+     it('treats generic kind fallback as placeholder', () => {
+@@ -68,4 +68,233 @@ describe('agent tool name helpers', () => {
+             expect(derived.source).toBe('title');
+         });
+     });
++
++    describe('canonicalizeDiffToolInput (OpenCode native diff shapes)', () => {
++        // OpenCode ACP keeps tool arguments in native shape:
++        //   edit  → {filePath, oldString, newString}
++        //   write → {filePath, content}
++        // The web Edit/Write views only render the Claude-shaped inputs
++        // ({file_path, old_string, new_string} / {file_path, content}), so
++        // these shapes are canonicalized at the adapter boundary.
++
++        it('maps camelCase edit input to the canonical Edit shape', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar'
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++            });
++        });
++
++        it('maps snake_case edit input to the canonical Edit shape', () => {
++            expect(canonicalizeDiffToolInput({
++                file_path: '/tmp/a.ts',
++                old_string: 'foo',
++                new_string: 'bar'
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++            });
++        });
++
++        it('allows empty newString (deletion edits)', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'drop me\n',
++                newString: ''
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'drop me\n', new_string: '' }
++            });
++        });
++
++        it('preserves replaceAll=true on edit input', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar',
++                replaceAll: true
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar', replace_all: true }
++            });
++        });
++
++        it('preserves replaceAll=false on edit input', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar',
++                replaceAll: false
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar', replace_all: false }
++            });
++        });
++
++        it('preserves snake_case replace_all=true on edit input', () => {
++            expect(canonicalizeDiffToolInput({
++                file_path: '/tmp/a.ts',
++                old_string: 'foo',
++                new_string: 'bar',
++                replace_all: true
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar', replace_all: true }
++            });
++        });
++
++        it('preserves snake_case replace_all=false on edit input', () => {
++            expect(canonicalizeDiffToolInput({
++                file_path: '/tmp/a.ts',
++                old_string: 'foo',
++                new_string: 'bar',
++                replace_all: false
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar', replace_all: false }
++            });
++        });
++
++        it('prefers camelCase replaceAll over snake_case replace_all', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar',
++                replaceAll: true,
++                replace_all: false
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar', replace_all: true }
++            });
++        });
++
++        it('omits replace_all when absent or non-boolean', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar'
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++            });
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar',
++                replaceAll: 'yes'
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++            });
++        });
++
++        it('prefers Edit over Write when both edit and content fields are present', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar',
++                content: 'baz'
++            }, 'edit')).toEqual({
++                name: 'Edit',
++                input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++            });
++        });
++
++        it('maps camelCase write input to the canonical Write shape', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/b.txt',
++                content: 'hello\n'
++            }, 'write')).toEqual({
++                name: 'Write',
++                input: { file_path: '/tmp/b.txt', content: 'hello\n' }
++            });
++        });
++
++        it('maps snake_case write input to the canonical Write shape', () => {
++            expect(canonicalizeDiffToolInput({
++                file_path: '/tmp/b.txt',
++                content: ''
++            }, 'write')).toEqual({
++                name: 'Write',
++                input: { file_path: '/tmp/b.txt', content: '' }
++            });
++        });
++
++        it('returns null without a usable path', () => {
++            expect(canonicalizeDiffToolInput({
++                oldString: 'foo',
++                newString: 'bar'
++            }, 'edit')).toBeNull();
++            expect(canonicalizeDiffToolInput({
++                filePath: 42,
++                oldString: 'foo',
++                newString: 'bar'
++            }, 'edit')).toBeNull();
++        });
++
++        it('returns null when one of old/new is missing', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo'
++            }, 'edit')).toBeNull();
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                newString: 'bar'
++            }, 'edit')).toBeNull();
++        });
++
++        it('returns null for non-diff shapes (e.g. apply_patch text)', () => {
++            expect(canonicalizeDiffToolInput({
++                patch: '*** Begin Patch\n...'
++            }, 'edit')).toBeNull();
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                command: 'ls'
++            }, 'edit')).toBeNull();
++        });
++
++        it('returns null for non-object inputs', () => {
++            expect(canonicalizeDiffToolInput(null, 'edit')).toBeNull();
++            expect(canonicalizeDiffToolInput(undefined, 'edit')).toBeNull();
++            expect(canonicalizeDiffToolInput('{"filePath":"/tmp/a.ts"}', 'edit')).toBeNull();
++            expect(canonicalizeDiffToolInput([], 'edit')).toBeNull();
++        });
++
++        it('does not rename a non-edit tool whose schema accepts filePath/content', () => {
++            // A custom MCP tool with {filePath, content, mode} must not be
++            // canonicalized to Write — its name and extra args are preserved.
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                content: 'payload',
++                mode: 'append'
++            }, 'artifact_write')).toBeNull();
++        });
++
++        it('returns null when the semantic hint is missing or unknown', () => {
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                oldString: 'foo',
++                newString: 'bar'
++            }, null)).toBeNull();
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/a.ts',
++                content: 'hi'
++            }, 'bash')).toBeNull();
++        });
++
++        it('canonicalizes write when the kind is edit (OpenCode mapping)', () => {
++            // OpenCode maps write's kind to 'edit'; that alias must still
++            // canonicalize a write-shaped input.
++            expect(canonicalizeDiffToolInput({
++                filePath: '/tmp/b.txt',
++                content: 'hello\n'
++            }, 'edit')).toEqual({
++                name: 'Write',
++                input: { file_path: '/tmp/b.txt', content: 'hello\n' }
++            });
++        });
++    });
+ });
+diff --git a/cli/src/agent/utils.ts b/cli/src/agent/utils.ts
+index 110cba3c6..571ce7f60 100644
+--- a/cli/src/agent/utils.ts
++++ b/cli/src/agent/utils.ts
+@@ -2,6 +2,78 @@ import { isObject } from '@hapi/protocol';
+ 
+ type ToolNameSource = 'title' | 'raw_input_name' | 'raw_input_tool' | 'kind' | 'default';
+ 
++export type CanonicalDiffToolInput =
++    | { name: 'Edit'; input: { file_path: string; old_string: string; new_string: string; replace_all?: boolean } }
++    | { name: 'Write'; input: { file_path: string; content: string } };
++
++function firstString(value: unknown, keys: readonly string[]): string | null {
++    if (!isObject(value)) return null;
++    for (const key of keys) {
++        const candidate = value[key];
++        if (typeof candidate === 'string') return candidate;
++    }
++    return null;
++}
++
++/**
++ * Detects diff/write-shaped tool inputs emitted by ACP agents that keep their
++ * native argument shapes (OpenCode: `{filePath, oldString, newString}` for
++ * edit and `{filePath, content}` for write) and normalizes them to the
++ * Claude-shaped inputs the web Edit/Write views render.
++ *
++ * Gated on the tool's semantic name/kind: only known edit/write aliases are
++ * canonicalized. The Edit shape (path + both old/new strings) is unambiguous on
++ * its own, but Write is just `{path, content}` — a shape many non-edit MCP
++ * tools also accept — so without the gate those tools would be renamed to
++ * Write and their extra args dropped. The gate keeps the OpenCode native-shape
++ * cases (OpenCode maps both edit and write to kind 'edit', which is in the
++ * allow-list) while avoiding that misclassification.
++ *
++ * Returns null when the semantic hint is missing/unknown, or the input shape
++ * doesn't match, so callers keep their existing fallback.
++ */
++export function canonicalizeDiffToolInput(rawInput: unknown, semanticHint: string | null): CanonicalDiffToolInput | null {
++    const kind = semanticHint?.trim().toLowerCase() ?? null;
++    if (!kind || !['edit', 'write', 'write_file', 'replace', 'modify', 'file_edit'].includes(kind)) {
++        return null;
++    }
++
++    const filePath = firstString(rawInput, ['filePath', 'file_path']);
++    if (filePath === null || filePath.length === 0) return null;
++
++    const oldString = firstString(rawInput, ['oldString', 'old_string']);
++    const newString = firstString(rawInput, ['newString', 'new_string']);
++    if (oldString !== null && newString !== null) {
++        // OpenCode streams camelCase replaceAll; already-canonical inputs may
++        // carry snake_case replace_all. Accept both so the execution argument
++        // survives every call site.
++        let replaceAll: boolean | undefined;
++        if (isObject(rawInput)) {
++            if (typeof rawInput.replaceAll === 'boolean') {
++                replaceAll = rawInput.replaceAll;
++            } else if (typeof rawInput.replace_all === 'boolean') {
++                replaceAll = rawInput.replace_all;
++            }
++        }
++        return {
++            name: 'Edit',
++            input: {
++                file_path: filePath,
++                old_string: oldString,
++                new_string: newString,
++                ...(replaceAll === undefined ? {} : { replace_all: replaceAll }),
++            },
++        };
++    }
++
++    const content = firstString(rawInput, ['content']);
++    if (content !== null) {
++        return { name: 'Write', input: { file_path: filePath, content } };
++    }
++
++    return null;
++}
++
+ function normalizeToolName(value: unknown): string | null {
+     if (typeof value !== 'string') {
+         return null;
+diff --git a/cli/src/opencode/opencodeLocalLauncher.ts b/cli/src/opencode/opencodeLocalLauncher.ts
+index 3699fb859..e5fd60dd9 100644
+--- a/cli/src/opencode/opencodeLocalLauncher.ts
++++ b/cli/src/opencode/opencodeLocalLauncher.ts
+@@ -1,4 +1,5 @@
+ import { logger } from '@/ui/logger';
++import { canonicalizeDiffToolInput } from '@/agent/utils';
+ import { opencodeLocal } from './opencodeLocal';
+ import { OpencodeSession } from './session';
+ import { ensureOpencodeHookPlugin } from './utils/hookPlugin';
+@@ -238,6 +239,10 @@ export async function opencodeLocalLauncher(
+     const sentTextParts = new Set<string>();
+     const sentToolCalls = new Set<string>();
+     const sentToolResults = new Set<string>();
++    // Emitted tool input per callId. When a partial native edit/write call is
++    // emitted first (e.g. `{filePath}`), a later canonical full input replaces
++    // it so the web Edit/Write view receives the complete arguments.
++    const emittedToolInputs = new Map<string, unknown>();
+     const textBuffers = new Map<string, string>();
+     const toolExecutionQueues = new Map<string, string[]>();
+ 
+@@ -328,16 +333,29 @@ export async function opencodeLocalLauncher(
+             }
+ 
+             const toolCall = parseToolCall(part);
+-            if (toolCall && isUsableToolInput(toolCall.input) && !sentToolCalls.has(toolCall.callId)) {
++            if (toolCall && isUsableToolInput(toolCall.input) && !sentToolResults.has(toolCall.callId)) {
+                 // Wait for non-empty input (OpenCode pending often has input:{}).
+-                sentToolCalls.add(toolCall.callId);
+-                session.sendAgentMessage({
+-                    type: 'tool-call',
+-                    name: toolCall.name,
+-                    callId: toolCall.callId,
+-                    input: toolCall.input,
+-                    ...(toolCall.title ? { nativeTitle: toolCall.title } : {})
+-                });
++                const previousInput = emittedToolInputs.get(toolCall.callId);
++                const previousCanonical = canonicalizeDiffToolInput(previousInput, toolCall.name);
++                const currentCanonical = canonicalizeDiffToolInput(toolCall.input, toolCall.name);
++                // Emit on first usable input, and re-emit whenever the canonical
++                // input changes (a partial native edit/write that already
++                // canonicalizes — e.g. {content: ""} — must be replaced when the
++                // final content arrives).
++                const canonicalChanged = currentCanonical !== null
++                    && hashObject(currentCanonical) !== hashObject(previousCanonical);
++                const shouldEmit = previousInput === undefined || canonicalChanged;
++                if (shouldEmit) {
++                    emittedToolInputs.set(toolCall.callId, toolCall.input);
++                    sentToolCalls.add(toolCall.callId);
++                    session.sendAgentMessage({
++                        type: 'tool-call',
++                        name: toolCall.name,
++                        callId: toolCall.callId,
++                        input: toolCall.input,
++                        ...(toolCall.title ? { nativeTitle: toolCall.title } : {})
++                    });
++                }
+             }
+ 
+             const toolResult = parseToolResult(part);
+@@ -355,6 +373,7 @@ export async function opencodeLocalLauncher(
+                     });
+                 }
+                 sentToolResults.add(toolResult.callId);
++                emittedToolInputs.delete(toolResult.callId);
+                 session.sendAgentMessage({
+                     type: 'tool-call-result',
+                     callId: toolResult.callId,
+@@ -370,13 +389,25 @@ export async function opencodeLocalLauncher(
+             }
+             const record = payload as Record<string, unknown>;
+             const tool = isObject(record.tool) ? record.tool as Record<string, unknown> : record;
+-            const name = getString(tool.name) || getString(record.name);
++            let name = getString(tool.name) || getString(record.name);
+             if (!name) {
+                 return;
+             }
+-            const toolInput = parseMaybeJson(tool.input ?? tool.args ?? record.input ?? record.args);
++            let toolInput: unknown = parseMaybeJson(tool.input ?? tool.args ?? record.input ?? record.args);
++            // Compute the pairing signature from the raw name/input BEFORE
++            // canonicalizing: an id-less `before` with empty/partial args must
++            // share a queue key with the full `after`. Canonicalizing first would
++            // re-key the `after` (edit -> Edit) and miss the queued call.
+             const signature = buildToolSignature(name, toolInput);
+             const fallbackSignature = buildToolSignature(name, null);
++            // Native edit/write args are canonicalized for emit so the web
++            // Edit/Write views match the ACP path. Gate on the tool name so an
++            // arbitrary non-edit tool isn't misclassified as Write.
++            const canonical = canonicalizeDiffToolInput(toolInput, name);
++            if (canonical) {
++                name = canonical.name;
++                toolInput = canonical.input;
++            }
+             const existingId = getString(tool.id)
+                 || getString(tool.tool_call_id)
+                 || getString(tool.toolCallId);
+@@ -410,25 +441,45 @@ export async function opencodeLocalLauncher(
+                     removeFromQueue(toolExecutionQueues, fallbackSignature, callId);
+                 }
+             }
+-            if (eventType === 'tool.execute.before' && !sentToolCalls.has(callId)) {
++            if (eventType === 'tool.execute.before' && !sentToolResults.has(callId)) {
+                 // Match message.part.updated path: skip empty placeholder args.
+                 if (!usableInput) {
+                     return;
+                 }
+-                sentToolCalls.add(callId);
+-                session.sendAgentMessage({
+-                    type: 'tool-call',
+-                    name,
+-                    callId,
+-                    input: toolInput,
+-                    ...(getString(tool.title ?? record.title) ? { nativeTitle: getString(tool.title ?? record.title) } : {})
+-                });
++                const previousInput = emittedToolInputs.get(callId);
++                const previousCanonical = canonicalizeDiffToolInput(previousInput, name);
++                const currentCanonical = canonicalizeDiffToolInput(toolInput, name);
++                // Emit on first usable input; re-emit whenever the canonical
++                // input changes (a partial native edit/write that already
++                // canonicalizes must be replaced when the final input arrives).
++                const canonicalChanged = currentCanonical !== null
++                    && hashObject(currentCanonical) !== hashObject(previousCanonical);
++                const shouldEmit = previousInput === undefined || canonicalChanged;
++                if (shouldEmit) {
++                    emittedToolInputs.set(callId, toolInput);
++                    sentToolCalls.add(callId);
++                    session.sendAgentMessage({
++                        type: 'tool-call',
++                        name,
++                        callId,
++                        input: toolInput,
++                        ...(getString(tool.title ?? record.title) ? { nativeTitle: getString(tool.title ?? record.title) } : {})
++                    });
++                }
+                 return;
+             }
+             if (eventType === 'tool.execute.after' && !sentToolResults.has(callId)) {
+                 // Late tool-call recovery: before may have skipped empty `{}`.
+-                // Mirror message.part.updated so result is never unpaired.
+-                if (!sentToolCalls.has(callId)) {
++                // Mirror message.part.updated so result is never unpaired, and
++                // replace a partial native edit/write call with the full input.
++                const previousInput = emittedToolInputs.get(callId);
++                const previousCanonical = canonicalizeDiffToolInput(previousInput, name);
++                const currentCanonical = canonicalizeDiffToolInput(toolInput, name);
++                const canonicalChanged = currentCanonical !== null
++                    && hashObject(currentCanonical) !== hashObject(previousCanonical);
++                const shouldEmit = previousInput === undefined || canonicalChanged;
++                if (!sentToolCalls.has(callId) || shouldEmit) {
++                    emittedToolInputs.set(callId, toolInput);
+                     sentToolCalls.add(callId);
+                     session.sendAgentMessage({
+                         type: 'tool-call',
+@@ -439,6 +490,7 @@ export async function opencodeLocalLauncher(
+                     });
+                 }
+                 sentToolResults.add(callId);
++                emittedToolInputs.delete(callId);
+                 session.sendAgentMessage({
+                     type: 'tool-call-result',
+                     callId,
+diff --git a/cli/src/opencode/utils/opencodeLocalToolParse.test.ts b/cli/src/opencode/utils/opencodeLocalToolParse.test.ts
+index 33121389c..b06359183 100644
+--- a/cli/src/opencode/utils/opencodeLocalToolParse.test.ts
++++ b/cli/src/opencode/utils/opencodeLocalToolParse.test.ts
+@@ -1,18 +1,38 @@
+ import { createHash } from 'node:crypto';
+ import { describe, expect, it } from 'vitest';
++import { canonicalizeDiffToolInput } from '@/agent/utils';
+ import { isUsableToolInput, parseToolCall, parseToolResult } from './opencodeLocalToolParse';
+ 
++/** Mirrors the launcher's execute-hook normalization: pairing signatures are
++ *  computed from the RAW name/input BEFORE canonicalizing, so an id-less
++ *  `before` shares a queue key with the full `after`; canonicalization only
++ *  affects what gets emitted. */
++function canonicalizeHookPair(name: string, input: unknown): { name: string; input: unknown } {
++    const canonical = canonicalizeDiffToolInput(input, name);
++    return canonical ? { name: canonical.name, input: canonical.input } : { name, input };
++}
++
+ /** Simulate the emit policy used by the local launcher hook handler. */
+ function collectMessages(parts: unknown[]): Array<{ type: string; name?: string; callId: string; input?: unknown; output?: unknown }> {
+     const sentToolCalls = new Set<string>();
+     const sentToolResults = new Set<string>();
++    const emittedToolInputs = new Map<string, unknown>();
+     const out: Array<{ type: string; name?: string; callId: string; input?: unknown; output?: unknown }> = [];
+ 
+     for (const part of parts) {
+         const toolCall = parseToolCall(part);
+-        if (toolCall && isUsableToolInput(toolCall.input) && !sentToolCalls.has(toolCall.callId)) {
+-            sentToolCalls.add(toolCall.callId);
+-            out.push({ type: 'tool-call', name: toolCall.name, callId: toolCall.callId, input: toolCall.input });
++        if (toolCall && isUsableToolInput(toolCall.input) && !sentToolResults.has(toolCall.callId)) {
++            const previousInput = emittedToolInputs.get(toolCall.callId);
++            const previousCanonical = canonicalizeDiffToolInput(previousInput, toolCall.name);
++            const currentCanonical = canonicalizeDiffToolInput(toolCall.input, toolCall.name);
++            const canonicalChanged = currentCanonical !== null
++                && hashObject(currentCanonical) !== hashObject(previousCanonical);
++            const shouldEmit = previousInput === undefined || canonicalChanged;
++            if (shouldEmit) {
++                emittedToolInputs.set(toolCall.callId, toolCall.input);
++                sentToolCalls.add(toolCall.callId);
++                out.push({ type: 'tool-call', name: toolCall.name, callId: toolCall.callId, input: toolCall.input });
++            }
+         }
+         const toolResult = parseToolResult(part);
+         if (toolResult && !sentToolResults.has(toolResult.callId)) {
+@@ -21,6 +41,7 @@ function collectMessages(parts: unknown[]): Array<{ type: string; name?: string;
+                 out.push({ type: 'tool-call', name: toolCall.name, callId: toolCall.callId, input: toolCall.input });
+             }
+             sentToolResults.add(toolResult.callId);
++            emittedToolInputs.delete(toolResult.callId);
+             out.push({ type: 'tool-call-result', callId: toolResult.callId, output: toolResult.output });
+         }
+     }
+@@ -41,6 +62,51 @@ describe('OpenCode local tool part parsing', () => {
+         })).toMatchObject({ title: 'Run project tests' });
+     });
+ 
++    it('canonicalizes edit tool parts to the Edit view shape', () => {
++        expect(parseToolCall({
++            type: 'tool',
++            tool: 'edit',
++            callID: 'call-edit-canonical',
++            state: {
++                status: 'running',
++                input: { filePath: '/tmp/a.ts', oldString: 'foo', newString: 'bar' }
++            }
++        })).toEqual({
++            callId: 'call-edit-canonical',
++            name: 'Edit',
++            input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++        });
++    });
++
++    it('canonicalizes write tool parts to the Write view shape', () => {
++        expect(parseToolCall({
++            type: 'tool',
++            tool: 'write',
++            callID: 'call-write-canonical',
++            state: {
++                status: 'running',
++                input: { filePath: '/tmp/b.txt', content: 'hello\n' }
++            }
++        })).toEqual({
++            callId: 'call-write-canonical',
++            name: 'Write',
++            input: { file_path: '/tmp/b.txt', content: 'hello\n' }
++        });
++    });
++
++    it('leaves non-diff tool parts untouched', () => {
++        expect(parseToolCall({
++            type: 'tool',
++            tool: 'bash',
++            callID: 'call-bash-canonical',
++            state: { status: 'running', input: { command: 'ls -la' } }
++        })).toEqual({
++            callId: 'call-bash-canonical',
++            name: 'bash',
++            input: { command: 'ls -la' }
++        });
++    });
++
+     it('does not emit tool-call on pending with empty input; emits on running with real args', () => {
+         const callId = 'call-6049b4cf-0272-4651-be9a-402c3a40c933-0';
+         const messages = collectMessages([
+@@ -125,6 +191,38 @@ describe('OpenCode local tool part parsing', () => {
+         expect(messages.map((m) => m.type)).toEqual(['tool-call', 'tool-call-result']);
+         expect(messages[0].input).toEqual({ command: 'echo hi' });
+     });
++
++    it('re-emits a running write when content changes from empty to final (message.part.updated path)', () => {
++        const callId = 'call-write-stream';
++        const messages = collectMessages([
++            {
++                type: 'tool',
++                tool: 'write',
++                callID: callId,
++                state: { status: 'running', input: { filePath: '/tmp/b.txt', content: '' } }
++            },
++            {
++                type: 'tool',
++                tool: 'write',
++                callID: callId,
++                state: { status: 'running', input: { filePath: '/tmp/b.txt', content: 'final\n' } }
++            },
++            {
++                type: 'tool',
++                tool: 'write',
++                callID: callId,
++                state: { status: 'completed', input: { filePath: '/tmp/b.txt', content: 'final\n' }, output: 'wrote' }
++            }
++        ]);
++        const calls = messages.filter((m) => m.type === 'tool-call');
++        const results = messages.filter((m) => m.type === 'tool-call-result');
++        expect(calls.length).toBe(2);
++        expect(results.length).toBe(1);
++        expect(calls[calls.length - 1]).toMatchObject({
++            name: 'Write',
++            input: { file_path: '/tmp/b.txt', content: 'final\n' }
++        });
++    });
+ });
+ 
+ function hashObject(obj: unknown): string {
+@@ -164,14 +262,29 @@ function collectExecuteHookMessages(
+ ): Array<{ type: string; name?: string; callId: string; input?: unknown; output?: unknown }> {
+     const sentToolCalls = new Set<string>();
+     const sentToolResults = new Set<string>();
++    const emittedToolInputs = new Map<string, unknown>();
+     const toolExecutionQueues = new Map<string, string[]>();
+     const out: Array<{ type: string; name?: string; callId: string; input?: unknown; output?: unknown }> = [];
+     let nextId = 0;
+ 
++    const shouldEmit = (callId: string, toolInput: unknown, hint: string): boolean => {
++        const previousInput = emittedToolInputs.get(callId);
++        const previousCanonical = canonicalizeDiffToolInput(previousInput, hint);
++        const currentCanonical = canonicalizeDiffToolInput(toolInput, hint);
++        const canonicalChanged = currentCanonical !== null
++            && hashObject(currentCanonical) !== hashObject(previousCanonical);
++        return previousInput === undefined || canonicalChanged;
++    };
++
+     for (const event of events) {
+-        const toolInput = event.input;
+-        const signature = buildToolSignature(event.name, toolInput);
++        // Signature is derived from the raw name/input BEFORE canonicalizing
++        // (mirrors opencodeLocalLauncher): an id-less `before` with empty or
++        // partial args must share a queue key with the full `after`.
++        const signature = buildToolSignature(event.name, event.input);
+         const fallbackSignature = buildToolSignature(event.name, null);
++        const normalized = canonicalizeHookPair(event.name, event.input);
++        const eventName = normalized.name;
++        const toolInput = normalized.input;
+         const existingId = event.id ?? null;
+         const isBefore = event.type === 'before';
+         const usableInput = isUsableToolInput(toolInput);
+@@ -194,10 +307,11 @@ function collectExecuteHookMessages(
+             } else {
+                 pushQueue(toolExecutionQueues, fallbackSignature, callId);
+             }
+-            if (!sentToolCalls.has(callId)) {
++            if (!sentToolResults.has(callId) && shouldEmit(callId, toolInput, eventName)) {
+                 if (!usableInput) continue;
++                emittedToolInputs.set(callId, toolInput);
+                 sentToolCalls.add(callId);
+-                out.push({ type: 'tool-call', name: event.name, callId, input: toolInput });
++                out.push({ type: 'tool-call', name: eventName, callId, input: toolInput });
+             }
+             continue;
+         }
+@@ -207,11 +321,13 @@ function collectExecuteHookMessages(
+             removeFromQueue(toolExecutionQueues, fallbackSignature, callId);
+         }
+         if (!sentToolResults.has(callId)) {
+-            if (!sentToolCalls.has(callId)) {
++            if (!sentToolCalls.has(callId) || shouldEmit(callId, toolInput, eventName)) {
++                emittedToolInputs.set(callId, toolInput);
+                 sentToolCalls.add(callId);
+-                out.push({ type: 'tool-call', name: event.name, callId, input: toolInput });
++                out.push({ type: 'tool-call', name: eventName, callId, input: toolInput });
+             }
+             sentToolResults.add(callId);
++            emittedToolInputs.delete(callId);
+             out.push({ type: 'tool-call-result', callId, output: event.output });
+         }
+     }
+@@ -239,4 +355,81 @@ describe('OpenCode local execute-hook tool emit policy', () => {
+             { type: 'tool-call-result', callId: 'stable-1', output: 'ok' }
+         ]);
+     });
++
++    it('canonicalizes edit before/after pairs emitted via the execute hook path', () => {
++        const messages = collectExecuteHookMessages([
++            { type: 'before', name: 'edit', input: {} },
++            { type: 'after', name: 'edit', input: { filePath: '/tmp/a.ts', oldString: 'foo', newString: 'bar' }, output: 'ok' }
++        ]);
++        expect(messages.map((m) => m.type)).toEqual(['tool-call', 'tool-call-result']);
++        expect(messages[0]).toMatchObject({
++            type: 'tool-call',
++            name: 'Edit',
++            callId: messages[1].callId,
++            input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++        });
++    });
++
++    it('upgrades a partial edit before to the full canonical input when after arrives', () => {
++        // Regression: a partial native `before` ({filePath}) is emitted as-is.
++        // When the full `after` arrives it must REPLACE the earlier partial call
++        // so the web Edit view receives the complete old_string/new_string args.
++        // The replacement is a second tool-call (same callId) followed by the result.
++        const messages = collectExecuteHookMessages([
++            { type: 'before', name: 'edit', input: { filePath: '/tmp/a.ts' } },
++            { type: 'after', name: 'edit', input: { filePath: '/tmp/a.ts', oldString: 'foo', newString: 'bar' }, output: 'ok' }
++        ]);
++        expect(messages.map((m) => m.type)).toEqual(['tool-call', 'tool-call', 'tool-call-result']);
++        expect(messages[0].callId).toEqual(messages[1].callId);
++        expect(messages[0].callId).toEqual(messages[2].callId);
++        expect(messages[1]).toMatchObject({
++            type: 'tool-call',
++            name: 'Edit',
++            input: { file_path: '/tmp/a.ts', old_string: 'foo', new_string: 'bar' }
++        });
++    });
++
++    it('canonicalizes write tool calls emitted via the execute hook path', () => {
++        const messages = collectExecuteHookMessages([
++            { type: 'before', name: 'write', id: 'hook-write-1', input: { filePath: '/tmp/b.txt', content: 'hi\n' } },
++            { type: 'after', name: 'write', id: 'hook-write-1', input: { filePath: '/tmp/b.txt', content: 'hi\n' }, output: 'wrote' }
++        ]);
++        expect(messages[0]).toMatchObject({
++            type: 'tool-call',
++            name: 'Write',
++            input: { file_path: '/tmp/b.txt', content: 'hi\n' }
++        });
++    });
++
++    it('releases completed calls from upgrade tracking (no re-emit after result)', () => {
++        // Once a call is completed (tool-call-result emitted), the upgrade map
++        // entry is released. A later stale part for the same callId must not
++        // trigger a replacement emit or a duplicate result — the lifecycle is
++        // already closed by sentToolResults.
++        const messages = collectExecuteHookMessages([
++            { type: 'before', name: 'edit', id: 'hook-e-1', input: { filePath: '/tmp/a.ts' } },
++            { type: 'after', name: 'edit', id: 'hook-e-1', input: { filePath: '/tmp/a.ts', oldString: 'foo', newString: 'bar' }, output: 'ok' },
++            { type: 'after', name: 'edit', id: 'hook-e-1', input: { filePath: '/tmp/a.ts', oldString: 'x', newString: 'y' }, output: 'late' }
++        ]);
++        expect(messages.map((m) => m.type)).toEqual(['tool-call', 'tool-call', 'tool-call-result']);
++        expect(messages.filter((m) => m.type === 'tool-call').length).toBe(2);
++        expect(messages.filter((m) => m.type === 'tool-call-result').length).toBe(1);
++    });
++
++    it('re-emits a canonical write when content changes from empty to final', () => {
++        // {filePath, content:""} already canonicalizes, so the previous
++        // null->canonical rule would suppress the final content. The canonical
++        // value itself changed, so a replacement tool-call must be emitted.
++        const messages = collectExecuteHookMessages([
++            { type: 'before', name: 'write', id: 'hook-w-1', input: { filePath: '/tmp/b.txt', content: '' } },
++            { type: 'after', name: 'write', id: 'hook-w-1', input: { filePath: '/tmp/b.txt', content: 'final\n' }, output: 'wrote' }
++        ]);
++        expect(messages.map((m) => m.type)).toEqual(['tool-call', 'tool-call', 'tool-call-result']);
++        expect(messages[0].callId).toEqual(messages[1].callId);
++        expect(messages[1]).toMatchObject({
++            type: 'tool-call',
++            name: 'Write',
++            input: { file_path: '/tmp/b.txt', content: 'final\n' }
++        });
++    });
+ });
+diff --git a/cli/src/opencode/utils/opencodeLocalToolParse.ts b/cli/src/opencode/utils/opencodeLocalToolParse.ts
+index 55d4c023e..59fec6caa 100644
+--- a/cli/src/opencode/utils/opencodeLocalToolParse.ts
++++ b/cli/src/opencode/utils/opencodeLocalToolParse.ts
+@@ -1,4 +1,5 @@
+ import { isObject } from '@hapi/protocol';
++import { canonicalizeDiffToolInput } from '@/agent/utils';
+ 
+ export type ParsedToolCall = {
+     callId: string;
+@@ -69,6 +70,19 @@ export function parseToolCall(part: unknown): ParsedToolCall | null {
+     if (!name || !callId) {
+         return null;
+     }
++    // OpenCode native edit/write args ({filePath, oldString, newString} /
++    // {filePath, content}) are canonicalized to the Claude-shaped inputs the
++    // web Edit/Write views render — same contract as the ACP path.
++    const toParsed = (input: unknown, title: string | null): ParsedToolCall => {
++        const canonical = canonicalizeDiffToolInput(input, name);
++        return {
++            callId,
++            name: canonical ? canonical.name : name,
++            input: canonical ? canonical.input : input,
++            ...(title ? { title } : {})
++        };
++    };
++
+     if (isObject(record.state)) {
+         const state = record.state as Record<string, unknown>;
+         const status = getString(state.status);
+@@ -78,12 +92,10 @@ export function parseToolCall(part: unknown): ParsedToolCall | null {
+             return null;
+         }
+         const input = parseMaybeJson(state.input ?? state.raw ?? record.input ?? record.args ?? record.arguments);
+-        const title = getString(state.title);
+-        return { callId, name, input, ...(title ? { title } : {}) };
++        return toParsed(input, getString(state.title));
+     }
+     const input = parseMaybeJson(record.input ?? record.args ?? record.arguments ?? record.raw);
+-    const title = getString(record.title);
+-    return { callId, name, input, ...(title ? { title } : {}) };
++    return toParsed(input, getString(record.title));
+ }
+ 
+ export function parseToolResult(part: unknown): ParsedToolResult | null {
+diff --git a/web/src/components/ToolCard/knownTools.tsx b/web/src/components/ToolCard/knownTools.tsx
+index a1cde754e..ae4c6af34 100644
+--- a/web/src/components/ToolCard/knownTools.tsx
++++ b/web/src/components/ToolCard/knownTools.tsx
+@@ -291,7 +291,15 @@ export const knownTools: Record<string, {
+     Read: {
+         icon: () => <EyeIcon className={DEFAULT_ICON_CLASS} />,
+         title: (opts) => {
+-            const file = getInputStringAny(opts.input, ['file_path', 'path', 'file'])
++            const file = getInputStringAny(opts.input, ['file_path', 'filePath', 'path', 'file'])
++            return file ? resolveDisplayPath(file, opts.metadata) : 'Read file'
++        },
++        minimal: true
++    },
++    read: {
++        icon: () => <EyeIcon className={DEFAULT_ICON_CLASS} />,
++        title: (opts) => {
++            const file = getInputStringAny(opts.input, ['filePath', 'file_path', 'path', 'file'])
+             return file ? resolveDisplayPath(file, opts.metadata) : 'Read file'
+         },
+         minimal: true
+diff --git a/web/src/components/ToolCard/views/_results.test.tsx b/web/src/components/ToolCard/views/_results.test.tsx
+index f481af02f..6ffa589d5 100644
+--- a/web/src/components/ToolCard/views/_results.test.tsx
++++ b/web/src/components/ToolCard/views/_results.test.tsx
+@@ -525,3 +525,93 @@ describe('parseNumberedFileLines', () => {
+         expect(parseNumberedFileLines('just some\nplain text')).toBeNull()
+     })
+ })
++
++describe('opencode native read result formatting', () => {
++    function renderToolResult(toolName: string, result: unknown, input: unknown) {
++        const ResultView = getToolResultViewComponent(toolName)
++        const block: ToolCallBlock = {
++            id: 'tool-read',
++            localId: null,
++            createdAt: 0,
++            kind: 'tool-call',
++            children: [],
++            tool: {
++                id: 'tool-read',
++                name: toolName,
++                state: 'completed',
++                input,
++                result,
++                createdAt: 0,
++                startedAt: null,
++                completedAt: 0,
++                execStartedAt: null,
++                execCompletedAt: null,
++                description: null,
++                nativeKind: null
++            }
++        }
++        return render(
++            <I18nProvider>
++                <ResultView block={block} metadata={null} surface="dialog" />
++            </I18nProvider>
++        )
++    }
++
++    it('routes lowercase opencode read to the file-content code block view', () => {
++        const result = '<path>/tmp/example.ts</path>\n<type>file</type> <content> 1: export type A = 1 2: export type B = 2 3: </content>'
++        const numbered = '1: export type A = 1\n2: export type B = 2\n3:'
++        const { container } = renderToolResult('read', numbered, { filePath: '/tmp/example.ts' })
++
++        const pre = container.querySelector('pre')
++        expect(pre).not.toBeNull()
++        expect(pre).toHaveTextContent('export type A = 1')
++        expect(container).toHaveTextContent('File content')
++    })
++
++    it('falls back to the raw opencode read payload as a code block when unnumbered', () => {
++        const result = '<path>/tmp/a.txt</path>\n<type>file</type> <content>hello</content>'
++        const { container } = renderToolResult('read', result, { filePath: '/tmp/a.txt' })
++
++        const pre = container.querySelector('pre')
++        expect(pre).not.toBeNull()
++        expect(pre).toHaveTextContent('hello')
++    })
++})
++
++describe('unwrapOpencodeReadOutput', () => {
++    it('strips the path/type/content wrapper and keeps numbered body', async () => {
++        const { unwrapOpencodeReadOutput } = await import('@/components/ToolCard/views/_results')
++        const out = unwrapOpencodeReadOutput('<path>/tmp/a.ts</path>\n<type>file</type>\n<content>\n1: alpha\n2: beta</content>')
++        expect(out.path).toBe('/tmp/a.ts')
++        expect(out.body).toBe('1: alpha\n2: beta')
++        expect(out.isOpencodeRead).toBe(true)
++    })
++
++    it('returns the text untouched when there is no content wrapper', async () => {
++        const { unwrapOpencodeReadOutput } = await import('@/components/ToolCard/views/_results')
++        expect(unwrapOpencodeReadOutput('plain text').body).toBe('plain text')
++        expect(unwrapOpencodeReadOutput('plain text').path).toBeNull()
++        expect(unwrapOpencodeReadOutput('plain text').isOpencodeRead).toBe(false)
++    })
++
++    it('does not unwrap a plain Read whose file text contains a literal <content> element', async () => {
++        const { unwrapOpencodeReadOutput } = await import('@/components/ToolCard/views/_results')
++        const text = '1: const xml = \'<content>literal</content>\'\n2: export {}'
++        const out = unwrapOpencodeReadOutput(text)
++        expect(out.isOpencodeRead).toBe(false)
++        expect(out.body).toBe(text)
++    })
++
++    it('keeps an embedded </content> inside the wrapper body (greedy capture)', async () => {
++        const { unwrapOpencodeReadOutput } = await import('@/components/ToolCard/views/_results')
++        const out = unwrapOpencodeReadOutput('<path>/tmp/a.xml</path>\n<type>file</type>\n<content>\n1: <content>x</content>\n2: tail</content>')
++        expect(out.isOpencodeRead).toBe(true)
++        expect(out.body).toBe('1: <content>x</content>\n2: tail')
++    })
++
++    it('preserves real trailing whitespace in the unwrapped body', async () => {
++        const { unwrapOpencodeReadOutput } = await import('@/components/ToolCard/views/_results')
++        const out = unwrapOpencodeReadOutput('<path>/tmp/a.md</path>\n<type>file</type>\n<content>\n1: alpha\n2: beta\n\n</content>')
++        expect(out.body).toBe('1: alpha\n2: beta\n\n')
++    })
++})
+diff --git a/web/src/components/ToolCard/views/_results.tsx b/web/src/components/ToolCard/views/_results.tsx
+index c14fde7f7..28f21ff3e 100644
+--- a/web/src/components/ToolCard/views/_results.tsx
++++ b/web/src/components/ToolCard/views/_results.tsx
+@@ -370,7 +370,7 @@ function extractReadFileContent(result: unknown): { filePath: string | null; con
+ }
+ 
+ function isReadFileToolCall(toolName: string, input: unknown): boolean {
+-    if (toolName === 'Read' || toolName === 'NotebookRead') return true
++    if (toolName === 'Read' || toolName === 'NotebookRead' || toolName === 'read') return true
+ 
+     const normalizedName = toolName.toLowerCase()
+     if (normalizedName.includes('read_file') || normalizedName.includes('readfile')) return true
+@@ -386,7 +386,7 @@ function isReadFileToolCall(toolName: string, input: unknown): boolean {
+ function extractReadPathFromInput(input: unknown): string | null {
+     if (!isObject(input)) return null
+ 
+-    const directPath = getInputStringAny(input, ['file_path', 'path', 'name'])
++    const directPath = getInputStringAny(input, ['file_path', 'filePath', 'path', 'name'])
+     if (directPath) return directPath
+ 
+     if (Array.isArray(input.parsed_cmd)) {
+@@ -426,6 +426,16 @@ export function parseNumberedFileLines(text: string): { startLine: number; body:
+     return startLine === null ? null : { startLine, body: body.join('\n') }
+ }
+ 
++export function unwrapOpencodeReadOutput(text: string): { path: string | null; body: string; isOpencodeRead: boolean } {
++    const wrapper = text.match(/^<path>([\s\S]*?)<\/path>\s*<type>file<\/type>\s*<content>\n?([\s\S]*)<\/content>\s*$/)
++    if (!wrapper) return { path: null, body: text, isOpencodeRead: false }
++    return {
++        path: wrapper[1].trim(),
++        body: wrapper[2].replace(/\n\(End of file[^)]*\)\n?$/, ''),
++        isOpencodeRead: true
++    }
++}
++
+ function renderReadTextResult(text: string, path: string | null, surface: ToolViewProps['surface'], parseNumberedLines: boolean) {
+     // A file read is line-oriented content: render it in a code block (monospace
+     // + line-number gutter) even when the extension is unknown (.txt, .log, agy
+@@ -665,11 +675,12 @@ const ReadResultView: ToolViewComponent = (props: ToolViewProps) => {
+ 
+     const text = extractTextFromResult(result)
+     if (text) {
+-        const path = extractReadPathFromInput(props.block.tool.input)
++        const unwrapped = unwrapOpencodeReadOutput(text)
++        const path = unwrapped.path ?? extractReadPathFromInput(props.block.tool.input)
+         const displayPath = path ? resolveDisplayPath(path, props.metadata) : null
+         return (
+             <>
+-                {renderReadTextResult(text, displayPath, props.surface, props.block.tool.nativeKind === 'agy-numbered-read')}
++                {renderReadTextResult(unwrapped.body, displayPath, props.surface, unwrapped.isOpencodeRead || props.block.tool.nativeKind === 'agy-numbered-read')}
+                 <RawJsonDevOnly value={result} surface={props.surface} />
+             </>
+         )
+@@ -1020,7 +1031,15 @@ const GenericResultView: ToolViewComponent = (props: ToolViewProps) => {
+         return (
+             <>
+                 {isReadFileToolCall(props.block.tool.name, props.block.tool.input)
+-                    ? renderReadTextResult(text, extractReadPathFromInput(props.block.tool.input), props.surface, props.block.tool.nativeKind === 'agy-numbered-read')
++                    ? (() => {
++                        const unwrapped = unwrapOpencodeReadOutput(text)
++                        return renderReadTextResult(
++                            unwrapped.body,
++                            unwrapped.path ?? extractReadPathFromInput(props.block.tool.input),
++                            props.surface,
++                            unwrapped.isOpencodeRead || props.block.tool.nativeKind === 'agy-numbered-read'
++                        )
++                    })()
+                     : renderText(text, { mode: 'auto', collapseLongContent: props.surface === 'inline', surface: props.surface })}
+                 {typeof result === 'object' ? <RawJsonDevOnly value={result} surface={props.surface} /> : null}
+             </>
+@@ -1041,6 +1060,7 @@ export const toolResultViewRegistry: Record<string, ToolViewComponent> = {
+     Grep: LineListResultView,
+     LS: LineListResultView,
+     Read: ReadResultView,
++    read: ReadResultView,
+     Edit: MutationResultView,
+     MultiEdit: MutationResultView,
+     Write: MutationResultView,
+-- 
+2.43.0
+
