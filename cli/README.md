@@ -39,6 +39,7 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, OpenCode, or DeepSeek Harness 
 - `hapi resume [sessionId]` - List resumable sessions for this machine or resume one locally.
 - `hapi ping-peer <session-id-prefix> <message>` - Resume (if needed) and message another session. Prefer this or MCP `ping_peer` / `list_peers` over reinventing JWT+curl. Also `--message-file` / `--list`.
 - `hapi inspect-peer <session-id-or-prefix>` - Read-only peer metadata + recent message text (no resume). Prefer this or MCP `inspect_peer` when a user cites `[title](/sessions/<id>)` or Copy-reference `See session "…" (/sessions/<id>) for context`. `/sessions/<id>` is a hub path, not a local file. Optional `--limit`.
+- `hapi job set|update|clear|list|run` - Attach long-running outliving work to a session so the list UI shows progress while the agent is idle (`tiann/hapi#1404`). Prefer `"$HAPI_SESSION_ID"`. Heartbeat via `update` (or `run`); honest `--remaining` or `--done`/`--total` (omit counts if unknown — never invent a percent). Late-attach clock fix: `set --started-at <epoch-ms>` or clear+set. See `docs/guide/session-jobs.md` and `hapi job --help`.
 
 ### Resume a remote session locally
 
@@ -70,6 +71,8 @@ Both `start` and `start-sync` accept repeatable `--workspace-root <path>` (or `-
 
 - The web `/browse` page surfaces scoped file trees rooted at those paths.
 - The runner refuses `list-directory` and `spawn-session` requests for paths outside the configured roots.
+- The runner can serve read-only file, Git, and ripgrep requests for inactive
+  sessions through its machine-scoped `workspace-file-access` capability.
 - `~` and `~/foo` are expanded.
 
 Omitting the flag keeps manual session spawning unrestricted and leaves the
@@ -129,6 +132,7 @@ controls for DSH.
 - `HAPI_EXPERIMENTAL` - Enable experimental features (true/1/yes).
 - `HAPI_EXTRA_HEADERS_JSON` - JSON object of extra headers to send on CLI → hub requests, e.g. `{"Cookie":"CF_Authorization=..."}`. Can also be set as the `extraHeaders` object in `~/.hapi/settings.json` (environment variable wins).
 - `HAPI_CLAUDE_PATH` - Path to a specific `claude` executable.
+- `HAPI_PI_PATH` - Path to a specific `pi` executable.
 - `HAPI_DSH_ACP_COMMAND` - ACP server executable for `hapi dsh` (default: `dsh-acp-demo`).
 - `HAPI_DSH_ACP_CONFIG` - Optional `dsh-acp-demo --config` path.
 - `HAPI_DSH_ACP_ARGS_JSON` - Optional JSON array of ACP server arguments.

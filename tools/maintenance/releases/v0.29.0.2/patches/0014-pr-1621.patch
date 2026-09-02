@@ -1,0 +1,1569 @@
+From ab29eb3e9937dd70f1bf395746971329f3dacfb6 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:47:00 +0000
+Subject: [PATCH] carry: upstream PR #1621
+
+---
+ cli/src/ui/doctor.test.ts                     |  75 ++++++++-
+ cli/src/ui/doctor.ts                          |  38 ++++-
+ docs/guide/installation.md                    |  32 +++-
+ docs/public/schemas/settings.schema.json      |  25 +++
+ hub/README.md                                 |  12 ++
+ hub/src/config/serverSettings.test.ts         |  22 +++
+ hub/src/config/serverSettings.ts              |  18 +-
+ hub/src/config/settings.ts                    |   9 +
+ hub/src/configuration.ts                      |   5 +
+ hub/src/startHub.ts                           |   4 +-
+ .../sync/sessionCache.titleSummary.test.ts    |  40 ++++-
+ hub/src/sync/sessionCache.ts                  |  12 +-
+ hub/src/sync/syncEngine.ts                    |  13 +-
+ hub/src/sync/titleSuggestion.test.ts          | 124 +++++++++++++-
+ hub/src/sync/titleSuggestion.ts               | 104 ++++++++++--
+ hub/src/web/routes/sessions.test.ts           |  47 +++++-
+ hub/src/web/routes/sessions.ts                |   6 +-
+ hub/src/web/server.ts                         |   3 +-
+ shared/src/apiTypes.ts                        |   3 +-
+ web/src/api/client.test.ts                    |  14 +-
+ web/src/api/client.ts                         |   4 +-
+ web/src/components/RenameSessionDialog.tsx    |  85 +++++++---
+ .../SessionDialogTitleAlignment.test.tsx      | 159 +++++++++++++++++-
+ web/src/components/SessionHeader.test.tsx     |   4 +-
+ web/src/components/SessionHeader.tsx          |   4 +-
+ web/src/components/SessionList.tsx            |   4 +-
+ web/src/hooks/mutations/useSessionActions.ts  |   8 +-
+ web/src/lib/locales/en.ts                     |   2 +
+ web/src/lib/locales/zh-CN.ts                  |   2 +
+ 29 files changed, 789 insertions(+), 89 deletions(-)
+
+diff --git a/cli/src/ui/doctor.test.ts b/cli/src/ui/doctor.test.ts
+index e4b8972f5..0f2eff412 100644
+--- a/cli/src/ui/doctor.test.ts
++++ b/cli/src/ui/doctor.test.ts
+@@ -9,15 +9,88 @@ describe('redactSettingsForDisplay', () => {
+             extraHeaders: {
+                 'CF-Access-Client-Id': 'client-id',
+                 'CF-Access-Client-Secret': 'client-secret'
++            },
++            titleProvider: {
++                baseUrl: 'https://provider.example.com/v1',
++                apiKey: 'title-provider-secret',
++                model: 'small-model',
++                timeoutMs: 20_000
+             }
+         })
+ 
+         expect(displaySettings).toEqual({
+             apiUrl: 'https://hapi.example.com',
+             cliApiToken: '***',
+-            extraHeaders: '***'
++            extraHeaders: '***',
++            titleProvider: {
++                baseUrl: 'https://provider.example.com/v1',
++                apiKey: '***',
++                model: 'small-model',
++                timeoutMs: 20_000
++            }
+         })
+         expect(JSON.stringify(displaySettings)).not.toContain('cli-secret')
+         expect(JSON.stringify(displaySettings)).not.toContain('client-secret')
++        expect(JSON.stringify(displaySettings)).not.toContain('title-provider-secret')
++    })
++
++    it('redacts malformed title provider settings without exposing unexpected fields', () => {
++        const displaySettings = redactSettingsForDisplay({
++            titleProvider: {
++                baseUrl: 'https://provider.example.com/v1',
++                apiKey: 'title-provider-secret',
++                model: 'small-model',
++                password: 'unexpected-secret'
++            }
++        })
++
++        expect(displaySettings.titleProvider).toEqual({
++            baseUrl: 'https://provider.example.com/v1',
++            apiKey: '***',
++            model: 'small-model'
++        })
++        expect(JSON.stringify(displaySettings)).not.toContain('unexpected-secret')
++    })
++
++    it('masks non-object title provider settings', () => {
++        for (const titleProvider of [null, 'provider-secret', ['provider-secret'], 42]) {
++            expect(redactSettingsForDisplay({ titleProvider }).titleProvider).toBe('***')
++        }
++    })
++
++    it('drops malformed nested title provider fields from diagnostic output', () => {
++        const displaySettings = redactSettingsForDisplay({
++            titleProvider: {
++                baseUrl: { password: 'base-url-secret' },
++                apiKey: { value: 'api-key-secret' },
++                model: ['model-secret']
++            }
++        })
++
++        expect(displaySettings.titleProvider).toEqual({
++            baseUrl: undefined,
++            apiKey: '***',
++            model: undefined
++        })
++        expect(JSON.stringify(displaySettings)).not.toContain('base-url-secret')
++        expect(JSON.stringify(displaySettings)).not.toContain('api-key-secret')
++        expect(JSON.stringify(displaySettings)).not.toContain('model-secret')
++    })
++
++    it('removes credentials from title provider URLs in diagnostic output', () => {
++        const displaySettings = redactSettingsForDisplay({
++            titleProvider: {
++                baseUrl: 'https://user:password@provider.example/v1?apiKey=query-secret#fragment',
++                apiKey: 'title-provider-secret',
++                model: 'small-model'
++            }
++        })
++
++        expect(displaySettings.titleProvider).toMatchObject({
++            baseUrl: 'https://provider.example/v1',
++            apiKey: '***'
++        })
++        expect(JSON.stringify(displaySettings)).not.toContain('password')
++        expect(JSON.stringify(displaySettings)).not.toContain('query-secret')
+     })
+ })
+diff --git a/cli/src/ui/doctor.ts b/cli/src/ui/doctor.ts
+index 4daae9948..6d0b5618f 100644
+--- a/cli/src/ui/doctor.ts
++++ b/cli/src/ui/doctor.ts
+@@ -48,11 +48,47 @@ export function getEnvironmentInfo(): Record<string, any> {
+ }
+ 
+ export function redactSettingsForDisplay(settings: Record<string, unknown>): Record<string, unknown> {
+-    return {
++    const displaySettings: Record<string, unknown> = {
+         ...settings,
+         cliApiToken: settings.cliApiToken ? '***' : undefined,
+         extraHeaders: settings.extraHeaders === undefined ? undefined : '***'
+     }
++
++    const titleProvider = settings.titleProvider
++    if (titleProvider !== undefined) {
++        if (titleProvider && typeof titleProvider === 'object' && !Array.isArray(titleProvider)) {
++            const titleProviderSettings = titleProvider as Record<string, unknown>
++            const stringOrUndefined = (value: unknown) => typeof value === 'string' ? value : undefined
++            const safeUrlOrUndefined = (value: unknown) => {
++                if (typeof value !== 'string') return undefined
++                try {
++                    const url = new URL(value)
++                    url.username = ''
++                    url.password = ''
++                    url.search = ''
++                    url.hash = ''
++                    return url.toString()
++                } catch {
++                    return undefined
++                }
++            }
++            const timeoutMs = typeof titleProviderSettings.timeoutMs === 'number'
++                && Number.isSafeInteger(titleProviderSettings.timeoutMs)
++                && titleProviderSettings.timeoutMs > 0
++                ? titleProviderSettings.timeoutMs
++                : undefined
++            displaySettings.titleProvider = {
++                baseUrl: safeUrlOrUndefined(titleProviderSettings.baseUrl),
++                apiKey: titleProviderSettings.apiKey ? '***' : undefined,
++                model: stringOrUndefined(titleProviderSettings.model),
++                ...(timeoutMs === undefined ? {} : { timeoutMs })
++            }
++        } else {
++            displaySettings.titleProvider = '***'
++        }
++    }
++
++    return displaySettings
+ }
+ 
+ function getLogFiles(logDir: string): { file: string, path: string, modified: Date }[] {
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index ecdf1f6a3..0355348f1 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -212,25 +212,33 @@ On first run, HAPI:
+ | `TRANSCRIPTION_BASE_URL` | - | Settings / env | OpenAI-compatible/local transcription base URL |
+ | `TRANSCRIPTION_MODEL` | - | Settings / env | Model for the OpenAI-compatible transcription endpoint |
+ | `TRANSCRIPTION_API_KEY` | - | Settings / env | Optional bearer token for that endpoint |
+-| `HAPI_TITLE_PROVIDER_BASE_URL` | - | - | Server-only OpenAI-compatible Chat Completions base URL for generated session titles |
+-| `HAPI_TITLE_PROVIDER_API_KEY` | - | - | Server-only API key for generated session titles; never sent to the browser |
+-| `HAPI_TITLE_PROVIDER_MODEL` | - | - | Server-only lightweight model used for generated session titles |
++| `HAPI_TITLE_PROVIDER_BASE_URL` | - | `titleProvider.baseUrl` | Server-only OpenAI-compatible Chat Completions base URL for generated session titles |
++| `HAPI_TITLE_PROVIDER_API_KEY` | - | `titleProvider.apiKey` | Server-only API key for generated session titles; never sent to the browser |
++| `HAPI_TITLE_PROVIDER_MODEL` | - | `titleProvider.model` | Server-only lightweight model used for generated session titles |
++| `HAPI_TITLE_PROVIDER_TIMEOUT_MS` | `10000` | `titleProvider.timeoutMs` | Provider request timeout in milliseconds |
+ | `HAPI_TITLE_SUGGESTION_RATE_LIMIT` | `5` | - | Maximum title suggestions per session in the rate-limit window |
+ | `HAPI_TITLE_SUGGESTION_RATE_WINDOW_MS` | `600000` | - | Title suggestion rate-limit window in milliseconds |
+ </details>
+ 
+-The session rename dialog's **Generate** action is unavailable until all three
+-`HAPI_TITLE_PROVIDER_*` variables are configured on the Hub. The provider is
+-called only on demand; the existing manual rename flow does not require these
+-variables. Each request sends recent visible user/assistant conversation text
+-(up to 200 stored messages and a bounded prompt) to that configured provider.
++The session rename dialog always shows **Generate** when a Hub connection is
++available, so the feature remains discoverable. If the provider is not
++configured, clicking **Generate** shows the configuration instructions and the
++existing manual rename flow remains available. The provider is called only on
++demand; each request sends recent visible user/assistant conversation text (up
++to 200 stored messages and a bounded prompt) to that configured provider.
+ 
+ <details>
+ <summary>settings.json example</summary>
+ 
+ Configuration priority: **ENV > settings.json > default**
+ 
+-When ENV values are set and not present in settings.json, they are automatically saved.
++For supported general settings, environment values that are not already present
++in `settings.json` are automatically saved.
++For title generation, each `HAPI_TITLE_PROVIDER_*` environment variable
++overrides its corresponding `titleProvider.*` field. Environment-only title
++provider values are not automatically saved to `settings.json`, so API keys
++are not persisted unexpectedly. Changes to title provider settings take effect
++after restarting the Hub.
+ `HAPI_EXTRA_HEADERS_JSON` is not automatically saved, so access credentials are not persisted unexpectedly.
+ 
+ ```json
+@@ -239,6 +247,12 @@ When ENV values are set and not present in settings.json, they are automatically
+   "listenHost": "0.0.0.0",
+   "listenPort": 3006,
+   "publicUrl": "https://your-domain.com",
++  "titleProvider": {
++    "baseUrl": "https://api.example.com/v1",
++    "apiKey": "your-api-key",
++    "model": "your-lightweight-model",
++    "timeoutMs": 10000
++  },
+   "extraHeaders": {
+     "Cookie": "CF_Authorization=..."
+   }
+diff --git a/docs/public/schemas/settings.schema.json b/docs/public/schemas/settings.schema.json
+index ed7cc68c0..a312b6311 100644
+--- a/docs/public/schemas/settings.schema.json
++++ b/docs/public/schemas/settings.schema.json
+@@ -133,6 +133,31 @@
+         "type": "string"
+       },
+       "description": "Hub-managed voice and dictation provider credentials; process environment variables win over settings-backed values."
++    },
++    "titleProvider": {
++      "type": "object",
++      "additionalProperties": false,
++      "properties": {
++        "baseUrl": {
++          "type": "string",
++          "format": "uri",
++          "description": "OpenAI-compatible Chat Completions base URL for generated session titles. ENV: HAPI_TITLE_PROVIDER_BASE_URL"
++        },
++        "apiKey": {
++          "type": "string",
++          "description": "Server-only API key for generated session titles. ENV: HAPI_TITLE_PROVIDER_API_KEY"
++        },
++        "model": {
++          "type": "string",
++          "description": "Lightweight model used for generated session titles. ENV: HAPI_TITLE_PROVIDER_MODEL"
++        },
++        "timeoutMs": {
++          "type": "integer",
++          "minimum": 1,
++          "description": "Provider request timeout in milliseconds (default: 10000). ENV: HAPI_TITLE_PROVIDER_TIMEOUT_MS"
++        }
++      },
++      "description": "Server-only OpenAI-compatible provider for on-demand session title suggestions. Environment variables override these fields per key."
+     }
+   },
+   "additionalProperties": false
+diff --git a/hub/README.md b/hub/README.md
+index 3e293aafe..9e84bb696 100644
+--- a/hub/README.md
++++ b/hub/README.md
+@@ -38,6 +38,18 @@ Dictation and voice-assistant provider keys can also be added from **Settings 
+ - `TRANSCRIPTION_BASE_URL` and `TRANSCRIPTION_MODEL` - OpenAI-compatible/local transcription endpoint and model.
+ - `TRANSCRIPTION_API_KEY` - Optional bearer token for the OpenAI-compatible endpoint.
+ 
++### Optional (session title generation)
++
++On-demand session title generation uses an OpenAI-compatible Chat Completions
++provider. Configure `titleProvider.baseUrl`, `titleProvider.apiKey`, and
++`titleProvider.model`, and optionally `titleProvider.timeoutMs` in
++`$HAPI_HOME/settings.json` (default `~/.hapi/settings.json`),
++or set the corresponding `HAPI_TITLE_PROVIDER_BASE_URL`,
++`HAPI_TITLE_PROVIDER_API_KEY`, `HAPI_TITLE_PROVIDER_MODEL`, and optionally
++`HAPI_TITLE_PROVIDER_TIMEOUT_MS` environment variables. The timeout defaults to
++10 seconds and environment values override settings-file values per field. API
++keys remain Hub-side and are never sent to the browser.
++
+ ### Optional
+ 
+ - `HAPI_LISTEN_HOST` - HTTP bind address (default: 127.0.0.1).
+diff --git a/hub/src/config/serverSettings.test.ts b/hub/src/config/serverSettings.test.ts
+index 6df75c4f6..8237c179b 100644
+--- a/hub/src/config/serverSettings.test.ts
++++ b/hub/src/config/serverSettings.test.ts
+@@ -108,6 +108,28 @@ describe('loadServerSettings', () => {
+         expect(result.sources.serverChanBackgroundOnly).toBe('env')
+     })
+ 
++    it('loads the title provider block from settings.json without persisting environment values', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            titleProvider: {
++                baseUrl: 'https://settings.example/v1',
++                apiKey: 'settings-secret',
++                model: 'settings-model',
++                timeoutMs: 20_000
++            }
++        }))
++
++        const result = await loadServerSettings(dir)
++
++        expect(result.settings.titleProvider).toEqual({
++            baseUrl: 'https://settings.example/v1',
++            apiKey: 'settings-secret',
++            model: 'settings-model',
++            timeoutMs: 20_000
++        })
++        expect(result.savedToFile).toBe(false)
++    })
++
+     it('rejects a non-boolean ServerChan background-only setting', async () => {
+         dir = makeTempDir()
+         writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+diff --git a/hub/src/config/serverSettings.ts b/hub/src/config/serverSettings.ts
+index 909057110..4184ee4e0 100644
+--- a/hub/src/config/serverSettings.ts
++++ b/hub/src/config/serverSettings.ts
+@@ -8,7 +8,7 @@
+  * it will be saved to settings.json for future use
+  */
+ 
+-import { getSettingsFile, updateSettings } from './settings'
++import { getSettingsFile, updateSettings, type TitleProviderSettings } from './settings'
+ 
+ const OLD_SETTINGS_FIELDS = ['webappHost', 'webappPort', 'webappUrl'] as const
+ 
+@@ -45,6 +45,7 @@ export interface ServerSettings {
+     listenPort: number
+     publicUrl: string
+     corsOrigins: string[]
++    titleProvider: TitleProviderSettings
+     fcmServiceAccountPath: string | null
+     iosPushMode: string | null
+     iosPushRelayUrl: string | null
+@@ -139,6 +140,19 @@ function readTopicIdArraySetting(value: unknown, field: string): number[] {
+     return [...new Set(value)]
+ }
+ 
++function normalizeTitleProviderSettings(value: unknown): TitleProviderSettings {
++    if (!value || typeof value !== 'object') return {}
++    const raw = value as Record<string, unknown>
++    return {
++        baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl : undefined,
++        apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : undefined,
++        model: typeof raw.model === 'string' ? raw.model : undefined,
++        timeoutMs: typeof raw.timeoutMs === 'number' && Number.isSafeInteger(raw.timeoutMs) && raw.timeoutMs > 0
++            ? raw.timeoutMs
++            : undefined,
++    }
++}
++
+ function rejectOldSettingsFields(settings: object, settingsFile: string): void {
+     const oldFields = OLD_SETTINGS_FIELDS.filter((field) => field in settings)
+     if (oldFields.length === 0) {
+@@ -396,6 +410,7 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+             corsOrigins = deriveCorsOrigins(publicUrl)
+         }
+ 
++        const titleProvider = normalizeTitleProviderSettings(settings.titleProvider)
+         // Push settings: env > file > null, env persisted on first sight —
+         // one loop instead of nine copies of the per-field block above.
+         const push: Record<PushSettingKey, string | null> = {
+@@ -442,6 +457,7 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+                     listenPort,
+                     publicUrl,
+                     corsOrigins,
++                    titleProvider,
+                     ...push,
+                 },
+                 sources,
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index fef0b1c9e..46d96997d 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -7,6 +7,13 @@ import type { FleetUpgradePolicy } from '@hapi/protocol/upgradeChannel'
+ 
+ import type { NotificationCopyConfig } from '../push/notificationCopy'
+ 
++export interface TitleProviderSettings {
++    baseUrl?: string
++    apiKey?: string
++    model?: string
++    timeoutMs?: number
++}
++
+ export interface Settings {
+     machineId?: string
+     machineIdConfirmedByServer?: boolean
+@@ -67,6 +74,8 @@ export interface Settings {
+     fleetUpgradePolicy?: FleetUpgradePolicy
+     /** Custom push notification copy templates (web push only). Empty fields fall back to defaults. */
+     notificationCopy?: NotificationCopyConfig
++    /** OpenAI-compatible provider used for on-demand session title suggestions. */
++    titleProvider?: TitleProviderSettings
+ }
+ 
+ export function getSettingsFile(dataDir: string): string {
+diff --git a/hub/src/configuration.ts b/hub/src/configuration.ts
+index f7447b60e..7180c47d5 100644
+--- a/hub/src/configuration.ts
++++ b/hub/src/configuration.ts
+@@ -21,6 +21,7 @@
+  * - HAPI_LISTEN_PORT: Port for HTTP service (default: 3006)
+  * - HAPI_PUBLIC_URL: Public URL for external access (e.g., Telegram Mini App)
+  * - CORS_ORIGINS: Comma-separated CORS origins
++ * - HAPI_TITLE_PROVIDER_TIMEOUT_MS: Title provider request timeout in milliseconds (default: 10000)
+  * - HAPI_RELAY_API: Relay API domain for tunwg (default: relay.hapi.run)
+  * - HAPI_RELAY_AUTH: Relay auth key override (default: per-hub key issued by the relay)
+  * - HAPI_RELAY_FORCE_TCP: Force TCP relay mode when UDP is unavailable (true/1)
+@@ -42,6 +43,7 @@ import { getOrCreateCliApiToken } from './config/cliApiToken'
+ import { applyProviderCredentialsFromSettings } from './config/providerCredentials'
+ import { getSettingsFile } from './config/settings'
+ import { loadServerSettings, type ServerSettings, type ServerSettingsResult } from './config/serverSettings'
++import { readTitleProviderConfig, type OpenAICompatibleTitleProviderConfig } from './sync/titleSuggestion'
+ 
+ export type ConfigSource = 'env' | 'file' | 'default'
+ 
+@@ -135,6 +137,8 @@ class Configuration {
+     /** Allowed CORS origins for Mini App + Socket.IO (comma-separated env override) */
+     public readonly corsOrigins: string[]
+ 
++    /** Effective on-demand session title provider configuration. */
++    public readonly titleProviderConfig: OpenAICompatibleTitleProviderConfig | null
+     // Push delivery (FCM + iOS/APNs) — nullable strings interpreted by
+     // fcm/fcmConfig.ts and push-ios/iosPushConfig.ts.
+     public readonly fcmServiceAccountPath: string | null
+@@ -176,6 +180,7 @@ class Configuration {
+         this.listenPort = serverSettings.listenPort
+         this.publicUrl = serverSettings.publicUrl
+         this.corsOrigins = serverSettings.corsOrigins
++        this.titleProviderConfig = readTitleProviderConfig(process.env, serverSettings.titleProvider)
+         this.fcmServiceAccountPath = serverSettings.fcmServiceAccountPath
+         this.iosPushMode = serverSettings.iosPushMode
+         this.iosPushRelayUrl = serverSettings.iosPushRelayUrl
+diff --git a/hub/src/startHub.ts b/hub/src/startHub.ts
+index a5d4aed92..ea508d53a 100644
+--- a/hub/src/startHub.ts
++++ b/hub/src/startHub.ts
+@@ -263,6 +263,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+     syncEngine = new SyncEngine(store, socketServer.io, socketServer.rpcRegistry, sseManager, {
+         getUpgradeOffer: () => resolveCurrentUpgradeOffer(),
+         getFleetUpgradePolicy: () => getFleetUpgradePolicy(),
++        titleProviderConfig: config.titleProviderConfig,
+         prepareArtifactOffer: async (offer, platform, arch) => {
+             const meta = await ensureCliArtifact({
+                 version: offer.targetVersion,
+@@ -274,9 +275,6 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+             retainArtifactOffer(meta.sha256)
+             const prepared = {
+                 ...offer,
+-                // Always advertise the fingerprint of the artifact that was
+-                // actually built/cached — tunwg pin refresh can change inputs
+-                // after the pre-build offer fingerprint.
+                 targetGeneration: meta.sourceFingerprint,
+                 artifact: {
+                     url: `/cli/upgrade/cli-artifact?sha256=${encodeURIComponent(meta.sha256)}`,
+diff --git a/hub/src/sync/sessionCache.titleSummary.test.ts b/hub/src/sync/sessionCache.titleSummary.test.ts
+index cc8c1d14f..d7c989614 100644
+--- a/hub/src/sync/sessionCache.titleSummary.test.ts
++++ b/hub/src/sync/sessionCache.titleSummary.test.ts
+@@ -11,7 +11,7 @@ function createPublisher(events: SyncEvent[]): EventPublisher {
+ }
+ 
+ describe('SessionCache.updateSessionSummary', () => {
+-    it('preserves metadata.name while stamping the generated summary timestamp', async () => {
++    it('preserves metadata.name by default while stamping the generated summary timestamp', async () => {
+         const store = new Store(':memory:')
+         const cache = new SessionCache(store, createPublisher([]))
+         const created = cache.getOrCreateSession(
+@@ -34,4 +34,42 @@ describe('SessionCache.updateSessionSummary', () => {
+             summary: { text: 'Generated title' }
+         })
+     })
++
++    it('clears an existing metadata.name when explicitly replacing it with a generated summary', async () => {
++        const store = new Store(':memory:')
++        const cache = new SessionCache(store, createPublisher([]))
++        const created = cache.getOrCreateSession(
++            'summary-replace-session',
++            { path: '/tmp', host: 'localhost', name: 'Manual name' },
++            null,
++            'default'
++        )
++
++        await cache.updateSessionSummary(created.id, 'Generated title', { clearName: true })
++
++        const updated = cache.getSession(created.id)
++        expect(updated?.metadata?.name).toBeUndefined()
++        expect(updated?.metadata?.summary?.text).toBe('Generated title')
++        expect(store.sessions.getSession(created.id)?.metadata).toMatchObject({
++            summary: { text: 'Generated title' }
++        })
++        expect(store.sessions.getSession(created.id)?.metadata).not.toHaveProperty('name')
++    })
++
++    it('clears a whitespace-only metadata.name when explicitly replacing it with a generated summary', async () => {
++        const store = new Store(':memory:')
++        const cache = new SessionCache(store, createPublisher([]))
++        const created = cache.getOrCreateSession(
++            'summary-whitespace-name-session',
++            { path: '/tmp', host: 'localhost', name: '   ' },
++            null,
++            'default'
++        )
++
++        await cache.updateSessionSummary(created.id, 'Generated title', { clearName: true })
++
++        const updated = cache.getSession(created.id)
++        expect(updated?.metadata?.name).toBeUndefined()
++        expect(updated?.metadata?.summary?.text).toBe('Generated title')
++    })
+ })
+diff --git a/hub/src/sync/sessionCache.ts b/hub/src/sync/sessionCache.ts
+index 583acbde9..d256e561f 100644
+--- a/hub/src/sync/sessionCache.ts
++++ b/hub/src/sync/sessionCache.ts
+@@ -897,10 +897,10 @@ export class SessionCache {
+         throw new Error('Session was modified concurrently. Please try again.')
+     }
+ 
+-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
+-        // Keep the generated/native title separate from metadata.name. A
+-        // manually chosen name must continue to win in the Web title helper,
+-        // while the summary remains available as the agent-authored fallback.
++    async updateSessionSummary(sessionId: string, text: string, options: { clearName?: boolean } = {}): Promise<void> {
++        // Keep the generated/native title separate from metadata.name unless
++        // the user explicitly saved a generated title as the replacement for
++        // an existing manual name.
+         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+             const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+             if (!session) {
+@@ -916,6 +916,10 @@ export class SessionCache {
+                 }
+             }
+ 
++            if (options.clearName && Object.prototype.hasOwnProperty.call(newMetadata, 'name')) {
++                delete newMetadata.name
++            }
++
+             const result = this.store.sessions.updateSessionMetadata(
+                 sessionId,
+                 newMetadata,
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index d8370d666..e12d40fa7 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -38,7 +38,11 @@ import { EventPublisher, type SyncEventListener } from './eventPublisher'
+ import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
+ import { MachineCache, type Machine } from './machineCache'
+ import { MessageService, type RetryIndeterminateMessageResult } from './messageService'
+-import { createTitleSuggestionService, type TitleSuggestionService } from './titleSuggestion'
++import {
++    createTitleSuggestionService,
++    type OpenAICompatibleTitleProviderConfig,
++    type TitleSuggestionService
++} from './titleSuggestion'
+ import { selectForkTranscriptPrefix } from './forkTranscript'
+ import {
+     RpcGateway,
+@@ -190,6 +194,7 @@ export type SyncEngineOptions = {
+     prepareArtifactOffer?: (offer: HubUpgradeOffer, platform: string, arch: string) => Promise<HubUpgradeOffer>
+     /** Operator policy: only `auto` lets the hub auto-fire fleet upgrades. */
+     getFleetUpgradePolicy?: () => FleetUpgradePolicy
++    titleProviderConfig?: OpenAICompatibleTitleProviderConfig | null
+     /** Data dir for cooldowns only — optional. */
+ }
+ 
+@@ -266,7 +271,7 @@ export class SyncEngine {
+             this.eventPublisher,
+             (sessionId, updatedAt) => this.recordSessionActivity(sessionId, updatedAt)
+         )
+-        this.titleSuggestionService = createTitleSuggestionService(store)
++        this.titleSuggestionService = createTitleSuggestionService(store, options?.titleProviderConfig)
+         this.rpcGateway = new RpcGateway(io, rpcRegistry)
+         this.reloadAll()
+         this.inactivityTimer = setInterval(() => this.expireInactive(), 5_000)
+@@ -2477,8 +2482,8 @@ export class SyncEngine {
+         return await this.titleSuggestionService.suggestTitle(sessionId)
+     }
+ 
+-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
+-        await this.sessionCache.updateSessionSummary(sessionId, text)
++    async updateSessionSummary(sessionId: string, text: string, options: { clearName?: boolean } = {}): Promise<void> {
++        await this.sessionCache.updateSessionSummary(sessionId, text, options)
+     }
+ 
+     async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+diff --git a/hub/src/sync/titleSuggestion.test.ts b/hub/src/sync/titleSuggestion.test.ts
+index 5ad6c2bf7..59ebe3bc1 100644
+--- a/hub/src/sync/titleSuggestion.test.ts
++++ b/hub/src/sync/titleSuggestion.test.ts
+@@ -58,11 +58,13 @@ describe('OpenAI-compatible title provider', () => {
+         expect(readTitleProviderConfig({
+             HAPI_TITLE_PROVIDER_BASE_URL: 'https://example.test/v1',
+             HAPI_TITLE_PROVIDER_API_KEY: 'secret',
+-            HAPI_TITLE_PROVIDER_MODEL: 'small-model'
++            HAPI_TITLE_PROVIDER_MODEL: 'small-model',
++            HAPI_TITLE_PROVIDER_TIMEOUT_MS: '20000'
+         })).toEqual({
+             baseUrl: 'https://example.test/v1',
+             apiKey: 'secret',
+-            model: 'small-model'
++            model: 'small-model',
++            timeoutMs: 20_000
+         })
+         expect(readTitleProviderConfig({ HAPI_TITLE_PROVIDER_API_KEY: 'secret' })).toBeNull()
+         expect(readTitleSuggestionLimits({
+@@ -93,8 +95,102 @@ describe('OpenAI-compatible title provider', () => {
+         expect(await request.json()).toMatchObject({ model: 'small-model' })
+     })
+ 
++    it('surfaces a safe provider HTTP reason without exposing credentials', async () => {
++        const provider = new OpenAICompatibleTitleProvider(
++            {
++                baseUrl: 'https://example.test/v1',
++            apiKey: 'secret',
++            model: 'small-model'
++        },
++            async () => new Response(JSON.stringify({
++                error: 'sk-live-secret'
++            }), { status: 401, statusText: 'Unauthorized' })
++        )
++
++        await expect(provider.suggest('Recent conversation')).rejects.toThrow(
++            'Title provider request failed (HTTP 401): authentication failed'
++        )
++    })
++
++    it('reports a timeout when the response body aborts after headers arrive', async () => {
++        const provider = new OpenAICompatibleTitleProvider(
++            {
++                baseUrl: 'https://example.test/v1',
++                apiKey: 'secret',
++                model: 'small-model',
++                timeoutMs: 50
++            },
++            async () => ({
++                ok: true,
++                status: 200,
++                statusText: 'OK',
++                text: async () => {
++                    const error = new Error('aborted while reading body')
++                    error.name = 'AbortError'
++                    throw error
++                }
++            } as unknown as Response)
++        )
++
++        await expect(provider.suggest('Recent conversation')).rejects.toThrow(
++            'Title provider request timed out after 50 ms'
++        )
++    })
++
++    it('falls back to settings.json values and lets environment values override them per field', () => {
++        const settings = {
++            baseUrl: 'https://settings.example/v1',
++            apiKey: 'settings-secret',
++            model: 'settings-model'
++        }
++
++        expect(readTitleProviderConfig({}, settings)).toEqual({
++            baseUrl: 'https://settings.example/v1',
++            apiKey: 'settings-secret',
++            model: 'settings-model',
++            timeoutMs: 10_000
++        })
++        expect(readTitleProviderConfig({
++            HAPI_TITLE_PROVIDER_BASE_URL: 'https://env.example/v1',
++            HAPI_TITLE_PROVIDER_MODEL: 'env-model',
++            HAPI_TITLE_PROVIDER_TIMEOUT_MS: '25000'
++        }, settings)).toEqual({
++            baseUrl: 'https://env.example/v1',
++            apiKey: 'settings-secret',
++            model: 'env-model',
++            timeoutMs: 25_000
++        })
++        expect(readTitleProviderConfig({
++            HAPI_TITLE_PROVIDER_TIMEOUT_MS: 'not-a-number'
++        }, { ...settings, timeoutMs: 15_000 })).toMatchObject({ timeoutMs: 15_000 })
++        expect(readTitleProviderConfig({}, { ...settings, apiKey: '   ' })).toBeNull()
++    })
++
++    it('uses the configured timeout when the provider request does not complete', async () => {
++        const provider = new OpenAICompatibleTitleProvider(
++            {
++                baseUrl: 'https://example.test/v1',
++                apiKey: 'secret',
++                model: 'small-model',
++                timeoutMs: 5
++            },
++            async (_input, init) => await new Promise<Response>((_resolve, reject) => {
++                init?.signal?.addEventListener('abort', () => {
++                    const error = new Error('aborted')
++                    error.name = 'AbortError'
++                    reject(error)
++                })
++            })
++        )
++
++        await expect(provider.suggest('Recent conversation')).rejects.toThrow(
++            'Title provider request timed out after 5 ms'
++        )
++    })
++
+     it('normalizes a one-line title and caps it for the metadata field', () => {
+         expect(normalizeTitleSuggestion('Title: "A useful title"\nExtra text')).toBe('A useful title')
++        expect(normalizeTitleSuggestion('  Generated title with trailing spaces   ')).toBe('Generated title with trailing spaces')
+         expect(normalizeTitleSuggestion('   ')).toBeNull()
+         expect(normalizeTitleSuggestion('x'.repeat(100))).toHaveLength(80)
+     })
+@@ -164,7 +260,7 @@ describe('TitleSuggestionService', () => {
+ 
+     it('reports unavailable configuration and enforces the per-session request limit', async () => {
+         const { store, sessionId } = makeStore()
+-        const unavailable = createTitleSuggestionService(store)
++        const unavailable = createTitleSuggestionService(store, null)
+         await expect(unavailable.suggestTitle(sessionId)).rejects.toMatchObject({
+             code: 'unavailable',
+             status: 503
+@@ -186,4 +282,26 @@ describe('TitleSuggestionService', () => {
+             status: 429
+         })
+     })
++
++    it('does not forward arbitrary provider errors from injected providers', async () => {
++        const { store, sessionId } = makeStore()
++        store.messages.addMessage(sessionId, {
++            role: 'user',
++            content: { type: 'text', text: 'Title this conversation' }
++        })
++
++        const service = new TitleSuggestionService(store, {
++            provider: {
++                suggest: async () => {
++                    throw new Error('Title provider returned HTTP 404 Not Found: model not found')
++                }
++            }
++        })
++
++        await expect(service.suggestTitle(sessionId)).rejects.toMatchObject({
++            code: 'provider',
++            status: 502,
++            message: 'The title suggestion provider failed'
++        })
++    })
+ })
+diff --git a/hub/src/sync/titleSuggestion.ts b/hub/src/sync/titleSuggestion.ts
+index 2aa92dd99..aed741d25 100644
+--- a/hub/src/sync/titleSuggestion.ts
++++ b/hub/src/sync/titleSuggestion.ts
+@@ -5,6 +5,7 @@ import {
+     unwrapRoleWrappedRecordEnvelope
+ } from '@hapi/protocol/messages'
+ import { isObject } from '@hapi/protocol'
++import type { TitleProviderSettings } from '../config/settings'
+ import type { Store, StoredMessage } from '../store'
+ 
+ export const TITLE_SUGGESTION_MESSAGE_LIMIT = 200
+@@ -13,8 +14,12 @@ export const TITLE_SUGGESTION_MAX_TITLE_CHARS = 80
+ export const TITLE_SUGGESTION_RATE_LIMIT = 5
+ export const TITLE_SUGGESTION_RATE_WINDOW_MS = 10 * 60 * 1000
+ export const TITLE_SUGGESTION_TIMEOUT_MS = 10_000
++const TITLE_PROVIDER_RESPONSE_MAX_CHARS = 16_000
+ const TITLE_SUGGESTION_RATE_LIMIT_ENV = 'HAPI_TITLE_SUGGESTION_RATE_LIMIT'
+ const TITLE_SUGGESTION_RATE_WINDOW_ENV = 'HAPI_TITLE_SUGGESTION_RATE_WINDOW_MS'
++const TITLE_PROVIDER_TIMEOUT_ENV = 'HAPI_TITLE_PROVIDER_TIMEOUT_MS'
++export const TITLE_SUGGESTION_UNAVAILABLE_MESSAGE =
++    'Title suggestions are not configured on this Hub. Configure titleProvider.baseUrl, titleProvider.apiKey, and titleProvider.model in $HAPI_HOME/settings.json (default ~/.hapi/settings.json), or set HAPI_TITLE_PROVIDER_BASE_URL, HAPI_TITLE_PROVIDER_API_KEY, and HAPI_TITLE_PROVIDER_MODEL in the Hub environment, then restart the Hub.'
+ 
+ type TitleSuggestionErrorCode = 'unavailable' | 'empty' | 'rate-limited' | 'provider'
+ 
+@@ -44,11 +49,18 @@ type TitleProviderFetch = (
+ ) => Promise<Response>
+ 
+ export function readTitleProviderConfig(
+-    env: TitleProviderEnvironment = process.env
++    env: TitleProviderEnvironment = process.env,
++    settings?: TitleProviderSettings | null
+ ): OpenAICompatibleTitleProviderConfig | null {
+-    const baseUrl = env.HAPI_TITLE_PROVIDER_BASE_URL?.trim()
+-    const apiKey = env.HAPI_TITLE_PROVIDER_API_KEY?.trim()
+-    const model = env.HAPI_TITLE_PROVIDER_MODEL?.trim()
++    const readValue = (envValue: string | undefined, fileValue: unknown): string | undefined => {
++        const fromEnv = envValue?.trim()
++        if (fromEnv) return fromEnv
++        return typeof fileValue === 'string' && fileValue.trim() ? fileValue.trim() : undefined
++    }
++
++    const baseUrl = readValue(env.HAPI_TITLE_PROVIDER_BASE_URL, settings?.baseUrl)
++    const apiKey = readValue(env.HAPI_TITLE_PROVIDER_API_KEY, settings?.apiKey)
++    const model = readValue(env.HAPI_TITLE_PROVIDER_MODEL, settings?.model)
+     if (!baseUrl || !apiKey || !model) return null
+ 
+     try {
+@@ -58,10 +70,18 @@ export function readTitleProviderConfig(
+         return null
+     }
+ 
+-    return { baseUrl, apiKey, model }
++    return {
++        baseUrl,
++        apiKey,
++        model,
++        timeoutMs: readPositiveInteger(
++            env[TITLE_PROVIDER_TIMEOUT_ENV],
++            settings?.timeoutMs ?? TITLE_SUGGESTION_TIMEOUT_MS
++        )
++    }
+ }
+ 
+-function readPositiveInteger(value: string | undefined, fallback: number): number {
++function readPositiveInteger(value: unknown, fallback: number): number {
+     const parsed = Number(value)
+     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+ }
+@@ -219,6 +239,50 @@ function extractProviderText(value: unknown): string | null {
+     return extractChatText(choice.message.content)
+ }
+ 
++const TITLE_PROVIDER_HTTP_REASONS: Record<number, string> = {
++    400: 'request rejected',
++    401: 'authentication failed',
++    403: 'access denied',
++    404: 'endpoint or model not found',
++    408: 'request timed out',
++    429: 'rate limited'
++}
++
++function titleProviderHttpError(status: number): string {
++    const reason = TITLE_PROVIDER_HTTP_REASONS[status]
++        ?? (status >= 500 ? 'provider service unavailable' : 'request rejected')
++    return `Title provider request failed (HTTP ${status}): ${reason}`
++}
++
++async function readTitleProviderResponseBody(response: Response): Promise<unknown> {
++    let text: string
++    try {
++        text = await response.text()
++    } catch (error) {
++        if (isAbortError(error)) throw error
++        return null
++    }
++    const boundedText = text.slice(0, TITLE_PROVIDER_RESPONSE_MAX_CHARS)
++    if (!boundedText.trim()) return null
++
++    try {
++        return JSON.parse(boundedText) as unknown
++    } catch {
++        return boundedText
++    }
++}
++
++function isAbortError(error: unknown): boolean {
++    return isObject(error) && error.name === 'AbortError'
++}
++
++class TitleProviderRequestError extends Error {
++    constructor(message: string) {
++        super(message)
++        this.name = 'TitleProviderRequestError'
++    }
++}
++
+ export class OpenAICompatibleTitleProvider {
+     private readonly timeoutMs: number
+ 
+@@ -255,14 +319,23 @@ export class OpenAICompatibleTitleProvider {
+                 signal: controller.signal
+             })
+ 
+-            const body: unknown = await response.json().catch(() => null)
+             if (!response.ok) {
+-                throw new Error(`Title provider returned HTTP ${response.status}`)
++                throw new TitleProviderRequestError(titleProviderHttpError(response.status))
+             }
+ 
++            const body = await readTitleProviderResponseBody(response)
+             const text = extractProviderText(body)
+-            if (!text) throw new Error('Title provider returned no text')
++            if (!text) throw new TitleProviderRequestError('Title provider returned no text')
+             return text
++        } catch (error) {
++            if (error instanceof TitleProviderRequestError) throw error
++            if (isAbortError(error)) {
++                throw new TitleProviderRequestError(
++                    `Title provider request timed out after ${this.timeoutMs} ms`
++                )
++            }
++
++            throw new TitleProviderRequestError('Title provider request failed')
+         } finally {
+             clearTimeout(timeout)
+         }
+@@ -298,7 +371,7 @@ export class TitleSuggestionService {
+         if (!this.provider) {
+             throw new TitleSuggestionError(
+                 'unavailable',
+-                'Title suggestions are not configured on this Hub',
++                TITLE_SUGGESTION_UNAVAILABLE_MESSAGE,
+                 503
+             )
+         }
+@@ -336,9 +409,12 @@ export class TitleSuggestionService {
+             return title
+         } catch (error) {
+             if (error instanceof TitleSuggestionError) throw error
++            const detail = error instanceof TitleProviderRequestError
++                ? error.message
++                : null
+             throw new TitleSuggestionError(
+                 'provider',
+-                'The title suggestion provider failed',
++                detail ?? 'The title suggestion provider failed',
+                 502
+             )
+         } finally {
+@@ -347,8 +423,10 @@ export class TitleSuggestionService {
+     }
+ }
+ 
+-export function createTitleSuggestionService(store: Store): TitleSuggestionService {
+-    const config = readTitleProviderConfig()
++export function createTitleSuggestionService(
++    store: Store,
++    config: OpenAICompatibleTitleProviderConfig | null = readTitleProviderConfig()
++): TitleSuggestionService {
+     const limits = readTitleSuggestionLimits()
+     return new TitleSuggestionService(
+         store,
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index d4e4251cb..4474801cf 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, it } from 'bun:test'
+ import { Hono } from 'hono'
+ import type { Session, SyncEngine } from '../../sync/syncEngine'
++import { TitleSuggestionError } from '../../sync/titleSuggestion'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { createSessionsRoutes } from './sessions'
+ 
+@@ -205,22 +206,58 @@ describe('sessions routes', () => {
+         expect(await response.json()).toEqual({ title: 'Generated title' })
+     })
+ 
++    it('preserves title suggestion error codes for the web client', async () => {
++        const { app } = createApp(createSession(), {
++            suggestSessionTitle: async () => {
++                throw new TitleSuggestionError('unavailable', 'Title provider is not configured', 503)
++            }
++        })
++
++        const response = await app.request('/api/sessions/session-1/title-suggestion', { method: 'POST' })
++
++        expect(response.status).toBe(503)
++        expect(await response.json()).toEqual({
++            error: 'Title provider is not configured',
++            code: 'unavailable'
++        })
++    })
++
++    it('preserves the safe provider error reason for the web client', async () => {
++        const { app } = createApp(createSession(), {
++            suggestSessionTitle: async () => {
++                throw new TitleSuggestionError(
++                    'provider',
++                    'Title provider request failed (HTTP 404): endpoint or model not found',
++                    502
++                )
++            }
++        })
++
++        const response = await app.request('/api/sessions/session-1/title-suggestion', { method: 'POST' })
++
++        expect(response.status).toBe(502)
++        expect(await response.json()).toEqual({
++            error: 'Title provider request failed (HTTP 404): endpoint or model not found',
++            code: 'provider'
++        })
++    })
++
+     it('writes generated titles through the summary metadata endpoint', async () => {
+-        const updates: Array<[string, string]> = []
++        const updates: Array<[string, string, { clearName?: boolean }]> = []
+         const { app } = createApp(createSession(), {
+-            updateSessionSummary: async (sessionId, text) => {
+-                updates.push([sessionId, text])
++            updateSessionSummary: async (sessionId, text, options) => {
++                updates.push([sessionId, text, options ?? {}])
+             }
+         })
+ 
+         const response = await app.request('/api/sessions/session-1/summary', {
+             method: 'PATCH',
+             headers: { 'Content-Type': 'application/json' },
+-            body: JSON.stringify({ text: '  Generated title  ' })
++            body: JSON.stringify({ text: '  Generated title  ', clearName: true })
+         })
+ 
+         expect(response.status).toBe(200)
+-        expect(updates).toEqual([['session-1', 'Generated title']])
++        expect(updates).toEqual([['session-1', 'Generated title', { clearName: true }]])
+     })
+ 
+     it('rejects an empty summary', async () => {
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index d1a04b3af..f1a621cee 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -967,7 +967,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             return c.json({ title })
+         } catch (error) {
+             if (error instanceof TitleSuggestionError) {
+-                return c.json({ error: error.message }, error.status)
++                return c.json({ error: error.message, code: error.code }, error.status)
+             }
+             return c.json({ error: 'Failed to generate a session title' }, 502)
+         }
+@@ -991,7 +991,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         }
+ 
+         try {
+-            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text)
++            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text, {
++                clearName: parsed.data.clearName
++            })
+             return c.json({ ok: true })
+         } catch (error) {
+             const message = error instanceof Error ? error.message : 'Failed to update session summary'
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 1a550803c..72e0a6415 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -9,7 +9,6 @@ import { getConfiguration } from '../configuration'
+ import { PROTOCOL_VERSION } from '@hapi/protocol'
+ import { buildGeminiLiveSetupMessage, QWEN_REALTIME_MODEL } from '@hapi/protocol/voice'
+ import { getProviderEnvironment } from '../config/providerCredentials'
+-import { readTitleProviderConfig } from '../sync/titleSuggestion'
+ import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
+ import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
+ import type { SyncEngine } from '../sync/syncEngine'
+@@ -262,7 +261,7 @@ function createWebApp(options: {
+         protocolVersion: PROTOCOL_VERSION,
+         capabilities: {
+             workGraph: true,
+-            titleSuggestion: readTitleProviderConfig() !== null
++            titleSuggestion: configuration.titleProviderConfig !== null
+         }
+     }))
+ 
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 58ee33785..312374c40 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -417,7 +417,8 @@ export const RenameSessionRequestSchema = z.object({
+ export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
+ 
+ export const UpdateSessionSummaryRequestSchema = z.object({
+-    text: z.string().trim().min(1).max(255)
++    text: z.string().trim().min(1).max(255),
++    clearName: z.boolean().optional()
+ })
+ 
+ export type UpdateSessionSummaryRequest = z.infer<typeof UpdateSessionSummaryRequestSchema>
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index b0da2627a..a7574cc24 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -141,12 +141,24 @@ describe('ApiClient error mapping', () => {
+ 
+         const api = new ApiClient('test-token')
+         await expect(api.suggestSessionTitle('session /?#')).resolves.toEqual({ title: 'Generated title' })
+-        await api.updateSessionSummary('session /?#', 'Generated title')
++        await api.updateSessionSummary('session /?#', 'Generated title', true)
+ 
+         expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%20%2F%3F%23/title-suggestion')
+         expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' })
+         expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/sessions/session%20%2F%3F%23/summary')
+         expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
++            method: 'PATCH',
++            body: JSON.stringify({ text: 'Generated title', clearName: true })
++        })
++    })
++
++    it('does not request manual-name clearing for a normal summary update', async () => {
++        fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
++
++        const api = new ApiClient('test-token')
++        await api.updateSessionSummary('session-1', 'Generated title')
++
++        expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+             method: 'PATCH',
+             body: JSON.stringify({ text: 'Generated title' })
+         })
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 7fc6c8900..870a0198f 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -1150,10 +1150,10 @@ export class ApiClient {
+         )
+     }
+ 
+-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
++    async updateSessionSummary(sessionId: string, text: string, clearName = false): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/summary`, {
+             method: 'PATCH',
+-            body: JSON.stringify({ text })
++            body: JSON.stringify({ text, ...(clearName ? { clearName: true } : {}) })
+         })
+     }
+ 
+diff --git a/web/src/components/RenameSessionDialog.tsx b/web/src/components/RenameSessionDialog.tsx
+index 4c2e649f5..b4d9c5531 100644
+--- a/web/src/components/RenameSessionDialog.tsx
++++ b/web/src/components/RenameSessionDialog.tsx
+@@ -6,6 +6,7 @@ import {
+     DialogTitle
+ } from '@/components/ui/dialog'
+ import { Button } from '@/components/ui/button'
++import { ApiError } from '@/api/client'
+ import { useTranslation } from '@/lib/use-translation'
+ 
+ type RenameSessionDialogProps = {
+@@ -14,10 +15,35 @@ type RenameSessionDialogProps = {
+     currentName: string
+     onRename: (newName: string) => Promise<void>
+     onSuggestTitle?: () => Promise<string>
+-    onUpdateSummary?: (text: string) => Promise<void>
++    onUpdateSummary?: (text: string, clearName?: boolean) => Promise<void>
+     isPending: boolean
+ }
+ 
++function extractTitleSuggestionErrorDetail(error: ApiError): string | null {
++    if (!error.body) return null
++
++    let parsed: unknown
++    try {
++        parsed = JSON.parse(error.body) as unknown
++    } catch {
++        return null
++    }
++
++    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
++    const message = (parsed as { error?: unknown }).error
++    if (typeof message !== 'string') return null
++
++    const detail = message
++        .replace(/\s+/g, ' ')
++        .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
++        .replace(/([?&](?:api[-_ ]?key|token|secret|password)=)[^&\s]+/gi, '$1[redacted]')
++        .replace(/\b((?:api[-_ ]?key|token|secret|password)(?:\s+provided)?)\b\s*[:=]\s*["']?[^,\s}"']+/gi, '$1: [credential redacted]')
++        .trim()
++
++    if (!detail) return null
++    return detail.length > 240 ? `${detail.slice(0, 239)}…` : detail
++}
++
+ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+     const { t } = useTranslation()
+     const { isOpen, onClose, currentName, onRename, onSuggestTitle, onUpdateSummary, isPending } = props
+@@ -68,9 +94,18 @@ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+             if (!suggested) throw new Error('Empty title suggestion')
+             setName(suggested)
+             setDraftSource('generated')
+-        } catch {
++        } catch (error) {
+             if (generation === generationRef.current) {
+-                setError(t('dialog.rename.generateError'))
++                if (error instanceof ApiError && error.code === 'unavailable') {
++                    setError(t('dialog.rename.generateUnavailable'))
++                } else {
++                    const detail = error instanceof ApiError
++                        ? extractTitleSuggestionErrorDetail(error)
++                        : null
++                    setError(detail
++                        ? t('dialog.rename.generateErrorWithReason', { reason: detail })
++                        : t('dialog.rename.generateError'))
++                }
+             }
+         } finally {
+             if (generation === generationRef.current) {
+@@ -89,7 +124,7 @@ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+         setError(null)
+         try {
+             if (draftSource === 'generated' && onUpdateSummary) {
+-                await onUpdateSummary(trimmed)
++                await onUpdateSummary(trimmed, true)
+             } else {
+                 await onRename(trimmed)
+             }
+@@ -136,31 +171,31 @@ export function RenameSessionDialog(props: RenameSessionDialogProps) {
+                         </div>
+                     ) : null}
+ 
+-                    <div className="flex items-center justify-between gap-2">
+-                        <Button
+-                            type="button"
+-                            variant="secondary"
+-                            onClick={handleClose}
+-                            disabled={busy}
+-                        >
+-                            {t('button.cancel')}
+-                        </Button>
+-                        <div className="flex gap-2">
+-                            {onSuggestTitle ? (
+-                                <Button
+-                                    type="button"
+-                                    variant="outline"
+-                                    onClick={() => void handleGenerate()}
+-                                    disabled={busy}
+-                                >
+-                                    {isGenerating ? t('dialog.rename.generating') : t('dialog.rename.generate')}
+-                                </Button>
+-                            ) : null}
++                    <div className="flex items-center gap-2">
++                        {onSuggestTitle ? (
++                            <Button
++                                type="button"
++                                variant="outline"
++                                onClick={() => void handleGenerate()}
++                                disabled={busy}
++                            >
++                                {isGenerating ? t('dialog.rename.generating') : t('dialog.rename.generate')}
++                            </Button>
++                        ) : null}
++                        <div className="ml-auto flex gap-2">
++                            <Button
++                                type="button"
++                                variant="secondary"
++                                onClick={handleClose}
++                                disabled={busy}
++                            >
++                                {t('button.cancel')}
++                            </Button>
+                             <Button
+                                 type="submit"
+                                 disabled={busy || !name.trim()}
+                             >
+-                                {isPending ? t('dialog.rename.saving') : t('button.save')}
++                                {isGenerating ? t('button.save') : isPending ? t('dialog.rename.saving') : t('button.save')}
+                             </Button>
+                         </div>
+                     </div>
+diff --git a/web/src/components/SessionDialogTitleAlignment.test.tsx b/web/src/components/SessionDialogTitleAlignment.test.tsx
+index 98550f671..74ba3bd71 100644
+--- a/web/src/components/SessionDialogTitleAlignment.test.tsx
++++ b/web/src/components/SessionDialogTitleAlignment.test.tsx
+@@ -1,5 +1,6 @@
+ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
++import { ApiError } from '@/api/client'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import { ToastProvider } from '@/lib/toast-context'
+ import { RenameSessionDialog } from './RenameSessionDialog'
+@@ -40,6 +41,140 @@ describe('session dialog title alignment', () => {
+         expectCenteredTitle('Rename Session')
+     })
+ 
++    it('places Generate before Cancel and Save', () => {
++        renderWithProviders(
++            <RenameSessionDialog
++                isOpen={true}
++                onClose={vi.fn()}
++                currentName="Session"
++                onRename={vi.fn(async () => {})}
++                onSuggestTitle={async () => 'Generated title'}
++                onUpdateSummary={vi.fn(async () => {})}
++                isPending={false}
++            />
++        )
++
++        expect(within(screen.getByRole('dialog')).getAllByRole('button').map((button) => button.textContent)).toEqual([
++            'Generate',
++            'Cancel',
++            'Save',
++            ''
++        ])
++    })
++
++    it('explains how to configure an unavailable title provider', async () => {
++        renderWithProviders(
++            <RenameSessionDialog
++                isOpen={true}
++                onClose={vi.fn()}
++                currentName="Session"
++                onRename={vi.fn(async () => {})}
++                onSuggestTitle={async () => {
++                    throw new ApiError('not configured', 503, 'unavailable')
++                }}
++                isPending={false}
++            />
++        )
++
++        fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
++
++        await waitFor(() => expect(screen.getByText(/HAPI_TITLE_PROVIDER_BASE_URL/)).toBeInTheDocument())
++        expect(screen.getByText(/titleProvider\.baseUrl/)).toBeInTheDocument()
++    })
++
++    it('uses the generic error for a provider failure with HTTP 503', async () => {
++        renderWithProviders(
++            <RenameSessionDialog
++                isOpen={true}
++                onClose={vi.fn()}
++                currentName="Session"
++                onRename={vi.fn(async () => {})}
++                onSuggestTitle={async () => {
++                    throw new ApiError('provider unavailable', 503, 'provider')
++                }}
++                isPending={false}
++            />
++        )
++
++        fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
++
++        await waitFor(() => expect(screen.getByText('Failed to generate a title. Please try again.')).toBeInTheDocument())
++        expect(screen.queryByText(/HAPI_TITLE_PROVIDER_BASE_URL/)).not.toBeInTheDocument()
++    })
++
++    it('shows a safe provider failure reason returned by the Hub', async () => {
++        renderWithProviders(
++            <RenameSessionDialog
++                isOpen={true}
++                onClose={vi.fn()}
++                currentName="Session"
++                onRename={vi.fn(async () => {})}
++                onSuggestTitle={async () => {
++                    throw new ApiError(
++                        'HTTP 502 Bad Gateway',
++                        502,
++                        'provider',
++                        JSON.stringify({
++                            error: 'Title provider request failed (HTTP 404): endpoint or model not found',
++                            code: 'provider'
++                        })
++                    )
++                }}
++                isPending={false}
++            />
++        )
++
++        fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
++
++        await waitFor(() => expect(screen.getByText(
++            'Failed to generate a title: Title provider request failed (HTTP 404): endpoint or model not found'
++        )).toBeInTheDocument())
++    })
++
++    it('keeps Save disabled but does not show Saving while generating', async () => {
++        let resolveSuggestion!: (title: string) => void
++        const onSuggestTitle = vi.fn(() => new Promise<string>((resolve) => {
++            resolveSuggestion = resolve
++        }))
++        const view = renderWithProviders(
++            <RenameSessionDialog
++                isOpen={true}
++                onClose={vi.fn()}
++                currentName="Session"
++                onRename={vi.fn(async () => {})}
++                onSuggestTitle={onSuggestTitle}
++                onUpdateSummary={vi.fn(async () => {})}
++                isPending={false}
++            />
++        )
++
++        fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
++        await waitFor(() => expect(screen.getByRole('button', { name: /^Generating/ })).toBeDisabled())
++
++        view.rerender(
++            <I18nProvider>
++                <ToastProvider>
++                    <RenameSessionDialog
++                        isOpen={true}
++                        onClose={vi.fn()}
++                        currentName="Session"
++                        onRename={vi.fn(async () => {})}
++                        onSuggestTitle={onSuggestTitle}
++                        onUpdateSummary={vi.fn(async () => {})}
++                        isPending={true}
++                    />
++                </ToastProvider>
++            </I18nProvider>
++        )
++
++        const save = screen.getByRole('button', { name: 'Save' })
++        expect(save).toBeDisabled()
++        expect(screen.queryByRole('button', { name: 'Saving' })).not.toBeInTheDocument()
++
++        resolveSuggestion('Generated title')
++        await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Generated title'))
++    })
++
+     it('saves an untouched generated draft as metadata.summary.text', async () => {
+         const onRename = vi.fn(async () => {})
+         const onUpdateSummary = vi.fn(async () => {})
+@@ -60,10 +195,32 @@ describe('session dialog title alignment', () => {
+         await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Generated title'))
+         fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+ 
+-        await waitFor(() => expect(onUpdateSummary).toHaveBeenCalledWith('Generated title'))
++        await waitFor(() => expect(onUpdateSummary).toHaveBeenCalledWith('Generated title', true))
+         expect(onRename).not.toHaveBeenCalled()
+     })
+ 
++    it('trims whitespace around a generated title before saving', async () => {
++        const onUpdateSummary = vi.fn(async () => {})
++
++        renderWithProviders(
++            <RenameSessionDialog
++                isOpen={true}
++                onClose={vi.fn()}
++                currentName="Session"
++                onRename={vi.fn(async () => {})}
++                onSuggestTitle={async () => '  Generated title  '}
++                onUpdateSummary={onUpdateSummary}
++                isPending={false}
++            />
++        )
++
++        fireEvent.click(screen.getByRole('button', { name: 'Generate' }))
++        await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('Generated title'))
++        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
++
++        await waitFor(() => expect(onUpdateSummary).toHaveBeenCalledWith('Generated title', true))
++    })
++
+     it('treats any edit to a generated draft as a manual metadata.name rename', async () => {
+         const onRename = vi.fn(async () => {})
+         const onUpdateSummary = vi.fn(async () => {})
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 27fba00f5..82958b725 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -103,7 +103,7 @@ describe('resolveSessionHeaderMachineLabel', () => {
+ })
+ 
+ describe('SessionHeader', () => {
+-    it('hides title generation when the Hub does not advertise the capability', () => {
++    it('keeps title generation discoverable when the Hub does not advertise the capability', () => {
+         const api = {
+             getMachines: vi.fn().mockResolvedValue({ machines: [] }),
+             getScratchlist: vi.fn().mockResolvedValue({ entries: [] })
+@@ -127,7 +127,7 @@ describe('SessionHeader', () => {
+         fireEvent.click(screen.getByTitle('More actions'))
+         fireEvent.click(screen.getByRole('menuitem', { name: /Rename/ }))
+ 
+-        expect(screen.queryByRole('button', { name: 'Generate' })).not.toBeInTheDocument()
++        expect(screen.getByRole('button', { name: 'Generate' })).toBeInTheDocument()
+     })
+ 
+     it('manually syncs an inactive Pi session through its owning machine', async () => {
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 5ca636508..4c2dc25b1 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -570,8 +570,8 @@ export function SessionHeader(props: {
+                 onClose={() => setRenameOpen(false)}
+                 currentName={title}
+                 onRename={renameSession}
+-                onSuggestTitle={api && props.titleSuggestionAvailable ? suggestSessionTitle : undefined}
+-                onUpdateSummary={api && props.titleSuggestionAvailable ? updateSessionSummary : undefined}
++                onSuggestTitle={api ? suggestSessionTitle : undefined}
++                onUpdateSummary={api ? updateSessionSummary : undefined}
+                 isPending={isPending}
+             />
+ 
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index c17369614..0806db377 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1373,8 +1373,8 @@ function SessionItem(props: {
+                     onClose={() => setRenameOpen(false)}
+                     currentName={sessionName}
+                     onRename={renameSession}
+-                    onSuggestTitle={api && titleSuggestionAvailable ? suggestSessionTitle : undefined}
+-                    onUpdateSummary={api && titleSuggestionAvailable ? updateSessionSummary : undefined}
++                    onSuggestTitle={api ? suggestSessionTitle : undefined}
++                    onUpdateSummary={api ? updateSessionSummary : undefined}
+                     isPending={isPending}
+                 />
+             ) : null}
+diff --git a/web/src/hooks/mutations/useSessionActions.ts b/web/src/hooks/mutations/useSessionActions.ts
+index 4c9ce03b7..28838f64b 100644
+--- a/web/src/hooks/mutations/useSessionActions.ts
++++ b/web/src/hooks/mutations/useSessionActions.ts
+@@ -28,7 +28,7 @@ export function useSessionActions(
+     setServiceTier: (serviceTier: string | null) => Promise<void>
+     renameSession: (name: string) => Promise<void>
+     suggestSessionTitle: () => Promise<string>
+-    updateSessionSummary: (text: string) => Promise<void>
++    updateSessionSummary: (text: string, clearName?: boolean) => Promise<void>
+     setPinMode: (mode: 'none' | 'project' | 'global') => Promise<void>
+     deleteSession: () => Promise<void>
+     isPending: boolean
+@@ -248,11 +248,11 @@ export function useSessionActions(
+     })
+ 
+     const summaryMutation = useMutation({
+-        mutationFn: async (text: string) => {
++        mutationFn: async ({ text, clearName }: { text: string; clearName?: boolean }) => {
+             if (!api || !sessionId) {
+                 throw new Error('Session unavailable')
+             }
+-            await api.updateSessionSummary(sessionId, text)
++            await api.updateSessionSummary(sessionId, text, clearName)
+         },
+         onSuccess: () => void invalidateSession(),
+     })
+@@ -294,7 +294,7 @@ export function useSessionActions(
+         setServiceTier: serviceTierMutation.mutateAsync,
+         renameSession: renameMutation.mutateAsync,
+         suggestSessionTitle: titleSuggestionMutation.mutateAsync,
+-        updateSessionSummary: summaryMutation.mutateAsync,
++        updateSessionSummary: (text, clearName = false) => summaryMutation.mutateAsync({ text, clearName }),
+         setPinMode: pinMutation.mutateAsync,
+         deleteSession: deleteMutation.mutateAsync,
+         isPending: abortMutation.isPending
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 3c9d8e1cd..f3e62a8ff 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -291,6 +291,8 @@ export default {
+   'dialog.rename.generate': 'Generate',
+   'dialog.rename.generating': 'Generating…',
+   'dialog.rename.generateError': 'Failed to generate a title. Please try again.',
++  'dialog.rename.generateErrorWithReason': 'Failed to generate a title: {reason}',
++  'dialog.rename.generateUnavailable': 'Title generation is not configured on this Hub. Configure titleProvider.baseUrl, titleProvider.apiKey, and titleProvider.model in $HAPI_HOME/settings.json (default ~/.hapi/settings.json), or set HAPI_TITLE_PROVIDER_BASE_URL, HAPI_TITLE_PROVIDER_API_KEY, and HAPI_TITLE_PROVIDER_MODEL in the Hub environment, then restart the Hub.',
+   'dialog.archive.title': 'Archive Session',
+   'dialog.archive.description': 'Are you sure you want to archive "{name}"? This will disconnect active session.',
+   'dialog.archive.confirm': 'Archive',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 8fe099806..dce5d9612 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -291,6 +291,8 @@ export default {
+   'dialog.rename.generate': '生成',
+   'dialog.rename.generating': '生成中…',
+   'dialog.rename.generateError': '标题生成失败，请重试。',
++  'dialog.rename.generateErrorWithReason': '标题生成失败：{reason}',
++  'dialog.rename.generateUnavailable': '此 Hub 尚未配置标题生成。请在 $HAPI_HOME/settings.json（默认 ~/.hapi/settings.json）的 titleProvider.baseUrl、titleProvider.apiKey、titleProvider.model 中配置，或在 Hub 环境变量中设置 HAPI_TITLE_PROVIDER_BASE_URL、HAPI_TITLE_PROVIDER_API_KEY 和 HAPI_TITLE_PROVIDER_MODEL，然后重启 Hub。',
+ 
+   'dialog.archive.title': '归档会话',
+   'dialog.archive.description': '确定要归档 "{name}" 吗？这将断开活动会话。',
+-- 
+2.43.0
+

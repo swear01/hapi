@@ -38,6 +38,18 @@ Dictation and voice-assistant provider keys can also be added from **Settings â†
 - `TRANSCRIPTION_BASE_URL` and `TRANSCRIPTION_MODEL` - OpenAI-compatible/local transcription endpoint and model.
 - `TRANSCRIPTION_API_KEY` - Optional bearer token for the OpenAI-compatible endpoint.
 
+### Optional (session title generation)
+
+On-demand session title generation uses an OpenAI-compatible Chat Completions
+provider. Configure `titleProvider.baseUrl`, `titleProvider.apiKey`, and
+`titleProvider.model`, and optionally `titleProvider.timeoutMs` in
+`$HAPI_HOME/settings.json` (default `~/.hapi/settings.json`),
+or set the corresponding `HAPI_TITLE_PROVIDER_BASE_URL`,
+`HAPI_TITLE_PROVIDER_API_KEY`, `HAPI_TITLE_PROVIDER_MODEL`, and optionally
+`HAPI_TITLE_PROVIDER_TIMEOUT_MS` environment variables. The timeout defaults to
+10 seconds and environment values override settings-file values per field. API
+keys remain Hub-side and are never sent to the browser.
+
 ### Optional
 
 - `HAPI_LISTEN_HOST` - HTTP bind address (default: 127.0.0.1).
@@ -133,6 +145,11 @@ See `src/web/routes/` for all endpoints.
 - `GET /api/sessions/:id/file` - Read file content.
 - `GET /api/sessions/:id/files` - File search with ripgrep.
 
+For inactive sessions, including archived sessions, these read-only file and Git operations fall back to
+the matching online Runner when it advertises `workspace-file-access`. The
+Runner reads the current workspace under its configured roots; HAPI does not
+copy or snapshot files during archive.
+
 ### Events (`src/web/routes/events.ts`)
 
 - `GET /api/events` - SSE stream for live updates.
@@ -186,7 +203,8 @@ Namespace: `/cli`
 ### Hub events (hub to clients)
 
 - `update` - Broadcast session/message updates.
-- `rpc-request` - Incoming RPC call.
+- `rpc-request` - Incoming RPC call; cancellable requests carry a `requestId`.
+- `rpc-cancel` - Cancel an in-flight RPC by `requestId`.
 
 See `src/socket/rpcRegistry.ts` for RPC routing.
 

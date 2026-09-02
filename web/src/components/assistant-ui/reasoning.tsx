@@ -93,28 +93,30 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
     startIndex = 0,
     endIndex,
 }) => {
-    const [isOpen, setIsOpen] = useState(false)
+    const { reasoningCollapsed } = useReasoningCollapse()
+    const isStreaming = useAuiState((state) => {
+        const parts = state.message.parts.slice(startIndex, endIndex === undefined ? undefined : endIndex + 1)
+        return parts.some((part) => part.type === 'reasoning' && part.status.type === 'running')
+    })
+    const messageIsRunning = useAuiState((state) => state.message.status?.type === 'running')
+    const [isOpen, setIsOpen] = useState(() => !reasoningCollapsed && !messageIsRunning)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const followLatestRef = useRef(true)
     const pointerActiveRef = useRef(false)
     const pointerCleanupRef = useRef<(() => void) | null>(null)
     const followSyncFrameRef = useRef<number | null>(null)
 
-    const isStreaming = useAuiState((state) => {
-        const parts = state.message.parts.slice(startIndex, endIndex === undefined ? undefined : endIndex + 1)
-        return parts.some((part) => part.type === 'reasoning' && part.status.type === 'running')
-    })
-    const { reasoningCollapsed } = useReasoningCollapse()
     const chatContext = useOptionalHappyChatContext()
+    const shouldRenderContent = isOpen
 
     useEffect(() => {
-        if (!isStreaming) return
+        if (messageIsRunning && !isStreaming && !reasoningCollapsed) return
         const nextOpen = !reasoningCollapsed
         if (nextOpen) {
             followLatestRef.current = true
         }
         setIsOpen(nextOpen)
-    }, [isStreaming, reasoningCollapsed])
+    }, [isStreaming, messageIsRunning, reasoningCollapsed])
 
     useEffect(() => {
         if (isOpen || followLatestRef.current) return
@@ -244,7 +246,7 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
                     // contain is not needed to stop the two from fighting.
                     className="aui-reasoning-scroll max-h-[60vh] overflow-y-auto border-t border-[var(--app-divider)] px-3.5 py-3"
                 >
-                    {children}
+                    {shouldRenderContent ? children : null}
                 </div>
             </div>
         </div>

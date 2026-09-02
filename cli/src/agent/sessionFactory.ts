@@ -15,6 +15,7 @@ import { readWorktreeEnv } from '@/utils/worktreeEnv'
 import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv'
 import packageJson from '../../package.json'
+import { durableTargetGeneration, readUpgradeTarget } from '@/upgrade/upgradeTarget'
 
 export { HAPI_SESSION_ID_ENV, exportHapiSessionEnv, exportHapiHubAuthEnv } from '@/agent/hapiSessionEnv'
 
@@ -55,9 +56,11 @@ export function buildMachineMetadata(options?: {
 }): MachineMetadata {
     const installedCliMtimeMs = getInstalledCliMtimeMs()
     const startedCliMtimeMs = options?.startedCliMtimeMs ?? installedCliMtimeMs
+    const cliArtifactGeneration = durableTargetGeneration(readUpgradeTarget()) ?? undefined
     const base: MachineMetadata = {
         host: process.env.HAPI_HOSTNAME || os.hostname(),
         platform: os.platform(),
+        arch: process.arch,
         happyCliVersion: packageJson.version,
         homeDir: os.homedir(),
         happyHomeDir: configuration.happyHomeDir,
@@ -70,10 +73,13 @@ export function buildMachineMetadata(options?: {
     return {
         ...base,
         capabilities: [...CURRENT_MACHINE_CAPABILITIES],
+        versionHandoffDisabled: process.env.HAPI_DISABLE_VERSION_HANDOFF === '1',
+        // Explicit supervisor opt-in only. HAPI_DISABLE_VERSION_HANDOFF is orthogonal
+        // (skips mtime/version self-restart) and must not imply Restart=always.
+        supervisedRestart: process.env.HAPI_RUNNER_SUPERVISED === '1',
         ...(typeof startedCliMtimeMs === 'number' ? { startedCliMtimeMs } : {}),
         ...(typeof installedCliMtimeMs === 'number' ? { installedCliMtimeMs } : {}),
-        // Always boolean so hub merge can clear a prior true on unsupervised restart.
-        supervisedRestart: process.env.HAPI_RUNNER_SUPERVISED === '1',
+        ...(cliArtifactGeneration ? { cliArtifactGeneration } : {}),
     }
 }
 
@@ -123,6 +129,7 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.claudeSessionId !== undefined) preserved.claudeSessionId = metadata.claudeSessionId
     if (metadata.codexSessionId !== undefined) preserved.codexSessionId = metadata.codexSessionId
     if (metadata.codexSourceSessionId !== undefined) preserved.codexSourceSessionId = metadata.codexSourceSessionId
+    if (metadata.codexUsage !== undefined) preserved.codexUsage = metadata.codexUsage
     if (metadata.geminiSessionId !== undefined) preserved.geminiSessionId = metadata.geminiSessionId
     if (metadata.opencodeSessionId !== undefined) preserved.opencodeSessionId = metadata.opencodeSessionId
     if (metadata.grokSessionId !== undefined) preserved.grokSessionId = metadata.grokSessionId
@@ -132,6 +139,7 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.kimiSessionId !== undefined) preserved.kimiSessionId = metadata.kimiSessionId
     if (metadata.copilotSessionId !== undefined) preserved.copilotSessionId = metadata.copilotSessionId
     if (metadata.piSessionId !== undefined) preserved.piSessionId = metadata.piSessionId
+    if (metadata.claudeImportState !== undefined) preserved.claudeImportState = metadata.claudeImportState
     if (metadata.piResumeAttempt !== undefined) preserved.piResumeAttempt = metadata.piResumeAttempt
     if (metadata.ptyResumeAttempt !== undefined) preserved.ptyResumeAttempt = metadata.ptyResumeAttempt
     if (metadata.preferredPermissionMode !== undefined) preserved.preferredPermissionMode = metadata.preferredPermissionMode
@@ -370,6 +378,9 @@ export async function bootstrapExistingSession(options: {
 
     const session = api.sessionSyncClient(sessionInfo)
     session.updateMetadata(buildUpdatedMetadata)
+    if (!await session.flushMetadata()) {
+        throw new Error('Unable to persist existing-session metadata')
+    }
 
     exportHapiSessionEnv(sessionInfo.id)
 

@@ -1,0 +1,1387 @@
+From bcb5cd6038c23ab1ded37db80cebafb6a8d2654d Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 11:12:44 +0800
+Subject: [PATCH 1/8] fix(codex): fail closed on ambiguous Web Rewind
+ boundaries
+
+---
+ cli/src/codex/conversationHistory.test.ts | 110 ++++++++++++++++++++++
+ cli/src/codex/conversationHistory.ts      |  57 ++++++++++-
+ 2 files changed, 163 insertions(+), 4 deletions(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index 8bd6ee4f2..31d658c76 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -90,6 +90,116 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).toHaveBeenCalledTimes(1)
+     })
+ 
++    it('rejects rewind before native mutation when steering adds another user message', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        {
++                            id: 'turn-b',
++                            items: [
++                                { type: 'userMessage', clientId: 'local-b' },
++                                { type: 'userMessage', clientId: 'local-steer' }
++                            ]
++                        }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++
++        const result = await history.rewind('local-b')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
++    it('rejects rewind before native mutation when compaction is present', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        {
++                            id: 'turn-b',
++                            items: [
++                                { type: 'userMessage', clientId: 'local-b' },
++                                { type: 'contextCompaction' }
++                            ]
++                        }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++
++        const result = await history.rewind('local-b')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
++    it('rejects rewind before native mutation when native items are incomplete', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        { id: 'turn-b' }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++        history.restoreTurns({ localB: 'turn-b' })
++
++        const result = await history.rewind('localB')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
++    it('rejects rewind before native mutation when a user message has no client id', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        { id: 'turn-b', items: [{ type: 'userMessage' }] }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++        history.restoreTurns({ localB: 'turn-b' })
++
++        const result = await history.rewind('localB')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('marks rewind unsupported on method-not-found without affecting fork', async () => {
+         const rollback = vi.fn(async () => {
+             throw new Error('thread/rollback is unsupported')
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index 1cc9580a4..e6261b796 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -32,8 +32,14 @@ type TurnInfo = {
+     id: string
+     status?: string
+     clientIds: string[]
++    userMessageCount: number
++    hasCompleteItems: boolean
++    hasContextCompaction: boolean
+ }
+ 
++const AMBIGUOUS_REWIND_ERROR =
++    'Rewind is unavailable for this Codex history because native turn boundaries are ambiguous (steering, compaction, or incomplete history)'
++
+ export class CodexConversationHistory {
+     private states: ConversationHistoryCapabilityStates = { ...CODEX_CONVERSATION_HISTORY_INITIAL }
+     private threadId: string | null = null
+@@ -185,6 +191,27 @@ export class CodexConversationHistory {
+         if (turns[index]?.status === 'inProgress' || turns[index]?.status === 'in_progress') {
+             throw new Error('Cannot rewind an in-progress turn')
+         }
++
++        // thread/rollback takes a raw native-turn count, while the Web transcript
++        // exposes user-message boundaries. Only use that count when every native
++        // turn is known to contain exactly one identified user message. Steering,
++        // compaction, and incomplete item data can otherwise leave the model
++        // context out of sync with the transcript after a successful rollback.
++        const hasAmbiguousBoundary = turns.some(
++            (turn) =>
++                !turn.hasCompleteItems ||
++                turn.userMessageCount !== 1 ||
++                turn.clientIds.length !== 1 ||
++                turn.hasContextCompaction
++        )
++        if (hasAmbiguousBoundary) {
++            return {
++                success: false,
++                error: AMBIGUOUS_REWIND_ERROR,
++                outcome: 'rejected'
++            }
++        }
++
+         const numTurns = turns.length - index
+         if (numTurns <= 0) throw new Error('Invalid rewind count')
+ 
+@@ -233,16 +260,32 @@ export class CodexConversationHistory {
+             const response = await client.readThread({ threadId, includeTurns: true })
+             const thread = asRecord(response.thread)
+             const turns = Array.isArray(thread?.turns) ? thread.turns : []
+-            return turns.flatMap((entry) => {
++            return turns.flatMap((entry): TurnInfo[] => {
+                 const record = asRecord(entry)
+                 const id = asString(record?.id)
+                 if (!id) return []
+                 const clientIds: string[] = []
+-                const items = Array.isArray(record?.items) ? record.items : []
++                const items = Array.isArray(record?.items) ? record.items : null
++                if (!items) {
++                    return [{
++                        id,
++                        status: asString(record?.status) ?? undefined,
++                        clientIds,
++                        userMessageCount: 0,
++                        hasCompleteItems: false,
++                        hasContextCompaction: false
++                    }]
++                }
++                let userMessageCount = 0
++                let hasContextCompaction = false
+                 for (const item of items) {
+                     const itemRecord = asRecord(item)
+                     const type = asString(itemRecord?.type) ?? asString(itemRecord?.itemType)
++                    if (type === 'contextCompaction' || type === 'context_compaction') {
++                        hasContextCompaction = true
++                    }
+                     if (type === 'userMessage' || type === 'user_message') {
++                        userMessageCount += 1
+                         const clientId = asString(itemRecord?.clientId) ?? asString(itemRecord?.client_id)
+                         if (clientId) clientIds.push(clientId)
+                     }
+@@ -250,7 +293,10 @@ export class CodexConversationHistory {
+                 return [{
+                     id,
+                     status: asString(record?.status) ?? undefined,
+-                    clientIds
++                    clientIds,
++                    userMessageCount,
++                    hasCompleteItems: true,
++                    hasContextCompaction
+                 }]
+             })
+         } catch (error) {
+@@ -258,7 +304,10 @@ export class CodexConversationHistory {
+             // Fall back to in-memory mapping only
+             return Array.from(this.turnByLocalId.entries()).map(([localId, id]) => ({
+                 id,
+-                clientIds: [localId]
++                clientIds: [localId],
++                userMessageCount: 1,
++                hasCompleteItems: false,
++                hasContextCompaction: false
+             }))
+         }
+     }
+-- 
+2.43.0
+
+
+From 06783f59a761572df587051dd7398a792acd1064 Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 12:47:08 +0800
+Subject: [PATCH 2/8] fix(codex): reject malformed native rewind history
+
+---
+ cli/src/codex/conversationHistory.test.ts | 49 +++++++++++++++++++++++
+ cli/src/codex/conversationHistory.ts      | 28 ++++++++++---
+ 2 files changed, 72 insertions(+), 5 deletions(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index 31d658c76..b2aab7a13 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -200,6 +200,55 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).not.toHaveBeenCalled()
+     })
+ 
++    it('rejects rewind before native mutation when a native turn has no id', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        { items: [{ type: 'assistantMessage' }] },
++                        { id: 'turn-c', items: [{ type: 'userMessage', clientId: 'local-c' }] }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++
++        const result = await history.rewind('local-a')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
++    it('rejects rewind before native mutation when a native item is malformed', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        { id: 'turn-b', items: [{}] }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++
++        const result = await history.rewind('local-a')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('marks rewind unsupported on method-not-found without affecting fork', async () => {
+         const rollback = vi.fn(async () => {
+             throw new Error('thread/rollback is unsupported')
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index e6261b796..fd8f3ca3a 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -29,7 +29,7 @@ function isMethodNotFound(error: unknown): boolean {
+ }
+ 
+ type TurnInfo = {
+-    id: string
++    id: string | null
+     status?: string
+     clientIds: string[]
+     userMessageCount: number
+@@ -133,9 +133,13 @@ export class CodexConversationHistory {
+             // Prefer stable inclusive lastTurnId of the previous turn. The first
+             // turn has no predecessor, so fall back to experimental beforeTurnId
+             // (exclusive) for that single boundary.
++            const previousTurnId = selectedIndex > 0 ? turns[selectedIndex - 1]?.id : null
++            if (selectedIndex > 0 && !previousTurnId) {
++                throw new Error(AMBIGUOUS_REWIND_ERROR)
++            }
+             const boundary = selectedIndex === 0
+                 ? { beforeTurnId: selectedTurnId }
+-                : { lastTurnId: turns[selectedIndex - 1]!.id }
++                : { lastTurnId: previousTurnId! }
+             try {
+                 const response = await client.forkThread({
+                     threadId,
+@@ -243,7 +247,7 @@ export class CodexConversationHistory {
+ 
+         const list = turns ?? await this.listTurns()
+         for (const turn of list) {
+-            if (turn.clientIds.includes(localId)) {
++            if (turn.id && turn.clientIds.includes(localId)) {
+                 this.turnByLocalId.set(localId, turn.id)
+                 return turn.id
+             }
+@@ -263,7 +267,16 @@ export class CodexConversationHistory {
+             return turns.flatMap((entry): TurnInfo[] => {
+                 const record = asRecord(entry)
+                 const id = asString(record?.id)
+-                if (!id) return []
++                if (!record || !id) {
++                    return [{
++                        id: null,
++                        status: asString(record?.status) ?? undefined,
++                        clientIds: [],
++                        userMessageCount: 0,
++                        hasCompleteItems: false,
++                        hasContextCompaction: false
++                    }]
++                }
+                 const clientIds: string[] = []
+                 const items = Array.isArray(record?.items) ? record.items : null
+                 if (!items) {
+@@ -277,10 +290,15 @@ export class CodexConversationHistory {
+                     }]
+                 }
+                 let userMessageCount = 0
++                let hasCompleteItems = true
+                 let hasContextCompaction = false
+                 for (const item of items) {
+                     const itemRecord = asRecord(item)
+                     const type = asString(itemRecord?.type) ?? asString(itemRecord?.itemType)
++                    if (!itemRecord || !type) {
++                        hasCompleteItems = false
++                        continue
++                    }
+                     if (type === 'contextCompaction' || type === 'context_compaction') {
+                         hasContextCompaction = true
+                     }
+@@ -295,7 +313,7 @@ export class CodexConversationHistory {
+                     status: asString(record?.status) ?? undefined,
+                     clientIds,
+                     userMessageCount,
+-                    hasCompleteItems: true,
++                    hasCompleteItems,
+                     hasContextCompaction
+                 }]
+             })
+-- 
+2.43.0
+
+
+From 4bb11fbeceb213a8166669e738b2d23e0fb7e469 Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 12:56:37 +0800
+Subject: [PATCH 3/8] fix(codex): reject duplicate rewind identifiers
+
+---
+ cli/src/codex/conversationHistory.test.ts | 48 +++++++++++++++++++++++
+ cli/src/codex/conversationHistory.ts      | 21 ++++++++--
+ 2 files changed, 65 insertions(+), 4 deletions(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index b2aab7a13..9a726877d 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -249,6 +249,54 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).not.toHaveBeenCalled()
+     })
+ 
++    it('rejects rewind before native mutation when native turn ids are duplicated', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-b' }] }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++
++        const result = await history.rewind('local-a')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
++    it('rejects rewind before native mutation when client ids are duplicated', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        { id: 'turn-b', items: [{ type: 'userMessage', clientId: 'local-a' }] }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++
++        const result = await history.rewind('local-a')
++
++        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('marks rewind unsupported on method-not-found without affecting fork', async () => {
+         const rollback = vi.fn(async () => {
+             throw new Error('thread/rollback is unsupported')
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index fd8f3ca3a..87d6ea4db 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -201,13 +201,26 @@ export class CodexConversationHistory {
+         // turn is known to contain exactly one identified user message. Steering,
+         // compaction, and incomplete item data can otherwise leave the model
+         // context out of sync with the transcript after a successful rollback.
+-        const hasAmbiguousBoundary = turns.some(
+-            (turn) =>
++        const seenTurnIds = new Set<string>()
++        const seenClientIds = new Set<string>()
++        const hasAmbiguousBoundary = turns.some((turn) => {
++            const clientId = turn.clientIds[0]
++            if (
++                !turn.id ||
+                 !turn.hasCompleteItems ||
+                 turn.userMessageCount !== 1 ||
+                 turn.clientIds.length !== 1 ||
+-                turn.hasContextCompaction
+-        )
++                !clientId ||
++                turn.hasContextCompaction ||
++                seenTurnIds.has(turn.id) ||
++                seenClientIds.has(clientId)
++            ) {
++                return true
++            }
++            seenTurnIds.add(turn.id)
++            seenClientIds.add(clientId)
++            return false
++        })
+         if (hasAmbiguousBoundary) {
+             return {
+                 success: false,
+-- 
+2.43.0
+
+
+From e7f0f631766649a92d48adca17c66039e47b370e Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 15:06:05 +0800
+Subject: [PATCH 4/8] feat(codex): offer Fork fallback for ambiguous rewind
+
+---
+ cli/src/codex/conversationHistory.test.ts  |  6 +++-
+ cli/src/codex/conversationHistory.ts       |  1 +
+ hub/src/sync/conversationHistoryPi.test.ts |  7 +++--
+ hub/src/sync/syncEngine.ts                 | 12 +++++---
+ hub/src/web/routes/sessions.test.ts        | 31 ++++++++++++++++++++
+ hub/src/web/routes/sessions.ts             |  1 +
+ shared/src/apiTypes.ts                     |  3 ++
+ web/src/api/client.test.ts                 | 19 +++++++++++++
+ web/src/components/SessionChat.test.ts     | 17 +++++++++++
+ web/src/components/SessionChat.tsx         | 33 +++++++++++++++++++++-
+ web/src/lib/locales/en.ts                  |  4 +++
+ web/src/lib/locales/zh-CN.ts               |  4 +++
+ 12 files changed, 129 insertions(+), 9 deletions(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index 9a726877d..bed0fcbfb 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -114,7 +114,11 @@ describe('CodexConversationHistory', () => {
+ 
+         const result = await history.rewind('local-b')
+ 
+-        expect(result).toMatchObject({ success: false, outcome: 'rejected' })
++        expect(result).toMatchObject({
++            success: false,
++            outcome: 'rejected',
++            code: 'ambiguous_native_boundary'
++        })
+         if (result.success) throw new Error('Expected rewind to be rejected')
+         expect(result.error).toContain('ambiguous')
+         expect(rollback).not.toHaveBeenCalled()
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index 87d6ea4db..5f170f954 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -225,6 +225,7 @@ export class CodexConversationHistory {
+             return {
+                 success: false,
+                 error: AMBIGUOUS_REWIND_ERROR,
++                code: 'ambiguous_native_boundary',
+                 outcome: 'rejected'
+             }
+         }
+diff --git a/hub/src/sync/conversationHistoryPi.test.ts b/hub/src/sync/conversationHistoryPi.test.ts
+index c27aafa22..bfb55717c 100644
+--- a/hub/src/sync/conversationHistoryPi.test.ts
++++ b/hub/src/sync/conversationHistoryPi.test.ts
+@@ -22,12 +22,13 @@ describe('Pi conversation-history hub integration', () => {
+             store.messages.markMessagesInvoked(session.id, ['local-boundary'], Date.now())
+             ;(engine as any).rpcGateway.rewindConversation = async () => ({
+                 success: false,
+-                error: 'Pi rewind was cancelled',
+-                outcome: 'cancelled',
++                error: 'Codex native boundary is ambiguous',
++                code: 'ambiguous_native_boundary',
++                outcome: 'rejected',
+             })
+ 
+             await expect(engine.rewindConversation(session.id, 'default', 'local-boundary')).resolves.toEqual({
+-                type: 'error', message: 'Pi rewind was cancelled',
++                type: 'error', message: 'Codex native boundary is ambiguous', code: 'ambiguous_native_boundary',
+             })
+             expect(engine.getSession(session.id)?.metadata?.conversationHistoryDiverged).not.toBe(true)
+         } finally {
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index ebce70266..718691130 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -20,7 +20,7 @@ import {
+     type HubUpgradeOffer,
+     type RunnerSelfUpgradeResponse,
+ } from '@hapi/protocol/upgradeChannel'
+-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
++import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, RewindConversationErrorCode, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+ import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
+ import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
+@@ -2057,7 +2057,7 @@ export class SyncEngine {
+         sessionId: string,
+         namespace: string,
+         messageLocalId: string
+-    ): Promise<{ type: 'success' } | { type: 'error'; message: string; hydrateFailed?: boolean }> {
++    ): Promise<{ type: 'success' } | { type: 'error'; message: string; code?: RewindConversationErrorCode; hydrateFailed?: boolean }> {
+         if (this.historyActionsInFlight.has(sessionId)) {
+             return { type: 'error', message: 'Conversation history action already in progress' }
+         }
+@@ -2073,7 +2073,7 @@ export class SyncEngine {
+         sessionId: string,
+         namespace: string,
+         messageLocalId: string
+-    ): Promise<{ type: 'success' } | { type: 'error'; message: string; hydrateFailed?: boolean }> {
++    ): Promise<{ type: 'success' } | { type: 'error'; message: string; code?: RewindConversationErrorCode; hydrateFailed?: boolean }> {
+         const access = this.resolveSessionAccess(sessionId, namespace)
+         if (!access.ok) {
+             return { type: 'error', message: access.reason === 'not-found' ? 'Session not found' : 'Access denied' }
+@@ -2109,7 +2109,11 @@ export class SyncEngine {
+         }
+ 
+         if (rpcResult?.success !== true) {
+-            return { type: 'error', message: rpcResult?.error ?? 'Native rewind failed' }
++            return {
++                type: 'error',
++                message: rpcResult?.error ?? 'Native rewind failed',
++                ...(rpcResult?.success === false && rpcResult.code ? { code: rpcResult.code } : {})
++            }
+         }
+ 
+         try {
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 229dfdd8c..76baa4621 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1750,6 +1750,37 @@ describe('sessions routes', () => {
+         expect(calls).toEqual([{ sessionId: 'session-1', messageLocalId: 'local-2' }])
+     })
+ 
++    it('returns a structured ambiguous-boundary code for deterministic rewind rejection', async () => {
++        const session = createSession({
++            metadata: {
++                path: '/tmp/project',
++                host: 'localhost',
++                flavor: 'codex',
++                capabilities: { conversationHistory: { rewindToMessage: true } }
++            }
++        })
++        const { app } = createApp(session, {
++            rewindConversation: async () => ({
++                type: 'error',
++                message: 'Rewind is unavailable for this Codex history',
++                code: 'ambiguous_native_boundary'
++            })
++        })
++
++        const response = await app.request('/api/sessions/session-1/rewind', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ messageLocalId: 'local-2' })
++        })
++
++        expect(response.status).toBe(409)
++        expect(await response.json()).toEqual({
++            error: 'Rewind is unavailable for this Codex history',
++            code: 'ambiguous_native_boundary',
++            hydrateFailed: false
++        })
++    })
++
+     it('rejects rewind without messageLocalId', async () => {
+         const { app } = createApp(createSession())
+         const response = await app.request('/api/sessions/session-1/rewind', {
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index aa422e0cc..4d65fe30d 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -445,6 +445,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         if (result.type === 'error') {
+             return c.json({
+                 error: result.message,
++                code: result.code,
+                 hydrateFailed: result.hydrateFailed === true
+             }, result.hydrateFailed ? 500 : 409)
+         }
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 42b592754..a99106794 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -674,6 +674,8 @@ export type ForkConversationRpcResponse = ForkConversationRpcResult | {
+     error: string
+ }
+ 
++export type RewindConversationErrorCode = 'ambiguous_native_boundary'
++
+ export type RewindConversationRpcResult = {
+     success: true
+     /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
+@@ -687,6 +689,7 @@ export type RewindConversationRpcResult = {
+ } | {
+     success: false
+     error: string
++    code?: RewindConversationErrorCode
+     /** Native state is unchanged, cancelled, or was restored exactly. */
+     outcome: 'rejected' | 'cancelled' | 'source_restored'
+ }
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index 1cb90a3bf..be3a267a5 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -72,6 +72,25 @@ describe('ApiClient error mapping', () => {
+         }
+     })
+ 
++    it('preserves the structured ambiguous-boundary code for Rewind fallbacks', async () => {
++        fetchMock.mockResolvedValueOnce(
++            new Response(
++                JSON.stringify({
++                    error: 'Rewind is unavailable for this Codex history',
++                    code: 'ambiguous_native_boundary',
++                    hydrateFailed: false
++                }),
++                { status: 409, statusText: 'Conflict' }
++            )
++        )
++
++        const api = new ApiClient('test-token')
++        await expect(api.rewindConversation('session-1', 'local-1')).rejects.toMatchObject({
++            status: 409,
++            code: 'ambiguous_native_boundary'
++        })
++    })
++
+     it('passes the 422 missing-metadata body through unchanged so the UI can show the missing fields', async () => {
+         fetchMock.mockResolvedValueOnce(
+             new Response(
+diff --git a/web/src/components/SessionChat.test.ts b/web/src/components/SessionChat.test.ts
+index cf721c747..bba19134b 100644
+--- a/web/src/components/SessionChat.test.ts
++++ b/web/src/components/SessionChat.test.ts
+@@ -13,10 +13,27 @@ import {
+     runAcceptedSendCleanup,
+     shouldAutoClearPendingSchedule,
+     shouldRouteToScratchlist,
++    isAmbiguousRewindError,
+ } from './SessionChat'
++import { ApiError } from '@/api/client'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+ import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
+ 
++describe('isAmbiguousRewindError', () => {
++    it('recognizes the structured Rewind boundary code', () => {
++        expect(isAmbiguousRewindError(new ApiError(
++            'native boundary is ambiguous',
++            409,
++            'ambiguous_native_boundary'
++        ))).toBe(true)
++    })
++
++    it('does not classify unrelated or message-only errors as fallback candidates', () => {
++        expect(isAmbiguousRewindError(new ApiError('native boundary is ambiguous', 409))).toBe(false)
++        expect(isAmbiguousRewindError(new Error('ambiguous native boundary'))).toBe(false)
++    })
++})
++
+ describe('applyModelChangeWithReasoningRollback', () => {
+     it('restores the previous effort when the model switch fails after clearing it', async () => {
+         const modelError = new Error('model switch failed')
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 86ded7021..de148453a 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -4,7 +4,7 @@ import { useNavigate } from '@tanstack/react-router'
+ import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
+ import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
+-import type { ApiClient } from '@/api/client'
++import { ApiError, type ApiClient } from '@/api/client'
+ import type {
+     AttachmentMetadata,
+     CodexCollaborationMode,
+@@ -121,11 +121,16 @@ import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeRe
+ import { useSessionReasoningEffortOptions } from '@/hooks/queries/useSessionReasoningEffortOptions'
+ import { useVoiceOptional } from '@/lib/voice-context'
+ import { AgentTerminalView } from '@/components/AgentTerminal/AgentTerminalView'
++import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+ import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
+ import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
+ 
+ type SessionModelSelection = { provider: string; modelId: string } | string | null
+ 
++export function isAmbiguousRewindError(error: unknown): boolean {
++    return error instanceof ApiError && error.code === 'ambiguous_native_boundary'
++}
++
+ export function resolvePiContextWindow(
+     models: PiModelSummary[] | undefined,
+     selectedModel: { provider: string; modelId: string } | null | undefined,
+@@ -663,6 +668,7 @@ function SessionChatInner(props: SessionChatProps) {
+     const { codexExplorationCollapsed } = useCodexExplorationCollapse()
+     const navigate = useNavigate()
+     const [historyActionPending, setHistoryActionPending] = useState(false)
++    const [rewindForkFallback, setRewindForkFallback] = useState<string | null>(null)
+ 
+     const onForkConversation = useCallback(async (messageLocalId?: string) => {
+         setHistoryActionPending(true)
+@@ -683,10 +689,22 @@ function SessionChatInner(props: SessionChatProps) {
+         try {
+             await props.api.rewindConversation(props.session.id, messageLocalId)
+             props.onRefresh()
++        } catch (error) {
++            if (isAmbiguousRewindError(error)) {
++                setRewindForkFallback(messageLocalId)
++                return
++            }
++            throw error
+         } finally {
+             setHistoryActionPending(false)
+         }
+     }, [props.api, props.onRefresh, props.session.id])
++
++    const onRewindForkFallback = useCallback(async () => {
++        if (!rewindForkFallback) return
++        await onForkConversation(rewindForkFallback)
++        setRewindForkFallback(null)
++    }, [onForkConversation, rewindForkFallback])
+     const sessionInactive = !props.session.active
+     const inactiveCanResume = inactiveSessionCanResume(
+         props.session,
+@@ -2320,6 +2338,19 @@ function SessionChatInner(props: SessionChatProps) {
+                     onReadyChange={setVoiceBackendReady}
+                 />
+             )}
++
++            <ConfirmDialog
++                isOpen={rewindForkFallback !== null}
++                onClose={() => {
++                    if (!historyActionPending) setRewindForkFallback(null)
++                }}
++                title={t('message.rewind.fallbackTitle')}
++                description={t('message.rewind.fallbackDescription')}
++                confirmLabel={t('message.rewind.fallbackFork')}
++                confirmingLabel={t('message.rewind.fallbackForking')}
++                isPending={historyActionPending}
++                onConfirm={onRewindForkFallback}
++            />
+         </div>
+     )
+ }
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 7b24b1984..5d01c1ce0 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -19,6 +19,10 @@ export default {
+   'message.rewind.confirmTitle': 'Rewind conversation',
+   'message.rewind.confirmDescription': 'Rewind this session to this point?\nLater conversation history will be permanently removed. Files will not be changed.',
+   'message.rewind.confirming': 'Rewinding…',
++  'message.rewind.fallbackTitle': 'Rewind unavailable',
++  'message.rewind.fallbackDescription': 'HAPI did not change this session because its native Codex boundary is ambiguous.\nCreate a new session before this point instead? The current session will not be changed.',
++  'message.rewind.fallbackFork': 'Fork here',
++  'message.rewind.fallbackForking': 'Forking…',
+   'message.shareTurn': 'Share turn as image',
+   'shareTurn.title': 'Share turn as image',
+   'shareTurn.badge': 'Shared turn',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 42c537760..01a19a123 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -19,6 +19,10 @@ export default {
+   'message.rewind.confirmTitle': '回退对话',
+   'message.rewind.confirmDescription': '将此会话回退到此处？\n之后的对话历史将永久移除。文件不会被修改。',
+   'message.rewind.confirming': '回退中…',
++  'message.rewind.fallbackTitle': '暂时无法回退',
++  'message.rewind.fallbackDescription': '由于 Codex 原生对话边界存在歧义，HAPI 没有修改当前会话。\n是否改为在此处创建新会话？当前会话不会被修改。',
++  'message.rewind.fallbackFork': '在此处分叉',
++  'message.rewind.fallbackForking': '分叉中…',
+   'message.shareTurn': '将本轮对话分享为图片',
+   'shareTurn.title': '将本轮对话分享为图片',
+   'shareTurn.badge': '分享会话',
+-- 
+2.43.0
+
+
+From 95e67e81c12708fde858dc5ea83addc28fead47d Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 15:48:11 +0800
+Subject: [PATCH 5/8] fix(codex): gate rewind Fork fallback on exact native
+ boundary
+
+---
+ cli/src/codex/conversationHistory.test.ts | 37 ++++++++++++++-
+ cli/src/codex/conversationHistory.ts      | 58 ++++++++++++++++++++++-
+ hub/src/web/routes/sessions.test.ts       |  4 +-
+ shared/src/apiTypes.ts                    |  4 +-
+ web/src/api/client.test.ts                |  4 +-
+ web/src/components/SessionChat.test.ts    | 20 ++++----
+ web/src/components/SessionChat.tsx        |  6 +--
+ 7 files changed, 114 insertions(+), 19 deletions(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index bed0fcbfb..d80867feb 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -90,7 +90,7 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).toHaveBeenCalledTimes(1)
+     })
+ 
+-    it('rejects rewind before native mutation when steering adds another user message', async () => {
++    it('returns a safe-Fork code when the selected message starts a steered turn', async () => {
+         const rollback = vi.fn(async () => ({}))
+         const history = new CodexConversationHistory(() => createClient({
+             rollback,
+@@ -117,13 +117,46 @@ describe('CodexConversationHistory', () => {
+         expect(result).toMatchObject({
+             success: false,
+             outcome: 'rejected',
+-            code: 'ambiguous_native_boundary'
++            code: 'ambiguous_native_boundary_fork_safe'
+         })
+         if (result.success) throw new Error('Expected rewind to be rejected')
+         expect(result.error).toContain('ambiguous')
+         expect(rollback).not.toHaveBeenCalled()
+     })
+ 
++    it('does not offer the Fork fallback for the second message in a steered turn', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        {
++                            id: 'turn-b',
++                            items: [
++                                { type: 'userMessage', clientId: 'local-b' },
++                                { type: 'userMessage', clientId: 'local-steer' }
++                            ]
++                        }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++        history.restoreTurns({ localSteer: 'turn-b' })
++
++        const result = await history.rewind('local-steer')
++
++        expect(result).toMatchObject({
++            success: false,
++            outcome: 'rejected',
++            code: 'ambiguous_native_boundary'
++        })
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('rejects rewind before native mutation when compaction is present', async () => {
+         const rollback = vi.fn(async () => ({}))
+         const history = new CodexConversationHistory(() => createClient({
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index 5f170f954..a731b150a 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -225,7 +225,9 @@ export class CodexConversationHistory {
+             return {
+                 success: false,
+                 error: AMBIGUOUS_REWIND_ERROR,
+-                code: 'ambiguous_native_boundary',
++                code: this.isForkFallbackSafe(messageLocalId, turns, index)
++                    ? 'ambiguous_native_boundary_fork_safe'
++                    : 'ambiguous_native_boundary',
+                 outcome: 'rejected'
+             }
+         }
+@@ -269,6 +271,60 @@ export class CodexConversationHistory {
+         throw new Error(`No native history point for message ${localId}`)
+     }
+ 
++    private isForkFallbackSafe(messageLocalId: string, turns: TurnInfo[], index: number): boolean {
++        const selected = turns[index]
++        if (
++            !selected
++            || !selected.id
++            || !selected.hasCompleteItems
++            || selected.hasContextCompaction
++            || selected.clientIds[0] !== messageLocalId
++        ) {
++            return false
++        }
++
++        if (turns.flatMap((turn) => turn.clientIds).filter((clientId) => clientId === messageLocalId).length !== 1) {
++            return false
++        }
++        if (turns.filter((turn) => turn.id === selected.id).length !== 1) {
++            return false
++        }
++
++        const previousId = index > 0 ? turns[index - 1]?.id : null
++        if (index > 0 && !previousId) {
++            return false
++        }
++        if (previousId && turns.filter((turn) => turn.id === previousId).length !== 1) {
++            return false
++        }
++
++        // The child transcript excludes the selected HAPI message. Native Fork
++        // excludes the whole selected native turn, so the selected message must
++        // be the first user item in that turn. Also require the retained prefix
++        // to be unambiguous; otherwise the child could inherit a different
++        // projection even though this particular boundary is exact.
++        const retainedTurnIds = new Set<string>()
++        const retainedClientIds = new Set<string>()
++        for (const turn of turns.slice(0, index)) {
++            const clientId = turn.clientIds[0]
++            if (
++                !turn.id
++                || !turn.hasCompleteItems
++                || turn.hasContextCompaction
++                || turn.userMessageCount !== 1
++                || turn.clientIds.length !== 1
++                || !clientId
++                || retainedTurnIds.has(turn.id)
++                || retainedClientIds.has(clientId)
++            ) {
++                return false
++            }
++            retainedTurnIds.add(turn.id)
++            retainedClientIds.add(clientId)
++        }
++        return true
++    }
++
+     private async listTurns(): Promise<TurnInfo[]> {
+         const client = this.getClient()
+         const threadId = this.threadId
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 76baa4621..3a20b5181 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1763,7 +1763,7 @@ describe('sessions routes', () => {
+             rewindConversation: async () => ({
+                 type: 'error',
+                 message: 'Rewind is unavailable for this Codex history',
+-                code: 'ambiguous_native_boundary'
++                code: 'ambiguous_native_boundary_fork_safe'
+             })
+         })
+ 
+@@ -1776,7 +1776,7 @@ describe('sessions routes', () => {
+         expect(response.status).toBe(409)
+         expect(await response.json()).toEqual({
+             error: 'Rewind is unavailable for this Codex history',
+-            code: 'ambiguous_native_boundary',
++            code: 'ambiguous_native_boundary_fork_safe',
+             hydrateFailed: false
+         })
+     })
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index a99106794..95c162b52 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -674,7 +674,9 @@ export type ForkConversationRpcResponse = ForkConversationRpcResult | {
+     error: string
+ }
+ 
+-export type RewindConversationErrorCode = 'ambiguous_native_boundary'
++export type RewindConversationErrorCode =
++    | 'ambiguous_native_boundary'
++    | 'ambiguous_native_boundary_fork_safe'
+ 
+ export type RewindConversationRpcResult = {
+     success: true
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index be3a267a5..ce9ae21f7 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -77,7 +77,7 @@ describe('ApiClient error mapping', () => {
+             new Response(
+                 JSON.stringify({
+                     error: 'Rewind is unavailable for this Codex history',
+-                    code: 'ambiguous_native_boundary',
++                    code: 'ambiguous_native_boundary_fork_safe',
+                     hydrateFailed: false
+                 }),
+                 { status: 409, statusText: 'Conflict' }
+@@ -87,7 +87,7 @@ describe('ApiClient error mapping', () => {
+         const api = new ApiClient('test-token')
+         await expect(api.rewindConversation('session-1', 'local-1')).rejects.toMatchObject({
+             status: 409,
+-            code: 'ambiguous_native_boundary'
++            code: 'ambiguous_native_boundary_fork_safe'
+         })
+     })
+ 
+diff --git a/web/src/components/SessionChat.test.ts b/web/src/components/SessionChat.test.ts
+index bba19134b..5eeddefd6 100644
+--- a/web/src/components/SessionChat.test.ts
++++ b/web/src/components/SessionChat.test.ts
+@@ -13,24 +13,28 @@ import {
+     runAcceptedSendCleanup,
+     shouldAutoClearPendingSchedule,
+     shouldRouteToScratchlist,
+-    isAmbiguousRewindError,
++    isRewindForkFallbackError,
+ } from './SessionChat'
+ import { ApiError } from '@/api/client'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+ import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
+ 
+-describe('isAmbiguousRewindError', () => {
+-    it('recognizes the structured Rewind boundary code', () => {
+-        expect(isAmbiguousRewindError(new ApiError(
++describe('isRewindForkFallbackError', () => {
++    it('recognizes the structured safe-Fork boundary code', () => {
++        expect(isRewindForkFallbackError(new ApiError(
+             'native boundary is ambiguous',
+             409,
+-            'ambiguous_native_boundary'
++            'ambiguous_native_boundary_fork_safe'
+         ))).toBe(true)
+     })
+ 
+-    it('does not classify unrelated or message-only errors as fallback candidates', () => {
+-        expect(isAmbiguousRewindError(new ApiError('native boundary is ambiguous', 409))).toBe(false)
+-        expect(isAmbiguousRewindError(new Error('ambiguous native boundary'))).toBe(false)
++    it('does not classify unsafe or message-only errors as fallback candidates', () => {
++        expect(isRewindForkFallbackError(new ApiError(
++            'native boundary is ambiguous',
++            409,
++            'ambiguous_native_boundary'
++        ))).toBe(false)
++        expect(isRewindForkFallbackError(new Error('ambiguous native boundary'))).toBe(false)
+     })
+ })
+ 
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index de148453a..61e97008e 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -127,8 +127,8 @@ import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
+ 
+ type SessionModelSelection = { provider: string; modelId: string } | string | null
+ 
+-export function isAmbiguousRewindError(error: unknown): boolean {
+-    return error instanceof ApiError && error.code === 'ambiguous_native_boundary'
++export function isRewindForkFallbackError(error: unknown): boolean {
++    return error instanceof ApiError && error.code === 'ambiguous_native_boundary_fork_safe'
+ }
+ 
+ export function resolvePiContextWindow(
+@@ -690,7 +690,7 @@ function SessionChatInner(props: SessionChatProps) {
+             await props.api.rewindConversation(props.session.id, messageLocalId)
+             props.onRefresh()
+         } catch (error) {
+-            if (isAmbiguousRewindError(error)) {
++            if (isRewindForkFallbackError(error)) {
+                 setRewindForkFallback(messageLocalId)
+                 return
+             }
+-- 
+2.43.0
+
+
+From 392f9e561ebb6ee4576ab2b35d050cbae4810e7f Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 16:22:11 +0800
+Subject: [PATCH 6/8] fix(codex): reject unresolved rewind boundaries safely
+
+---
+ cli/src/codex/conversationHistory.test.ts | 23 ++++++++++++++++++++++-
+ cli/src/codex/conversationHistory.ts      | 13 ++++++++++---
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index d80867feb..02a8d9de4 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -4,7 +4,7 @@ import { CodexConversationHistory } from './conversationHistory'
+ function createClient(overrides?: {
+     fork?: (params: Record<string, unknown>) => Promise<{ thread: { id: string } }>
+     rollback?: (params: { threadId: string; numTurns: number }) => Promise<unknown>
+-    read?: () => Promise<{ thread: { id: string; turns: Array<Record<string, unknown>> } }>
++    read?: () => Promise<{ thread: { id: string; turns?: Array<Record<string, unknown>> } }>
+ }) {
+     return {
+         supportsMethod: async () => true,
+@@ -262,6 +262,27 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).not.toHaveBeenCalled()
+     })
+ 
++    it('returns a deterministic rejection when the selected native turn cannot be resolved', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({ thread: { id: 'thread-1' } })
++        }) as never)
++        history.setThreadId('thread-1')
++        history.restoreTurns({ localB: 'turn-b' })
++
++        const result = await history.rewind('localB')
++
++        expect(result).toMatchObject({
++            success: false,
++            code: 'ambiguous_native_boundary',
++            outcome: 'rejected'
++        })
++        if (result.success) throw new Error('Expected rewind to be rejected')
++        expect(result.error).toContain('ambiguous')
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('rejects rewind before native mutation when a native item is malformed', async () => {
+         const rollback = vi.fn(async () => ({}))
+         const history = new CodexConversationHistory(() => createClient({
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index a731b150a..08e40785a 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -189,9 +189,16 @@ export class CodexConversationHistory {
+         }
+ 
+         const turns = await this.listTurns()
+-        const turnId = await this.resolveTurnId(messageLocalId, turns)
+-        const index = turns.findIndex((turn) => turn.id === turnId)
+-        if (index < 0) throw new Error('Selected turn not found')
++        const turnId = await this.resolveTurnId(messageLocalId, turns).catch(() => null)
++        const index = turnId ? turns.findIndex((turn) => turn.id === turnId) : -1
++        if (index < 0) {
++            return {
++                success: false,
++                error: AMBIGUOUS_REWIND_ERROR,
++                code: 'ambiguous_native_boundary',
++                outcome: 'rejected'
++            }
++        }
+         if (turns[index]?.status === 'inProgress' || turns[index]?.status === 'in_progress') {
+             throw new Error('Cannot rewind an in-progress turn')
+         }
+-- 
+2.43.0
+
+
+From 740ff7a6b4df858c657029fcb08253d45e8d19f5 Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 11:58:33 +0800
+Subject: [PATCH 7/8] fix(codex): gate safe rewind fallback on fork support
+
+---
+ cli/src/codex/conversationHistory.test.ts | 42 +++++++++++++++++++++++
+ cli/src/codex/conversationHistory.ts      |  3 +-
+ 2 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index 02a8d9de4..5d64a146c 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -111,6 +111,7 @@ describe('CodexConversationHistory', () => {
+             })
+         }) as never)
+         history.setThreadId('thread-1')
++        await history.probeCapabilities()
+ 
+         const result = await history.rewind('local-b')
+ 
+@@ -124,6 +125,47 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).not.toHaveBeenCalled()
+     })
+ 
++    it('does not offer the Fork fallback when historical fork is unsupported', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const supportsMethod = vi.fn(async (method: string) => method === 'thread/rollback')
++        const history = new CodexConversationHistory(() => ({
++            ...createClient({
++                rollback,
++                read: async () => ({
++                    thread: {
++                        id: 'thread-1',
++                        turns: [
++                            { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                            {
++                                id: 'turn-b',
++                                items: [
++                                    { type: 'userMessage', clientId: 'local-b' },
++                                    { type: 'userMessage', clientId: 'local-steer' }
++                                ]
++                            }
++                        ]
++                    }
++                })
++            }),
++            supportsMethod
++        }) as never)
++        history.setThreadId('thread-1')
++        await history.probeCapabilities()
++
++        const result = await history.rewind('local-b')
++
++        expect(result).toMatchObject({
++            success: false,
++            outcome: 'rejected',
++            code: 'ambiguous_native_boundary'
++        })
++        expect(history.getCapabilityStates()).toMatchObject({
++            forkAtMessage: 'unsupported',
++            rewindToMessage: 'supported'
++        })
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('does not offer the Fork fallback for the second message in a steered turn', async () => {
+         const rollback = vi.fn(async () => ({}))
+         const history = new CodexConversationHistory(() => createClient({
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index 08e40785a..c52427398 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -232,7 +232,8 @@ export class CodexConversationHistory {
+             return {
+                 success: false,
+                 error: AMBIGUOUS_REWIND_ERROR,
+-                code: this.isForkFallbackSafe(messageLocalId, turns, index)
++                code: this.states.forkAtMessage === 'supported'
++                    && this.isForkFallbackSafe(messageLocalId, turns, index)
+                     ? 'ambiguous_native_boundary_fork_safe'
+                     : 'ambiguous_native_boundary',
+                 outcome: 'rejected'
+-- 
+2.43.0
+
+
+From 7932cd111c63c1b310b19e864b9cbd54c0e22722 Mon Sep 17 00:00:00 2001
+From: Ananovo <78636812+techotaku39@users.noreply.github.com>
+Date: Sun, 30 Aug 2026 12:15:42 +0800
+Subject: [PATCH 8/8] fix(codex): require complete user ids for rewind fallback
+
+---
+ cli/src/codex/conversationHistory.test.ts | 33 +++++++++++++++++++++++
+ cli/src/codex/conversationHistory.ts      |  1 +
+ 2 files changed, 34 insertions(+)
+
+diff --git a/cli/src/codex/conversationHistory.test.ts b/cli/src/codex/conversationHistory.test.ts
+index 5d64a146c..c3041afe2 100644
+--- a/cli/src/codex/conversationHistory.test.ts
++++ b/cli/src/codex/conversationHistory.test.ts
+@@ -166,6 +166,39 @@ describe('CodexConversationHistory', () => {
+         expect(rollback).not.toHaveBeenCalled()
+     })
+ 
++    it('does not offer the Fork fallback when an earlier user message has no client id', async () => {
++        const rollback = vi.fn(async () => ({}))
++        const history = new CodexConversationHistory(() => createClient({
++            rollback,
++            read: async () => ({
++                thread: {
++                    id: 'thread-1',
++                    turns: [
++                        { id: 'turn-a', items: [{ type: 'userMessage', clientId: 'local-a' }] },
++                        {
++                            id: 'turn-b',
++                            items: [
++                                { type: 'userMessage' },
++                                { type: 'userMessage', clientId: 'local-b' }
++                            ]
++                        }
++                    ]
++                }
++            })
++        }) as never)
++        history.setThreadId('thread-1')
++        await history.probeCapabilities()
++
++        const result = await history.rewind('local-b')
++
++        expect(result).toMatchObject({
++            success: false,
++            outcome: 'rejected',
++            code: 'ambiguous_native_boundary'
++        })
++        expect(rollback).not.toHaveBeenCalled()
++    })
++
+     it('does not offer the Fork fallback for the second message in a steered turn', async () => {
+         const rollback = vi.fn(async () => ({}))
+         const history = new CodexConversationHistory(() => createClient({
+diff --git a/cli/src/codex/conversationHistory.ts b/cli/src/codex/conversationHistory.ts
+index c52427398..72d2b9b04 100644
+--- a/cli/src/codex/conversationHistory.ts
++++ b/cli/src/codex/conversationHistory.ts
+@@ -286,6 +286,7 @@ export class CodexConversationHistory {
+             || !selected.id
+             || !selected.hasCompleteItems
+             || selected.hasContextCompaction
++            || selected.userMessageCount !== selected.clientIds.length
+             || selected.clientIds[0] !== messageLocalId
+         ) {
+             return false
+-- 
+2.43.0
+

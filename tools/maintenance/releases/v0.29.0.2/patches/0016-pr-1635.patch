@@ -1,0 +1,573 @@
+From b48b5f580fb1d602cbbaa814bf1038fdb5fdee25 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:51:25 +0000
+Subject: [PATCH] carry: upstream PR #1635
+
+---
+ .../components/AssistantChat/HappyThread.tsx  |  6 ++
+ web/src/components/SessionHeader.test.tsx     | 26 ++++++
+ web/src/components/SessionHeader.tsx          | 10 ++
+ web/src/components/SessionList.tsx            | 93 +------------------
+ .../hooks/useSessionHeaderMetadata.test.ts    |  1 +
+ web/src/hooks/useSessionHeaderMetadata.ts     |  2 +
+ web/src/lib/locales/en.ts                     |  2 +
+ web/src/lib/locales/zh-CN.ts                  |  2 +
+ .../lib/sessionHeaderMobileMetadata.test.ts   |  4 +
+ web/src/lib/sessionHeaderMobileMetadata.ts    |  2 +
+ web/src/lib/sessionProjectLabel.test.ts       | 31 +++++++
+ web/src/lib/sessionProjectLabel.ts            | 75 +++++++++++++++
+ web/src/lib/shareTurnMetadata.test.ts         |  3 +-
+ web/src/lib/shareTurnMetadata.ts              |  1 +
+ web/src/routes/settings/display.tsx           |  1 +
+ web/src/routes/settings/index.test.tsx        |  2 +
+ 16 files changed, 172 insertions(+), 89 deletions(-)
+ create mode 100644 web/src/lib/sessionProjectLabel.test.ts
+ create mode 100644 web/src/lib/sessionProjectLabel.ts
+
+diff --git a/web/src/components/AssistantChat/HappyThread.tsx b/web/src/components/AssistantChat/HappyThread.tsx
+index a685296a5..8424db025 100644
+--- a/web/src/components/AssistantChat/HappyThread.tsx
++++ b/web/src/components/AssistantChat/HappyThread.tsx
+@@ -29,6 +29,7 @@ import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
+ import { useMachines } from '@/hooks/queries/useMachines'
+ import { useMachineLabels } from '@/hooks/useMachineLabels'
+ import { resolveSessionHeaderMachineLabel } from '@/components/SessionHeader'
++import { getSessionProjectLabel, getSessionProjectPath } from '@/lib/sessionProjectLabel'
+ import { formatRelativeTime } from '@/lib/relativeTime'
+ import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
+ import { getShareTurnReasoningLabel, selectShareTurnMetadata } from '@/lib/shareTurnMetadata'
+@@ -531,6 +532,8 @@ export function HappyThread(props: {
+         const agentFlavor = props.session.metadata?.flavor ?? null
+         const agentLabel = agentFlavor?.trim() || null
+         const machineLabel = resolveSessionHeaderMachineLabel(props.session, machineLabelsById)
++        const projectPath = getSessionProjectPath(props.session.metadata)
++        const projectLabel = projectPath ? getSessionProjectLabel(projectPath) : null
+         const modelLabel = getSessionModelLabel(props.session)
+         const reasoningLabel = getShareTurnReasoningLabel(
+             agentFlavor,
+@@ -548,6 +551,9 @@ export function HappyThread(props: {
+ 
+         return selectShareTurnMetadata(headerMetadata, {
+             agent: agentLabel ? { text: agentLabel, flavor: agentFlavor } : undefined,
++            project: projectLabel ? {
++                text: `${headerMetadata.showLabels ? `${t('session.item.project')}: ` : ''}${projectLabel}`,
++            } : undefined,
+             machine: machineLabel ? {
+                 text: `${headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}${machineLabel}`,
+             } : undefined,
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 82958b725..089ce20df 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -356,6 +356,32 @@ describe('SessionHeader', () => {
+         expect(screen.getByTestId('session-header-age')).toHaveTextContent(/5m ago|5分钟前/)
+     })
+ 
++    it('shows the project label from the worktree base path separately from its branch', () => {
++        renderHeader(baseSession({
++            metadata: {
++                flavor: 'cursor',
++                path: '/home/user/coding/hapi-worktrees/fix-resume',
++                host: 'machine',
++                worktree: {
++                    basePath: '/home/user/coding/hapi',
++                    branch: 'fix/resume',
++                    name: 'fix-resume',
++                    worktreePath: '/home/user/coding/hapi-worktrees/fix-resume'
++                }
++            }
++        }))
++
++        expect(screen.getByTestId('session-header-project')).toHaveTextContent('project: coding/hapi')
++        expect(screen.getByText('worktree: fix/resume')).toBeInTheDocument()
++    })
++
++    it('hides the project label when its display setting is disabled', () => {
++        localStorage.setItem('hapi-session-header-metadata', JSON.stringify({ project: false }))
++        renderHeader(baseSession({ metadata: { flavor: 'cursor', path: '/home/user/coding/hapi', host: 'machine' } }))
++
++        expect(screen.queryByTestId('session-header-project')).not.toBeInTheDocument()
++    })
++
+     it('advances relative age on the minute tick without a session prop change', () => {
+         vi.useFakeTimers()
+         const now = new Date('2026-07-29T16:00:00.000Z')
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index 4c2dc25b1..eeda1dd4f 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -19,6 +19,7 @@ import { useTranslation } from '@/lib/use-translation'
+ import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+ import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
+ import { getSessionTitle } from '@/lib/sessionTitle'
++import { getSessionProjectLabel, getSessionProjectPath } from '@/lib/sessionProjectLabel'
+ import { useToast } from '@/lib/toast-context'
+ import { queryKeys } from '@/lib/query-keys'
+ import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
+@@ -161,6 +162,8 @@ export function SessionHeader(props: {
+     const { addToast } = useToast()
+     const { session, api, onSessionDeleted, onSessionReopened } = props
+     const title = useMemo(() => getSessionTitle(session), [session])
++    const projectPath = getSessionProjectPath(session.metadata)
++    const projectLabel = projectPath ? getSessionProjectLabel(projectPath) : null
+     const worktreeBranch = session.metadata?.worktree?.branch?.trim() || null
+     const { preferences: headerMetadata } = useSessionHeaderMetadata()
+     const isModelChanging = useIsMutating({
+@@ -219,6 +222,7 @@ export function SessionHeader(props: {
+     )
+     const ageAbsolute = ageLabel ? formatAbsoluteDateTime(lastActiveAt) : null
+     const mobileSecondary = selectMobileSessionHeaderSecondary({
++        project: headerMetadata.project && projectLabel !== null,
+         model: headerMetadata.model && modelLabel !== null,
+         reasoning: headerMetadata.reasoning && reasoningLabel !== null,
+         machine: headerMetadata.machine && machineLabel !== null,
+@@ -422,6 +426,7 @@ export function SessionHeader(props: {
+                                         {agentLabel}
+                                     </span>
+                                 ) : null}
++                                {mobileSecondary === 'project' && projectLabel ? <span className="truncate" title={projectPath ?? undefined}>{headerMetadata.showLabels ? `${t('session.item.project')}: ` : ''}{projectLabel}</span> : null}
+                                 {mobileSecondary === 'model' && modelLabel ? <span className="inline-flex truncate items-center gap-1.5">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}{isModelChanging ? <ModelChangingStatus /> : null}</span> : null}
+                                 {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
+                                 {mobileSecondary === 'machine' && machineLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span> : null}
+@@ -439,6 +444,11 @@ export function SessionHeader(props: {
+                                     {agentLabel}
+                                 </span>
+                             ) : null}
++                            {headerMetadata.project && projectLabel ? (
++                                <span data-testid="session-header-project" className="max-w-[12rem] truncate" title={projectPath ?? undefined}>
++                                    {headerMetadata.showLabels ? `${t('session.item.project')}: ` : ''}{projectLabel}
++                                </span>
++                            ) : null}
+                             {headerMetadata.machine && machineLabel ? (
+                                 <span data-testid="session-header-machine" className="max-w-[12rem] truncate" title={machineLabel}>
+                                     {headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 0806db377..e8240b85e 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -51,6 +51,7 @@ import { formatReopenError } from '@/lib/reopenError'
+ import { resolveCursorReopenGate } from '@/lib/sessionResume'
+ import { getSessionTitle, hasSessionTitleSignal } from '@/lib/sessionTitle'
+ import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
++import { getSessionProjectLabel, resolveSessionGroupDirectory } from '@/lib/sessionProjectLabel'
+ import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
+ import type { Machine } from '@/types/api'
+ import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
+@@ -64,6 +65,7 @@ import { useToast } from '@/lib/toast-context'
+ import { SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
+ 
+ export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
++export { resolveSessionGroupDirectory } from '@/lib/sessionProjectLabel'
+ 
+ type SessionGroup = {
+     key: string
+@@ -205,91 +207,6 @@ type MachineGroup = {
+     latestUpdatedAt: number
+ }
+ 
+-function getGroupDisplayName(directory: string): string {
+-    if (directory === 'Other') return directory
+-    const parts = directory.split(/[\\/]+/).filter(Boolean)
+-    if (parts.length === 0) return directory
+-    if (parts.length === 1) return parts[0]
+-    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
+-}
+-
+-function usesWindowsSeparators(path: string): boolean {
+-    return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\/.test(path)
+-}
+-
+-function stripTrailingSeparators(path: string): string {
+-    if (!usesWindowsSeparators(path)) {
+-        if (/^\/+$/.test(path)) return '/'
+-        return path.replace(/\/+$/, '')
+-    }
+-    if (/^[A-Za-z]:[\\/]+$/.test(path)) return path.slice(0, 3)
+-    return path.replace(/[\\/]+$/, '')
+-}
+-
+-function normalizePathForCompare(path: string): string {
+-    const stripped = stripTrailingSeparators(path)
+-    return usesWindowsSeparators(path) ? stripped.replace(/\\/g, '/') : stripped
+-}
+-
+-function pathIsUnder(parent: string, child: string): boolean {
+-    const parentNorm = normalizePathForCompare(parent)
+-    const childNorm = normalizePathForCompare(child)
+-    return childNorm === parentNorm || childNorm.startsWith(`${parentNorm}/`)
+-}
+-
+-export type SessionGroupDirectorySource = {
+-    path?: string | null
+-    worktree?: { basePath?: string | null; worktreePath?: string | null } | null
+-}
+-
+-/**
+- * Directory used as the sidebar project-group key.
+- *
+- * Prefer worktree.basePath when the session path lives under it. When basePath
+- * is a realpath of a symlink prefix (CLI realpaths worktreePath/basePath while
+- * metadata.path may still use the logical spelling), require worktreePath to
+- * sit under basePath before rewriting the group root from path — display-name
+- * collision alone is not alias evidence.
+- */
+-export function resolveSessionGroupDirectory(source: SessionGroupDirectorySource): string {
+-    // Do not trim(): trailing/leading spaces are valid POSIX path characters and
+-    // group.directory feeds Copy Path / New Session.
+-    const path = source.path ?? ''
+-    const basePath = source.worktree?.basePath ?? ''
+-    const worktreePath = source.worktree?.worktreePath ?? ''
+-    if (!basePath && !path) return 'Other'
+-    if (!basePath) return stripTrailingSeparators(path)
+-    if (!path) return stripTrailingSeparators(basePath)
+-
+-    const normBase = stripTrailingSeparators(basePath)
+-    if (pathIsUnder(normBase, path)) {
+-        return normBase
+-    }
+-
+-    // Alias evidence: realpathed worktreePath under realpathed basePath, while
+-    // path still uses a logical spelling of the same checkout.
+-    if (!worktreePath || !pathIsUnder(normBase, worktreePath)) {
+-        return normBase
+-    }
+-
+-    const baseNorm = normalizePathForCompare(normBase)
+-    const worktreeNorm = normalizePathForCompare(worktreePath)
+-    const pathNorm = normalizePathForCompare(path)
+-    const suffix = worktreeNorm.slice(baseNorm.length)
+-    if (!suffix) return normBase
+-
+-    const suffixIndex = pathNorm.lastIndexOf(`${suffix}/`)
+-    if (suffixIndex !== -1) {
+-        const logicalRoot = pathNorm.slice(0, suffixIndex)
+-        return usesWindowsSeparators(path) ? logicalRoot.replace(/\//g, '\\') : logicalRoot
+-    }
+-    if (pathNorm.endsWith(suffix)) {
+-        const logicalRoot = pathNorm.slice(0, -suffix.length) || normBase
+-        return usesWindowsSeparators(path) ? logicalRoot.replace(/\//g, '\\') : logicalRoot
+-    }
+-    return normBase
+-}
+-
+ export const UNKNOWN_MACHINE_ID = '__unknown__'
+ export const GROUP_SESSION_PREVIEW_LIMIT = DEFAULT_SESSION_PREVIEW_LIMIT
+ 
+@@ -443,7 +360,7 @@ export function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGro
+             )
+             const hasActiveSession = group.sessions.some(s => s.active)
+             const hasPinnedSession = group.sessions.some(s => s.pinned)
+-            const displayName = getGroupDisplayName(group.directory)
++            const displayName = getSessionProjectLabel(group.directory)
+ 
+             return {
+                 key,
+@@ -1837,7 +1754,7 @@ export function SessionList(props: {
+                                             selected={s.id === selectedSessionId}
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
+-                                            projectLabel={getGroupDisplayName(resolveSessionGroupDirectory(s.metadata ?? {}))}
++                                            projectLabel={getSessionProjectLabel(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
+                                                 : undefined}
+@@ -2290,7 +2207,7 @@ export function SessionList(props: {
+                                             selected={s.id === selectedSessionId}
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
+-                                            projectLabel={getGroupDisplayName(resolveSessionGroupDirectory(s.metadata ?? {}))}
++                                            projectLabel={getSessionProjectLabel(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
+                                                 : undefined}
+diff --git a/web/src/hooks/useSessionHeaderMetadata.test.ts b/web/src/hooks/useSessionHeaderMetadata.test.ts
+index 7265c1c6c..329138c23 100644
+--- a/web/src/hooks/useSessionHeaderMetadata.test.ts
++++ b/web/src/hooks/useSessionHeaderMetadata.test.ts
+@@ -9,6 +9,7 @@ describe('parseSessionHeaderMetadata', () => {
+         expect(DEFAULT_SESSION_HEADER_METADATA).toMatchObject({
+             showLabels: true,
+             agent: true,
++            project: true,
+             model: true,
+             reasoning: true,
+             fastMode: true,
+diff --git a/web/src/hooks/useSessionHeaderMetadata.ts b/web/src/hooks/useSessionHeaderMetadata.ts
+index 15b8a47e8..a14c9efd0 100644
+--- a/web/src/hooks/useSessionHeaderMetadata.ts
++++ b/web/src/hooks/useSessionHeaderMetadata.ts
+@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
+ export type SessionHeaderMetadataKey =
+     | 'showLabels'
+     | 'agent'
++    | 'project'
+     | 'model'
+     | 'reasoning'
+     | 'fastMode'
+@@ -17,6 +18,7 @@ export type SessionHeaderMetadataPreferences = Record<SessionHeaderMetadataKey,
+ export const DEFAULT_SESSION_HEADER_METADATA: SessionHeaderMetadataPreferences = {
+     showLabels: true,
+     agent: true,
++    project: true,
+     model: true,
+     reasoning: true,
+     fastMode: true,
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index f3e62a8ff..675418c2d 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -174,6 +174,7 @@ export default {
+   'session.item.path': 'path',
+   'session.item.agent': 'agent',
+   'session.item.model': 'model',
++  'session.item.project': 'project',
+   'session.item.machine': 'machine',
+   'session.modelChange.pending': 'Changing…',
+   'session.modelChange.pendingTooltip': 'The model will change when the current task finishes.',
+@@ -896,6 +897,7 @@ export default {
+   'settings.display.sessionHeader.description': 'Choose which details appear below the session title. Mobile shows the agent plus the highest-priority available detail.',
+   'settings.display.sessionHeader.showLabels': 'Show field labels',
+   'settings.display.sessionHeader.agent': 'Agent',
++  'settings.display.sessionHeader.project': 'Project',
+   'settings.display.sessionHeader.model': 'Model',
+   'settings.display.sessionHeader.reasoning': 'Reasoning effort',
+   'settings.display.sessionHeader.fastMode': 'Fast mode',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index dce5d9612..85c579932 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -174,6 +174,7 @@ export default {
+   'session.item.path': '路径',
+   'session.item.agent': '代理',
+   'session.item.model': '模型',
++  'session.item.project': '项目',
+   'session.item.machine': '机器',
+   'session.modelChange.pending': '更改中…',
+   'session.modelChange.pendingTooltip': '当前任务完成后将更改模型。',
+@@ -895,6 +896,7 @@ export default {
+   'settings.display.sessionHeader.description': '选择在会话标题下方显示的信息。移动端显示 Agent 类型及优先级最高的一个可用信息。',
+   'settings.display.sessionHeader.showLabels': '显示字段标题',
+   'settings.display.sessionHeader.agent': 'Agent 类型',
++  'settings.display.sessionHeader.project': '项目',
+   'settings.display.sessionHeader.model': '模型',
+   'settings.display.sessionHeader.reasoning': '推理强度',
+   'settings.display.sessionHeader.fastMode': '快速模式',
+diff --git a/web/src/lib/sessionHeaderMobileMetadata.test.ts b/web/src/lib/sessionHeaderMobileMetadata.test.ts
+index 115bc3c25..267899e81 100644
+--- a/web/src/lib/sessionHeaderMobileMetadata.test.ts
++++ b/web/src/lib/sessionHeaderMobileMetadata.test.ts
+@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
+ import { selectMobileSessionHeaderSecondary } from './sessionHeaderMobileMetadata'
+ 
+ describe('selectMobileSessionHeaderSecondary', () => {
++    it('prioritizes the project label when it is available', () => {
++        expect(selectMobileSessionHeaderSecondary({ project: true, machine: true })).toBe('project')
++    })
++
+     it('follows the upstream-first display order', () => {
+         expect(selectMobileSessionHeaderSecondary({ machine: true, model: true, updatedAt: true })).toBe('machine')
+         expect(selectMobileSessionHeaderSecondary({ model: true, updatedAt: true, worktree: true })).toBe('model')
+diff --git a/web/src/lib/sessionHeaderMobileMetadata.ts b/web/src/lib/sessionHeaderMobileMetadata.ts
+index fa3ed5538..06cae9074 100644
+--- a/web/src/lib/sessionHeaderMobileMetadata.ts
++++ b/web/src/lib/sessionHeaderMobileMetadata.ts
+@@ -1,4 +1,5 @@
+ export type SessionHeaderSecondaryMetadataKey =
++    | 'project'
+     | 'model'
+     | 'reasoning'
+     | 'machine'
+@@ -9,6 +10,7 @@ export type SessionHeaderSecondaryMetadataKey =
+     | 'fastMode'
+ 
+ const MOBILE_SECONDARY_PRIORITY: ReadonlyArray<SessionHeaderSecondaryMetadataKey> = [
++    'project',
+     'machine',
+     'lastActive',
+     'model',
+diff --git a/web/src/lib/sessionProjectLabel.test.ts b/web/src/lib/sessionProjectLabel.test.ts
+new file mode 100644
+index 000000000..d37dcf85c
+--- /dev/null
++++ b/web/src/lib/sessionProjectLabel.test.ts
+@@ -0,0 +1,31 @@
++import { describe, expect, it } from 'vitest'
++import { getSessionProjectLabel, getSessionProjectPath } from './sessionProjectLabel'
++
++describe('session project labels', () => {
++    it('uses the repository path for worktree sessions', () => {
++        expect(getSessionProjectPath({
++            path: '/work/hapi-worktrees/fix-resume',
++            worktree: { basePath: '/work/hapi' },
++        })).toBe('/work/hapi')
++        expect(getSessionProjectLabel('/work/hapi')).toBe('work/hapi')
++    })
++
++    it('formats nested POSIX and Windows paths like the sidebar', () => {
++        expect(getSessionProjectLabel('/home/user/coding/hapi')).toBe('coding/hapi')
++        expect(getSessionProjectLabel('C:\\work\\hapi')).toBe('work/hapi')
++        expect(getSessionProjectLabel('hapi')).toBe('hapi')
++    })
++
++    it('falls back to the session path and hides blank paths', () => {
++        expect(getSessionProjectPath({ path: '/repo' })).toBe('/repo')
++        expect(getSessionProjectPath({ path: '   ' })).toBeNull()
++        expect(getSessionProjectPath(null)).toBeNull()
++    })
++
++    it('does not treat a worktree with no base path as a simple session', () => {
++        expect(getSessionProjectPath({
++            path: '/work/hapi-worktrees/fix-resume',
++            worktree: { basePath: '   ' },
++        })).toBeNull()
++    })
++})
+diff --git a/web/src/lib/sessionProjectLabel.ts b/web/src/lib/sessionProjectLabel.ts
+new file mode 100644
+index 000000000..f1e10592b
+--- /dev/null
++++ b/web/src/lib/sessionProjectLabel.ts
+@@ -0,0 +1,75 @@
++export type SessionProjectMetadata = {
++    path?: string | null
++    worktree?: {
++        basePath?: string | null
++        worktreePath?: string | null
++    } | null
++}
++
++function usesWindowsSeparators(path: string): boolean {
++    return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\/.test(path)
++}
++
++function stripTrailingSeparators(path: string): string {
++    if (!usesWindowsSeparators(path)) {
++        if (/^\/+$/u.test(path)) return '/'
++        return path.replace(/\/+$/u, '')
++    }
++    if (/^[A-Za-z]:[\\/]+$/u.test(path)) return path.slice(0, 3)
++    return path.replace(/[\\/]+$/u, '')
++}
++
++function normalizePathForCompare(path: string): string {
++    const stripped = stripTrailingSeparators(path)
++    return usesWindowsSeparators(path) ? stripped.replace(/\\/gu, '/') : stripped
++}
++
++function pathIsUnder(parent: string, child: string): boolean {
++    const parentNorm = normalizePathForCompare(parent)
++    const childNorm = normalizePathForCompare(child)
++    return childNorm === parentNorm || childNorm.startsWith(`${parentNorm}/`)
++}
++
++export function resolveSessionGroupDirectory(source: SessionProjectMetadata): string {
++    const path = source.path ?? ''
++    const basePath = source.worktree?.basePath ?? ''
++    const worktreePath = source.worktree?.worktreePath ?? ''
++    if (!basePath && !path) return 'Other'
++    if (!basePath) return stripTrailingSeparators(path)
++    if (!path) return stripTrailingSeparators(basePath)
++
++    const normalizedBase = stripTrailingSeparators(basePath)
++    if (pathIsUnder(normalizedBase, path)) return normalizedBase
++    if (!worktreePath || !pathIsUnder(normalizedBase, worktreePath)) return normalizedBase
++
++    const baseNorm = normalizePathForCompare(normalizedBase)
++    const worktreeNorm = normalizePathForCompare(worktreePath)
++    const pathNorm = normalizePathForCompare(path)
++    const suffix = worktreeNorm.slice(baseNorm.length)
++    if (!suffix) return normalizedBase
++
++    const suffixIndex = pathNorm.lastIndexOf(`${suffix}/`)
++    if (suffixIndex !== -1) {
++        const logicalRoot = pathNorm.slice(0, suffixIndex)
++        return usesWindowsSeparators(path) ? logicalRoot.replace(/\//gu, '\\') : logicalRoot
++    }
++    if (pathNorm.endsWith(suffix)) {
++        const logicalRoot = pathNorm.slice(0, -suffix.length) || normalizedBase
++        return usesWindowsSeparators(path) ? logicalRoot.replace(/\//gu, '\\') : logicalRoot
++    }
++    return normalizedBase
++}
++
++export function getSessionProjectPath(metadata: SessionProjectMetadata | null | undefined): string | null {
++    if (metadata?.worktree && !metadata.worktree.basePath?.trim()) return null
++    const directory = resolveSessionGroupDirectory(metadata ?? {})
++    return directory === 'Other' || !directory.trim() ? null : directory
++}
++
++export function getSessionProjectLabel(directory: string): string {
++    if (directory === 'Other') return directory
++    const parts = directory.split(/[\\/]+/u).filter(Boolean)
++    if (parts.length === 0) return directory
++    if (parts.length === 1) return parts[0]
++    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
++}
+diff --git a/web/src/lib/shareTurnMetadata.test.ts b/web/src/lib/shareTurnMetadata.test.ts
+index 4918476eb..85ef17808 100644
+--- a/web/src/lib/shareTurnMetadata.test.ts
++++ b/web/src/lib/shareTurnMetadata.test.ts
+@@ -5,6 +5,7 @@ import { getShareTurnReasoningLabel, selectShareTurnMetadata } from './shareTurn
+ describe('selectShareTurnMetadata', () => {
+     const available = {
+         agent: { text: 'codex', flavor: 'codex' },
++        project: { text: 'Project: coding/hapi' },
+         machine: { text: 'Machine: workstation' },
+         lastActive: { text: '2 minutes ago' },
+         model: { text: 'Model: gpt-5.6-sol' },
+@@ -17,7 +18,7 @@ describe('selectShareTurnMetadata', () => {
+ 
+     it('uses the desktop session-header order and default visibility', () => {
+         expect(selectShareTurnMetadata(DEFAULT_SESSION_HEADER_METADATA, available).map((item) => item.key)).toEqual([
+-            'agent', 'machine', 'lastActive', 'model', 'reasoning', 'fastMode', 'worktree',
++            'agent', 'project', 'machine', 'lastActive', 'model', 'reasoning', 'fastMode', 'worktree',
+         ])
+     })
+ 
+diff --git a/web/src/lib/shareTurnMetadata.ts b/web/src/lib/shareTurnMetadata.ts
+index 59a0577a4..bb698e9d1 100644
+--- a/web/src/lib/shareTurnMetadata.ts
++++ b/web/src/lib/shareTurnMetadata.ts
+@@ -21,6 +21,7 @@ export function getShareTurnReasoningLabel(
+ 
+ const SESSION_HEADER_METADATA_ORDER: ReadonlyArray<ShareTurnMetadataKey> = [
+     'agent',
++    'project',
+     'machine',
+     'lastActive',
+     'model',
+diff --git a/web/src/routes/settings/display.tsx b/web/src/routes/settings/display.tsx
+index cdb3f291e..ebe209c9e 100644
+--- a/web/src/routes/settings/display.tsx
++++ b/web/src/routes/settings/display.tsx
+@@ -150,6 +150,7 @@ export default function SettingsDisplayPage() {
+     const sessionHeaderOptions: ReadonlyArray<{ key: SessionHeaderMetadataKey; labelKey: string }> = [
+         { key: 'showLabels', labelKey: 'settings.display.sessionHeader.showLabels' },
+         { key: 'agent', labelKey: 'settings.display.sessionHeader.agent' },
++        { key: 'project', labelKey: 'settings.display.sessionHeader.project' },
+         { key: 'machine', labelKey: 'settings.display.sessionHeader.machine' },
+         { key: 'lastActive', labelKey: 'settings.display.sessionHeader.lastActive' },
+         { key: 'model', labelKey: 'settings.display.sessionHeader.model' },
+diff --git a/web/src/routes/settings/index.test.tsx b/web/src/routes/settings/index.test.tsx
+index 4078c90a6..caf2c7d13 100644
+--- a/web/src/routes/settings/index.test.tsx
++++ b/web/src/routes/settings/index.test.tsx
+@@ -118,6 +118,7 @@ vi.mock('@/hooks/useSessionHeaderMetadata', () => ({
+         preferences: {
+             showLabels: true,
+             agent: true,
++            project: true,
+             model: true,
+             reasoning: true,
+             fastMode: true,
+@@ -324,6 +325,7 @@ describe('responsive settings pages', () => {
+         expect(screen.getByRole('radio', { name: '120%' })).toBeInTheDocument()
+         expect(screen.getByRole('spinbutton', { name: 'Sessions Before Folding' })).toHaveValue(8)
+         expect(screen.getByRole('checkbox', { name: 'Show field labels' })).toBeChecked()
++        expect(screen.getByRole('checkbox', { name: 'Project' })).toBeChecked()
+         expect(screen.getByRole('checkbox', { name: 'Reasoning effort' })).toBeChecked()
+         expect(screen.getByRole('checkbox', { name: 'Machine' })).toBeChecked()
+         expect(screen.getByRole('checkbox', { name: 'Active time' })).toBeChecked()
+-- 
+2.43.0
+

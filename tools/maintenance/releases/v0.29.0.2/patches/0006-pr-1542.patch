@@ -1,0 +1,2030 @@
+From bc1f1d6c543b55c5cdf6290ba24c22bbd0e3e96b Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:24:12 +0000
+Subject: [PATCH] carry: upstream PR #1542
+
+---
+ e2e/load-earlier-running-session.spec.ts      |  87 ++
+ web/e2e-fixtures/history-load-fixture.tsx     |  65 +-
+ .../components/AssistantChat/HappyThread.tsx  | 104 ++-
+ web/src/components/SessionChat.tsx            |  46 +-
+ web/src/hooks/queries/useMessages.test.tsx    | 164 ++++
+ web/src/hooks/queries/useMessages.ts          |  12 +-
+ web/src/lib/message-window-store.test.ts      | 742 ++++++++++++++++++
+ web/src/lib/message-window-store.ts           | 332 +++++++-
+ 8 files changed, 1474 insertions(+), 78 deletions(-)
+ create mode 100644 e2e/load-earlier-running-session.spec.ts
+ create mode 100644 web/src/hooks/queries/useMessages.test.tsx
+
+diff --git a/e2e/load-earlier-running-session.spec.ts b/e2e/load-earlier-running-session.spec.ts
+new file mode 100644
+index 000000000..a78c705d2
+--- /dev/null
++++ b/e2e/load-earlier-running-session.spec.ts
+@@ -0,0 +1,87 @@
++import { expect, test } from '@playwright/test'
++
++// Bug report: clicking "Load earlier" (outline button) on a RUNNING session
++// (messages streaming in via SSE) made the chat viewport fly upward and keep
++// jumping. Root cause: the tail-mode window trim evicted the freshly loaded
++// older pages on the very next streaming ingest (and one more row per message
++// afterwards), so the loaded range the user was reading vanished from the DOM
++// and the viewport jumped up repeatedly.
++//
++// Regression: the loaded older range must survive streaming ingests while the
++// user browses it. Driven against the real message-window store + HappyThread
++// with a streaming fixture (`?outline=1` + probe.startStreaming).
++
++test('running session: outline load-earlier keeps the loaded range and the viewport stable', async ({ page }) => {
++    test.setTimeout(90_000)
++    await page.goto('/e2e-fixtures/history-load-fixture.html?outline=1')
++    const viewport = page.locator('.chat-scroll-y')
++    await expect(viewport).toBeVisible()
++    // Initial tail sync + initial scroll-settling window.
++    await page.waitForTimeout(3500)
++
++    // Click "Load earlier" in the outline (DOM click: Playwright's
++    // actionability retries cannot keep up with dev-mode re-render churn).
++    await page.evaluate(() => {
++        const button = Array.from(document.querySelectorAll('button'))
++            .find((b) => b.getAttribute('aria-label') === 'Load earlier') as HTMLButtonElement | undefined
++        if (!button) throw new Error('Load earlier button not found')
++        button.click()
++    })
++
++    // Wait for the older page request, then for it to apply.
++    await expect.poll(async () => await page.evaluate(() =>
++        window.__probe.requests.filter((r) => r.direction === 'before').length
++    ), { timeout: 10_000 }).toBeGreaterThanOrEqual(1)
++    await expect.poll(async () => await page.evaluate(() =>
++        document.querySelector('.happy-thread-messages')?.childElementCount ?? 0
++    ), { timeout: 10_000 }).toBeGreaterThanOrEqual(400)
++
++    // Now the session starts running: messages stream in continuously.
++    await page.evaluate(() => window.__probe.startStreaming(800))
++
++    // Sample the scroll position and window contents while streaming continues.
++    let flewUp = false
++    let loadedRangeEvicted = false
++    for (let i = 0; i < 3; i += 1) {
++        await page.waitForTimeout(400)
++        const sample = await page.evaluate(() => {
++            const el = document.querySelector('.chat-scroll-y') as HTMLElement
++            const firstMessage = document.querySelector('.happy-thread-messages > [id]')
++            const firstSeq = firstMessage
++                ? Number(firstMessage.id.match(/m-(\d+)/)?.[1] ?? 0)
++                : 0
++            return {
++                scrollTop: Math.round(el.scrollTop),
++                max: el.scrollHeight - el.clientHeight,
++                childCount: document.querySelector('.happy-thread-messages')?.childElementCount ?? 0,
++                firstSeq
++            }
++        })
++        // The viewport must never fly to the top while the tail streams.
++        if (sample.max > 0 && sample.scrollTop < sample.max * 0.3) {
++            flewUp = true
++        }
++        // The loaded older range (m-801, the oldest loaded page) must remain
++        // rendered instead of being evicted by the streaming ingests.
++        if (sample.firstSeq !== 801) {
++            loadedRangeEvicted = true
++        }
++    }
++
++    const final = await page.evaluate(() => ({
++        streamed: window.__probe.streamedCount(),
++        beforeReqs: window.__probe.requests.filter((r) => r.direction === 'before').length,
++        childCount: document.querySelector('.happy-thread-messages')?.childElementCount ?? 0,
++        firstSeq: Number(document.querySelector('.happy-thread-messages > [id]')?.id.match(/m-(\d+)/)?.[1] ?? 0)
++    }))
++
++    console.log('final:', JSON.stringify(final), 'flewUp:', flewUp, 'loadedRangeEvicted:', loadedRangeEvicted)
++
++    expect(final.beforeReqs).toBeGreaterThanOrEqual(1)
++    // The loaded older page was applied and survived the streaming ingests.
++    expect(final.childCount).toBeGreaterThanOrEqual(400)
++    expect(final.firstSeq).toBe(801)
++    // The viewport never flew to the top.
++    expect(flewUp).toBe(false)
++    expect(loadedRangeEvicted).toBe(false)
++})
+diff --git a/web/e2e-fixtures/history-load-fixture.tsx b/web/e2e-fixtures/history-load-fixture.tsx
+index dccb7ba44..a15aa4db5 100644
+--- a/web/e2e-fixtures/history-load-fixture.tsx
++++ b/web/e2e-fixtures/history-load-fixture.tsx
+@@ -1,6 +1,7 @@
+ import { useMemo, useRef } from 'react'
+ import ReactDOM from 'react-dom/client'
+ import { AssistantRuntimeProvider } from '@assistant-ui/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import '../src/index.css'
+ import type { ApiClient } from '../src/api/client'
+ import type { DecryptedMessage, MessagesResponse, Session } from '../src/types/api'
+@@ -10,11 +11,12 @@ import { normalizeDecryptedMessage } from '../src/chat/normalize'
+ import { reduceChatBlocks } from '../src/chat/reducer'
+ import { reconcileChatBlocks } from '../src/chat/reconcile'
+ import { buildVisibleChatBlocks } from '../src/chat/toolGroups'
++import { buildConversationOutline } from '../src/chat/outline'
+ import { isQueuedForInvocation } from '../src/lib/messages'
+ import { useHappyRuntime } from '../src/lib/assistant-runtime'
+ import { HappyThread } from '../src/components/AssistantChat/HappyThread'
+ import type { ChatBlock } from '../src/chat/types'
+-import { getMessageWindowState } from '../src/lib/message-window-store'
++import { getMessageWindowState, ingestIncomingMessages } from '../src/lib/message-window-store'
+ 
+ // Drives the real message-window store + chat pipeline + HappyThread against a
+ // fake paginated message API, so e2e tests can exercise older-history loading
+@@ -29,6 +31,9 @@ type Probe = {
+     requests: { direction: string; beforeSeq: number | null; limit: number | undefined; at: number }[]
+     refetch: () => Promise<void>
+     windowState: () => { messageCount: number; oldestSeq: number | null; newestSeq: number | null }
++    startStreaming: (intervalMs?: number) => void
++    stopStreaming: () => void
++    streamedCount: () => number
+ }
+ 
+ declare global {
+@@ -37,6 +42,11 @@ declare global {
+     }
+ }
+ 
++let liveMessages: DecryptedMessage[] = []
++let streamTimer: ReturnType<typeof setInterval> | null = null
++let streamSeq = TOTAL_MESSAGES + 1
++let streamedMessages = 0
++
+ window.__probe = {
+     requests: [],
+     refetch: async () => {},
+@@ -47,7 +57,34 @@ window.__probe = {
+             oldestSeq: state.oldestSeq,
+             newestSeq: state.newestSeq
+         }
+-    }
++    },
++    startStreaming: (intervalMs = 150) => {
++        if (streamTimer) return
++        streamTimer = window.setInterval(() => {
++            const seq = streamSeq++
++            streamedMessages += 1
++            const message: DecryptedMessage = {
++                id: `m-${seq}`,
++                seq,
++                localId: null,
++                content: {
++                    role: 'assistant',
++                    content: { type: 'text', text: `Streamed message ${seq} ${'y'.repeat(80)}` }
++                },
++                createdAt: BASE_AT + seq,
++                invokedAt: BASE_AT + seq
++            }
++            liveMessages = [...liveMessages, message]
++            ingestIncomingMessages(SESSION_ID, [message])
++        }, intervalMs)
++    },
++    stopStreaming: () => {
++        if (streamTimer) {
++            window.clearInterval(streamTimer)
++            streamTimer = null
++        }
++    },
++    streamedCount: () => streamedMessages
+ }
+ 
+ // Test knobs via query params:
+@@ -87,6 +124,8 @@ const allMessages: DecryptedMessage[] = Array.from({ length: TOTAL_MESSAGES }, (
+     } as DecryptedMessage
+ })
+ 
++liveMessages = [...allMessages]
++
+ function positionOf(message: DecryptedMessage): { at: number; seq: number } {
+     return { at: message.invokedAt ?? message.createdAt, seq: message.seq ?? 0 }
+ }
+@@ -142,7 +181,7 @@ const fakeApi = {
+             }
+             const cursorAt = query.beforeAt ?? Number.POSITIVE_INFINITY
+             const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
+-            const older = allMessages.filter((message) => {
++            const older = liveMessages.filter((message) => {
+                 const position = positionOf(message)
+                 return position.at < cursorAt || (position.at === cursorAt && position.seq < cursorSeq)
+             })
+@@ -165,7 +204,7 @@ const fakeApi = {
+             }
+         }
+ 
+-        const pageMessages = allMessages.slice(-limit)
++        const pageMessages = liveMessages.slice(-limit)
+         // After an epoch bump the "rewritten" tail renders taller rows, so
+         // the reset changes content height — this is what re-fires the
+         // ResizeObserver coverage re-check in the epoch-reset scenario.
+@@ -190,6 +229,8 @@ const fakeApi = {
+     }
+ } as unknown as ApiClient
+ 
++const outline = fixtureParams.has('outline')
++
+ const fakeSession = {
+     id: SESSION_ID,
+     active: true,
+@@ -251,6 +292,8 @@ function FixtureThread() {
+         onAbort: noopAbort
+     })
+ 
++    const outlineItems = useMemo(() => buildConversationOutline(reconciled.blocks), [reconciled.blocks])
++
+     return (
+         <AssistantRuntimeProvider runtime={runtime}>
+             <div className="flex h-screen min-h-0 flex-col">
+@@ -276,8 +319,8 @@ function FixtureThread() {
+                     messagesVersion={messagesVersion}
+                     historyVersion={historyVersion}
+                     forceScrollToken={0}
+-                    outlineOpen={false}
+-                    outlineItems={[]}
++                    outlineOpen={outline}
++                    outlineItems={outlineItems}
+                     onOutlineOpenChange={() => {}}
+                 />
+             </div>
+@@ -285,8 +328,12 @@ function FixtureThread() {
+     )
+ }
+ 
++const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++
+ ReactDOM.createRoot(document.getElementById('root')!).render(
+-    <I18nProvider>
+-        <FixtureThread />
+-    </I18nProvider>
++    <QueryClientProvider client={queryClient}>
++        <I18nProvider>
++            <FixtureThread />
++        </I18nProvider>
++    </QueryClientProvider>
+ )
+diff --git a/web/src/components/AssistantChat/HappyThread.tsx b/web/src/components/AssistantChat/HappyThread.tsx
+index 99f3f1d78..a685296a5 100644
+--- a/web/src/components/AssistantChat/HappyThread.tsx
++++ b/web/src/components/AssistantChat/HappyThread.tsx
+@@ -49,7 +49,7 @@ type PendingScrollRestore = {
+     targetHistoryVersion: number | null
+ }
+ 
+-type HistoryLoadSource = 'coverage' | 'user' | 'consumer'
++type HistoryLoadSource = 'coverage' | 'user' | 'consumer' | 'outline'
+ type PullToLoadState = 'idle' | 'pulling' | 'ready'
+ 
+ type HistoryLoaderState = {
+@@ -506,7 +506,7 @@ export function HappyThread(props: {
+     messagesWarning: string | null
+     hasMoreMessages: boolean
+     isLoadingMoreMessages: boolean
+-    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
++    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
+     onCancelLoadMore: () => void
+     unseenCount: number
+     rawMessagesCount: number
+@@ -635,6 +635,10 @@ export function HappyThread(props: {
+     const atBottomRef = useRef(true)
+     const onViewModeChangeRef = useRef(props.onViewModeChange)
+     const forceScrollTokenRef = useRef(props.forceScrollToken)
++    // Render-time mirror so apply-time boundary decisions can read the live
++    // outline state without a stale closure or an effect-delayed ref.
++    const outlineOpenRef = useRef(props.outlineOpen)
++    outlineOpenRef.current = props.outlineOpen
+     const lastScrollTopRef = useRef(0)
+     const sessionIdRef = useRef(props.sessionId)
+     const initialScrollSessionRef = useRef<string | null>(null)
+@@ -708,6 +712,7 @@ export function HappyThread(props: {
+         // old DOM after trimming. Only network/backoff work is cancellable.
+         if (
+             state.source === 'consumer'
++            || state.source === 'outline'
+             || (state.phase !== 'loading' && state.phase !== 'backoff')
+         ) {
+             return
+@@ -1242,7 +1247,11 @@ export function HappyThread(props: {
+             }
+         }
+ 
+-        if (state.source !== 'consumer' && !needsViewportCoverage()) {
++        if (
++            state.source !== 'consumer'
++            && state.source !== 'outline'
++            && !needsViewportCoverage()
++        ) {
+             finishStoppedAttempt(state, 'transient-stop')
+             return
+         }
+@@ -1286,13 +1295,27 @@ export function HappyThread(props: {
+                     ) {
+                         return false
+                     }
+-                    if (current.source !== 'consumer' && !needsViewportCoverage()) {
++                    if (
++                        current.source !== 'consumer'
++                        && current.source !== 'outline'
++                        && !needsViewportCoverage()
++                    ) {
+                         return false
+                     }
+                     pending.targetHistoryVersion = historyVersion
+                     historyLoaderRef.current = { ...current, phase: 'awaiting-render' }
+                     return true
+-                })
++                }, state.source === 'outline'
++                    ? {
++                        // Only outline-driven loads hold the loaded-history
++                        // boundary, and only while the outline is still open at
++                        // APPLY time — a slow request that lands after the
++                        // outline closed must not leave the window unbounded.
++                        // Automatic coverage loads and tool-group hydration
++                        // (consumer) never hold it.
++                        shouldInstallBoundary: () => outlineOpenRef.current
++                    }
++                    : undefined)
+             } catch (error) {
+                 outcome = {
+                     kind: 'failed',
+@@ -1425,33 +1448,26 @@ export function HappyThread(props: {
+         return requestOlder('consumer')
+     }, [requestOlder])
+ 
++    const loadOlderFromOutline = useCallback((): Promise<OlderHistoryLoadResult> => {
++        return requestOlder('outline')
++    }, [requestOlder])
++
+     const loadOlderForOutline = useCallback(async (): Promise<boolean> => {
+         return await loadOlderFromConsumer() === 'loaded'
+     }, [loadOlderFromConsumer])
+ 
+-    const markExplicitNavigationAwayFromBottom = useCallback(() => {
+-        autoScrollEnabledRef.current = false
+-        atBottomRef.current = false
+-        onViewModeChangeRef.current('history')
+-    }, [])
+-
+-    const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+-        initialScrollDeadlineRef.current = 0
+-        clearInitialScrollTimers()
+-        const target = await locateOutlineTargetMessage({
+-            targetMessageId: item.targetMessageId,
+-            findTarget: (anchorId) => document.getElementById(anchorId),
+-            hasMoreMessages: () => hasMoreMessagesRef.current,
+-            loadOlderPreservingScroll: loadOlderForOutline
+-        })
+-        if (target) {
+-            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+-            markExplicitNavigationAwayFromBottom()
+-        }
+-        props.onOutlineItemClick?.(item)
++    const handleOutlineClose = useCallback(() => {
++        outlineOpenRef.current = false
+         props.onOutlineOpenChange(false)
+-    }, [loadOlderForOutline, markExplicitNavigationAwayFromBottom, props.onOutlineItemClick, props.onOutlineOpenChange])
+-
++        // Closing the outline while still at the tail ends the loaded-history
++        // browsing session: re-assert tail mode so the store releases the
++        // history boundary and the window compacts back to the bounded tail.
++        // Scrolling up afterwards re-fetches the older pages via the coverage
++        // loader, so the loaded range is never lost permanently.
++        if (atBottomRef.current) {
++            onViewModeChangeRef.current('tail')
++        }
++    }, [props.onOutlineOpenChange])
+ 
+     useEffect(() => {
+         if (
+@@ -1572,6 +1588,34 @@ export function HappyThread(props: {
+         isLoadingMoreRef.current = props.isLoadingMoreMessages
+     }, [props.isLoadingMoreMessages])
+ 
++    const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
++        const target = await locateOutlineTargetMessage({
++            targetMessageId: item.targetMessageId,
++            findTarget: (anchorId) => document.getElementById(anchorId),
++            hasMoreMessages: () => hasMoreMessagesRef.current,
++            loadOlderPreservingScroll: loadOlderForOutline
++        })
++        if (!target) {
++            // The target could not be located; close through the release path
++            // so a held history boundary is released (the outline is gone).
++            handleOutlineClose()
++            return
++        }
++        // Navigating to an outline entry is an explicit history jump: enter
++        // history mode so the store's loaded-history protection (and its
++        // release on returning to the tail) follows the normal view-mode
++        // lifecycle. The browser clamps scrollIntoView to the live tail for
++        // newest entries, which would otherwise leave the store in tail mode
++        // with the boundary held and no release path.
++        atBottomRef.current = false
++        onViewModeChangeRef.current('history')
++        autoScrollEnabledRef.current = false
++        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
++        props.onOutlineItemClick?.(item)
++        props.onOutlineOpenChange(false)
++    }, [loadOlderForOutline, handleOutlineClose, props.onOutlineItemClick, props.onOutlineOpenChange])
++
++
+     const showSkeleton = props.isSyncingTail && props.rawMessagesCount === 0
+     const handleShareTurn = useCallback((
+         messageTarget: HTMLElement | string | null,
+@@ -1727,17 +1771,17 @@ export function HappyThread(props: {
+                             type="button"
+                             className="absolute inset-0 z-20 bg-black/20"
+                             aria-label={t('session.outline.close')}
+-                            onClick={() => props.onOutlineOpenChange(false)}
++                            onClick={handleOutlineClose}
+                         />
+                         <ConversationOutlinePanel
+                             items={props.outlineItems}
+                             hasMoreMessages={props.hasMoreMessages}
+                             isLoadingMoreMessages={props.isLoadingMoreMessages}
+                             onLoadMore={() => {
+-                                void loadOlderFromConsumer()
++                                void loadOlderFromOutline()
+                             }}
+                             onSelect={handleOutlineSelect}
+-                            onClose={() => props.onOutlineOpenChange(false)}
++                            onClose={handleOutlineClose}
+                         />
+                     </>
+                 ) : null}
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 58a3b3d85..9ce32aa6b 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -522,7 +522,7 @@ type SessionChatProps = {
+     tailRevision: number
+     onBack: () => void
+     onRefresh: () => void
+-    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
++    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
+     onCancelLoadMore: () => void
+     // Returns the accepted mutation's attempt id, or false when
+     // pre-mutation guards (no-api / no-session / pending) rejected the call OR async
+@@ -1649,26 +1649,58 @@ function SessionChatInner(props: SessionChatProps) {
+         props.onRefresh()
+     }, [switchSession, props.onRefresh])
+ 
+-    const handleToggleFiles = useCallback(() => {
++    const closeOutlineBeforeHidingThread = useCallback(() => {
++        // Before hiding the thread (Files/Terminal routes or the terminal
++        // panel), re-assert tail mode while the outline is open: the store
++        // releases the loaded-history boundary and the window compacts back
++        // to the bounded tail. Without this, selected-session SSE keeps
++        // ingesting on subroutes and the no-trim boundary branch grows the
++        // rendered and persisted window without limit.
++        if (outlineOpen && props.viewMode === 'tail') {
++            props.onViewModeChange('tail')
++        }
+         setOutlineOpen(false)
++    }, [outlineOpen, props.viewMode, props.onViewModeChange])
++
++    const handleToggleFiles = useCallback(() => {
++        closeOutlineBeforeHidingThread()
+         navigate({
+             to: '/sessions/$sessionId/files',
+             params: { sessionId: props.session.id },
+             ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+-    }, [navigate, props.session.id])
++    }, [closeOutlineBeforeHidingThread, navigate, props.session.id])
+ 
+     const handleToggleOutline = useCallback(() => {
+-        setOutlineOpen((open) => !open)
+-    }, [])
++        // Closing the outline while still at the tail ends the loaded-history
++        // browsing session: re-assert tail mode so the store releases the
++        // history boundary and the window compacts back to the bounded tail
++        // (mirrors the in-panel close controls in HappyThread).
++        setOutlineOpen((open) => {
++            if (open && props.viewMode === 'tail') {
++                props.onViewModeChange('tail')
++            }
++            return !open
++        })
++    }, [props.viewMode, props.onViewModeChange])
+ 
+     const handleViewTerminal = useCallback(() => {
++        closeOutlineBeforeHidingThread()
+         navigate({
+             to: '/sessions/$sessionId/terminal',
+             params: { sessionId: props.session.id },
+             ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+         })
+-    }, [navigate, props.session.id])
++    }, [closeOutlineBeforeHidingThread, navigate, props.session.id])
++
++    const handleToggleTerminalPanel = useCallback(() => {
++        setTerminalVisible((visible) => {
++            if (!visible) {
++                closeOutlineBeforeHidingThread()
++            }
++            return !visible
++        })
++    }, [closeOutlineBeforeHidingThread])
+ 
+     // Scheduled message state — lifted here so useHappyRuntime can read the ref.
+     //
+@@ -1850,7 +1882,7 @@ function SessionChatInner(props: SessionChatProps) {
+                 filesActive={false}
+                 onToggleOutline={handleToggleOutline}
+                 outlineActive={outlineOpen}
+-                onToggleTerminal={canViewAgentTerminal ? () => setTerminalVisible(v => !v) : undefined}
++                onToggleTerminal={canViewAgentTerminal ? handleToggleTerminalPanel : undefined}
+                 terminalActive={terminalVisible}
+                 api={props.api}
+                 titleSuggestionAvailable={props.titleSuggestionAvailable}
+diff --git a/web/src/hooks/queries/useMessages.test.tsx b/web/src/hooks/queries/useMessages.test.tsx
+new file mode 100644
+index 000000000..e0087556c
+--- /dev/null
++++ b/web/src/hooks/queries/useMessages.test.tsx
+@@ -0,0 +1,164 @@
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { act, renderHook } from '@testing-library/react'
++import type { PropsWithChildren } from 'react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { ApiClient } from '@/api/client'
++import type { DecryptedMessage, MessagesResponse } from '@/types/api'
++import {
++    clearMessageWindow,
++    fetchOlderMessages,
++    getMessageWindowState,
++    ingestIncomingMessages,
++    syncTailMessages,
++} from '@/lib/message-window-store'
++import { useMessages } from './useMessages'
++
++const sessionId = 'use-messages-route-cleanup'
++
++function makeAgentMessage(seq: number): DecryptedMessage {
++    return {
++        id: `message-${seq}`,
++        seq,
++        localId: null,
++        content: {
++            role: 'agent',
++            content: {
++                type: 'output',
++                data: { type: 'text', text: `message ${seq}` },
++            },
++        },
++        createdAt: seq,
++        invokedAt: seq,
++    } as DecryptedMessage
++}
++
++function latestResponse(messages: DecryptedMessage[]): MessagesResponse {
++    return {
++        messages,
++        page: {
++            direction: 'latest',
++            limit: 200,
++            epoch: 1,
++            reset: false,
++            nextBeforeSeq: 401,
++            nextBeforeAt: 401,
++            nextAfterSeq: 600,
++            nextAfterAt: 600,
++            snapshotHeadSeq: 600,
++            snapshotHeadAt: 600,
++            hasMore: true,
++        },
++    }
++}
++
++function beforeResponse(messages: DecryptedMessage[], hasMore: boolean): MessagesResponse {
++    const first = messages[0]
++    return {
++        messages,
++        page: {
++            direction: 'before',
++            limit: 200,
++            epoch: 1,
++            reset: false,
++            nextBeforeSeq: first?.seq ?? null,
++            nextBeforeAt: first?.createdAt ?? null,
++            nextAfterSeq: null,
++            nextAfterAt: null,
++            snapshotHeadSeq: null,
++            snapshotHeadAt: null,
++            hasMore,
++        },
++    }
++}
++
++function createWrapper() {
++    const queryClient = new QueryClient({
++        defaultOptions: { queries: { retry: false } },
++    })
++    return ({ children }: PropsWithChildren) => (
++        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
++    )
++}
++
++function deferred<T>() {
++    let resolve!: (value: T) => void
++    const promise = new Promise<T>((resolvePromise) => {
++        resolve = resolvePromise
++    })
++    return { promise, resolve }
++}
++
++afterEach(() => {
++    clearMessageWindow(sessionId)
++    vi.restoreAllMocks()
++})
++
++describe('useMessages route cleanup', () => {
++    it('releases a tail history boundary when the chat view unmounts', async () => {
++        const allMessages = Array.from({ length: 600 }, (_, index) => makeAgentMessage(index + 1))
++        const getMessages = vi.fn(async (_id: string, query: { beforeSeq?: number | null }) => {
++            const beforeSeq = query.beforeSeq
++            if (beforeSeq != null) {
++                const older = allMessages.filter((message) => (message.seq ?? 0) < beforeSeq)
++                return beforeResponse(older.slice(-200), older.length > 200)
++            }
++            return latestResponse(allMessages.slice(-200))
++        })
++        const api = { getMessages } as unknown as ApiClient
++
++        await syncTailMessages(api, sessionId)
++        const hook = renderHook(() => useMessages(null, sessionId), {
++            wrapper: createWrapper(),
++        })
++
++        await act(async () => {
++            const outcome = await fetchOlderMessages(api, sessionId, {
++                shouldInstallBoundary: () => true,
++            })
++            expect(outcome.kind).toBe('applied')
++        })
++        ingestIncomingMessages(sessionId, [makeAgentMessage(601)])
++        expect(getMessageWindowState(sessionId).messages).toHaveLength(401)
++
++        hook.unmount()
++        for (let seq = 602; seq <= 801; seq += 1) {
++            ingestIncomingMessages(sessionId, [makeAgentMessage(seq)])
++        }
++
++        const state = getMessageWindowState(sessionId)
++        expect(state.viewMode).toBe('tail')
++        expect(state.messages).toHaveLength(400)
++        expect(state.messages.at(-1)?.seq).toBe(801)
++    })
++
++    it('invalidates an in-flight older load when the chat view unmounts', async () => {
++        const allMessages = Array.from({ length: 600 }, (_, index) => makeAgentMessage(index + 1))
++        const pending = deferred<MessagesResponse>()
++        let olderPageCall = 0
++        const getMessages = vi.fn(async (_id: string, query: { beforeSeq?: number | null }) => {
++            const beforeSeq = query.beforeSeq
++            if (beforeSeq != null) {
++                if (olderPageCall++ > 0) {
++                    return await pending.promise
++                }
++                const older = allMessages.filter((message) => (message.seq ?? 0) < beforeSeq)
++                return beforeResponse(older.slice(-200), older.length > 200)
++            }
++            return latestResponse(allMessages.slice(-200))
++        })
++        const api = { getMessages } as unknown as ApiClient
++
++        await syncTailMessages(api, sessionId)
++        const hook = renderHook(() => useMessages(null, sessionId), {
++            wrapper: createWrapper(),
++        })
++        await fetchOlderMessages(api, sessionId, { shouldInstallBoundary: () => true })
++
++        const load = fetchOlderMessages(api, sessionId, { shouldInstallBoundary: () => true })
++        hook.unmount()
++        pending.resolve(beforeResponse(allMessages.slice(0, 200), false))
++
++        await expect(load).resolves.toEqual({ kind: 'stopped', reason: 'invalidated' })
++        expect(getMessageWindowState(sessionId).messages).toHaveLength(400)
++    })
++})
+diff --git a/web/src/hooks/queries/useMessages.ts b/web/src/hooks/queries/useMessages.ts
+index b01922790..95b26a66c 100644
+--- a/web/src/hooks/queries/useMessages.ts
++++ b/web/src/hooks/queries/useMessages.ts
+@@ -40,7 +40,7 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
+     messagesVersion: number
+     historyVersion: number
+     tailRevision: number
+-    loadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
++    loadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
+     cancelLoadMore: () => void
+     refetch: () => Promise<void>
+     setViewMode: (mode: MessageViewMode) => void
+@@ -58,6 +58,12 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
+         if (sessionId) {
+             activateMessageWindow(sessionId)
+         }
++        return () => {
++            if (sessionId) {
++                cancelOlderMessageLoad(sessionId)
++                setMessageViewMode(sessionId, 'tail')
++            }
++        }
+     }, [sessionId])
+ 
+     useEffect(() => {
+@@ -66,11 +72,11 @@ export function useMessages(api: ApiClient | null, sessionId: string | null): {
+         }
+     }, [api, sessionId])
+ 
+-    const loadMore = useCallback(async (onBeforeApply?: (historyVersion: number) => boolean) => {
++    const loadMore = useCallback(async (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => {
+         if (!api || !sessionId) {
+             return { kind: 'stopped', reason: 'unavailable' } as const
+         }
+-        return await fetchOlderMessages(api, sessionId, { onBeforeApply })
++        return await fetchOlderMessages(api, sessionId, { onBeforeApply, ...options })
+     }, [api, sessionId])
+ 
+     const cancelLoadMore = useCallback(() => {
+diff --git a/web/src/lib/message-window-store.test.ts b/web/src/lib/message-window-store.test.ts
+index 121ee2960..f10e504f3 100644
+--- a/web/src/lib/message-window-store.test.ts
++++ b/web/src/lib/message-window-store.test.ts
+@@ -1225,6 +1225,748 @@ describe('history view and older pagination', () => {
+ 
+         expect(getMessageWindowState(id).messages.some((message) => message.id === 'root')).toBe(true)
+     })
++
++    // Regression: clicking "Load earlier" on a RUNNING session used to be
++    // pointless and destructive. The tail-mode trim evicted the freshly
++    // loaded older pages on the very next streaming ingest (and one more row
++    // per message afterwards), so the viewport anchored in the loaded range
++    // jumped upward repeatedly. The loaded-history range must survive
++    // streaming ingests while the user browses it.
++    it('keeps loaded older pages in the window while a running session streams (tail mode)', async () => {
++        const id = sessionId('running-tail-loaded-history')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Two "Load earlier" clicks from the tail: window 200 -> 600.
++        const first = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        expect(first.kind).toBe('applied')
++        const second = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        expect(second.kind).toBe('applied')
++        expect(getMessageWindowState(id).messages[0]!.seq).toBe(1)
++        expect(getMessageWindowState(id).messages).toHaveLength(600)
++
++        // Running session: streaming messages arrive one by one.
++        for (const seq of [601, 602, 603]) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        const state = getMessageWindowState(id)
++        // The loaded range (m-1…) survives; the streaming tail stays visible.
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages).toHaveLength(603)
++        expect(state.messages.at(-1)!.seq).toBe(603)
++
++    })
++
++    it('keeps loaded older pages and the streaming tail while reading history', async () => {
++        const id = sessionId('running-history-loaded-history')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++        setMessageViewMode(id, 'history')
++        await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        const second = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        expect(second.kind).toBe('applied')
++
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
++        const state = getMessageWindowState(id)
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(601)
++
++    })
++
++    // Regression: while the history boundary is held, tail mode must not
++    // trim — the loaded range and the live streaming tail both stay visible,
++    // contiguous, and cursor-bookended. Trimming either side would make the
++    // viewport jump (evicting the loaded range) or freeze the stream (a
++    // dropped tail needs a tail resync that never fires on its own in tail
++    // mode). Releasing the boundary compacts the window again.
++    it('keeps the loaded range and the live tail contiguous while the boundary is held', async () => {
++        const id = sessionId('loaded-history-no-gap')
++        const all = Array.from({ length: 1_000 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[800]!.invokedAt ?? all[800]!.createdAt,
++                nextBeforeSeq: 801
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Tail mode: load four older pages (the last crosses the old 800-row
++        // cap) while the boundary is held (outline path).
++        for (let page = 0; page < 4; page += 1) {
++            const outcome = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++            expect(outcome.kind).toBe('applied')
++        }
++        let state = getMessageWindowState(id)
++        for (let index = 1; index < state.messages.length; index += 1) {
++            expect(state.messages[index]!.seq).toBe(state.messages[index - 1]!.seq! + 1)
++        }
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(1_000)
++        expect(state.oldestSeq).toBe(1)
++
++        // Streaming past the cap: every new row stays visible (no frozen
++        // tail), the loaded range stays intact, the window stays contiguous.
++        for (let seq = 1_001; seq <= 1_300; seq += 1) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        state = getMessageWindowState(id)
++        for (let index = 1; index < state.messages.length; index += 1) {
++            expect(state.messages[index]!.seq).toBe(state.messages[index - 1]!.seq! + 1)
++        }
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(1_300)
++        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
++
++        // Releasing the boundary (leaving history and returning to the tail)
++        // compacts the window to the newest tail again.
++        setMessageViewMode(id, 'history')
++        setMessageViewMode(id, 'tail')
++        state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(901)
++        expect(state.messages.at(-1)!.seq).toBe(1_300)
++    })
++
++    // Regression: an older-page load made while the viewport is already at
++    // the tail (outline "Load earlier") installs a history boundary with no
++    // viewMode transition to release it. Re-asserting tail mode (the outline
++    // closing at the bottom) must release the boundary and compact the
++    // window back to the bounded tail.
++    it('releases the loaded range when tail mode is re-asserted at the bottom', async () => {
++        const id = sessionId('loaded-history-tail-reassert')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Outline "Load earlier" while already in tail mode: window 200 -> 400.
++        const outcome = await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        expect(outcome.kind).toBe('applied')
++        expect(getMessageWindowState(id).messages).toHaveLength(400)
++        expect(getMessageWindowState(id).messages[0]!.seq).toBe(201)
++
++        // Streaming keeps the window (boundary held, tail live).
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
++        expect(getMessageWindowState(id).messages).toHaveLength(401)
++
++        // Closing the outline re-asserts tail mode: the window compacts to
++        // the newest tail and streaming trims resume normally.
++        setMessageViewMode(id, 'tail')
++        let state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(202)
++        expect(state.messages.at(-1)!.seq).toBe(601)
++
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-602', seq: 602, at: 602 })])
++        state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(203)
++        expect(state.messages.at(-1)!.seq).toBe(602)
++    })
++
++    // Regression: automatic loads outside the outline (e.g. the underfilled-
++    // viewport coverage path) must not install the history boundary — there is
++    // no outline-close or view-mode transition to release it, so the window
++    // would stay unbounded for the rest of the session. Without the boundary
++    // the base tail trim keeps the window bounded.
++    it('keeps automatic tail-mode loads bounded (no boundary installed)', async () => {
++        const id = sessionId('automatic-tail-load-bounded')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Coverage load at the tail: no installBoundary option.
++        const outcome = await fetchOlderMessages(api, id)
++        expect(outcome.kind).toBe('applied')
++        expect(getMessageWindowState(id).messages).toHaveLength(400)
++
++        // Streaming keeps the window at the tail cap (base trim resumes).
++        for (let seq = 601; seq <= 620; seq += 1) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        const state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages.at(-1)!.seq).toBe(620)
++        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
++    })
++
++    // Regression: the history boundary is persisted, but a boundary restored
++    // from a previous page session must not survive — the outline that held
++    // it is gone, so no release path exists and SSE ingests would grow the
++    // window without limit. Activation clears it.
++    it('drops a persisted history boundary on window activation', () => {
++        const id = sessionId('persisted-boundary-release')
++        const messages = Array.from({ length: VISIBLE_WINDOW_SIZE }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
++            messages,
++            hasMore: true,
++            oldestPositionAt: 1,
++            oldestPositionSeq: 1,
++            newestPositionAt: 400,
++            newestPositionSeq: 400,
++            historyBoundaryAt: 201,
++            historyBoundarySeq: 201,
++            epoch: 0
++        }))
++        activateMessageWindow(id)
++
++        // The boundary is released: the next streaming ingest trims back to
++        // the tail cap instead of taking the no-trim branch.
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-401', seq: 401, at: 401 })])
++        const state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(2)
++        expect(state.messages.at(-1)!.seq).toBe(401)
++    })
++
++    // Regression: the boundary must be installed at REQUEST START, not when
++    // the response applies. While an outline load is in flight, an SSE ingest
++    // could evict the exclusive `before` cursor row (the window's oldest),
++    // and applying the older page afterwards would leave a permanent
++    // unreachable gap between the page and the trimmed window.
++    it('protects the fetch cursor row while the outline request is in flight', async () => {
++        const id = sessionId('outline-inflight-cursor-protected')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const pending = deferred<MessagesResponse>()
++        let outlineRequestStarted = false
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                if (cursorSeq === 201 && !outlineRequestStarted) {
++                    outlineRequestStarted = true
++                    return await pending.promise
++                }
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++        // Automatic coverage load (no boundary): window 200 -> 400.
++        const coverage = await fetchOlderMessages(api, id)
++        expect(coverage.kind).toBe('applied')
++        expect(getMessageWindowState(id).messages).toHaveLength(400)
++
++        // Outline "Load earlier" starts; its GET stays pending.
++        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        await new Promise((resolve) => setTimeout(resolve, 0))
++        expect(outlineRequestStarted).toBe(true)
++
++        // An SSE message lands while the request is in flight. Without the
++        // request-start boundary, the tail trim would evict the `before` row
++        // (m-201); with it, the window must stay whole.
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
++        expect(getMessageWindowState(id).messages).toHaveLength(401)
++        expect(getMessageWindowState(id).messages[0]!.seq).toBe(201)
++
++        // The older page applies: no gap, cursor bookends the window.
++        pending.resolve(beforeResponse(all.slice(0, 200), {
++            epoch: 0,
++            hasMore: false,
++            nextBeforeAt: 1,
++            nextBeforeSeq: 1
++        }))
++        const outcome = await loading
++        expect(outcome.kind).toBe('applied')
++        const state = getMessageWindowState(id)
++        for (let index = 1; index < state.messages.length; index += 1) {
++            expect(state.messages[index]!.seq).toBe(state.messages[index - 1]!.seq! + 1)
++        }
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(601)
++        expect(state.oldestSeq).toBe(1)
++    })
++
++    // Regression: a provisional boundary installed for an in-flight outline
++    // load must be removed when the load fails — otherwise the outline stays
++    // open on a running session, every SSE message takes the no-trim branch,
++    // and the window grows without limit.
++    it('clears a provisional boundary when the outline load fails', async () => {
++        const id = sessionId('outline-failed-boundary-clear')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const pending = deferred<MessagesResponse>()
++        let outlinePending = false
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                if (!outlinePending) {
++                    outlinePending = true
++                    return await pending.promise
++                }
++                throw new Error('fixture: forced before-page failure')
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Outline load starts; while it is pending, SSE rows accumulate past
++        // the tail cap because the provisional boundary holds the no-trim
++        // branch.
++        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        await new Promise((resolve) => setTimeout(resolve, 0))
++        expect(outlinePending).toBe(true)
++        for (let seq = 601; seq <= 850; seq += 1) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        expect(getMessageWindowState(id).messages).toHaveLength(450)
++
++        // The load fails: the provisional boundary is released and the window
++        // is compacted back to the tail cap immediately.
++        pending.reject(new Error('fixture: forced before-page failure'))
++        const outcome = await loading
++        expect(outcome.kind).toBe('failed')
++        let state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages.at(-1)!.seq).toBe(850)
++        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
++
++        // Further ingests keep trimming normally (no no-trim branch).
++        for (let seq = 851; seq <= 900; seq += 1) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages.at(-1)!.seq).toBe(900)
++        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
++    })
++
++    // Regression: a tail resync invalidates an in-flight outline request via
++    // the olderGeneration bump; the provisional boundary it installed must be
++    // released with it, or the no-trim branch outlives the load.
++    it('releases a provisional boundary when a tail resync invalidates the outline request', async () => {
++        const id = sessionId('outline-resync-releases-boundary')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const pending = deferred<MessagesResponse>()
++        let outlinePending = false
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                if (!outlinePending) {
++                    outlinePending = true
++                    return await pending.promise
++                }
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Outline load starts; its GET stays pending with the boundary
++        // provisionally installed (ingest takes the no-trim branch).
++        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        await new Promise((resolve) => setTimeout(resolve, 0))
++        expect(outlinePending).toBe(true)
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
++        expect(getMessageWindowState(id).messages).toHaveLength(201)
++
++        // A tail resync invalidates the in-flight request and must release
++        // the provisional boundary.
++        await syncTailMessages(api, id)
++        pending.resolve(beforeResponse(all.slice(0, 200), {
++            epoch: 0,
++            hasMore: false,
++            nextBeforeAt: 1,
++            nextBeforeSeq: 1
++        }))
++        const outcome = await loading
++        expect(outcome.kind).toBe('stopped')
++
++        // The boundary is gone: ingests trim back to the tail cap.
++        for (let seq = 602; seq <= 850; seq += 1) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        const state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages.at(-1)!.seq).toBe(850)
++        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
++    })
++
++    // Regression: re-asserting tail mode (outline closed / back at the bottom)
++    // compacts the window while an outline request is still in flight; the
++    // compaction can evict the request's `before` cursor row, so the request
++    // must be invalidated instead of applying against a stale cursor.
++    it('invalidates an in-flight outline request when the tail compacts it', async () => {
++        const id = sessionId('outline-compact-invalidates-inflight')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const pending = deferred<MessagesResponse>()
++        let outlinePending = false
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                if (!outlinePending) {
++                    outlinePending = true
++                    return await pending.promise
++                }
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++
++        // Outline load starts (pending) and the provisional boundary lets SSE
++        // rows accumulate past the tail cap.
++        const loading = fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        await new Promise((resolve) => setTimeout(resolve, 0))
++        expect(outlinePending).toBe(true)
++        for (let seq = 601; seq <= 850; seq += 1) {
++            ingestIncomingMessages(id, [makeAgentMessage({ id: `m-${seq}`, seq, at: seq })])
++        }
++        expect(getMessageWindowState(id).messages).toHaveLength(450)
++
++        // Returning to the tail compacts the window and must invalidate the
++        // in-flight request (its `before` cursor row was shed).
++        setMessageViewMode(id, 'tail')
++        const compacted = getMessageWindowState(id)
++        expect(compacted.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(compacted.messages.at(-1)!.seq).toBe(850)
++
++        pending.resolve(beforeResponse(all.slice(0, 200), {
++            epoch: 0,
++            hasMore: false,
++            nextBeforeAt: 1,
++            nextBeforeSeq: 1
++        }))
++        const outcome = await loading
++        expect(outcome.kind).toBe('stopped')
++
++        // The window stays bounded and the cursor keeps bookending it.
++        const state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.oldestSeq).toBe(state.messages[0]!.seq)
++        expect(state.messages.at(-1)!.seq).toBe(850)
++    })
++
++    it('preserves history rows when a provisional load fails', async () => {
++        const id = sessionId('history-provisional-failure')
++        const initial = Array.from({ length: 200 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn()
++            .mockResolvedValueOnce(latestResponse(initial, {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: 1,
++                nextBeforeSeq: 1
++            }))
++            .mockRejectedValueOnce(new Error('fixture: before-page failure'))
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++        setMessageViewMode(id, 'history')
++        ingestIncomingMessages(id, Array.from({ length: 400 }, (_, index) => {
++            const seq = index + 201
++            return makeAgentMessage({ id: `m-${seq}`, seq, at: seq })
++        }))
++
++        const outcome = await fetchOlderMessages(api, id, {
++            shouldInstallBoundary: () => true
++        })
++
++        expect(outcome.kind).toBe('failed')
++        const state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(600)
++    })
++
++    it('preserves history rows when a provisional load is invalidated', async () => {
++        const id = sessionId('history-provisional-invalidation')
++        const initial = Array.from({ length: 200 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const older = deferred<MessagesResponse>()
++        const tail = deferred<MessagesResponse>()
++        const getMessages = vi.fn(async (
++            _sessionId: string,
++            options?: Parameters<ApiClient['getMessages']>[1]
++        ) => {
++            if (options?.beforeAt !== undefined) return await older.promise
++            if (options?.afterAt !== undefined) return await tail.promise
++            return latestResponse(initial, {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: 1,
++                nextBeforeSeq: 1
++            })
++        }) as ApiClient['getMessages']
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++        setMessageViewMode(id, 'history')
++        ingestIncomingMessages(id, Array.from({ length: 400 }, (_, index) => {
++            const seq = index + 201
++            return makeAgentMessage({ id: `m-${seq}`, seq, at: seq })
++        }))
++
++        const loading = fetchOlderMessages(api, id, {
++            shouldInstallBoundary: () => true
++        })
++        await vi.waitFor(() => expect(getMessageWindowState(id).isLoadingMore).toBe(true))
++        const syncing = syncTailMessages(api, id)
++        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(3))
++
++        let state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(600)
++
++        tail.resolve(afterResponse([], {
++            epoch: 0,
++            nextAfterAt: 600,
++            nextAfterSeq: 600,
++            snapshotHeadAt: 600,
++            snapshotHeadSeq: 600
++        }))
++        await syncing
++        older.resolve(beforeResponse([], {
++            epoch: 0,
++            hasMore: false,
++            nextBeforeAt: null,
++            nextBeforeSeq: null
++        }))
++        expect(await loading).toEqual({ kind: 'stopped', reason: 'invalidated' })
++
++        state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(HISTORY_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(1)
++        expect(state.messages.at(-1)!.seq).toBe(600)
++    })
++
++    it('releases the loaded range when the user returns to the tail', async () => {
++        const id = sessionId('loaded-history-tail-release')
++        const all = Array.from({ length: 600 }, (_, index) =>
++            makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: index + 1 })
++        )
++        const getMessages = vi.fn(async (_sid: string, query: {
++            limit?: number
++            beforeAt?: number | null
++            beforeSeq?: number | null
++        }) => {
++            if (query.beforeSeq != null || query.beforeAt != null) {
++                const cursorSeq = query.beforeSeq ?? Number.POSITIVE_INFINITY
++                const older = all.filter((message) => message.seq! < cursorSeq)
++                const page = older.slice(-200)
++                return beforeResponse(page, {
++                    epoch: 0,
++                    hasMore: older.length > page.length,
++                    nextBeforeAt: page[0]?.invokedAt ?? page[0]?.createdAt ?? null,
++                    nextBeforeSeq: page[0]?.seq ?? null
++                })
++            }
++            return latestResponse(all.slice(-200), {
++                epoch: 0,
++                hasMore: true,
++                nextBeforeAt: all[400]!.invokedAt ?? all[400]!.createdAt,
++                nextBeforeSeq: 401
++            })
++        })
++        const api = createApi(getMessages)
++        await syncTailMessages(api, id)
++        setMessageViewMode(id, 'history')
++        await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++        await fetchOlderMessages(api, id, { shouldInstallBoundary: () => true })
++
++        // Back to the bottom: the window compacts to the newest tail and the
++        // protection is released, so streaming trims resume normally.
++        setMessageViewMode(id, 'tail')
++        let state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(201)
++
++        ingestIncomingMessages(id, [makeAgentMessage({ id: 'm-601', seq: 601, at: 601 })])
++        state = getMessageWindowState(id)
++        expect(state.messages).toHaveLength(VISIBLE_WINDOW_SIZE)
++        expect(state.messages[0]!.seq).toBe(202)
++        expect(state.messages.at(-1)!.seq).toBe(601)
++    })
+ })
+ 
+ describe('optimistic and queued-message operations', () => {
+diff --git a/web/src/lib/message-window-store.ts b/web/src/lib/message-window-store.ts
+index 07e9e83bb..f6f5ed1fd 100644
+--- a/web/src/lib/message-window-store.ts
++++ b/web/src/lib/message-window-store.ts
+@@ -54,6 +54,24 @@ type InternalState = MessageWindowState & {
+     oldestPositionSeq: number | null
+     newestPositionAt: number | null
+     newestPositionSeq: number | null
++    /**
++     * Oldest position of the "tail region" after older-history pages were
++     * loaded (the cursor of the last successful older-page fetch). Messages
++     * strictly older than this boundary are part of the loaded history the
++     * user is browsing; tail-mode trims must not evict them while streaming
++     * ingests arrive, or the viewport anchored in the loaded range jumps up
++     * repeatedly on a running session. Cleared when the window re-enters the
++     * tail (enterTailMode) or is rebuilt by a tail resync.
++     */
++    historyBoundaryAt: number | null
++    historyBoundarySeq: number | null
++    /**
++     * olderGeneration of the in-flight outline request that provisionally
++     * installed historyBoundaryAt/Seq at request start. A tail resync or
++     * cancel that invalidates that generation must release the boundary too,
++     * or the no-trim branch would outlive the load that armed it.
++     */
++    provisionalBoundaryGeneration: number | null
+     requiresLatestReset: boolean
+     preferLatestOnActivation: boolean
+     syncGeneration: number
+@@ -67,6 +85,8 @@ type PersistedMessageWindowState = {
+     oldestPositionSeq: number | null
+     newestPositionAt: number | null
+     newestPositionSeq: number | null
++    historyBoundaryAt: number | null
++    historyBoundarySeq: number | null
+     epoch: number | null
+ }
+ 
+@@ -162,6 +182,7 @@ function shouldPersistState(state: InternalState): boolean {
+         || state.epoch !== null
+         || state.oldestPositionAt !== null
+         || state.newestPositionAt !== null
++        || state.historyBoundaryAt !== null
+ }
+ 
+ function persistState(sessionId: string, state: InternalState): void {
+@@ -180,6 +201,8 @@ function persistState(sessionId: string, state: InternalState): void {
+             oldestPositionSeq: state.oldestPositionSeq,
+             newestPositionAt: state.newestPositionAt,
+             newestPositionSeq: state.newestPositionSeq,
++            historyBoundaryAt: state.historyBoundaryAt,
++            historyBoundarySeq: state.historyBoundarySeq,
+             epoch: state.epoch
+         }
+         sessionStorage.setItem(getStorageKey(sessionId), JSON.stringify(persisted))
+@@ -241,6 +264,9 @@ function createState(sessionId: string): InternalState {
+         oldestPositionSeq: null,
+         newestPositionAt: null,
+         newestPositionSeq: null,
++        historyBoundaryAt: null,
++        historyBoundarySeq: null,
++        provisionalBoundaryGeneration: null,
+         requiresLatestReset: false,
+         preferLatestOnActivation: false,
+         syncGeneration: 0,
+@@ -273,6 +299,7 @@ function hydrateState(sessionId: string): InternalState | null {
+         }
+         const oldest = readPosition(parsed.oldestPositionAt, parsed.oldestPositionSeq)
+         const newest = readPosition(parsed.newestPositionAt, parsed.newestPositionSeq)
++        const historyBoundary = readPosition(parsed.historyBoundaryAt, parsed.historyBoundarySeq)
+         const epoch = typeof parsed.epoch === 'number' && Number.isInteger(parsed.epoch) && parsed.epoch >= 0
+             ? parsed.epoch
+             : null
+@@ -283,6 +310,8 @@ function hydrateState(sessionId: string): InternalState | null {
+             oldestPositionSeq: oldest?.seq ?? null,
+             newestPositionAt: newest?.at ?? null,
+             newestPositionSeq: newest?.seq ?? null,
++            historyBoundaryAt: historyBoundary?.at ?? null,
++            historyBoundarySeq: historyBoundary?.seq ?? null,
+             epoch,
+             requiresLatestReset: parsed.messages.length > 0 && (newest === null || epoch === null)
+         })
+@@ -391,6 +420,9 @@ function buildState(
+         | 'oldestPositionSeq'
+         | 'newestPositionAt'
+         | 'newestPositionSeq'
++        | 'historyBoundaryAt'
++        | 'historyBoundarySeq'
++        | 'provisionalBoundaryGeneration'
+         | 'requiresLatestReset'
+         | 'preferLatestOnActivation'
+         | 'syncGeneration'
+@@ -533,6 +565,8 @@ function mergeIntoWindow(
+     options: {
+         mode?: 'append' | 'prepend'
+         regularLimit?: number
++        historyBoundaryAt?: number | null
++        historyBoundarySeq?: number | null
+         advanceTailRevision?: boolean
+     } = {}
+ ): InternalState {
+@@ -544,7 +578,72 @@ function mergeIntoWindow(
+     const regularLimit = options.regularLimit
+         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
+     const merged = mergeMessages(previous.messages, retainedIncoming)
+-    const { kept, dropped } = trimPreservingQueued(merged, regularLimit, mode)
++
++    const boundaryAt = options.historyBoundaryAt !== undefined
++        ? options.historyBoundaryAt
++        : previous.historyBoundaryAt
++    const boundarySeq = options.historyBoundarySeq !== undefined
++        ? options.historyBoundarySeq
++        : previous.historyBoundarySeq
++    const boundary = boundaryAt !== null && boundarySeq !== null
++        ? { at: boundaryAt, seq: boundarySeq }
++        : null
++
++    let kept: DecryptedMessage[]
++    let dropped: DecryptedMessage[]
++    let droppedNewest = false
++    if (boundary) {
++        // Loaded older history is present and the user is browsing it.
++        // Tail mode deliberately does NOT trim while the boundary is held:
++        // the loaded range must stay readable and the live tail must keep
++        // streaming — dropping either side would make the viewport jump or
++        // freeze new messages. Releasing the boundary (returning to the tail
++        // via enterTailMode, or a tail resync) restores the bounded window.
++        // History mode keeps the loaded range whole and caps the tail by
++        // dropping its NEWEST rows (reachable through the requiresLatestReset
++        // tail resync), so the kept window stays contiguous and the loaded
++        // range is never evicted.
++        const totalCap = Math.max(regularLimit, OLDER_LOAD_WINDOW_SIZE)
++        if (mode === 'append') {
++            kept = merged
++            dropped = []
++        } else {
++            const queued = merged.filter(isQueuedForInvocation)
++            const queuedIds = new Set(queued.map((message) => message.id))
++            const trimmable = merged.filter((message) => !queuedIds.has(message.id))
++            const loaded: DecryptedMessage[] = []
++            const tail: DecryptedMessage[] = []
++            for (const message of trimmable) {
++                const position = messagePosition(message)
++                if (!position) {
++                    loaded.push(message)
++                    continue
++                }
++                if (comparePosition(position, boundary) < 0) {
++                    loaded.push(message)
++                } else {
++                    tail.push(message)
++                }
++            }
++            const loadedTrim = sliceForTrim(loaded, totalCap, 'prepend')
++            const tailTrim = sliceForTrim(tail, Math.max(0, totalCap - loadedTrim.kept.length), 'prepend')
++            kept = mergeMessages([...loadedTrim.kept, ...tailTrim.kept], queued)
++            const keptIds = new Set(kept.map((message) => message.id))
++            dropped = merged.filter((message) => !keptIds.has(message.id))
++            if (dropped.length > 0) {
++                const droppedNewestPosition = derivePosition(dropped, 'newest')
++                const mergedNewestPosition = derivePosition(merged, 'newest')
++                droppedNewest = droppedNewestPosition !== null
++                    && mergedNewestPosition !== null
++                    && comparePosition(droppedNewestPosition, mergedNewestPosition) === 0
++            }
++        }
++    } else {
++        const trimmed = trimPreservingQueued(merged, regularLimit, mode)
++        kept = trimmed.kept
++        dropped = trimmed.dropped
++        droppedNewest = mode === 'prepend' && dropped.length > 0
++    }
+     let next = buildState(previous, {
+         messages: kept,
+         ...(options.advanceTailRevision
+@@ -554,21 +653,52 @@ function mergeIntoWindow(
+     if (dropped.length === 0) {
+         return next
+     }
+-    if (mode === 'append') {
+-        const oldest = derivePosition(kept, 'oldest')
+-        return buildState(next, {
+-            hasMore: true,
+-            oldestPositionAt: oldest?.at ?? next.oldestPositionAt,
+-            oldestPositionSeq: oldest?.seq ?? next.oldestPositionSeq
++    if (droppedNewest) {
++        const newest = derivePosition(kept, 'newest')
++        next = buildState(next, {
++            requiresLatestReset: true,
++            newestPositionAt: newest?.at ?? null,
++            newestPositionSeq: newest?.seq ?? null
+         })
++        return next
+     }
+-    const newest = derivePosition(kept, 'newest')
+-    next = buildState(next, {
+-        requiresLatestReset: true,
+-        newestPositionAt: newest?.at ?? null,
+-        newestPositionSeq: newest?.seq ?? null
++    const oldest = derivePosition(kept, 'oldest')
++    return buildState(next, {
++        hasMore: true,
++        oldestPositionAt: oldest?.at ?? next.oldestPositionAt,
++        oldestPositionSeq: oldest?.seq ?? next.oldestPositionSeq
++    })
++}
++
++// Rows accumulated while a provisional boundary held the no-trim branch have
++// no loaded page to justify them once the boundary is released; trim them with
++// the active view's existing window policy immediately.
++function trimReleasedProvisionalWindow(previous: InternalState): InternalState {
++    const historyMode = previous.viewMode === 'history'
++    const { kept, dropped } = trimPreservingQueued(
++        previous.messages,
++        historyMode ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE,
++        historyMode ? 'prepend' : 'append'
++    )
++    if (dropped.length === 0) {
++        return previous
++    }
++    if (historyMode) {
++        const newest = derivePosition(kept, 'newest')
++        return buildState(previous, {
++            messages: kept,
++            requiresLatestReset: true,
++            newestPositionAt: newest?.at ?? null,
++            newestPositionSeq: newest?.seq ?? null
++        })
++    }
++    const oldest = derivePosition(kept, 'oldest')
++    return buildState(previous, {
++        messages: kept,
++        hasMore: true,
++        oldestPositionAt: oldest?.at ?? previous.oldestPositionAt,
++        oldestPositionSeq: oldest?.seq ?? previous.oldestPositionSeq
+     })
+-    return next
+ }
+ 
+ function pagePosition(at: number | null, seq: number | null): MessagePosition | null {
+@@ -624,6 +754,13 @@ function applyLatestResponse(
+         olderGeneration: options.replaceServerRows
+             ? previous.olderGeneration + 1
+             : previous.olderGeneration,
++        // A tail resync rebuilds the window from the server's authoritative
++        // rows; the loaded-history protection no longer applies.
++        historyBoundaryAt: options.replaceServerRows ? null : previous.historyBoundaryAt,
++        historyBoundarySeq: options.replaceServerRows ? null : previous.historyBoundarySeq,
++        provisionalBoundaryGeneration: options.replaceServerRows
++            ? null
++            : previous.provisionalBoundaryGeneration,
+         warning: null
+     })
+ }
+@@ -632,7 +769,13 @@ function beginTailSync(sessionId: string): number {
+     let generation = 0
+     updateState(sessionId, (previous) => {
+         generation = previous.syncGeneration + 1
+-        return buildState(previous, {
++        // Bumping olderGeneration invalidates any in-flight older-page request.
++        // If that request provisionally installed the history boundary, the
++        // load is gone — release the boundary too, or the no-trim branch would
++        // outlive it and the window would grow without limit.
++        const releaseProvisional = previous.provisionalBoundaryGeneration !== null
++            && previous.provisionalBoundaryGeneration === previous.olderGeneration
++        const cleared = buildState(previous, {
+             syncGeneration: generation,
+             // Tail reconciliation owns the authoritative epoch. An older-page
+             // response captured before this point must not commit while the tail
+@@ -640,8 +783,14 @@ function beginTailSync(sessionId: string): number {
+             olderGeneration: previous.olderGeneration + 1,
+             isSyncingTail: true,
+             isLoadingMore: false,
+-            warning: null
++            warning: null,
++            historyBoundaryAt: releaseProvisional ? null : previous.historyBoundaryAt,
++            historyBoundarySeq: releaseProvisional ? null : previous.historyBoundarySeq,
++            provisionalBoundaryGeneration: releaseProvisional ? null : previous.provisionalBoundaryGeneration
+         })
++        // Shed the rows the no-trim branch accumulated while the provisional
++        // boundary was held, immediately rather than on the next ingest.
++        return releaseProvisional ? trimReleasedProvisionalWindow(cleared) : cleared
+     })
+     return generation
+ }
+@@ -810,6 +959,10 @@ function enterTailMode(previous: InternalState): InternalState {
+     const oldest = dropped.length > 0
+         ? derivePosition(kept, 'oldest')
+         : readPosition(previous.oldestPositionAt, previous.oldestPositionSeq)
++    // Shedding rows while an older-page request is in flight can evict its
++    // `before` cursor row (the window's oldest at request start); invalidate
++    // that request so its apply cannot re-arm a stale cursor past the gap.
++    const invalidateInFlight = previous.isLoadingMore && dropped.length > 0
+     return buildState(previous, {
+         messages: kept,
+         hasMore: previous.hasMore || dropped.length > 0,
+@@ -818,7 +971,15 @@ function enterTailMode(previous: InternalState): InternalState {
+         oldestPositionAt: oldest?.at ?? null,
+         oldestPositionSeq: oldest?.seq ?? null,
+         newestPositionAt: forceLatest ? null : previous.newestPositionAt,
+-        newestPositionSeq: forceLatest ? null : previous.newestPositionSeq
++        newestPositionSeq: forceLatest ? null : previous.newestPositionSeq,
++        // Returning to the tail releases the loaded-history protection: the
++        // window is allowed to shed the older range again (invisibly, the
++        // user is at the bottom).
++        historyBoundaryAt: null,
++        historyBoundarySeq: null,
++        provisionalBoundaryGeneration: null,
++        olderGeneration: invalidateInFlight ? previous.olderGeneration + 1 : previous.olderGeneration,
++        isLoadingMore: invalidateInFlight ? false : previous.isLoadingMore
+     })
+ }
+ 
+@@ -852,6 +1013,10 @@ export function activateMessageWindow(sessionId: string): void {
+             previous.viewMode === 'tail'
+             && kept.length === previous.messages.length
+             && !forceLatest
++            // A boundary persisted from a previous page session must not
++            // survive: the outline that held it is gone, so the window has
++            // no release path and would grow unboundedly on SSE ingests.
++            && previous.historyBoundaryAt === null
+         ) {
+             return preferLatestOnActivation
+                 ? buildState(previous, activationUpdates)
+@@ -909,8 +1074,20 @@ export async function fetchOlderMessages(
+     sessionId: string,
+     options: {
+         onBeforeApply?: (historyVersion: number) => boolean
++        /**
++         * Live predicate evaluated when the older page APPLIES (not when the
++         * request starts): when it returns true, the loaded-history boundary
++         * (tail-mode no-trim protection) is installed for this load. Only
++         * user-initiated outline browsing passes it — automatic coverage
++         * loads and tool-group hydration must not leave the window unbounded,
++         * and history-mode loads are already protected by the oldest-kept
++         * trim. Evaluating at apply time also covers an outline closed while
++         * a slow request was in flight.
++         */
++        shouldInstallBoundary?: () => boolean
+     } = {}
+ ): Promise<OlderLoadOutcome> {
++    const installBoundary = options.shouldInstallBoundary?.() === true
+     const initial = getState(sessionId)
+     const before = readPosition(initial.oldestPositionAt, initial.oldestPositionSeq)
+     if (initial.isSyncingTail || initial.isLoadingMore) {
+@@ -928,6 +1105,24 @@ export async function fetchOlderMessages(
+         isLoadingMore: true,
+         warning: null
+     }))
++    // Install the boundary at REQUEST START, not when the response applies:
++    // while the request is in flight, SSE ingests keep trimming the tail and
++    // could evict the exclusive `before` cursor row (the window's oldest).
++    // Applying the older page afterwards would leave a permanent unreachable
++    // gap between the page and the trimmed window. Track when WE installed it
++    // (no pre-existing boundary) so the rejection/error exits can restore the
++    // bounded window if the load never completes.
++    const installedProvisionalBoundary = installBoundary && initial.historyBoundaryAt === null
++    if (installedProvisionalBoundary) {
++        updateState(sessionId, (previous) => {
++            if (previous.olderGeneration !== generation) return previous
++            return buildState(previous, {
++                historyBoundaryAt: before.at,
++                historyBoundarySeq: before.seq,
++                provisionalBoundaryGeneration: generation
++            })
++        })
++    }
+ 
+     try {
+         const response = await api.getMessages(sessionId, {
+@@ -966,22 +1161,74 @@ export async function fetchOlderMessages(
+             const nextHistoryVersion = previous.historyVersion + 1
+             if (options.onBeforeApply && !options.onBeforeApply(nextHistoryVersion)) {
+                 applyRejected = true
+-                return buildState(previous, {
++                // A rejected apply never delivers the loaded page; restore the
++                // bounded window if we provisionally installed the boundary,
++                // and shed the rows the no-trim branch accumulated.
++                const cleared = buildState(previous, {
+                     olderGeneration: previous.olderGeneration + 1,
+                     isLoadingMore: false,
+-                    warning: null
++                    warning: null,
++                    historyBoundaryAt: installedProvisionalBoundary ? null : previous.historyBoundaryAt,
++                    historyBoundarySeq: installedProvisionalBoundary ? null : previous.historyBoundarySeq,
++                    provisionalBoundaryGeneration: installedProvisionalBoundary
++                        ? null
++                        : previous.provisionalBoundaryGeneration
+                 })
++                return installedProvisionalBoundary ? trimReleasedProvisionalWindow(cleared) : cleared
+             }
+-            const merged = mergeIntoWindow(previous, response.messages, {
+-                mode: 'prepend',
+-                regularLimit: OLDER_LOAD_WINDOW_SIZE
++            const installBoundaryNow = options.shouldInstallBoundary?.() === true
++            const compactedOnClose = !installBoundaryNow && installedProvisionalBoundary && previous.viewMode === 'tail'
++            let merged = mergeIntoWindow(previous, response.messages, {
++                // In history mode keep the oldest side (the loaded pages the
++                // user is browsing); in tail mode keep the whole window while
++                // the history boundary is held so the live tail keeps streaming.
++                mode: previous.viewMode === 'history' ? 'prepend' : 'append',
++                regularLimit: OLDER_LOAD_WINDOW_SIZE,
++                historyBoundaryAt: previous.historyBoundaryAt ?? (installBoundaryNow ? before.at : undefined),
++                historyBoundarySeq: previous.historyBoundarySeq ?? (installBoundaryNow ? before.seq : undefined)
+             })
++            let oldestPositionAt: number | null = response.page.nextBeforeAt
++            let oldestPositionSeq: number | null = response.page.nextBeforeSeq
++            if (compactedOnClose) {
++                // The outline closed while the request was in flight: the
++                // boundary dies with the apply, and in tail mode the rows
++                // accumulated by the no-trim branch are shed back to the
++                // bounded tail window. In history mode the user is reading
++                // the loaded range — the oldest-kept trim protects it and the
++                // next ingest sheds only the tail overflow.
++                const trimmed = trimReleasedProvisionalWindow(merged)
++                if (trimmed !== merged) {
++                    // Rows were shed from the oldest end: the pagination
++                    // cursor must bookend the compacted window, not the
++                    // response's nextBefore (which would point into the gap).
++                    oldestPositionAt = trimmed.oldestPositionAt
++                    oldestPositionSeq = trimmed.oldestPositionSeq
++                }
++                merged = trimmed
++            }
+             historyVersion = nextHistoryVersion
+             return buildState(merged, {
+                 hasMore: response.page.hasMore,
+                 epoch: response.page.epoch,
+-                oldestPositionAt: response.page.nextBeforeAt,
+-                oldestPositionSeq: response.page.nextBeforeSeq,
++                oldestPositionAt,
++                oldestPositionSeq,
++                // The boundary was installed at request start; carry it past
++                // the apply only while the outline is still open. If it
++                // closed while the request was in flight, drop the boundary
++                // here so the window returns to the bounded tail trim.
++                historyBoundaryAt: installBoundaryNow
++                    ? before.at
++                    : installBoundary
++                        ? null
++                        : previous.historyBoundaryAt,
++                historyBoundarySeq: installBoundaryNow
++                    ? before.seq
++                    : installBoundary
++                        ? null
++                        : previous.historyBoundarySeq,
++                // The boundary is now held by the outline lifecycle, not by
++                // this request; the provisional ownership ends here.
++                provisionalBoundaryGeneration: null,
+                 isLoadingMore: false,
+                 historyVersion,
+                 warning: null
+@@ -1005,10 +1252,22 @@ export async function fetchOlderMessages(
+             : new Error('Failed to load older messages')
+         updateState(sessionId, (previous) => {
+             if (previous.olderGeneration !== generation) return previous
+-            return buildState(previous, {
++            // A failed request never delivers the loaded page; restore the
++            // bounded window if we provisionally installed the boundary, and
++            // shed the rows the no-trim branch accumulated while it was held.
++            if (!installedProvisionalBoundary) {
++                return buildState(previous, {
++                    isLoadingMore: false,
++                    warning: loadError.message
++                })
++            }
++            return trimReleasedProvisionalWindow(buildState(previous, {
+                 isLoadingMore: false,
+-                warning: loadError.message
+-            })
++                warning: loadError.message,
++                historyBoundaryAt: null,
++                historyBoundarySeq: null,
++                provisionalBoundaryGeneration: null
++            }))
+         })
+         return { kind: 'failed', error: loadError }
+     }
+@@ -1019,18 +1278,30 @@ export function cancelOlderMessageLoad(sessionId: string): void {
+         if (!previous.isLoadingMore) {
+             return previous
+         }
+-        return buildState(previous, {
++        const releaseProvisional = previous.provisionalBoundaryGeneration !== null
++            && previous.provisionalBoundaryGeneration === previous.olderGeneration
++        const cleared = buildState(previous, {
+             olderGeneration: previous.olderGeneration + 1,
+             isLoadingMore: false,
+-            warning: null
++            warning: null,
++            historyBoundaryAt: releaseProvisional ? null : previous.historyBoundaryAt,
++            historyBoundarySeq: releaseProvisional ? null : previous.historyBoundarySeq,
++            provisionalBoundaryGeneration: releaseProvisional ? null : previous.provisionalBoundaryGeneration
+         })
++        return releaseProvisional ? trimReleasedProvisionalWindow(cleared) : cleared
+     }, true)
+ }
+ 
+ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): void {
+     updateState(sessionId, (previous) => {
+         if (previous.viewMode === mode) {
+-            return previous
++            // Re-asserting tail mode while loaded history is held releases it:
++            // the user has returned to the live tail (e.g. the conversation
++            // outline closed after a "Load earlier" click), so the window can
++            // shed the older range again and stay bounded.
++            return mode === 'tail' && previous.historyBoundaryAt !== null
++                ? enterTailMode(previous)
++                : previous
+         }
+         if (mode === 'history') {
+             return buildState(previous, { viewMode: 'history' })
+@@ -1101,6 +1372,9 @@ export function seedMessageWindowFromSession(fromSessionId: string, toSessionId:
+         tailRevision: source.tailRevision,
+         oldestPositionAt: source.oldestPositionAt,
+         oldestPositionSeq: source.oldestPositionSeq,
++        historyBoundaryAt: source.historyBoundaryAt,
++        historyBoundarySeq: source.historyBoundarySeq,
++        provisionalBoundaryGeneration: null,
+         requiresLatestReset: true,
+         syncGeneration: target.syncGeneration + 1,
+         olderGeneration: target.olderGeneration + 1
+-- 
+2.43.0
+

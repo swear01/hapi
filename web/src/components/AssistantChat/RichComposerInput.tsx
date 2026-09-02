@@ -27,12 +27,14 @@ import {
     type ComposerSegment,
     type ComposerSelection,
 } from '@/lib/composerSegments'
+import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
 import {
     formatSessionMentionTooltip,
     type SessionMentionTooltipModel,
 } from '@/lib/sessionReference'
 import { SessionRowSummary } from '@/components/SessionRowSummary'
 import type { SessionSummary } from '@/types/api'
+import { parseSessionMentionDrag, SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
 
 export type RichComposerInputHandle = {
     focus: () => void
@@ -75,6 +77,7 @@ type Props = {
     onPaste?: (e: ReactClipboardEvent<HTMLDivElement>) => void
     onFocus?: (e: ReactFocusEvent<HTMLDivElement>) => void
     onEdit?: () => void
+    onSessionMentionDrop?: (mention: { id: string; title: string }) => void
     /** Live session meta for chip hover / aria-label (from useSessions). */
     resolveSessionMentionTooltip?: ResolveSessionMentionTooltip
 }
@@ -97,8 +100,14 @@ function createMentionSpan(
     span.dataset.sessionTitle = title
     span.dataset.composerMention = 'session'
     span.className =
-        'mx-0.5 inline-flex max-w-[12rem] items-center truncate rounded-md bg-[var(--app-subtle-bg)] px-1.5 py-0.5 align-baseline text-[0.95em] font-medium text-[var(--app-link)]'
-    span.textContent = `@${title || id.slice(0, 8)}`
+        'mx-0.5 inline-flex max-w-[16rem] items-baseline rounded-md bg-[var(--app-subtle-bg)] px-1.5 py-0.5 align-baseline text-[0.95em] font-medium text-[var(--app-link)]'
+    const label = document.createElement('span')
+    label.textContent = `@${title || id.slice(0, 8)}`
+    // Truncation lives on the inner label so the pill's own baseline stays a
+    // text baseline (an overflow≠visible inline-block would align by its
+    // bottom edge instead).
+    label.className = 'min-w-0 truncate'
+    span.appendChild(label)
     const tip = resolveTooltip?.(id, title)?.model
         ?? formatSessionMentionTooltip(null, title, id)
     span.setAttribute('aria-label', tip.ariaLabel)
@@ -681,6 +690,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         onPaste,
         onFocus,
         onEdit,
+        onSessionMentionDrop,
         resolveSessionMentionTooltip,
     },
     ref
@@ -787,7 +797,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
             })
             return serialized
         },
-        insertSessionMention: (mention, prefixes = ['@', '/', '$']) => {
+        insertSessionMention: (mention, prefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES]) => {
             const root = rootRef.current
             if (!root) {
                 return { text: value, selection: { start: value.length, end: value.length } }
@@ -806,7 +816,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
             })
             return { text: serialized, selection: result.selection }
         },
-        applyPlainSuggestion: (suggestionText, prefixes = ['@', '/', '$']) => {
+        applyPlainSuggestion: (suggestionText, prefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES]) => {
             const root = rootRef.current
             if (!root) {
                 return { text: value, selection: { start: value.length, end: value.length } }
@@ -977,6 +987,19 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         insertPlainClipboardText(e.clipboardData?.getData('text/plain') ?? '')
     }, [insertPlainClipboardText, onPaste])
 
+    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        if (disabled || !e.dataTransfer.types.includes(SESSION_MENTION_DRAG_MIME)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+    }, [disabled])
+
+    const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        const mention = parseSessionMentionDrag(e.dataTransfer)
+        if (!mention || disabled) return
+        e.preventDefault()
+        onSessionMentionDrop?.(mention)
+    }, [disabled, onSessionMentionDrop])
+
     const applyBackwardDelete = useCallback((
         root: HTMLElement,
         segments: readonly ComposerSegment[],
@@ -1019,8 +1042,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         return () => root.removeEventListener('beforeinput', handleBeforeInput)
     }, [applyBackwardDelete])
 
-    // No onDrop: intercepting without caretRangeFromPoint appends at EOF / no-ops
-    // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
+    // Session drops use the current editor selection; without one, insertion falls back to EOF.
 
     const placeholderRef = useRef<HTMLDivElement>(null)
 
@@ -1140,6 +1162,8 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
                 onCopy={(e) => handleCopyOrCut(e, false)}
                 onCut={(e) => handleCopyOrCut(e, true)}
                 onPaste={handlePaste}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
                 onCompositionStart={() => {
                     composingRef.current = true
                 }}

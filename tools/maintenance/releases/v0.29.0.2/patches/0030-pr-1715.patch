@@ -1,0 +1,223 @@
+From c2084f8f78e802b5557b54566973d62ed28173f3 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 18:22:43 +0000
+Subject: [PATCH] carry: upstream PR #1715
+
+---
+ cli/src/pi/loop.ts                  | 20 ++++++++-
+ cli/src/pi/piEventConverter.test.ts | 67 ++++++++++++++++++++++++++-
+ cli/src/pi/piEventConverter.ts      | 70 +++++++++++++++++++++++++++++
+ 3 files changed, 154 insertions(+), 3 deletions(-)
+
+diff --git a/cli/src/pi/loop.ts b/cli/src/pi/loop.ts
+index 08cf44024..d2101cf41 100644
+--- a/cli/src/pi/loop.ts
++++ b/cli/src/pi/loop.ts
+@@ -2,11 +2,11 @@ import { logger } from '@/ui/logger';
+ import { convertAgentMessage } from '@/agent/messageConverter';
+ import { createNativeSessionTitleMetadataSync } from '@/agent/nativeSessionTitle';
+ import { PiTransport } from './piTransport';
+-import { convertPiEvent, convertPiTurnUsage } from './piEventConverter';
++import { convertPiEvent, convertPiTurnUsage, extractPiGeneratedImages } from './piEventConverter';
+ import { PiMessageAccumulator } from './piMessageAccumulator';
+ import { PiExtensionUiHandler } from './extensionUiHandler';
+ import { parsePiModels, parsePiCommands, parsePiContextUsage, PiAgentEndEventSchema, PiAgentSettledEventSchema, PiExtensionUiRequestSchema, PiLifecycleEventSchema, PiResponseEventSchema, PiSessionInfoChangedEventSchema, PiStateDataSchema, PiSetModelDataSchema } from './schemas';
+-import type { PiContextUsage, PiResponseEvent, PiRpcCommand, PiThinkingLevel, PiTurnEndEvent } from './types';
++import type { PiContextUsage, PiResponseEvent, PiRpcCommand, PiThinkingLevel, PiToolExecutionStartEvent, PiTurnEndEvent } from './types';
+ import type { PiSession } from './session';
+ import type { PiConversationHistory } from './conversationHistory';
+ 
+@@ -533,6 +533,9 @@ export function wireTransportEvents(
+     const lifecycleTimeline = new PiLifecycleTimeline();
+     let latestContextUsageRequest = 0;
+     let deliveredSettlement = false;
++    // Bounded tool-args cache so tool_execution_end can attribute registered
++    // media (e.g. images read by the `read` tool) to their source path.
++    const piToolArgsByCallId = new Map<string, unknown>();
+     let legacySettleTimer: ReturnType<typeof setTimeout> | null = null;
+     let promptLifecycleTimer: ReturnType<typeof setTimeout> | null = null;
+     let compactionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+@@ -850,6 +853,19 @@ export function wireTransportEvents(
+                 const converted = convertAgentMessage(message, session.currentModel);
+                 if (converted) session.sendAgentMessage(converted);
+             }
++            if (event.type === 'tool_execution_start') {
++                if (piToolArgsByCallId.size > 500) piToolArgsByCallId.clear();
++                const startEvent = event as PiToolExecutionStartEvent;
++                piToolArgsByCallId.set(startEvent.toolCallId, startEvent.args);
++            } else if (event.type === 'tool_execution_end') {
++                const endEvent = event as { toolCallId: string };
++                const mediaMessages = extractPiGeneratedImages(event, (toolCallId) => piToolArgsByCallId.get(toolCallId));
++                piToolArgsByCallId.delete(endEvent.toolCallId);
++                for (const message of mediaMessages) {
++                    const converted = convertAgentMessage(message, session.currentModel);
++                    if (converted) session.sendAgentMessage(converted);
++                }
++            }
+         }
+ 
+         if (event.type === 'agent_start') {
+diff --git a/cli/src/pi/piEventConverter.test.ts b/cli/src/pi/piEventConverter.test.ts
+index b0c6d30ba..37132c37e 100644
+--- a/cli/src/pi/piEventConverter.test.ts
++++ b/cli/src/pi/piEventConverter.test.ts
+@@ -1,7 +1,72 @@
+ import { describe, it, expect } from 'vitest';
+-import { convertPiCompactionUsage, convertPiEvent, convertPiTurnUsage } from './piEventConverter';
++import { clearGeneratedImages, MAX_GENERATED_IMAGE_BASE64_CHARS } from '../modules/common/generatedImages';
++import { convertPiCompactionUsage, convertPiEvent, convertPiTurnUsage, extractPiGeneratedImages } from './piEventConverter';
+ import type { PiAgentEvent } from './types';
+ 
++describe('extractPiGeneratedImages', () => {
++    const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
++
++    function imageEndEvent(blocks: unknown[]): PiAgentEvent {
++        return {
++            type: 'tool_execution_end',
++            toolCallId: 'tool-1',
++            toolName: 'read',
++            result: { content: blocks },
++            isError: false,
++        } as PiAgentEvent;
++    }
++
++    it('registers a valid PNG tool-result image', () => {
++        clearGeneratedImages();
++        const messages = extractPiGeneratedImages(imageEndEvent([
++            { type: 'image', mimeType: 'image/png', data: PNG_HEADER.toString('base64') },
++        ]), () => null);
++        expect(messages).toHaveLength(1);
++        expect(messages[0].type).toBe('generated_image');
++        expect(messages[0]).toMatchObject({
++            mimeType: 'image/png',
++            source: { ingress: 'tool_result', flavor: 'pi', toolCallId: 'tool-1' },
++        });
++    });
++
++    it('skips oversized base64 without decoding it', () => {
++        clearGeneratedImages();
++        const messages = extractPiGeneratedImages(imageEndEvent([
++            { type: 'image', mimeType: 'image/png', data: 'A'.repeat(MAX_GENERATED_IMAGE_BASE64_CHARS + 8) },
++        ]), () => null);
++        expect(messages).toEqual([]);
++    });
++
++    it('skips bytes that do not sniff as a real image', () => {
++        clearGeneratedImages();
++        const messages = extractPiGeneratedImages(imageEndEvent([
++            { type: 'image', mimeType: 'image/png', data: Buffer.from('definitely not an image').toString('base64') },
++        ]), () => null);
++        expect(messages).toEqual([]);
++    });
++
++    it('rejects declared-vs-sniffed MIME mismatches', () => {
++        clearGeneratedImages();
++        const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
++        const messages = extractPiGeneratedImages(imageEndEvent([
++            { type: 'image', mimeType: 'image/png', data: jpeg.toString('base64') },
++        ]), () => null);
++        expect(messages).toEqual([]);
++    });
++
++    it('rejects malformed tool_execution_end events missing required fields', () => {
++        clearGeneratedImages();
++        const event = {
++            type: 'tool_execution_end',
++            // toolCallId / toolName / isError 均缺失 —— 同类事件在 convertPiEvent
++            // 的 schema 安检里也会被拒收，这里不能给孤儿图片开绿灯
++            result: { content: [{ type: 'image', mimeType: 'image/png', data: PNG_HEADER.toString('base64') }] },
++        } as PiAgentEvent;
++        const messages = extractPiGeneratedImages(event, () => null);
++        expect(messages).toEqual([]);
++    });
++});
++
+ describe('convertPiEvent', () => {
+     it('should return empty for message_update with text_delta (accumulated in runPi)', () => {
+         // The converter intentionally emits nothing for message_update
+diff --git a/cli/src/pi/piEventConverter.ts b/cli/src/pi/piEventConverter.ts
+index 1f9c19067..efbd9c9bc 100644
+--- a/cli/src/pi/piEventConverter.ts
++++ b/cli/src/pi/piEventConverter.ts
+@@ -1,4 +1,6 @@
++import { randomUUID } from 'node:crypto';
+ import { logger } from '@/ui/logger';
++import { decodeGeneratedImageBase64, detectImageMimeType, registerGeneratedImage } from '@/modules/common/generatedImages';
+ import type { AgentMessage } from '@/agent/types';
+ import {
+     PiToolExecutionEndEventSchema,
+@@ -97,3 +99,71 @@ export function convertPiEvent(event: PiAgentEvent): AgentMessage[] {
+             return [];
+     }
+ }
++
++const PI_IMAGE_EXTENSIONS: Record<string, string> = {
++    'image/png': '.png',
++    'image/jpeg': '.jpg',
++    'image/gif': '.gif',
++    'image/webp': '.webp',
++    'image/avif': '.avif',
++};
++
++/**
++ * Pi hands images back inside tool results as inline base64 content blocks
++ * (e.g. `read` on an image file yields `{ type: 'image', data, mimeType }`).
++ * Register each block as generated media and emit a `generated_image`
++ * AgentMessage so the web client can render it via the generated-image blob
++ * endpoint — mirroring the Codex `generated_image` flow.
++ */
++export function extractPiGeneratedImages(
++    event: PiAgentEvent,
++    resolveArgs: (toolCallId: string) => unknown,
++): AgentMessage[] {
++    if (event.type !== 'tool_execution_end') return [];
++    const parsed = PiToolExecutionEndEventSchema.safeParse(event);
++    if (!parsed.success) return [];
++    const endEvent = parsed.data;
++    const result = endEvent.result;
++    const content = result !== null && typeof result === 'object'
++        ? (result as { content?: unknown }).content
++        : undefined;
++    if (!Array.isArray(content)) return [];
++
++    const args = resolveArgs(endEvent.toolCallId);
++    const sourcePath = args !== null && typeof args === 'object'
++        && typeof (args as { path?: unknown }).path === 'string'
++        ? (args as { path: string }).path
++        : undefined;
++
++    const messages: AgentMessage[] = [];
++    for (const block of content) {
++        if (!block || typeof block !== 'object' || (block as { type?: unknown }).type !== 'image') continue;
++        const record = block as { data?: unknown; mimeType?: unknown };
++        const data = typeof record.data === 'string' ? record.data : undefined;
++        const mimeType = typeof record.mimeType === 'string' ? record.mimeType : undefined;
++        if (!data || !mimeType || !mimeType.toLowerCase().startsWith('image/')) continue;
++        try {
++            const bytes = decodeGeneratedImageBase64(data);
++            if (!bytes) continue;
++            const detectedMimeType = detectImageMimeType(bytes);
++            if (!detectedMimeType || detectedMimeType !== mimeType.toLowerCase()) continue;
++            const media = registerGeneratedImage({
++                id: randomUUID(),
++                path: sourcePath ?? `${endEvent.toolCallId}${PI_IMAGE_EXTENSIONS[detectedMimeType] ?? '.bin'}`,
++                fileName: sourcePath ? undefined : null,
++                mimeType: detectedMimeType,
++                bytes,
++            });
++            messages.push({
++                type: 'generated_image',
++                imageId: media.id,
++                fileName: media.fileName,
++                mimeType: media.mimeType,
++                source: { ingress: 'tool_result', flavor: 'pi', toolCallId: endEvent.toolCallId },
++            });
++        } catch (error) {
++            logger.debug(`[pi] Skipping undisplayable image from ${endEvent.toolName} (${endEvent.toolCallId}): ${error instanceof Error ? error.message : String(error)}`);
++        }
++    }
++    return messages;
++}
+-- 
+2.43.0
+

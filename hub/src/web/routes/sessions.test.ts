@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { Hono } from 'hono'
 import type { Session, SyncEngine } from '../../sync/syncEngine'
+import { TitleSuggestionError } from '../../sync/titleSuggestion'
 import type { WebAppEnv } from '../middleware/auth'
 import { createSessionsRoutes } from './sessions'
 
@@ -63,14 +64,22 @@ function createApp(session: Session, opts?: {
     getSessionExport?: (sessionId: string, session: Session, options?: { force?: boolean }) => unknown
     sessionExists?: boolean
     archiveSession?: (sessionId: string) => Promise<void>
+    acknowledgeModelError?: (sessionId: string, eventId: string) => Promise<void>
+    deleteSession?: (sessionId: string) => Promise<void>
+    deleteArchivedSessions?: (sessionIds: string[], namespace: string) => Promise<void>
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
+    listSessionReasoningEffortOptionsForSession?: SyncEngine['listSessionReasoningEffortOptionsForSession']
     forkConversation?: SyncEngine['forkConversation']
     rewindConversation?: SyncEngine['rewindConversation']
     suggestSessionTitle?: SyncEngine['suggestSessionTitle']
     updateSessionSummary?: SyncEngine['updateSessionSummary']
+    getPrimaryAttachedJob?: SyncEngine['getPrimaryAttachedJob']
+    getPrimaryAttachedJobsBySessionIds?: SyncEngine['getPrimaryAttachedJobsBySessionIds']
+    allocateAttachedJobVersion?: SyncEngine['allocateAttachedJobVersion']
     setSessionPinned?: (sessionId: string, pinned: boolean) => void
     setSessionPinMode?: (sessionId: string, mode: 'none' | 'project' | 'global') => void
+    namespace?: string
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
@@ -116,6 +125,12 @@ function createApp(session: Session, opts?: {
         options: [{ value: 'low', name: 'Low' }],
         currentValue: 'low'
     })
+    const listSessionReasoningEffortOptionsForSession = opts?.listSessionReasoningEffortOptionsForSession ?? (async () => ({
+        success: true,
+        model: 'gpt-5.6',
+        options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }],
+        currentValue: 'low'
+    }))
     const resumeSession = opts?.resumeSession ?? (async (sessionId: string) => ({ type: 'success', sessionId }))
     const reopenSession = opts?.reopenSession ?? (async (sessionId: string) => ({
         type: 'success' as const,
@@ -124,6 +139,9 @@ function createApp(session: Session, opts?: {
     }))
     const sessionExists = opts?.sessionExists !== false
     const archiveSessionMock = opts?.archiveSession ?? (async () => {})
+    const acknowledgeModelErrorMock = opts?.acknowledgeModelError ?? (async () => {})
+    const deleteSessionMock = opts?.deleteSession ?? (async () => {})
+    const deleteArchivedSessionsMock = opts?.deleteArchivedSessions ?? (async () => {})
     const engine = {
         resolveSessionAccess: () => sessionExists
             ? { ok: true, sessionId: session.id, session }
@@ -138,6 +156,7 @@ function createApp(session: Session, opts?: {
         listOpencodeReasoningEffortOptionsForSession,
         listGrokModelsForSession,
         listGrokReasoningEffortOptionsForSession,
+        listSessionReasoningEffortOptionsForSession,
         resumeSession,
         reopenSession,
         getCursorChatStoreStatus: opts?.getCursorChatStoreStatus ?? (async () => ({
@@ -145,8 +164,11 @@ function createApp(session: Session, opts?: {
             status: { onDisk: true, store: 'acp' as const }
         })),
         archiveSession: archiveSessionMock,
+        deleteSession: deleteSessionMock,
+        deleteArchivedSessions: deleteArchivedSessionsMock,
         setSessionPinned: opts?.setSessionPinned ?? (() => {}),
         setSessionPinMode: opts?.setSessionPinMode ?? (() => {}),
+        acknowledgeModelError: acknowledgeModelErrorMock,
         getSessionExport: opts?.getSessionExport ?? (() => ({
             type: 'success',
             payload: {
@@ -164,12 +186,15 @@ function createApp(session: Session, opts?: {
         forkConversation: opts?.forkConversation ?? (async () => ({ type: 'success', sessionId: 'child-1' })),
         rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
         suggestSessionTitle: opts?.suggestSessionTitle ?? (async () => 'Generated title'),
-        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {})
+        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {}),
+        getPrimaryAttachedJob: opts?.getPrimaryAttachedJob ?? (() => null),
+        getPrimaryAttachedJobsBySessionIds: opts?.getPrimaryAttachedJobsBySessionIds ?? (() => new Map()),
+        allocateAttachedJobVersion: opts?.allocateAttachedJobVersion ?? (() => Date.now())
     } as Partial<SyncEngine>
 
     const app = new Hono<WebAppEnv>()
     app.use('*', async (c, next) => {
-        c.set('namespace', 'default')
+        c.set('namespace', opts?.namespace ?? 'default')
         await next()
     })
     app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
@@ -191,22 +216,58 @@ describe('sessions routes', () => {
         expect(await response.json()).toEqual({ title: 'Generated title' })
     })
 
-    it('writes generated titles through the summary metadata endpoint', async () => {
-        const updates: Array<[string, string]> = []
+    it('preserves title suggestion error codes for the web client', async () => {
         const { app } = createApp(createSession(), {
-            updateSessionSummary: async (sessionId, text) => {
-                updates.push([sessionId, text])
+            suggestSessionTitle: async () => {
+                throw new TitleSuggestionError('unavailable', 'Title provider is not configured', 503)
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/title-suggestion', { method: 'POST' })
+
+        expect(response.status).toBe(503)
+        expect(await response.json()).toEqual({
+            error: 'Title provider is not configured',
+            code: 'unavailable'
+        })
+    })
+
+    it('preserves the safe provider error reason for the web client', async () => {
+        const { app } = createApp(createSession(), {
+            suggestSessionTitle: async () => {
+                throw new TitleSuggestionError(
+                    'provider',
+                    'Title provider request failed (HTTP 404): endpoint or model not found',
+                    502
+                )
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/title-suggestion', { method: 'POST' })
+
+        expect(response.status).toBe(502)
+        expect(await response.json()).toEqual({
+            error: 'Title provider request failed (HTTP 404): endpoint or model not found',
+            code: 'provider'
+        })
+    })
+
+    it('writes generated titles through the summary metadata endpoint', async () => {
+        const updates: Array<[string, string, { clearName?: boolean }]> = []
+        const { app } = createApp(createSession(), {
+            updateSessionSummary: async (sessionId, text, options) => {
+                updates.push([sessionId, text, options ?? {}])
             }
         })
 
         const response = await app.request('/api/sessions/session-1/summary', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: '  Generated title  ' })
+            body: JSON.stringify({ text: '  Generated title  ', clearName: true })
         })
 
         expect(response.status).toBe(200)
-        expect(updates).toEqual([['session-1', 'Generated title']])
+        expect(updates).toEqual([['session-1', 'Generated title', { clearName: true }]])
     })
 
     it('rejects an empty summary', async () => {
@@ -847,6 +908,39 @@ describe('sessions routes', () => {
         ])
     })
 
+    it('applies effort changes for remote Antigravity sessions', async () => {
+        const appState = createApp(createSession({
+            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'agy' }
+        }))
+        const response = await appState.app.request('/api/sessions/session-1/effort', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ effort: 'medium' })
+        })
+        expect(response.status).toBe(200)
+        expect(appState.applySessionConfigCalls).toEqual([
+            ['session-1', { effort: 'medium' }]
+        ])
+    })
+
+    it('applies effort changes for remote Copilot and Kimi sessions', async () => {
+        for (const flavor of ['copilot', 'kimi'] as const) {
+            const session = createSession({
+                metadata: { path: '/tmp/project', host: 'localhost', flavor }
+            })
+            const appState = createApp(session)
+            const response = await appState.app.request('/api/sessions/session-1/effort', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ effort: 'high' })
+            })
+            expect(response.status).toBe(200)
+            expect(appState.applySessionConfigCalls).toEqual([
+                ['session-1', { effort: 'high' }]
+            ])
+        }
+    })
+
     it('applies effort changes for remote Grok sessions and rejects local control', async () => {
         const remote = createSession({
             metadata: { path: '/tmp/project', host: 'localhost', flavor: 'grok' }
@@ -893,6 +987,33 @@ describe('sessions routes', () => {
             ],
             currentValue: 'low'
         })
+    })
+
+    it('returns generic reasoning effort options for active Copilot and Kimi sessions', async () => {
+        for (const flavor of ['copilot', 'kimi'] as const) {
+            const session = createSession({
+                metadata: { path: '/tmp/project', host: 'localhost', flavor }
+            })
+            const { app } = createApp(session)
+            const response = await app.request('/api/sessions/session-1/reasoning-effort-options')
+
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({
+                success: true,
+                model: 'gpt-5.6',
+                options: [
+                    { value: 'low', name: 'Low' },
+                    { value: 'high', name: 'High' }
+                ],
+                currentValue: 'low'
+            })
+        }
+    })
+
+    it('rejects generic reasoning effort options for unsupported sessions', async () => {
+        const { app } = createApp(createSession())
+        const response = await app.request('/api/sessions/session-1/reasoning-effort-options')
+        expect(response.status).toBe(400)
     })
 
     it('returns Grok model and effort catalogs for active Grok sessions', async () => {
@@ -1436,6 +1557,145 @@ describe('sessions routes', () => {
         })
     })
 
+    describe('POST /sessions/delete-archived (atomic group delete, tiann/hapi#881)', () => {
+        it('passes the full group to the atomic archived delete operation', async () => {
+            const calls: string[][] = []
+            const session = createSession({ active: false, metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                lifecycleState: 'archived'
+            } })
+            const { app } = createApp(session, {
+                deleteArchivedSessions: async (sessionIds, namespace) => {
+                    calls.push([...sessionIds, namespace])
+                }
+            })
+
+            const response = await app.request('/api/sessions/delete-archived', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionIds: ['session-1', 'session-2'], requireAllArchived: true })
+            })
+
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({ ok: true })
+            expect(calls).toEqual([['session-1', 'session-2', 'default']])
+        })
+
+        it('requires the all-archived guard flag', async () => {
+            const { app } = createApp(createSession({ active: false }))
+            const response = await app.request('/api/sessions/delete-archived', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionIds: ['session-1'] })
+            })
+            expect(response.status).toBe(400)
+        })
+
+        it('rejects malformed member IDs without invoking deletion', async () => {
+            const calls: string[][] = []
+            const { app } = createApp(createSession({ active: false }), {
+                deleteArchivedSessions: async (sessionIds) => { calls.push(sessionIds) }
+            })
+            const response = await app.request('/api/sessions/delete-archived', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionIds: ['session-1', ''], requireAllArchived: true })
+            })
+            expect(response.status).toBe(400)
+            expect(calls).toEqual([])
+        })
+
+        it('maps transactional delete failures to 500', async () => {
+            const { app } = createApp(createSession({ active: false }), {
+                deleteArchivedSessions: async () => {
+                    throw new Error('Failed to delete archived sessions')
+                }
+            })
+            const response = await app.request('/api/sessions/delete-archived', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ sessionIds: ['session-1'], requireAllArchived: true })
+            })
+            expect(response.status).toBe(500)
+        })
+    })
+
+    describe('DELETE /sessions/:id (requireArchived guard, tiann/hapi#881)', () => {
+        it('deletes an inactive session without the guard', async () => {
+            const calls: string[] = []
+            const session = createSession({ active: false })
+            const { app } = createApp(session, {
+                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
+            })
+
+            const response = await app.request('/api/sessions/session-1', { method: 'DELETE' })
+
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({ ok: true })
+            expect(calls).toEqual(['session-1'])
+        })
+
+        it('rejects requireArchived=1 when the session was never archived', async () => {
+            const calls: string[] = []
+            const session = createSession({
+                active: false,
+                metadata: {
+                    path: '/tmp/project',
+                    host: 'localhost',
+                    flavor: 'codex',
+                    lifecycleState: 'running'
+                }
+            })
+            const { app } = createApp(session, {
+                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
+            })
+
+            const response = await app.request('/api/sessions/session-1?requireArchived=1', { method: 'DELETE' })
+
+            expect(response.status).toBe(409)
+            expect(await response.json()).toEqual({ error: 'Session is no longer archived' })
+            expect(calls).toEqual([])
+        })
+
+        it('rejects requireArchived=1 for an inactive row with no lifecycle metadata', async () => {
+            const calls: string[] = []
+            const session = createSession({ active: false })
+            const { app } = createApp(session, {
+                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
+            })
+
+            const response = await app.request('/api/sessions/session-1?requireArchived=1', { method: 'DELETE' })
+
+            expect(response.status).toBe(409)
+            expect(await response.json()).toEqual({ error: 'Session is no longer archived' })
+            expect(calls).toEqual([])
+        })
+
+        it('deletes an archived session with requireArchived=1', async () => {
+            const calls: string[] = []
+            const session = createSession({
+                active: false,
+                metadata: {
+                    path: '/tmp/project',
+                    host: 'localhost',
+                    flavor: 'codex',
+                    lifecycleState: 'archived'
+                }
+            })
+            const { app } = createApp(session, {
+                deleteSession: async (sessionId: string) => { calls.push(sessionId) }
+            })
+
+            const response = await app.request('/api/sessions/session-1?requireArchived=1', { method: 'DELETE' })
+
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({ ok: true })
+            expect(calls).toEqual(['session-1'])
+        })
+    })
+
     it('forks via POST /sessions/:id/fork and returns the child session id', async () => {
         const calls: Array<{ sessionId: string; namespace: string; messageLocalId?: string }> = []
         const session = createSession({
@@ -1492,6 +1752,37 @@ describe('sessions routes', () => {
         expect(calls).toEqual([{ sessionId: 'session-1', messageLocalId: 'local-2' }])
     })
 
+    it('returns a structured ambiguous-boundary code for deterministic rewind rejection', async () => {
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                capabilities: { conversationHistory: { rewindToMessage: true } }
+            }
+        })
+        const { app } = createApp(session, {
+            rewindConversation: async () => ({
+                type: 'error',
+                message: 'Rewind is unavailable for this Codex history',
+                code: 'ambiguous_native_boundary_fork_safe'
+            })
+        })
+
+        const response = await app.request('/api/sessions/session-1/rewind', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ messageLocalId: 'local-2' })
+        })
+
+        expect(response.status).toBe(409)
+        expect(await response.json()).toEqual({
+            error: 'Rewind is unavailable for this Codex history',
+            code: 'ambiguous_native_boundary_fork_safe',
+            hydrateFailed: false
+        })
+    })
+
     it('rejects rewind without messageLocalId', async () => {
         const { app } = createApp(createSession())
         const response = await app.request('/api/sessions/session-1/rewind', {
@@ -1515,7 +1806,11 @@ describe('sessions routes', () => {
                 scheduledIds.push(ids)
                 return new Map(ids.map((id) => [id, 0]))
             },
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getPrimaryAttachedJobsBySessionIds: () => new Map(),
+            allocateAttachedJobVersion: () => Date.now(),
             resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
         } as unknown as Partial<SyncEngine>
 
@@ -1547,7 +1842,11 @@ describe('sessions routes', () => {
         const engine = {
             getSessionsByNamespace: () => sessions,
             getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
             getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getPrimaryAttachedJobsBySessionIds: () => new Map(),
+            allocateAttachedJobVersion: () => Date.now(),
             resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
         } as unknown as Partial<SyncEngine>
 
@@ -1562,6 +1861,133 @@ describe('sessions routes', () => {
         expect(response.status).toBe(200)
         const body = await response.json() as { sessions: Array<{ id: string }> }
         expect(body.sessions.map((s) => s.id)).toEqual(['new-inactive'])
+    })
+
+    describe('POST /sessions/:id/model-error/acknowledge', () => {
+        it('forwards eventId to the engine when body is valid', async () => {
+            const calls: Array<[string, string]> = []
+            const { app } = createApp(createSession(), {
+                acknowledgeModelError: async (sessionId, eventId) => {
+                    calls.push([sessionId, eventId])
+                }
+            })
+
+            const response = await app.request('/api/sessions/session-1/model-error/acknowledge', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ eventId: 'evt-ack-1' })
+            })
+
+            expect(response.status).toBe(200)
+            expect(await response.json()).toEqual({ ok: true })
+            expect(calls).toEqual([['session-1', 'evt-ack-1']])
+        })
+
+        it('returns 400 when eventId is missing', async () => {
+            let called = false
+            const { app } = createApp(createSession(), {
+                acknowledgeModelError: async () => { called = true }
+            })
+
+            const response = await app.request('/api/sessions/session-1/model-error/acknowledge', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({})
+            })
+
+            expect(response.status).toBe(400)
+            expect(called).toBe(false)
+        })
+
+        it('returns 409 when the displayed error no longer matches', async () => {
+            const { app } = createApp(createSession(), {
+                acknowledgeModelError: async () => {
+                    throw new Error('Model error changed; refresh before acknowledging.')
+                }
+            })
+
+            const response = await app.request('/api/sessions/session-1/model-error/acknowledge', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ eventId: 'evt-stale' })
+            })
+
+            expect(response.status).toBe(409)
+            expect(await response.json()).toEqual({
+                error: 'Model error changed; refresh before acknowledging.'
+            })
+        })
+    })
+
+    it('does not expose deferred model-error bridge endpoints', async () => {
+        const { app } = createApp(createSession({
+            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'cursor' }
+        }))
+
+        for (const path of ['bridge', 'auto-bridge-setting']) {
+            const response = await app.request(`/api/sessions/session-1/model-error/${path}`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ eventId: 'evt-1', enabled: true })
+            })
+            expect(response.status).toBe(404)
+        }
+    })
+
+    it('allocates attachedJob watermark before reading jobs (SSE race)', async () => {
+        const session = createSession({ id: 'session-watermark' })
+        const callOrder: string[] = []
+        let watermark = 0
+        const runningJob = {
+            key: 'beets',
+            label: 'beets',
+            status: 'running' as const,
+            remaining: 3,
+            heartbeatAt: 1,
+            startedAt: 1,
+            updatedAt: 1
+        }
+        let primary: typeof runningJob | null = runningJob
+        const engine = {
+            getSessionsByNamespace: () => [session],
+            getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getUninvokedScheduledMessageCounts: (_ids: string[]) => new Map<string, number>(),
+            getScratchlistUpdatedAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            allocateAttachedJobVersion: (id: string) => {
+                expect(id).toBe(session.id)
+                callOrder.push('allocate')
+                watermark += 1
+                return watermark
+            },
+            getPrimaryAttachedJobsBySessionIds: (ids: string[]) => {
+                callOrder.push('read')
+                // Concurrent terminal mutation in the old read→allocate gap:
+                // SSE would allocate the next watermark with the cleared job.
+                primary = null
+                watermark += 1
+                return new Map(ids.map((id) => [id, primary]))
+            },
+            resolveSessionAccess: () => ({ ok: true as const, sessionId: session.id, session })
+        } as unknown as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/sessions')
+        expect(response.status).toBe(200)
+        expect(callOrder).toEqual(['allocate', 'read'])
+        const body = await response.json() as {
+            sessions: Array<{ id: string; attachedJob: unknown; attachedJobUpdatedAt: number }>
+        }
+        const row = body.sessions.find((s) => s.id === session.id)
+        expect(row?.attachedJobUpdatedAt).toBe(1)
+        // Snapshot watermark must stay behind the concurrent SSE emit so useSSE applies it.
+        expect(row?.attachedJobUpdatedAt).toBeLessThan(watermark)
     })
 
 })

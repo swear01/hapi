@@ -1,5 +1,5 @@
 import * as Popover from '@radix-ui/react-popover'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useAuiState } from '@assistant-ui/react'
 import { CheckIcon, CopyIcon, ForkIcon, InfoIcon, RewindIcon } from '@/components/icons'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
@@ -54,7 +54,7 @@ export function MessageActions({
     showRewind = false,
     historyActionPending = false,
     onFork,
-    onRewind
+    onRewind,
 }: MessageActionsProps) {
     const { copied, copy } = useCopyToClipboard()
     const { t } = useTranslation()
@@ -123,7 +123,6 @@ export function MessageActions({
                 {align === 'start' && hasMetadata && metadata ? <MessageInfoPopover metadata={metadata} /> : null}
                 {align === 'start' ? <DesktopTimestamp /> : null}
             </div>
-
             <ConfirmDialog
                 isOpen={forkOpen}
                 onClose={() => {
@@ -171,6 +170,7 @@ export function MessageActions({
         </>
     )
 }
+
 
 function DesktopTimestamp() {
     return (

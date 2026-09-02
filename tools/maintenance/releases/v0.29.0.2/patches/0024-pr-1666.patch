@@ -1,0 +1,236 @@
+From ea6c69b047dbe7e6124c3a73c0af6b88145cef41 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 18:11:24 +0000
+Subject: [PATCH] carry: upstream PR #1666
+
+---
+ .../ToolMessage.generatedMedia.test.tsx       | 75 ++++++++++++++++++-
+ .../AssistantChat/messages/ToolMessage.tsx    | 40 +++++++---
+ web/src/lib/locales/en.ts                     |  3 +-
+ web/src/lib/locales/zh-CN.ts                  |  3 +-
+ 4 files changed, 105 insertions(+), 16 deletions(-)
+
+diff --git a/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx b/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx
+index d513b2b59..da14f18f4 100644
+--- a/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx
++++ b/web/src/components/AssistantChat/messages/ToolMessage.generatedMedia.test.tsx
+@@ -1,7 +1,7 @@
+ import { describe, expect, it, vi } from 'vitest'
+ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import { HappyChatProvider } from '@/components/AssistantChat/context'
+-import { GeneratedImageCard } from '@/components/AssistantChat/messages/ToolMessage'
++import { computeTinyImageScale, GeneratedImageCard } from '@/components/AssistantChat/messages/ToolMessage'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import type { ApiClient } from '@/api/client'
+ import type { HappyChatContextValue } from '@/components/AssistantChat/context'
+@@ -54,7 +54,7 @@ function renderCard(options: {
+     return { getGeneratedImageBlob }
+ }
+ 
+-describe('GeneratedImageCard video fetch', () => {
++describe('GeneratedImageCard media fetch', () => {
+     it('labels displayed images in English without implying AI generation', () => {
+         renderCard({ mimeType: 'image/png', locale: 'en' })
+ 
+@@ -95,6 +95,77 @@ describe('GeneratedImageCard video fetch', () => {
+         })
+     })
+ 
++    it('keeps tiny image previews sized to their content instead of stretching the frame', async () => {
++        renderCard({ mimeType: 'image/png' })
++
++        const image = await screen.findByRole('img', { name: 'clip.mp4' })
++        const frame = image.parentElement?.parentElement
++        if (!frame) throw new Error('Expected generated image frame')
++        const card = frame.parentElement
++        if (!card) throw new Error('Expected generated image card')
++
++        expect(frame).toHaveClass('w-fit', 'max-w-full')
++        expect(frame).not.toHaveClass('min-h-32', 'min-w-[12rem]')
++        expect(card).toHaveClass('w-fit', 'max-w-[92%]')
++    })
++
++    it('reserves layout space when scaling a skinny tiny image', async () => {
++        expect(computeTinyImageScale(16, 32)).toBe(2)
++
++        class MockImage {
++            naturalWidth = 16
++            naturalHeight = 32
++            onload: (() => void) | null = null
++
++            set src(_value: string) {
++                queueMicrotask(() => this.onload?.())
++            }
++        }
++
++        vi.stubGlobal('Image', MockImage)
++        try {
++            renderCard({ mimeType: 'image/png' })
++            const image = await screen.findByRole('img', { name: 'clip.mp4' })
++
++            await waitFor(() => {
++                expect(image).toHaveStyle({ width: '32px', height: '64px' })
++            })
++            expect(image).not.toHaveStyle({ transform: 'scale(2)' })
++        } finally {
++            vi.unstubAllGlobals()
++        }
++    })
++
++    it('shows a friendly error and retries a failed image load', async () => {
++        const getGeneratedImageBlob = vi.fn()
++            .mockRejectedValueOnce(new Error('HTTP 404'))
++            .mockResolvedValueOnce(new Blob(['x'], { type: 'image/png' }))
++        renderCard({ mimeType: 'image/png', locale: 'en', getGeneratedImageBlob })
++
++        await waitFor(() => {
++            expect(screen.getByText('Displayed image is currently unavailable.')).toBeInTheDocument()
++        })
++        expect(screen.queryByText('HTTP 404')).not.toBeInTheDocument()
++
++        fireEvent.click(screen.getByRole('button', { name: /Displayed image is currently unavailable\. Retry/ }))
++
++        await waitFor(() => {
++            expect(getGeneratedImageBlob).toHaveBeenCalledTimes(2)
++            expect(screen.getByRole('img', { name: 'clip.mp4' })).toBeInTheDocument()
++        })
++    })
++
++    it('localizes the failed image retry state in Simplified Chinese', async () => {
++        const getGeneratedImageBlob = vi.fn().mockRejectedValue(new Error('HTTP 404'))
++        renderCard({ mimeType: 'image/png', locale: 'zh-CN', getGeneratedImageBlob })
++
++        await waitFor(() => {
++            expect(screen.getByText('展示图片暂不可用。')).toBeInTheDocument()
++            expect(screen.getByText('重新加载')).toBeInTheDocument()
++        })
++        expect(screen.queryByText('HTTP 404')).not.toBeInTheDocument()
++    })
++
+     it('loads audio on demand and renders controls', async () => {
+         renderCard({ mimeType: 'audio/wav' })
+ 
+diff --git a/web/src/components/AssistantChat/messages/ToolMessage.tsx b/web/src/components/AssistantChat/messages/ToolMessage.tsx
+index e977fb503..4c4542cd3 100644
+--- a/web/src/components/AssistantChat/messages/ToolMessage.tsx
++++ b/web/src/components/AssistantChat/messages/ToolMessage.tsx
+@@ -68,9 +68,10 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
+     const ctx = useHappyChatContext()
+     const { t } = useTranslation()
+     const [objectUrl, setObjectUrl] = useState<string | null>(null)
+-    const [error, setError] = useState<string | null>(null)
++    const [hasError, setHasError] = useState(false)
+     const [imageStyle, setImageStyle] = useState<CSSProperties | undefined>(undefined)
+     const [loadMedia, setLoadMedia] = useState(false)
++    const [loadRetryCount, setLoadRetryCount] = useState(0)
+     const objectUrlRef = useRef<string | null>(null)
+     const isVideo = isInlineVideoMimeType(props.block.mimeType)
+     const isAudio = isInlineAudioMimeType(props.block.mimeType)
+@@ -103,7 +104,7 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
+         }
+         setObjectUrl(null)
+         setImageStyle(undefined)
+-        setError(null)
++        setHasError(false)
+ 
+         void ctx.api.getGeneratedImageBlob(ctx.sessionId, props.block.imageId)
+             .then((blob) => {
+@@ -120,23 +121,29 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
+                     probe.onload = () => {
+                         if (disposed) return
+                         const scale = computeTinyImageScale(probe.naturalWidth, probe.naturalHeight)
+-                        setImageStyle(scale === 1 ? undefined : { transform: `scale(${scale})` })
++                        setImageStyle(scale === 1 ? undefined : {
++                            // Keep the enlarged preview inside normal layout flow. CSS transforms
++                            // only change painting, so a w-fit card would reserve the tiny source
++                            // dimensions and could overlap adjacent chat content.
++                            width: probe.naturalWidth * scale,
++                            height: probe.naturalHeight * scale,
++                        })
+                     }
+                     probe.src = nextObjectUrl
+                 }
+             })
+-            .catch((err: unknown) => {
++            .catch(() => {
+                 if (disposed) return
+-                setError(err instanceof Error ? err.message : 'Failed to load inline media')
++                setHasError(true)
+             })
+ 
+         return () => {
+             disposed = true
+         }
+-    }, [ctx.api, ctx.sessionId, props.block.imageId, isImage, shouldFetch])
++    }, [ctx.api, ctx.sessionId, props.block.imageId, isImage, shouldFetch, loadRetryCount])
+ 
+     return (
+-        <div className="max-w-[92%] rounded-2xl border border-[var(--app-border)] bg-[var(--app-tool-card-bg)] p-3">
++        <div className="w-fit max-w-[92%] rounded-2xl border border-[var(--app-border)] bg-[var(--app-tool-card-bg)] p-3">
+             <div className="mb-2 min-w-0 truncate text-xs font-medium text-[var(--app-hint)]">
+                 {mediaHeader}
+             </div>
+@@ -167,7 +174,7 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
+                         <span className="min-w-0 truncate">Download {props.block.fileName}</span>
+                     </a>
+                 ) : (
+-                    <div className="flex min-h-32 min-w-[12rem] items-center justify-center rounded-xl bg-[var(--app-subtle-bg)]">
++                    <div className="flex w-fit max-w-full items-center justify-center rounded-xl bg-[var(--app-subtle-bg)]">
+                         <ImagePreview
+                             src={objectUrl}
+                             fileName={props.block.fileName}
+@@ -178,10 +185,19 @@ export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
+                         />
+                     </div>
+                 )
+-            ) : error ? (
+-                <div className="text-sm text-[var(--app-hint)]">
+-                    {t('media.displayed.unavailable', { label: mediaLabel, error })}
+-                </div>
++            ) : hasError ? (
++                <button
++                    type="button"
++                    onClick={() => setLoadRetryCount((count) => count + 1)}
++                    className="flex min-h-32 w-72 max-w-full min-w-[12rem] items-center justify-center rounded-xl border border-[var(--app-border)] bg-[var(--app-subtle-bg)] px-4 text-center text-sm text-[var(--app-hint)] transition-colors hover:text-[var(--app-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
++                >
++                    <span className="flex flex-col gap-1">
++                        <span>{t('media.displayed.unavailable', { label: mediaLabel })}</span>
++                        <span className="text-xs font-medium text-[var(--app-fg)] underline underline-offset-2">
++                            {t('media.displayed.retry')}
++                        </span>
++                    </span>
++                </button>
+             ) : !isImage && !loadMedia ? (
+                 <button
+                     type="button"
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 943c934c9..3a97f7d22 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -555,7 +555,8 @@ export default {
+   'media.displayed.audio': 'Displayed audio',
+   'media.displayed.file': 'Displayed file',
+   'media.displayed.header': '{label}: {fileName}',
+-  'media.displayed.unavailable': '{label} is unavailable. {error}',
++  'media.displayed.unavailable': '{label} is currently unavailable.',
++  'media.displayed.retry': 'Retry',
+ 
+   // Tool card
+   'tool.askQuestion': 'Other',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index fcbc0f889..699c8b945 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -554,7 +554,8 @@ export default {
+   'media.displayed.audio': '展示音频',
+   'media.displayed.file': '展示文件',
+   'media.displayed.header': '{label}：{fileName}',
+-  'media.displayed.unavailable': '{label}不可用：{error}',
++  'media.displayed.unavailable': '{label}暂不可用。',
++  'media.displayed.retry': '重新加载',
+ 
+   // Tool card
+   'tool.askQuestion': '其他',
+-- 
+2.43.0
+

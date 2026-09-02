@@ -49,6 +49,28 @@ describe('StatusBar context details popover', () => {
         expect(thinkingLabel.parentElement?.className.split(' ')).toContain('sm:top-0.5')
     })
 
+    it('shows machine uptime between the connection status and context usage', () => {
+        render(
+            <I18nProvider>
+                <StatusBar
+                    active
+                    thinking={false}
+                    agentState={null}
+                    machineUptimeSeconds={6_540}
+                    contextSize={68_000}
+                    contextWindow={258_000}
+                />
+            </I18nProvider>
+        )
+
+        const onlineLabel = screen.getByText('online')
+        const uptimeLabel = screen.getByText('up 1h 49m')
+        const contextLabel = screen.getByText('26% · 68k / 258k')
+
+        expect(onlineLabel.compareDocumentPosition(uptimeLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        expect(uptimeLabel.compareDocumentPosition(contextLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+
     it('uses an effort-only reasoning label on mobile and the full label on desktop', () => {
         render(
             <I18nProvider>

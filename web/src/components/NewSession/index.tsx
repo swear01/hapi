@@ -1,7 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ApiClient } from '@/api/client'
-import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
-import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
+import type { ClaudeLocalSessionSummary, CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
+import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
+import type { CodexCollaborationMode, CopilotAgentMode, GrokPermissionMode, PermissionMode } from '@hapi/protocol'
 import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
@@ -19,6 +20,7 @@ import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggesti
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
 import { useRecentPaths } from '@/hooks/useRecentPaths'
 import { useTranslation } from '@/lib/use-translation'
+import { loadCreateAgentVisibility } from '@/lib/createAgentVisibility'
 import { getCodexModelReasoningEfforts } from '@/lib/codexModelCapabilities'
 import {
     buildNewSessionCursorModelCatalog,
@@ -38,10 +40,11 @@ import {
     saveNewSessionFormDraft,
     shouldRestoreNewSessionFormDraft
 } from './newSessionFormDraft'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
+import { MODEL_OPTIONS, type AgentType, type LaunchEffort, type CodexReasoningEffort, type NewSessionServiceTier, type SessionType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
 import { CollaborationModeSelector } from './CollaborationModeSelector'
+import { ClaudeImportActions } from './ClaudeImportActions'
 import { CodexImportActions } from './CodexImportActions'
 import { PiImportActions } from './PiImportActions'
 import { clearBatchImportedCodexSelection, resolveCodexImportRedirectSessionId } from './codexImportMerge'
@@ -70,6 +73,7 @@ import { SessionTypeSelector } from './SessionTypeSelector'
 import { PermissionField } from './PermissionField'
 import { usesCodexFamilyPermissionModes } from '@/lib/codexFamilyPermissionAgents'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
+import { ClaudeSessionImportDialog } from '@/components/ClaudeSessionImportDialog'
 import { PiSessionImportDialog } from '@/components/PiSessionImportDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { formatRunnerSpawnError } from '../../utils/formatRunnerSpawnError'
@@ -96,6 +100,7 @@ export function NewSession(props: {
     const { sessions, refetch: refetchSessions } = useSessions(props.api)
     const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
 
+    const [agentVisibility] = useState(loadCreateAgentVisibility)
     const [machineId, setMachineId] = useState<string | null>(props.initialMachineId ?? null)
     const [directory, setDirectory] = useState(props.initialDirectory ?? '')
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
@@ -103,6 +108,10 @@ export function NewSession(props: {
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
     const [legacyCodexYolo] = useState(
         () => loadPreferredAgent() === 'codex' && loadPreferredYoloMode()
+    )
+    const visibleAgents = useMemo<AgentType[]>(
+        () => CREATABLE_AGENT_FLAVORS.filter((candidate) => agentVisibility[candidate]),
+        [agentVisibility]
     )
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
@@ -127,6 +136,15 @@ export function NewSession(props: {
     const [codexImportError, setCodexImportError] = useState<string | null>(null)
     const [isImportingCodexSession, setIsImportingCodexSession] = useState(false)
     const [isCodexImportDialogOpen, setIsCodexImportDialogOpen] = useState(false)
+    const [claudeImportSessions, setClaudeImportSessions] = useState<ClaudeLocalSessionSummary[]>([])
+    const [selectedClaudeImportSessionId, setSelectedClaudeImportSessionId] = useState<string | null>(null)
+    const [claudeImportMachineId, setClaudeImportMachineId] = useState<string | null>(null)
+    const [isLoadingClaudeImportSessions, setIsLoadingClaudeImportSessions] = useState(false)
+    const [claudeImportError, setClaudeImportError] = useState<string | null>(null)
+    const [isImportingClaudeSession, setIsImportingClaudeSession] = useState(false)
+    const [isBulkImportingClaudeSessions, setIsBulkImportingClaudeSessions] = useState(false)
+    const [isClaudeImportDialogOpen, setIsClaudeImportDialogOpen] = useState(false)
+    const claudeLoadGenerationRef = useRef(0)
     const [piImportSessions, setPiImportSessions] = useState<PiLocalSessionSummary[]>([])
     const [selectedPiImportSessionId, setSelectedPiImportSessionId] = useState<string | null>(null)
     const [piImportMachineId, setPiImportMachineId] = useState<string | null>(null)
@@ -151,11 +169,22 @@ export function NewSession(props: {
         || props.isLoading
         || isImportingCodexSession
         || isBulkImportingCodexSessions
+        || isImportingClaudeSession
+        || isBulkImportingClaudeSessions
         || isImportingPiSession
         || isBulkImportingPiSessions
     )
     const worktreeInputRef = useRef<HTMLInputElement>(null)
     const preserveRestoredDraftRef = useRef(false)
+
+    useEffect(() => {
+        if (!visibleAgents.includes(agent) && visibleAgents[0]) {
+            // A hidden agent must not keep restored-draft launch state: the
+            // fallback behaves like a manual agent switch, so normalize.
+            preserveRestoredDraftRef.current = false
+            setAgent(visibleAgents[0])
+        }
+    }, [agent, visibleAgents])
 
     useEffect(() => {
         if (sessionType === 'worktree') {
@@ -194,6 +223,22 @@ export function NewSession(props: {
     }, [agent])
 
     useEffect(() => {
+        if (agent !== 'claude') {
+            setSelectedClaudeImportSessionId(null)
+            setClaudeImportSessions([])
+            setClaudeImportMachineId(null)
+            setClaudeImportError(null)
+        }
+    }, [agent])
+
+    useEffect(() => {
+        setSelectedClaudeImportSessionId(null)
+        setClaudeImportSessions([])
+        setClaudeImportMachineId(null)
+        setClaudeImportError(null)
+    }, [machineId])
+
+    useEffect(() => {
         savePreferredYoloMode(yoloMode)
     }, [yoloMode])
 
@@ -230,31 +275,42 @@ export function NewSession(props: {
             return
         }
         restoredFromBrowseRef.current = true
-        preserveRestoredDraftRef.current = true
-        setAgent(draft.agent)
-        setModel(draft.model)
-        setCursorSelectedBase(draft.cursorSelectedBase)
-        setEffort(draft.effort)
-        setModelReasoningEffort(draft.modelReasoningEffort)
-        setOpencodeSelectedModel(
-            draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
-        )
-        setAgySelectedModel(
-            draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
-        )
-        setServiceTier(draft.serviceTier)
-        setCollaborationMode(draft.collaborationMode)
-        setCopilotAgentMode(draft.copilotAgentMode)
-        setYoloMode(draft.yoloMode)
-        setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
-        setGrokPermissionMode(draft.grokPermissionMode)
-        setSessionType(draft.sessionType)
-        setWorktreeName(draft.worktreeName)
+        if (visibleAgents.includes(draft.agent)) {
+            preserveRestoredDraftRef.current = true
+            setAgent(draft.agent)
+            setModel(draft.model)
+            setCursorSelectedBase(draft.cursorSelectedBase)
+            setEffort(draft.effort)
+            setModelReasoningEffort(draft.modelReasoningEffort)
+            setOpencodeSelectedModel(
+                draft.agent === 'opencode' && draft.model !== 'auto' ? draft.model : null
+            )
+            setAgySelectedModel(
+                draft.agent === 'agy' && draft.model !== 'auto' ? draft.model : null
+            )
+            setServiceTier(draft.serviceTier)
+            setCollaborationMode(draft.collaborationMode)
+            setCopilotAgentMode(draft.copilotAgentMode)
+            setYoloMode(draft.yoloMode)
+            setCodexFamilyPermissionMode(draft.codexFamilyPermissionMode)
+            setGrokPermissionMode(draft.grokPermissionMode)
+            setSessionType(draft.sessionType)
+            setWorktreeName(draft.worktreeName)
+        } else if (visibleAgents[0]) {
+            // The draft agent is hidden in settings: restore only the
+            // agent-agnostic fields and let the normalization effects pick
+            // defaults for the fallback agent (no stale model/permission state).
+            setAgent(visibleAgents[0])
+            setYoloMode(draft.yoloMode)
+            setSessionType(draft.sessionType)
+            setWorktreeName(draft.worktreeName)
+        }
         clearNewSessionFormDraft()
     }, [
         props.initialDirectory,
         props.initialMachineId,
-        machineId
+        machineId,
+        visibleAgents
     ])
 
     useEffect(() => {
@@ -286,8 +342,9 @@ export function NewSession(props: {
     const availableAgents = useMemo(
         () => agentAvailability.agents
             .filter((entry) => entry.available && entry.agent !== 'gemini')
-            .map((entry) => entry.agent as AgentType),
-        [agentAvailability.agents]
+            .map((entry) => entry.agent as AgentType)
+            .filter((candidate) => visibleAgents.includes(candidate)),
+        [agentAvailability.agents, visibleAgents]
     )
     const selectedAgentAvailable = availableAgents.includes(agent)
 
@@ -793,6 +850,10 @@ export function NewSession(props: {
         setCursorSelectedBase(preferred.cursorSelectedBase)
         setEffort(preferred.effort)
         setModelReasoningEffort(preferred.modelReasoningEffort)
+        setServiceTier(preferred.serviceTier ?? 'standard')
+        setCollaborationMode(preferred.collaborationMode ?? 'default')
+        setGrokPermissionMode(preferred.grokPermissionMode ?? 'default')
+        setSessionType(preferred.sessionType ?? 'simple')
         if (usesCodexFamilyPermissionModes(agent)) {
             setCodexFamilyPermissionMode(preferred.permissionMode ?? 'default')
         }
@@ -943,6 +1004,44 @@ export function NewSession(props: {
             setIsLoadingCodexImportSessions(false)
         }
     }, [agent, machineId, props.api, trimmedDirectory, t])
+
+    useEffect(() => {
+        claudeLoadGenerationRef.current += 1
+        setIsLoadingClaudeImportSessions(false)
+    }, [agent, machineId, trimmedDirectory])
+
+    useEffect(() => () => {
+        claudeLoadGenerationRef.current += 1
+    }, [])
+
+    const loadClaudeImportSessions = useCallback(async () => {
+        if (agent !== 'claude' || !machineId) return
+        const generation = ++claudeLoadGenerationRef.current
+        setIsLoadingClaudeImportSessions(true)
+        setClaudeImportError(null)
+        try {
+            const result = await props.api.getClaudeSessions(trimmedDirectory || null, machineId)
+            if (generation !== claudeLoadGenerationRef.current) return
+            if (!result.success) throw new Error(result.error)
+            setClaudeImportSessions(result.sessions)
+            setClaudeImportMachineId(result.machineId ?? machineId)
+            setSelectedClaudeImportSessionId((current) => current && result.sessions.some((session) => session.id === current) ? current : null)
+        } catch (loadError) {
+            if (generation !== claudeLoadGenerationRef.current) return
+            setClaudeImportSessions([])
+            setClaudeImportMachineId(null)
+            setSelectedClaudeImportSessionId(null)
+            setClaudeImportError(loadError instanceof Error ? loadError.message : t('claudeImport.failed.body'))
+        } finally {
+            if (generation === claudeLoadGenerationRef.current) setIsLoadingClaudeImportSessions(false)
+        }
+    }, [agent, machineId, props.api, trimmedDirectory, t])
+
+    const formatClaudeImportError = useCallback((code?: string, message?: string): string => {
+        if (code === 'transcript_diverged') return t('claudeImport.error.diverged')
+        if (code === 'session_active') return t('claudeImport.error.active')
+        return message?.trim() || t('claudeImport.failed.body')
+    }, [t])
 
     useEffect(() => {
         piLoadGenerationRef.current += 1
@@ -1176,6 +1275,66 @@ export function NewSession(props: {
         t
     ])
 
+    const handleBulkImportClaudeSessions = useCallback(async (sessionIds: string[]) => {
+        if (isBulkImportingClaudeSessions || isLoadingClaudeImportSessions) return
+        setIsBulkImportingClaudeSessions(true)
+        try {
+            const result = await props.api.importClaudeSessions({
+                sessionIds,
+                cwd: trimmedDirectory || null,
+                machineId: claudeImportMachineId ?? machineId
+            })
+            const importedCount = result.results.filter((item) => item.hapiSessionId && !item.error).length
+            const failed = result.results.filter((item) => item.error)
+            if (importedCount > 0) {
+                addToast({
+                    title: t('claudeImport.success.title'),
+                    body: t('claudeImport.success.body', { n: importedCount }),
+                    sessionId: '',
+                    url: ''
+                })
+                await refetchSessions()
+                await loadClaudeImportSessions()
+            }
+            if (failed.length > 0) {
+                const first = failed[0]!.error!
+                addToast({
+                    title: t('claudeImport.failed.title'),
+                    body: t('claudeImport.failed.partial', {
+                        failed: failed.length,
+                        reason: formatClaudeImportError(first.code, first.message)
+                    }),
+                    sessionId: '',
+                    url: ''
+                })
+                return
+            }
+            setIsClaudeImportDialogOpen(false)
+            setSelectedClaudeImportSessionId(null)
+        } catch (importError) {
+            addToast({
+                title: t('claudeImport.failed.title'),
+                body: importError instanceof Error ? importError.message : t('claudeImport.failed.body'),
+                sessionId: '',
+                url: ''
+            })
+        } finally {
+            setIsBulkImportingClaudeSessions(false)
+        }
+    }, [
+        addToast,
+        claudeImportMachineId,
+        formatClaudeImportError,
+        isBulkImportingClaudeSessions,
+        isLoadingClaudeImportSessions,
+        loadClaudeImportSessions,
+        machineId,
+        props.api,
+        refetchSessions,
+        t,
+        trimmedDirectory
+    ])
+
     const handleBulkImportPiSessions = useCallback(async (sessionIds: string[]) => {
         if (isBulkImportingPiSessions || isLoadingPiImportSessions) return
         setIsBulkImportingPiSessions(true)
@@ -1240,6 +1399,10 @@ export function NewSession(props: {
         () => codexImportSessions.find((session) => session.id === selectedCodexImportSessionId) ?? null,
         [codexImportSessions, selectedCodexImportSessionId]
     )
+    const selectedClaudeImportSession = useMemo(
+        () => claudeImportSessions.find((session) => session.id === selectedClaudeImportSessionId) ?? null,
+        [claudeImportSessions, selectedClaudeImportSessionId]
+    )
     const selectedPiImportSession = useMemo(
         () => piImportSessions.find((session) => session.id === selectedPiImportSessionId) ?? null,
         [piImportSessions, selectedPiImportSessionId]
@@ -1261,6 +1424,9 @@ export function NewSession(props: {
         setSelectedCodexImportSessionId(null)
         setCodexImportSessions([])
         setCodexImportMachineId(null)
+        setSelectedClaudeImportSessionId(null)
+        setClaudeImportSessions([])
+        setClaudeImportMachineId(null)
         setSelectedPiImportSessionId(null)
         setPiImportSessions([])
         setPiImportMachineId(null)
@@ -1413,7 +1579,14 @@ export function NewSession(props: {
     }, [suggestions, selectedIndex, moveUp, moveDown, clearSuggestions, handleSuggestionSelect])
 
     async function handleCreate() {
-        if (!machineId || !trimmedDirectory || createInFlightRef.current) return
+        if (!machineId || createInFlightRef.current) return
+
+        // When importing a Codex session, prefer that session's recorded workspace cwd.
+        const spawnDirectory = (agent === 'codex' && selectedCodexImportSession?.cwd)
+            ? selectedCodexImportSession.cwd
+            : trimmedDirectory
+
+        if (!spawnDirectory) return
 
         createInFlightRef.current = true
         setIsCreating(true)
@@ -1424,13 +1597,13 @@ export function NewSession(props: {
                 setError(t('newSession.agentUnavailable'))
                 return
             }
-            const existsResult = await checkPathsExists([trimmedDirectory])
-            if (existsResult.outsideWorkspaceRoots?.includes(trimmedDirectory)) {
+            const existsResult = await checkPathsExists([spawnDirectory])
+            if (existsResult.outsideWorkspaceRoots?.includes(spawnDirectory)) {
                 haptic.notification('error')
                 setError(t('newSession.directoryOutsideWorkspaceRoots'))
                 return
             }
-            const directoryExists = existsResult.exists[trimmedDirectory]
+            const directoryExists = existsResult.exists[spawnDirectory]
 
             if (sessionType === 'worktree' && directoryExists === false) {
                 haptic.notification('error')
@@ -1476,6 +1649,10 @@ export function NewSession(props: {
                 cursorSelectedBase,
                 effort,
                 modelReasoningEffort,
+                serviceTier,
+                collaborationMode,
+                grokPermissionMode,
+                sessionType,
                 ...(usesCodexFamilyPermissions ? { permissionMode: codexFamilyPermissionMode } : {})
             }
             const resolvedServiceTier = agent === 'codex' && showCodexFastMode
@@ -1525,6 +1702,34 @@ export function NewSession(props: {
                 return
             }
 
+            if (agent === 'claude' && selectedClaudeImportSession) {
+                setIsImportingClaudeSession(true)
+                const result = await props.api.importClaudeSessions({
+                    sessionIds: [selectedClaudeImportSession.id],
+                    cwd: selectedClaudeImportSession.cwd ?? trimmedDirectory,
+                    machineId: claudeImportMachineId ?? machineId,
+                    model: resolvedModel ?? null,
+                    effort: resolvedEffort ?? null,
+                    permissionMode: yoloMode ? 'bypassPermissions' : 'default'
+                })
+                const imported = result.results.find((item) => item.claudeSessionId === selectedClaudeImportSession.id)
+                if (imported?.error) {
+                    setIsImportingClaudeSession(false)
+                    haptic.notification('error')
+                    setError(formatClaudeImportError(imported.error.code, imported.error.message))
+                    return
+                }
+                if (!imported?.hapiSessionId) throw new Error(result.error || t('claudeImport.failed.body'))
+                const reopened = await props.api.reopenSession(imported.hapiSessionId)
+                haptic.notification('success')
+                savePreferredLaunchSettings(machineId, agent, preferredLaunchSettings)
+                clearNewSessionFormDraft()
+                setLastUsedMachineId(machineId)
+                addRecentPath(machineId, trimmedDirectory)
+                props.onSuccess(reopened.sessionId)
+                return
+            }
+
             if (agent === 'pi' && selectedPiImportSession) {
                 setIsImportingPiSession(true)
                 const result = await props.api.importPiSessions({
@@ -1552,7 +1757,7 @@ export function NewSession(props: {
 
             const result = await spawnSession({
                 machineId,
-                directory: trimmedDirectory,
+                directory: spawnDirectory,
                 agent,
                 model: resolvedModel,
                 effort: resolvedEffort,
@@ -1576,7 +1781,7 @@ export function NewSession(props: {
                 savePreferredLaunchSettings(machineId, agent, preferredLaunchSettings)
                 clearNewSessionFormDraft()
                 setLastUsedMachineId(machineId)
-                addRecentPath(machineId, trimmedDirectory)
+                addRecentPath(machineId, spawnDirectory)
                 props.onSuccess(result.sessionId)
                 return
             }
@@ -1585,6 +1790,7 @@ export function NewSession(props: {
             setError(result.message)
         } catch (e) {
             setIsImportingCodexSession(false)
+            setIsImportingClaudeSession(false)
             setIsImportingPiSession(false)
             haptic.notification('error')
             setError(e instanceof Error ? e.message : 'Failed to create session')
@@ -1630,10 +1836,15 @@ export function NewSession(props: {
     const fastModeSelectionPending = agent === 'codex'
         && serviceTier === 'fast'
         && codexModelsState.isLoading
+    const hasSpawnDirectory = Boolean(
+        (agent === 'codex' && selectedCodexImportSession?.cwd)
+            ? selectedCodexImportSession.cwd
+            : trimmedDirectory
+    )
     const canCreate = Boolean(
-        machineId
-        && trimmedDirectory
-        && !isFormDisabled
+        visibleAgents.includes(agent)
+        && machineId
+        && hasSpawnDirectory        && !isFormDisabled
         && !missingWorktreeDirectory
         && !directoryOutsideWorkspaceRoots
         && !agentAvailability.isLoading
@@ -1706,6 +1917,19 @@ export function NewSession(props: {
                 <div className="px-3 py-2 text-xs text-red-600">
                     {t('newSession.noAvailableAgents')}
                 </div>
+            ) : null}
+            {agent === 'claude' ? (
+                <ClaudeImportActions
+                    selectedSession={selectedClaudeImportSession}
+                    isLoading={isLoadingClaudeImportSessions}
+                    isDisabled={isFormDisabled}
+                    error={claudeImportError}
+                    onChooseHistory={() => {
+                        setIsClaudeImportDialogOpen(true)
+                        void loadClaudeImportSessions()
+                    }}
+                    onClear={() => setSelectedClaudeImportSessionId(null)}
+                />
             ) : null}
             {agent === 'codex' ? (
                 <CodexImportActions
@@ -1808,7 +2032,7 @@ export function NewSession(props: {
                                         ? copilotModelOptions
                                         : agent === 'pi'
                                             ? (showPiLaunchConfig ? piModelOptions : undefined)
-                                    : undefined
+                                            : undefined
                         }
                         isDisabled={
                             isFormDisabled
@@ -1894,6 +2118,27 @@ export function NewSession(props: {
                 createLabel={createLabel}
                 onCancel={props.onCancel}
                 onCreate={handleCreate}
+            />
+            <ClaudeSessionImportDialog
+                isOpen={isClaudeImportDialogOpen}
+                onClose={() => setIsClaudeImportDialogOpen(false)}
+                sessions={claudeImportSessions}
+                currentSessionId={selectedClaudeImportSessionId}
+                currentWorkDirectory={trimmedDirectory}
+                onConfirm={async (sessionIds) => {
+                    if (sessionIds.length === 1) {
+                        const session = claudeImportSessions.find((candidate) => candidate.id === sessionIds[0])
+                        if (session) {
+                            setSelectedClaudeImportSessionId(session.id)
+                            if (session.cwd?.trim()) setDirectory(session.cwd.trim())
+                            setIsClaudeImportDialogOpen(false)
+                        }
+                        return
+                    }
+                    await handleBulkImportClaudeSessions(sessionIds)
+                }}
+                isPending={isBulkImportingClaudeSessions}
+                isLoading={isLoadingClaudeImportSessions}
             />
             <CodexSessionSyncDialog
                 isOpen={isCodexImportDialogOpen}

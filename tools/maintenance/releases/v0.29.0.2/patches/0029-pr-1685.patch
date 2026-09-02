@@ -1,0 +1,428 @@
+From 3d0ebfbf5a22074f22513135651979a10165be73 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 18:21:39 +0000
+Subject: [PATCH] carry: upstream PR #1685
+
+---
+ cli/src/codex/codexLocalLauncher.test.ts      |  3 +
+ cli/src/codex/codexLocalLauncher.ts           |  1 +
+ cli/src/codex/codexRemoteLauncher.test.ts     |  1 +
+ cli/src/codex/codexRemoteLauncher.ts          |  1 +
+ web/src/chat/normalizeAgent.test.ts           | 27 +++++++++
+ web/src/chat/normalizeAgent.ts                |  8 ++-
+ web/src/chat/reducerTimeline.test.ts          | 55 +++++++++++++++++++
+ web/src/chat/reducerTimeline.ts               | 52 ++++++++++++++++++
+ web/src/chat/types.ts                         |  2 +
+ .../messages/MessageMetadata.test.ts          | 16 ++++++
+ .../messages/MessageMetadata.tsx              |  5 +-
+ web/src/lib/assistant-runtime.test.ts         | 19 +++++++
+ web/src/lib/assistant-runtime.ts              | 22 +++++++-
+ 13 files changed, 209 insertions(+), 3 deletions(-)
+
+diff --git a/cli/src/codex/codexLocalLauncher.test.ts b/cli/src/codex/codexLocalLauncher.test.ts
+index e45a69549..4771a318e 100644
+--- a/cli/src/codex/codexLocalLauncher.test.ts
++++ b/cli/src/codex/codexLocalLauncher.test.ts
+@@ -429,6 +429,7 @@ describe('codexLocalLauncher', () => {
+         expect(getModelReasoningEffort()).toBeNull();
+         expect(agentMessages).toContainEqual(expect.objectContaining({
+             type: 'token_count',
++            flavor: 'codex',
+             model: 'gpt-5.4',
+             usageSchema: 'hapi.usage.v1',
+             inputTokenSemantics: 'includes-cache'
+@@ -964,8 +965,10 @@ describe('codexLocalLauncher', () => {
+             usageSchema: 'hapi.usage.v1',
+             inputTokenSemantics: 'includes-cache'
+         });
++        expect(tokenMessages[0]).not.toHaveProperty('flavor');
+         expect(tokenMessages[0]).not.toHaveProperty('thread_id');
+         expect(tokenMessages[1]).toMatchObject({
++            flavor: 'codex',
+             threadId: 'codex-thread-import',
+             thread_id: 'codex-thread-import',
+             hapiUsageScope: 'managed',
+diff --git a/cli/src/codex/codexLocalLauncher.ts b/cli/src/codex/codexLocalLauncher.ts
+index 9cbe8b190..39a2567ad 100644
+--- a/cli/src/codex/codexLocalLauncher.ts
++++ b/cli/src/codex/codexLocalLauncher.ts
+@@ -245,6 +245,7 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
+                     }
+                     : {
+                         ...message,
++                        flavor: 'codex' as const,
+                         model: transcriptModel,
+                         ...(managedThreadId ? { threadId: managedThreadId, thread_id: managedThreadId } : {}),
+                         ...(effectiveScopeRole
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index 9e76c4a28..3da83fffc 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -3274,6 +3274,7 @@ describe('codexRemoteLauncher', () => {
+ 
+         expect(codexMessages).toContainEqual(expect.objectContaining({
+             type: 'token_count',
++            flavor: 'codex',
+             thread_id: 'thread-1',
+             usageSchema: 'hapi.usage.v1',
+             inputTokenSemantics: 'includes-cache',
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index 99621c603..16d303fb5 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -3437,6 +3437,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 session.recordCodexUsage(msg);
+                 session.sendAgentMessage({
+                     ...addCodexEventScope(msg, 'parent', threadId),
++                    flavor: 'codex',
+                     model: asString(msg.model) ?? usageModel,
+                     id: randomUUID()
+                 });
+diff --git a/web/src/chat/normalizeAgent.test.ts b/web/src/chat/normalizeAgent.test.ts
+index b3c83a6d2..55a3a13e3 100644
+--- a/web/src/chat/normalizeAgent.test.ts
++++ b/web/src/chat/normalizeAgent.test.ts
+@@ -253,3 +253,30 @@ describe('normalizeAgentRecord — imported pi compact-summary (codex envelope)'
+         expect((normalized as { content: { tokensBefore?: number } }).content.tokensBefore).toBeUndefined()
+     })
+ })
++
++describe('normalizeAgentRecord — Codex usage provenance', () => {
++    it('preserves the Codex marker and model on token-count events', () => {
++        const normalized = normalizeAgentRecord('codex-token-count', null, 1, {
++            type: 'codex',
++            data: {
++                type: 'token_count',
++                flavor: 'codex',
++                model: 'gpt-5.4',
++                info: {
++                    last_token_usage: { input_tokens: 321, output_tokens: 12 },
++                    model_context_window: 200_000
++                }
++            }
++        })
++
++        expect(normalized).toMatchObject({
++            role: 'event',
++            content: {
++                type: 'token-count',
++                provider: 'codex',
++                model: 'gpt-5.4'
++            },
++            usage: { input_tokens: 321, output_tokens: 12 }
++        })
++    })
++})
+diff --git a/web/src/chat/normalizeAgent.ts b/web/src/chat/normalizeAgent.ts
+index 0db8716c2..3684c2fdc 100644
+--- a/web/src/chat/normalizeAgent.ts
++++ b/web/src/chat/normalizeAgent.ts
+@@ -1148,7 +1148,13 @@ export function normalizeAgentRecord(
+                 role: 'event',
+                 content: {
+                     type: 'token-count',
+-                    info: data.info
++                    info: data.info,
++                    ...(data.flavor === 'codex'
++                        ? {
++                            provider: 'codex' as const,
++                            model: asString(data.model) ?? undefined
++                        }
++                        : {})
+                 },
+                 isSidechain: false,
+                 meta,
+diff --git a/web/src/chat/reducerTimeline.test.ts b/web/src/chat/reducerTimeline.test.ts
+index 3deb1fe0a..6abece566 100644
+--- a/web/src/chat/reducerTimeline.test.ts
++++ b/web/src/chat/reducerTimeline.test.ts
+@@ -203,6 +203,61 @@ describe('reduceTimeline', () => {
+         expect(agentTextBlock.durationMs).toBe(1500)
+     })
+ 
++    it('attaches marked top-level Codex usage as a one-turn Round summary', () => {
++        const assistant = makeAgentMessage('Codex answer', {
++            id: 'codex-answer',
++            model: 'gpt-5.4'
++        })
++        const tokenCount: TracedMessage = {
++            id: 'codex-token-count',
++            localId: null,
++            createdAt: 1_700_000_002_000,
++            role: 'event',
++            content: {
++                type: 'token-count',
++                provider: 'codex',
++                model: 'gpt-5.4',
++                info: {}
++            },
++            usage: { input_tokens: 100, output_tokens: 10 },
++            isSidechain: false
++        } as TracedMessage
++
++        const { blocks } = reduceTimeline([assistant, tokenCount], makeContext())
++        expect(blocks).toMatchObject([{
++            kind: 'agent-text',
++            roundSummary: {
++                usage: { input_tokens: 100, output_tokens: 10 },
++                modelUsage: {
++                    'gpt-5.4': { inputTokens: 100, outputTokens: 10 }
++                },
++                numTurns: 1
++            }
++        }])
++    })
++
++    it('does not derive a Round summary from unmarked token usage', () => {
++        const assistant = makeAgentMessage('Imported Codex answer', {
++            id: 'imported-codex-answer',
++            model: 'gpt-5.4'
++        })
++        const tokenCount: TracedMessage = {
++            id: 'imported-codex-token-count',
++            localId: null,
++            createdAt: 1_700_000_002_000,
++            role: 'event',
++            content: {
++                type: 'token-count',
++                info: {}
++            },
++            usage: { input_tokens: 100, output_tokens: 10 },
++            isSidechain: false
++        } as TracedMessage
++
++        const { blocks } = reduceTimeline([assistant, tokenCount], makeContext())
++        expect(blocks[0]).not.toHaveProperty('roundSummary')
++    })
++
+     it('merges turn-duration event into the last assistant block as fallback', () => {
+         const assistantMsg = makeAgentMessage('Hello')
+         const durationEvent: TracedMessage = {
+diff --git a/web/src/chat/reducerTimeline.ts b/web/src/chat/reducerTimeline.ts
+index 67930c55e..a32ead88d 100644
+--- a/web/src/chat/reducerTimeline.ts
++++ b/web/src/chat/reducerTimeline.ts
+@@ -70,6 +70,26 @@ function mapAgentRunStatusToToolState(status: string | null): ToolCallBlock['too
+     return 'running'
+ }
+ 
++function attachCodexRoundSummaryToLatestGroup(blocks: ChatBlock[], summary: RoundSummary): void {
++    type SummaryTargetBlock = Exclude<ChatBlock, UserTextBlock | AgentEventBlock>
++    const isSummaryTarget = (block: ChatBlock): block is SummaryTargetBlock =>
++        block.kind !== 'user-text'
++        && block.kind !== 'agent-event'
++        && !(block.kind === 'cli-output' && block.source === 'user')
++
++    let firstIndex = -1
++    for (let index = blocks.length - 1; index >= 0; index -= 1) {
++        if (!isSummaryTarget(blocks[index])) break
++        firstIndex = index
++    }
++    if (firstIndex === -1) return
++
++    const firstBlock = blocks[firstIndex]
++    if (isSummaryTarget(firstBlock)) {
++        firstBlock.roundSummary = summary
++    }
++}
++
+ function isTerminalAgentRunState(state: ToolCallBlock['tool']['state']): boolean {
+     return state === 'completed' || state === 'error'
+ }
+@@ -476,6 +496,38 @@ export function reduceTimeline(
+                 continue
+             }
+             if (msg.content.type === 'token-count') {
++                const tokenCount = msg.content as {
++                    type: 'token-count'
++                    provider?: 'codex'
++                    model?: string | null
++                }
++                if (
++                    tokenCount.provider === 'codex'
++                    && msg.usage
++                    && msg.usage.scope_role !== 'child'
++                ) {
++                    const model = tokenCount.model ?? undefined
++                    const displayUsage = model
++                        ? msg.usage
++                        : {
++                            ...msg.usage,
++                            cache_creation_input_tokens: undefined,
++                            cache_read_input_tokens: undefined
++                        }
++                    attachCodexRoundSummaryToLatestGroup(blocks, {
++                        provider: 'codex',
++                        usage: displayUsage,
++                        modelUsage: model
++                            ? {
++                                [model]: {
++                                    inputTokens: msg.usage.input_tokens,
++                                    outputTokens: msg.usage.output_tokens
++                                }
++                            }
++                            : {},
++                        numTurns: 1
++                    })
++                }
+                 continue
+             }
+             // abort-restore is a side-effect signal for the web composer,
+diff --git a/web/src/chat/types.ts b/web/src/chat/types.ts
+index 04950e02d..38f2ae7d1 100644
+--- a/web/src/chat/types.ts
++++ b/web/src/chat/types.ts
+@@ -22,6 +22,7 @@ export type RoundModelUsage = {
+ }
+ 
+ export type RoundSummary = {
++    provider?: 'codex'
+     usage?: UsageData
+     modelUsage: Record<string, RoundModelUsage>
+     totalCostUsd?: number
+@@ -40,6 +41,7 @@ export type AgentEvent =
+     | { type: 'api-error'; retryAttempt: number; maxRetries: number; error: unknown }
+     | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
+     | { type: 'turn-summary'; summary: RoundSummary }
++    | { type: 'token-count'; info: unknown; provider?: 'codex'; model?: string | null }
+     | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
+     | { type: 'compact'; trigger: string; preTokens: number }
+     // Structured result of Pi's compact RPC; rendered as a dedicated chat block.
+diff --git a/web/src/components/AssistantChat/messages/MessageMetadata.test.ts b/web/src/components/AssistantChat/messages/MessageMetadata.test.ts
+index a5f8f603d..ce5881a79 100644
+--- a/web/src/components/AssistantChat/messages/MessageMetadata.test.ts
++++ b/web/src/components/AssistantChat/messages/MessageMetadata.test.ts
+@@ -149,6 +149,22 @@ describe('buildMessageMetadataLabels', () => {
+         ])
+     })
+ 
++    it('labels a top-level Codex turn with Round', () => {
++        expect(buildMessageMetadataLabels({
++            roundSummary: {
++                provider: 'codex',
++                modelUsage: {
++                    'gpt-5.4': { inputTokens: 100, outputTokens: 10 }
++                },
++                numTurns: 1
++            }
++        })).toEqual([
++            'Model: gpt-5.4',
++            'Tokens: 110 (100 in · 10 out)',
++            'Round: 1 turn'
++        ])
++    })
++
+     it('keeps the existing formatter byte-identical when no result summary is present', () => {
+         expect(buildMessageMetadataLabels({
+             durationMs: 1234,
+diff --git a/web/src/components/AssistantChat/messages/MessageMetadata.tsx b/web/src/components/AssistantChat/messages/MessageMetadata.tsx
+index abb22a545..eff84516a 100644
+--- a/web/src/components/AssistantChat/messages/MessageMetadata.tsx
++++ b/web/src/components/AssistantChat/messages/MessageMetadata.tsx
+@@ -70,7 +70,10 @@ function buildRoundSummaryLabels(summary: RoundSummary, fallbackModel?: string |
+ 
+     const round: string[] = []
+     if (summary.durationMs !== undefined && summary.durationMs >= 0) round.push(`${(summary.durationMs / 1000).toFixed(1)}s`)
+-    if (summary.numTurns !== undefined && summary.numTurns > 0) round.push(`${summary.numTurns} internal turn${summary.numTurns === 1 ? '' : 's'}`)
++    if (summary.numTurns !== undefined && summary.numTurns > 0) {
++        const turnLabel = summary.provider === 'codex' ? 'turn' : 'internal turn'
++        round.push(`${summary.numTurns} ${turnLabel}${summary.numTurns === 1 ? '' : 's'}`)
++    }
+     if (round.length > 0) parts.push(`Round: ${round.join(' · ')}`)
+     return parts
+ }
+diff --git a/web/src/lib/assistant-runtime.test.ts b/web/src/lib/assistant-runtime.test.ts
+index 55b86c014..c997dbea6 100644
+--- a/web/src/lib/assistant-runtime.test.ts
++++ b/web/src/lib/assistant-runtime.test.ts
+@@ -824,6 +824,25 @@ describe('aggregateResponseGroups', () => {
+         expect(aggregateResponseGroups([userText('u2'), groupedTurn, tool]).get('grouped')?.roundSummary).toEqual(summary)
+     })
+ 
++    it('derives Codex Round duration from invocation to response completion', () => {
++        const summary = {
++            provider: 'codex' as const,
++            modelUsage: {
++                'gpt-5.4': { inputTokens: 100, outputTokens: 10 }
++            },
++            numTurns: 1
++        }
++        const blocks: VisibleChatBlock[] = [
++            userText('u1', { invokedAt: 1_000 }),
++            Object.assign(agentText('codex-answer', { createdAt: 2_800 }), { roundSummary: summary })
++        ]
++
++        expect(aggregateResponseGroups(blocks).get('codex-answer')?.roundSummary).toEqual({
++            ...summary,
++            durationMs: 1_800
++        })
++    })
++
+     it('preserves a tool-only result summary through tool-call to tool-group conversion', () => {
+         const summary = {
+             usage: { input_tokens: 100, output_tokens: 20 },
+diff --git a/web/src/lib/assistant-runtime.ts b/web/src/lib/assistant-runtime.ts
+index d20900d95..f95f11056 100644
+--- a/web/src/lib/assistant-runtime.ts
++++ b/web/src/lib/assistant-runtime.ts
+@@ -260,8 +260,21 @@ export function aggregateResponseGroups(
+     let groupUsage: UsageData | undefined
+     let groupTurnCount = 0
+     let groupRoundSummary: RoundSummary | undefined
++    let groupStartedAt: number | null = null
++    let groupCompletedAt: number | null = null
++    let latestUserInvokedAt: number | null = null
+ 
+     const flush = () => {
++        const roundSummary = groupRoundSummary
++            && groupRoundSummary.provider === 'codex'
++            && groupRoundSummary.durationMs === undefined
++            && groupStartedAt !== null
++            && groupCompletedAt !== null
++            ? {
++                ...groupRoundSummary,
++                durationMs: Math.max(0, groupCompletedAt - groupStartedAt)
++            }
++            : groupRoundSummary
+         if (groupFirstBlockId !== null && (groupTurnCount >= 2 || groupRoundSummary)) {
+             const joinedModel = seenModels.length > 0 ? seenModels.join(', ') : null
+             aggregates.set(groupFirstBlockId, {
+@@ -270,7 +283,7 @@ export function aggregateResponseGroups(
+                 invokedAt: groupInvokedAt,
+                 durationMs: undefined,
+                 turnCount: groupTurnCount,
+-                roundSummary: groupRoundSummary
++                roundSummary
+             })
+         }
+         groupFirstBlockId = null
+@@ -280,6 +293,8 @@ export function aggregateResponseGroups(
+         groupUsage = undefined
+         groupTurnCount = 0
+         groupRoundSummary = undefined
++        groupStartedAt = null
++        groupCompletedAt = null
+     }
+ 
+     for (const block of blocks) {
+@@ -287,12 +302,17 @@ export function aggregateResponseGroups(
+         if (role !== 'assistant') {
+             // Boundary: close the open group, if any.
+             flush()
++            if (block.kind === 'user-text') {
++                latestUserInvokedAt = block.invokedAt ?? null
++            }
+             continue
+         }
+ 
+         if (groupFirstBlockId === null) {
+             groupFirstBlockId = block.id
++            groupStartedAt = latestUserInvokedAt
+         }
++        groupCompletedAt = Math.max(groupCompletedAt ?? 0, getBlockPresentationTimestamp(block))
+ 
+         const roundSummary = block.kind === 'tool-group'
+             ? block.roundSummary
+-- 
+2.43.0
+

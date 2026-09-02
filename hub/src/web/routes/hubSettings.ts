@@ -1,31 +1,31 @@
 import { Hono } from 'hono'
 import { UpdateHubSettingsRequestSchema, type HubSettingsResponse } from '@hapi/protocol'
 import {
-    getSettingsFile,
-    readSettingsOrThrow,
-    updateSettings,
-    type Settings
-} from '../../config/settings'
+    readSessionSummaryContractEnabled,
+    writeSessionSummaryContractEnabled
+} from '../../config/sessionSummaryContract'
+import {
+    readSessionSummaryInChatEnabled,
+    writeSessionSummaryInChatEnabled
+} from '../../config/sessionSummaryInChat'
 import type { WebAppEnv } from '../middleware/auth'
 
 const OWNER_ONLY_ERROR = 'Hub settings are only available to the hub owner'
 
-function toHubSettings(settings: Settings): HubSettingsResponse {
-    return {
-        sessionSummaryContract: settings.sessionSummaryContract === true,
-        sessionSummaryInChat: settings.sessionSummaryInChat === true
-    }
+async function readHubSettings(dataDir: string): Promise<HubSettingsResponse> {
+    const [sessionSummaryContract, sessionSummaryInChat] = await Promise.all([
+        readSessionSummaryContractEnabled(dataDir),
+        readSessionSummaryInChatEnabled(dataDir)
+    ])
+    return { sessionSummaryContract, sessionSummaryInChat }
 }
 
 export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
-    // Authenticated readers (any namespace) can observe hub-wide display/emit
-    // flags. Mutations stay owner-only below.
     app.get('/hub-settings', async (c) => {
         c.header('Cache-Control', 'no-store')
-        const settings = await readSettingsOrThrow(getSettingsFile(dataDir))
-        return c.json(toHubSettings(settings))
+        return c.json(await readHubSettings(dataDir))
     })
 
     app.put('/hub-settings', async (c) => {
@@ -37,21 +37,27 @@ export function createHubSettingsRoutes(dataDir: string): Hono<WebAppEnv> {
         if (!parsed.success) {
             return c.json({ error: 'Invalid body' }, 400)
         }
-        const response = await updateSettings(getSettingsFile(dataDir), (current) => {
-            const settings: Settings = { ...current }
-            if (parsed.data.sessionSummaryContract !== undefined) {
-                settings.sessionSummaryContract = parsed.data.sessionSummaryContract
-            }
-            if (parsed.data.sessionSummaryInChat !== undefined) {
-                settings.sessionSummaryInChat = parsed.data.sessionSummaryInChat
-            }
-            return {
-                settings,
-                result: toHubSettings(settings)
-            }
-        })
+        const providedFieldCount = [
+            parsed.data.sessionSummaryContract,
+            parsed.data.sessionSummaryInChat
+        ].filter((value) => value !== undefined).length
+        if (providedFieldCount > 1) {
+            return c.json({ error: 'Update one hub setting per request' }, 400)
+        }
+        if (parsed.data.sessionSummaryContract !== undefined) {
+            await writeSessionSummaryContractEnabled(
+                dataDir,
+                parsed.data.sessionSummaryContract
+            )
+        }
+        if (parsed.data.sessionSummaryInChat !== undefined) {
+            await writeSessionSummaryInChatEnabled(
+                dataDir,
+                parsed.data.sessionSummaryInChat
+            )
+        }
         c.header('Cache-Control', 'no-store')
-        return c.json(response)
+        return c.json(await readHubSettings(dataDir))
     })
 
     return app

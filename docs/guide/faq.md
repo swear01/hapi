@@ -72,11 +72,13 @@ Yes. Telegram is optional. You can use the web app directly in any browser or in
 
 ### How do I receive notifications?
 
-HAPI supports three methods:
+HAPI supports several methods:
 
 1. **PWA Push Notifications** - Enable when prompted, works even when app is closed
 2. **Telegram Bot** - See [Telegram Setup](./notifications.md#telegram-setup)
 3. **FCM native push** - Used by the Android/Wear OS companion apps; notifications are delivered via Firebase Cloud Messaging
+4. **Server酱 (ServerChan)** - See [ServerChan Setup](./notifications.md#serverchan-server酱-setup)
+5. **Generic webhook** - POST HAPI's JSON to a relay you control; see [Webhook setup](./notifications.md#webhook-setup)
 
 ### Can I start sessions remotely?
 
@@ -100,6 +102,10 @@ Yes. Open any session and use the chat interface to send messages directly to th
 ### Why did my session look idle when the agent woke itself?
 
 Some agents (especially Cursor) can resume after idle from harness signals such as background Shell `notify_on_output` or `/loop`, without you sending a new HAPI message. HAPI treats real ACP agent activity (and permission requests) as thinking again so the session list matches the agent - same keepalive path as a normal turn. This is different from session-attached jobs (`hapi job`), which show progress while the agent stays idle on purpose.
+
+### How do I show progress for a long batch that outlives the agent?
+
+Use session-attached jobs (`hapi job`). The agent (or a wrapper script) registers a job on the session, heartbeats while the process runs, and clears it when done. The session list shows remaining / fraction / or an indeterminate "running" meter even when the agent is idle. See [Session-attached jobs](./session-jobs.md). This is Layer 0 list chrome - not an A2A Layer 1 work advertisement ([#1332](https://github.com/tiann/hapi/discussions/1332)).
 
 ### Can I access a terminal remotely?
 

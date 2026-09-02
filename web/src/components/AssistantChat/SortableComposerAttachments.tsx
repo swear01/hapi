@@ -32,6 +32,7 @@ type SortableComposerAttachmentProps = {
     onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>, id: string) => void
     onContextMenu: (event: ReactMouseEvent<Element>, id: string) => void
     onClick: (event: ReactMouseEvent<Element>, id: string) => void
+    onRemove?: () => void
 }
 
 type AttachmentDropTarget = {
@@ -64,6 +65,7 @@ function SortableComposerAttachment(props: SortableComposerAttachmentProps) {
         onKeyDown,
         onContextMenu,
         onClick,
+        onRemove,
     } = props
     const handlePointerDown = useCallback(
         (event: ReactPointerEvent<HTMLButtonElement>) => onPointerDown(event, attachment.id, false),
@@ -100,8 +102,8 @@ function SortableComposerAttachment(props: SortableComposerAttachmentProps) {
         [attachment.name, disabled, handleKeyDown, handlePointerDown],
     )
     const AttachmentWithHandle = useCallback(
-        () => <AttachmentItem dragHandleProps={dragHandleProps} />,
-        [dragHandleProps],
+        () => <AttachmentItem dragHandleProps={dragHandleProps} onRemove={onRemove} />,
+        [dragHandleProps, onRemove],
     )
 
     return (
@@ -123,8 +125,9 @@ export function SortableComposerAttachments(props: {
     orderedAttachmentIds: readonly string[]
     disabled?: boolean
     onReorder: (activeId: string, targetId: string, position: AttachmentDropPosition) => void
+    onRemove?: () => void
 }) {
-    const { attachments, orderedAttachmentIds, onReorder, disabled = false } = props
+    const { attachments, orderedAttachmentIds, onReorder, onRemove, disabled = false } = props
     const [draggingId, setDraggingId] = useState<string | null>(null)
     const dragRef = useRef<DragState | null>(null)
     const suppressClickIdRef = useRef<string | null>(null)
@@ -267,6 +270,7 @@ export function SortableComposerAttachments(props: {
                         onKeyDown={handleKeyDown}
                         onContextMenu={handleContextMenu}
                         onClick={handleClick}
+                        onRemove={onRemove}
                     />
                 )
             })}

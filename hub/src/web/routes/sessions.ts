@@ -1,4 +1,7 @@
 import {
+    AcknowledgeModelErrorRequestSchema,
+    AttachedJobPatchSchema,
+    AttachedJobUpsertSchema,
     CursorMigrateToAcpRequestSchema,
     DeleteUploadRequestSchema,
     ForkConversationRequestSchema,
@@ -26,6 +29,7 @@ import {
 } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
+import { DeleteArchivedSessionsRequestSchema } from '@hapi/protocol/schemas'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
@@ -115,13 +119,30 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             sessionRecords = sessionRecords.slice(0, limit)
         }
         const scheduledCounts = engine.getFutureScheduledMessageCounts(sessionRecords.map((session) => session.id))
+        const uninvokedScheduledCounts = engine.getUninvokedScheduledMessageCounts(sessionRecords.map((session) => session.id))
         const nextScheduledAt = engine.getNextScheduledAtBySessionIds(sessionRecords.map((session) => session.id))
+        // Watermark BEFORE reading jobs. If a mutation lands between read and
+        // allocate, SSE gets version V with the new value while this response
+        // would return the older value labeled V+1 — useSSE then rejects the
+        // real patch as stale. Allocate first so concurrent emits always win.
+        const sessionIds = sessionRecords.map((session) => session.id)
+        const attachedJobVersions = new Map(
+            sessionIds.map((id) => [id, engine.allocateAttachedJobVersion(id)])
+        )
+        const attachedJobs = engine.getPrimaryAttachedJobsBySessionIds(sessionIds)
+        const scratchlistUpdatedAt = engine.getScratchlistUpdatedAtBySessionIds(sessionIds)
         const sessions = sessionRecords.map((session) => {
-            const summary = toSessionSummary(session)
+            const summary = toSessionSummary(session, {
+                attachedJob: attachedJobs.get(session.id) ?? null,
+                // Same allocator as SSE emits — equal-ms terminal patches stay applyable.
+                attachedJobUpdatedAt: attachedJobVersions.get(session.id) ?? 0
+            })
             return {
                 ...summary,
                 futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
-                nextScheduledAt: nextScheduledAt.get(session.id) ?? null
+                uninvokedScheduledMessageCount: uninvokedScheduledCounts.get(session.id) ?? 0,
+                nextScheduledAt: nextScheduledAt.get(session.id) ?? null,
+                scratchlistUpdatedAt: scratchlistUpdatedAt.get(session.id)
             }
         })
 
@@ -424,6 +445,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (result.type === 'error') {
             return c.json({
                 error: result.message,
+                code: result.code,
                 hydrateFailed: result.hydrateFailed === true
             }, result.hydrateFailed ? 500 : 409)
         }
@@ -458,6 +480,39 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         await engine.archiveSession(sessionResult.sessionId)
         return c.json({ ok: true })
+    })
+
+    app.post('/sessions/:id/model-error/acknowledge', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = AcknowledgeModelErrorRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+
+        try {
+            await engine.acknowledgeModelError(sessionResult.sessionId, parsed.data.eventId)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to acknowledge model error'
+            if (
+                message.includes('concurrently')
+                || message.includes('version')
+                || message.includes('changed')
+            ) {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
     })
 
     app.post('/sessions/:id/migrate-to-acp', async (c) => {
@@ -826,7 +881,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ title })
         } catch (error) {
             if (error instanceof TitleSuggestionError) {
-                return c.json({ error: error.message }, error.status)
+                return c.json({ error: error.message, code: error.code }, error.status)
             }
             return c.json({ error: 'Failed to generate a session title' }, 502)
         }
@@ -850,7 +905,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         try {
-            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text)
+            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text, {
+                clearName: parsed.data.clearName
+            })
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to update session summary'
@@ -878,6 +935,30 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         return c.json({ ok: true })
     })
 
+    app.post('/sessions/delete-archived', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = DeleteArchivedSessionsRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body' }, 400)
+        }
+
+        try {
+            await engine.deleteArchivedSessions(parsed.data.sessionIds, c.get('namespace'))
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'
+            if (message === 'Sessions are no longer archived') {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
+    })
+
     app.delete('/sessions/:id', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
@@ -892,14 +973,27 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (sessionResult.session.active) {
             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
         }
+        if (engine.getPrimaryAttachedJob(sessionResult.sessionId)?.status === 'running') {
+            return c.json({ error: 'Cannot delete a session while an attached job is running.' }, 409)
+        }
+
+        // Bulk group-delete guard (#881): the web UI only enables "Delete
+        // Group" when every session in the group is archived, but the server
+        // re-checks so a stale client or a race cannot delete a session whose
+        // lifecycle state is no longer 'archived' (e.g. completed/imported
+        // stubs that are inactive but never formally archived).
+        if (c.req.query('requireArchived') === '1'
+            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
+            return c.json({ error: 'Session is no longer archived' }, 409)
+        }
 
         try {
             await engine.deleteSession(sessionResult.sessionId)
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to delete session'
-            // Map "active session" error to 409 conflict (race condition: session became active)
-            if (message.includes('active')) {
+            // Map lifecycle conflicts to 409 (active race, or running attached job)
+            if (message.includes('active') || message.includes('attached job')) {
                 return c.json({ error: message }, 409)
             }
             return c.json({ error: message }, 500)
@@ -1246,6 +1340,175 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         return c.json({ ok: true })
     })
 
+    // tiann/hapi#1404 — session-attached long-running jobs (works while agent idle).
+    const JOB_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+    function resolveJobOwnerSession(
+        c: Context<WebAppEnv>,
+        engine: SyncEngine
+    ): { requestedSessionId: string; sessionId: string; session: Session } | Response {
+        const rawId = c.req.param('id') ?? ''
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            // Session may already be deleted after merge — still try acceptor redirect.
+            const namespace = c.get('namespace')
+            const redirected = engine.resolveAttachedJobSessionId(rawId, namespace)
+            if (redirected !== rawId) {
+                const access = engine.resolveSessionAccess(redirected, namespace)
+                if (access.ok) {
+                    return {
+                        requestedSessionId: rawId,
+                        sessionId: access.sessionId,
+                        session: access.session,
+                    }
+                }
+            }
+            return sessionResult
+        }
+        const namespace = c.get('namespace')
+        const ownerId = engine.resolveAttachedJobSessionId(sessionResult.sessionId, namespace)
+        if (ownerId === sessionResult.sessionId) {
+            return {
+                requestedSessionId: sessionResult.sessionId,
+                sessionId: sessionResult.sessionId,
+                session: sessionResult.session,
+            }
+        }
+        const access = engine.resolveSessionAccess(ownerId, namespace)
+        if (!access.ok) {
+            return {
+                requestedSessionId: sessionResult.sessionId,
+                sessionId: sessionResult.sessionId,
+                session: sessionResult.session,
+            }
+        }
+        return {
+            requestedSessionId: sessionResult.sessionId,
+            sessionId: access.sessionId,
+            session: access.session,
+        }
+    }
+
+    function resolveJobKey(
+        c: Context<WebAppEnv>,
+        engine: SyncEngine,
+        owner: { requestedSessionId: string; sessionId: string },
+        jobKey: string
+    ): string {
+        return engine.resolveAttachedJobKey(
+            owner.requestedSessionId,
+            owner.sessionId,
+            jobKey,
+            c.get('namespace')
+        )
+    }
+
+    app.get('/sessions/:id/jobs', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        return c.json({
+            jobs: engine.listSessionJobs(sessionResult.sessionId),
+            primary: engine.getPrimaryAttachedJob(sessionResult.sessionId)
+        })
+    })
+
+    app.put('/sessions/:id/jobs/:jobKey', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const rawJobKey = c.req.param('jobKey')
+        if (!rawJobKey || !JOB_KEY_RE.test(rawJobKey)) {
+            return c.json({ error: 'Invalid jobKey (1-128 chars: alnum, . _ -)' }, 400)
+        }
+        const jobKey = resolveJobKey(c, engine, sessionResult, rawJobKey)
+        const body = await c.req.json().catch(() => null)
+        const parsed = AttachedJobUpsertSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+        const result = engine.upsertSessionJob(sessionResult.sessionId, jobKey, parsed.data)
+        if (result.outcome === 'session-not-found') {
+            return c.json({ error: 'Session not found' }, 404)
+        }
+        return c.json({ job: result.job })
+    })
+
+    app.patch('/sessions/:id/jobs/:jobKey', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const rawJobKey = c.req.param('jobKey')
+        if (!rawJobKey || !JOB_KEY_RE.test(rawJobKey)) {
+            return c.json({ error: 'Invalid jobKey (1-128 chars: alnum, . _ -)' }, 400)
+        }
+        const jobKey = resolveJobKey(c, engine, sessionResult, rawJobKey)
+        const body = await c.req.json().catch(() => null)
+        const parsed = AttachedJobPatchSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+        const result = engine.patchSessionJob(sessionResult.sessionId, jobKey, parsed.data)
+        if (result.outcome === 'not-found') {
+            return c.json({ error: 'Job not found' }, 404)
+        }
+        if (result.outcome === 'run-mismatch') {
+            return c.json({
+                error: 'Job run mismatch: expectedRunId does not match the current run (key was reused).'
+            }, 409)
+        }
+        return c.json({ job: result.job })
+    })
+
+    app.delete('/sessions/:id/jobs/:jobKey', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+        const sessionResult = resolveJobOwnerSession(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const rawJobKey = c.req.param('jobKey')
+        if (!rawJobKey || !JOB_KEY_RE.test(rawJobKey)) {
+            return c.json({ error: 'Invalid jobKey (1-128 chars: alnum, . _ -)' }, 400)
+        }
+        const jobKey = resolveJobKey(c, engine, sessionResult, rawJobKey)
+        const expectedRunIdRaw = c.req.query('expectedRunId')
+        const expectedRunId = expectedRunIdRaw && expectedRunIdRaw.trim()
+            ? expectedRunIdRaw.trim()
+            : undefined
+        const result = engine.deleteSessionJob(
+            sessionResult.sessionId,
+            jobKey,
+            expectedRunId
+        )
+        if (result.outcome === 'not-found') {
+            return c.json({ error: 'Job not found' }, 404)
+        }
+        if (result.outcome === 'run-mismatch') {
+            return c.json({
+                error: 'Job run mismatch: expectedRunId does not match the current run (key was reused).'
+            }, 409)
+        }
+        return c.json({ ok: true })
+    })
+
     app.get('/sessions/:id/slash-commands', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
@@ -1403,6 +1666,31 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list OpenCode reasoning effort options'
+            }, 500)
+        }
+    })
+
+    app.get('/sessions/:id/reasoning-effort-options', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+
+        const flavor = sessionResult.session.metadata?.flavor
+        if (flavor !== 'copilot' && flavor !== 'kimi') {
+            return c.json({
+                success: false,
+                error: 'Session reasoning effort options are only available for Copilot and Kimi sessions'
+            }, 400)
+        }
+
+        try {
+            return c.json(await engine.listSessionReasoningEffortOptionsForSession(sessionResult.sessionId))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list session reasoning effort options'
             }, 500)
         }
     })

@@ -2,7 +2,24 @@ export type {
     AgentState,
     AgentStateCompletedRequest,
     AgentStateRequest,
+    AttachedJob,
+    AttachedJobPatch,
+    AttachedJobStatus,
+    AttachedJobUpsert,
     AttachmentMetadata,
+    CodexTokenUsage,
+    CodexUsage,
+    CodexUsageCredits,
+    CodexUsageRateLimit,
+} from './schemas'
+export type {
+    AgentBudgetAxis,
+    AgentBudgetAxisId,
+    AgentBudgetEffectiveState,
+    AgentBudgetMetadataRow,
+    AgentBudgetState
+} from './agentBudget'
+export type {
     DecryptedMessage,
     Metadata,
     Machine,
