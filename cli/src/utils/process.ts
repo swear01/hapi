@@ -37,10 +37,10 @@ export function getProcessStartMarker(pid: number): string | null {
     const match = (result.stdout?.toString() ?? '').match(/CreationDate=([^\r\n]+)/);
     return match?.[1]?.trim() || null;
   }
-    const result = spawn.sync('ps', ['-p', String(pid), '-o', 'lstart='], {
-        stdio: 'pipe',
-        env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
-        timeout: PROCESS_PROBE_TIMEOUT_MS
+  const result = spawn.sync('ps', ['-p', String(pid), '-o', 'lstart='], {
+    stdio: 'pipe',
+    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+    timeout: PROCESS_PROBE_TIMEOUT_MS
   });
   if (result.error || result.status !== 0) return null;
   return result.stdout?.toString().trim() || null;

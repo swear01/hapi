@@ -665,7 +665,7 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
         if (generatedMediaAction) {
             const media = generatedMediaAction.closest<HTMLElement>('[data-hapi-generated-media-id]')
             const imageId = media?.dataset.hapiGeneratedMediaId
-            if (!imageId || !props.getGeneratedMediaBlob) return
+            if (!media || !imageId || !props.getGeneratedMediaBlob) return
 
             // Once the preview has created a real object URL, let the browser
             // handle the native download on the next click.
