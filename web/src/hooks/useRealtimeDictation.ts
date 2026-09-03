@@ -113,6 +113,8 @@ export function useRealtimeDictation(config: {
                         initialText: pendingSend.initialText,
                         failedText: finalMessage,
                         draftAtStart: recoveryDraftAtStart,
+                        sourceSessionId: pendingSend.sessionId,
+                        sourceDraftAtStart: pendingSend.draftAtStart,
                     })
                     if (resumed) {
                         pendingSend.options.onSessionResolved?.(recoverySessionId)

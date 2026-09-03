@@ -147,7 +147,7 @@ describe('useRealtimeDictation', () => {
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
     })
 
-    it('does not overwrite a newer resumed-session draft when a post-resume send fails', async () => {
+    it('preserves source and target follow-up drafts when a post-resume send fails after unmount', async () => {
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
             value: { getUserMedia: vi.fn() }
@@ -162,7 +162,7 @@ describe('useRealtimeDictation', () => {
         const onSessionResolved = vi.fn()
         clearDraft('session-A')
         clearDraft('session-A-resumed')
-        const { result } = renderHook(() => useRealtimeDictation({
+        const { result, unmount } = renderHook(() => useRealtimeDictation({
             api,
             provider: 'elevenlabs',
             mode: 'realtime',
@@ -179,17 +179,21 @@ describe('useRealtimeDictation', () => {
             onSessionResolved
         }))
         // The send is now in flight against the resumed session; the operator
-        // types a newer draft there before it rejects.
+        // types follow-ups, then leaves the source composer before it rejects.
         await act(async () => {
             await waitFor(() => expect(sendMessage).toHaveBeenCalled())
         })
-        act(() => { saveDraft('session-A-resumed', 'newer draft typed by user') })
+        act(() => {
+            saveDraft('session-A-resumed', 'newer resumed draft')
+            saveDraft('session-A', 'source follow-up')
+        })
+        unmount()
         await act(async () => { rejectSend?.(new Error('network down')) })
         await act(async () => {
-            await waitFor(() => expect(getDraft('session-A-resumed')).toBe('newer draft typed by user explicit initial text spoken words'))
+            await waitFor(() => expect(getDraft('session-A-resumed')).toBe('newer resumed draft source follow-up explicit initial text spoken words'))
         })
 
-        // Both the newer draft and the failed voice message survive.
+        // Both follow-ups and the failed voice message survive under the live id.
         expect(getDraft('session-A')).toBe('')
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
     })
