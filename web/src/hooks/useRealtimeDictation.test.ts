@@ -70,7 +70,7 @@ describe('useRealtimeDictation', () => {
         expect(onFinalTranscript).toHaveBeenCalledWith('spoken words')
     })
 
-    it('resumes an inactive session before a stopAndSend commit and notifies the resolved session', async () => {
+    it('resumes an inactive session, preserves its follow-up draft, and notifies the resolved session', async () => {
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
             value: { getUserMedia: vi.fn() }
@@ -78,10 +78,13 @@ describe('useRealtimeDictation', () => {
         const api = {
             fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
         } as unknown as ApiClient
-        const sendMessage = vi.fn(async () => {})
+        let resolveSend: (() => void) | null = null
+        const sendMessage = vi.fn(() => new Promise<void>((resolve) => { resolveSend = resolve }))
         const onFinalTranscript = vi.fn()
         const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
         const onSessionResolved = vi.fn()
+        clearDraft('session-A')
+        clearDraft('session-A-resumed')
         const { result } = renderHook(() => useRealtimeDictation({
             api,
             provider: 'elevenlabs',
@@ -100,12 +103,15 @@ describe('useRealtimeDictation', () => {
             resolveSessionId,
             onSessionResolved
         }))
-
         await waitFor(() => {
             expect(sendMessage).toHaveBeenCalledWith('session-A-resumed', 'explicit initial text spoken words', undefined)
         })
+        act(() => { saveDraft('session-A', 'follow-up typed while sending') })
+        await act(async () => { resolveSend?.() })
+        await waitFor(() => expect(onSessionResolved).toHaveBeenCalled())
         expect(resolveSessionId).toHaveBeenCalledWith('session-A')
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
+        expect(getDraft('session-A-resumed')).toBe('follow-up typed while sending')
     })
 
     it('transfers newer source draft text to the replacement session after a successful send', async () => {

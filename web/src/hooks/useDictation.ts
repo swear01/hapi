@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
-import { transferComposerDraft } from '@/lib/composer-draft-transfer'
+import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import type { ConversationStatus } from '@/realtime/types'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
@@ -267,12 +267,14 @@ export function useDictation(config: {
                                     }
                                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
                                     if (resumed) {
-                                        if (!draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                                            await transferComposerDraft(pendingSend.sessionId, targetSessionId).catch((error) => {
-                                                console.warn('[dictation] failed to transfer newer draft after resume', error)
-                                            })
-                                        }
-                                        pendingSend.options.onSessionResolved?.(targetSessionId)
+                                        const followUpDraft = getDraft(pendingSend.sessionId)
+                                        await transferComposerDraftThenNavigate(
+                                            pendingSend.sessionId,
+                                            targetSessionId,
+                                            () => pendingSend.options.onSessionResolved?.(targetSessionId),
+                                            [],
+                                            { textOverride: followUpDraft === pendingSend.draftAtStart ? '' : followUpDraft },
+                                        )
                                     }
                                     if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                                         clearDraft(pendingSend.sessionId)
