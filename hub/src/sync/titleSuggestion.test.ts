@@ -242,7 +242,9 @@ describe('OpenAI-compatible title provider', () => {
             }
         )
 
-        await expect(provider.suggest('Recent conversation')).rejects.toMatchObject({ name: 'AbortError' })
+        await expect(provider.suggest('Recent conversation')).rejects.toThrow(
+            'Title provider request timed out after 20 ms'
+        )
     })
 })
 
