@@ -56,19 +56,21 @@ struct ChatStreamIdentityTests {
     func blankReasoningStreamIdsFallBackToRowIds() {
         let rows = [
             Self.agentMessage("blank-1", text: "one", streamId: ""),
-            Self.agentMessage("blank-2", text: "two", streamId: "   ")
+            Self.agentMessage("blank-2", text: "two", streamId: "   "),
+            Self.agentMessage("nil-3", text: "three", streamId: nil)
         ]
 
-        #expect(Self.reasoningIds(rows) == ["blank-1:0", "blank-2:0"])
+        #expect(Self.reasoningIds(rows) == ["blank-1:0", "blank-2:0", "nil-3:0"])
     }
 
     @Test("blank text stream ids fall back to distinct row-derived ids")
     func blankTextStreamIdsFallBackToRowIds() {
         let rows = [
             Self.textMessage("blank-1", text: "one", streamId: ""),
-            Self.textMessage("blank-2", text: "two", streamId: "   ")
+            Self.textMessage("blank-2", text: "two", streamId: "   "),
+            Self.textMessage("nil-3", text: "three", streamId: nil)
         ]
 
-        #expect(Self.textIds(rows) == ["blank-1:0", "blank-2:0"])
+        #expect(Self.textIds(rows) == ["blank-1:0", "blank-2:0", "nil-3:0"])
     }
 }

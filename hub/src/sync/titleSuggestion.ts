@@ -77,6 +77,10 @@ export function readTitleProviderConfig(
         baseUrl,
         apiKey,
         model,
+        maxTokens: readPositiveInteger(
+            env[TITLE_PROVIDER_MAX_TOKENS_ENV],
+            TITLE_SUGGESTION_MAX_TOKENS
+        ),
         timeoutMs: readPositiveInteger(
             env[TITLE_PROVIDER_TIMEOUT_ENV],
             settings?.timeoutMs ?? TITLE_SUGGESTION_TIMEOUT_MS
@@ -95,18 +99,6 @@ export function readTitleSuggestionLimits(
     return {
         rateLimit: readPositiveInteger(env[TITLE_SUGGESTION_RATE_LIMIT_ENV], TITLE_SUGGESTION_RATE_LIMIT),
         rateWindowMs: readPositiveInteger(env[TITLE_SUGGESTION_RATE_WINDOW_ENV], TITLE_SUGGESTION_RATE_WINDOW_MS)
-    }
-}
-
-/// Some providers (e.g. reasoning models) need more than one emitted token
-/// per title and more than 10s to produce it, so both knobs are tunable via
-/// environment without changing the defaults for standard providers.
-export function readTitleProviderRequestLimits(
-    env: TitleProviderEnvironment = process.env
-): { maxTokens: number; timeoutMs: number } {
-    return {
-        maxTokens: readPositiveInteger(env[TITLE_PROVIDER_MAX_TOKENS_ENV], TITLE_SUGGESTION_MAX_TOKENS),
-        timeoutMs: readPositiveInteger(env[TITLE_PROVIDER_TIMEOUT_ENV], TITLE_SUGGESTION_TIMEOUT_MS)
     }
 }
 
@@ -445,11 +437,10 @@ export function createTitleSuggestionService(
     config: OpenAICompatibleTitleProviderConfig | null = readTitleProviderConfig()
 ): TitleSuggestionService {
     const limits = readTitleSuggestionLimits()
-    const requestLimits = readTitleProviderRequestLimits()
     return new TitleSuggestionService(
         store,
         {
-            provider: config ? new OpenAICompatibleTitleProvider({ ...requestLimits, ...config }) : null,
+            provider: config ? new OpenAICompatibleTitleProvider(config) : null,
             ...limits
         }
     )
