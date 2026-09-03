@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import { useRealtimeDictation } from './useRealtimeDictation'
@@ -12,11 +12,13 @@ const scribe = vi.hoisted(() => ({
 }))
 
 const draftTransfer = vi.hoisted(() => ({
-    transferComposerDraft: vi.fn(async () => {})
+    transferComposerDraft: vi.fn(async () => {}),
+    transferComposerDraftThenNavigate: vi.fn(async () => {})
 }))
 
 vi.mock('@/lib/composer-draft-transfer', () => ({
-    transferComposerDraft: draftTransfer.transferComposerDraft
+    transferComposerDraft: draftTransfer.transferComposerDraft,
+    transferComposerDraftThenNavigate: draftTransfer.transferComposerDraftThenNavigate
 }))
 
 vi.mock('@elevenlabs/react', () => ({
@@ -39,6 +41,21 @@ type ScribeCallbacks = {
 }
 
 describe('useRealtimeDictation', () => {
+    beforeEach(() => {
+        draftTransfer.transferComposerDraft.mockImplementation(async (sourceSessionId: string, targetSessionId: string) => {
+            saveDraft(targetSessionId, getDraft(sourceSessionId))
+            clearDraft(sourceSessionId)
+        })
+        draftTransfer.transferComposerDraftThenNavigate.mockImplementation(async (
+            sourceSessionId: string,
+            targetSessionId: string,
+            navigate: () => void | Promise<void>,
+        ) => {
+            await draftTransfer.transferComposerDraft(sourceSessionId, targetSessionId)
+            await navigate()
+        })
+    })
+
     afterEach(() => vi.clearAllMocks())
 
     it('preserves partial ElevenLabs text on an unexpected disconnect', async () => {

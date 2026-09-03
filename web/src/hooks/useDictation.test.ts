@@ -1,16 +1,18 @@
 import { StrictMode } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import { appendTranscript, useDictation } from './useDictation'
 
 const draftTransfer = vi.hoisted(() => ({
-    transferComposerDraft: vi.fn(async () => {})
+    transferComposerDraft: vi.fn(async () => {}),
+    transferComposerDraftThenNavigate: vi.fn(async () => {})
 }))
 
 vi.mock('@/lib/composer-draft-transfer', () => ({
-    transferComposerDraft: draftTransfer.transferComposerDraft
+    transferComposerDraft: draftTransfer.transferComposerDraft,
+    transferComposerDraftThenNavigate: draftTransfer.transferComposerDraftThenNavigate
 }))
 
 describe('appendTranscript', () => {
@@ -24,9 +26,25 @@ describe('appendTranscript', () => {
 })
 
 describe('useDictation', () => {
+    beforeEach(() => {
+        draftTransfer.transferComposerDraft.mockImplementation(async (sourceSessionId: string, targetSessionId: string) => {
+            saveDraft(targetSessionId, getDraft(sourceSessionId))
+            clearDraft(sourceSessionId)
+        })
+        draftTransfer.transferComposerDraftThenNavigate.mockImplementation(async (
+            sourceSessionId: string,
+            targetSessionId: string,
+            navigate: () => void | Promise<void>,
+        ) => {
+            await draftTransfer.transferComposerDraft(sourceSessionId, targetSessionId)
+            await navigate()
+        })
+    })
+
     afterEach(() => {
         vi.unstubAllGlobals()
         draftTransfer.transferComposerDraft.mockClear()
+        draftTransfer.transferComposerDraftThenNavigate.mockClear()
     })
 
     it('records and inserts a final transcript under React StrictMode', async () => {
