@@ -20,9 +20,10 @@ describe('useDictation', () => {
 
     it('records and inserts a final transcript under React StrictMode', async () => {
         const stopTrack = vi.fn()
+        const getUserMedia = vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] }))
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
-            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
+            value: { getUserMedia }
         })
 
         class MockMediaRecorder {
@@ -55,6 +56,9 @@ describe('useDictation', () => {
 
         await act(() => result.current.toggle())
         expect(result.current.status).toBe('connected')
+        expect(getUserMedia).toHaveBeenCalledWith({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        })
         await act(() => result.current.toggle())
 
         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft dictated words'))
