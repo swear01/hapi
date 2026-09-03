@@ -130,7 +130,10 @@ export const runnerCommand: CommandDefinition = {
         if (runnerSubcommand === 'start') {
             if (await checkIfRunnerRunningAndCleanupStaleState()) {
                 console.log('Existing runner detected, stopping it before starting a new one...')
-                await stopRunner()
+                if (!(await stopRunner())) {
+                    console.error('Failed to verify and stop existing runner')
+                    process.exit(1)
+                }
 
                 if (!(await waitForRunnerToStop())) {
                     console.error('Failed to stop existing runner')
@@ -176,7 +179,10 @@ export const runnerCommand: CommandDefinition = {
         }
 
         if (runnerSubcommand === 'stop') {
-            await stopRunner()
+            if (!(await stopRunner())) {
+                console.error('Failed to verify and stop runner')
+                process.exit(1)
+            }
             process.exit(0)
         }
 

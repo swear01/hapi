@@ -184,6 +184,7 @@ describe('FilePage markdown preview', () => {
 
         const sourcePre = (await screen.findByRole('code')).closest('pre')
         expect(screen.queryByRole('button', { pressed: true })).not.toBeInTheDocument()
+        expect(document.querySelector('[data-hapi-file-content-header="true"]')).toBeNull()
         expect(sourcePre).toHaveStyle({ whiteSpace: 'pre' })
     })
 

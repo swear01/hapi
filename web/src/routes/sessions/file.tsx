@@ -560,16 +560,18 @@ export default function FilePage() {
                                         data-hapi-file-source-preview="true"
                                         className="min-w-0 max-w-full overflow-hidden rounded-md bg-[var(--app-code-bg)]"
                                     >
-                                        <FileContentHeader
-                                            label={language ?? 'text'}
-                                            copied={contentCopied}
-                                            copyLabel={t('file.page.copyContent')}
-                                            onCopy={canCopyContent ? () => copyContent(decodedContent) : undefined}
-                                            codeWrap={canWrapContent && codeWrap}
-                                            wrapEnableLabel={t('code.wrap.enable')}
-                                            wrapDisableLabel={t('code.wrap.disable')}
-                                            onToggleWrap={canWrapContent ? () => setCodeWrap(!codeWrap) : undefined}
-                                        />
+                                        {canCopyContent || canWrapContent ? (
+                                            <FileContentHeader
+                                                label={language ?? 'text'}
+                                                copied={contentCopied}
+                                                copyLabel={t('file.page.copyContent')}
+                                                onCopy={canCopyContent ? () => copyContent(decodedContent) : undefined}
+                                                codeWrap={canWrapContent && codeWrap}
+                                                wrapEnableLabel={t('code.wrap.enable')}
+                                                wrapDisableLabel={t('code.wrap.disable')}
+                                                onToggleWrap={canWrapContent ? () => setCodeWrap(!codeWrap) : undefined}
+                                            />
+                                        ) : null}
                                         <pre
                                             className={`shiki m-0 overflow-y-auto bg-[var(--app-code-bg)] p-3 text-xs font-mono ${canWrapContent && codeWrap ? 'overflow-x-hidden' : 'overflow-x-auto'}`}
                                             style={{

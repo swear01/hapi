@@ -304,12 +304,12 @@ export async function cleanupRunnerState(): Promise<void> {
   }
 }
 
-export async function stopRunner() {
+export async function stopRunner(): Promise<boolean> {
   try {
     const state = await readRunnerState();
     if (!state) {
       logger.debug('No runner state found');
-      return;
+      return true;
     }
 
     // Every stop is a signal to the persisted pid and port, so gate the whole
@@ -319,7 +319,8 @@ export async function stopRunner() {
     const identity = getHapiRunnerProcessIdentity(state.pid);
     if (identity !== 'runner') {
       logger.debug(`Not stopping PID ${state.pid}: identity is ${identity}`);
-      return;
+      if (identity !== 'unknown') await cleanupRunnerState();
+      return identity !== 'unknown';
     }
 
     logger.debug(`Stopping runner with PID ${state.pid}`);
@@ -331,7 +332,7 @@ export async function stopRunner() {
       // Wait for runner to die
       await waitForProcessDeath(state.pid, 2000);
       logger.debug('Runner stopped gracefully via HTTP');
-      return;
+      return true;
     } catch (error) {
       logger.debug('HTTP stop failed, will force kill', error);
     }
@@ -342,8 +343,10 @@ export async function stopRunner() {
     } else {
       logger.debug('Runner already dead or could not be killed');
     }
+    return killed || !isProcessAlive(state.pid);
   } catch (error) {
     logger.debug('Error stopping runner', error);
+    return false;
   }
 }
 

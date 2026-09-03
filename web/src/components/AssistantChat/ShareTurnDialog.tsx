@@ -119,7 +119,7 @@ function replaceGeneratedMediaPrepareAction(action: HTMLElement, media: HTMLElem
     link.download = getGeneratedMediaFileName(media)
     link.dataset.hapiGeneratedMediaDownload = 'true'
     link.dataset.hapiGeneratedMediaLoaded = 'true'
-    link.innerHTML = action.innerHTML
+    link.replaceChildren(...Array.from(action.childNodes))
     const label = link.querySelector<HTMLElement>('span')
     if (label) {
         label.textContent = downloadLabel

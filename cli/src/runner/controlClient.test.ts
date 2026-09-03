@@ -88,7 +88,7 @@ describe('stopRunner identity gate', () => {
     it('stops a confirmed runner', async () => {
         identityMock.mockReturnValue('runner')
 
-        await stopRunner()
+        await expect(stopRunner()).resolves.toBe(true)
 
         expect(globalThis.fetch).toHaveBeenCalled()
         expect(killProcessMock).toHaveBeenCalledWith(42, true)
@@ -99,10 +99,11 @@ describe('stopRunner identity gate', () => {
         async (identity) => {
             identityMock.mockReturnValue(identity)
 
-            await stopRunner()
+            await expect(stopRunner()).resolves.toBe(identity !== 'unknown')
 
             expect(globalThis.fetch).not.toHaveBeenCalled()
             expect(killProcessMock).not.toHaveBeenCalled()
+            expect(clearRunnerStateMock).toHaveBeenCalledTimes(identity === 'unknown' ? 0 : 1)
         }
     )
 })
