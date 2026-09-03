@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { readRunnerStateMock, isProcessAliveMock, identityMock, killProcessMock } = vi.hoisted(() => ({
+const { readRunnerStateMock, clearRunnerStateMock, isProcessAliveMock, identityMock, killProcessMock } = vi.hoisted(() => ({
     readRunnerStateMock: vi.fn(),
+    clearRunnerStateMock: vi.fn(),
     isProcessAliveMock: vi.fn(),
     identityMock: vi.fn(),
     killProcessMock: vi.fn(),
@@ -10,7 +11,7 @@ const { readRunnerStateMock, isProcessAliveMock, identityMock, killProcessMock }
 vi.mock('@/persistence', () => ({
     readRunnerState: readRunnerStateMock,
     readSettings: vi.fn(),
-    clearRunnerState: vi.fn(),
+    clearRunnerState: clearRunnerStateMock,
 }))
 
 vi.mock('@/utils/process', () => ({
@@ -21,7 +22,19 @@ vi.mock('@/utils/process', () => ({
 
 vi.mock('@/ui/logger', () => ({ logger: { debug: vi.fn() } }))
 
-import { stopRunner, stopRunnerSession } from './controlClient'
+import { checkIfRunnerRunningAndCleanupStaleState, stopRunner, stopRunnerSession } from './controlClient'
+
+describe('runner control client identity checks', () => {
+    afterEach(() => vi.clearAllMocks())
+
+    it('treats an unidentifiable live pid as occupied without clearing state', async () => {
+        readRunnerStateMock.mockResolvedValue({ pid: 42, httpPort: 3210 })
+        identityMock.mockReturnValue('unknown')
+
+        await expect(checkIfRunnerRunningAndCleanupStaleState()).resolves.toBe(true)
+        expect(clearRunnerStateMock).not.toHaveBeenCalled()
+    })
+})
 
 describe('runner control client stop-session contract', () => {
     beforeEach(() => {

@@ -109,7 +109,7 @@ function revokePreviewMediaUrls(urls: Set<string>): void {
     urls.clear()
 }
 
-function replaceGeneratedMediaPrepareAction(action: HTMLElement, media: HTMLElement, url: string): void {
+function replaceGeneratedMediaPrepareAction(action: HTMLElement, media: HTMLElement, url: string, downloadLabel: string): void {
     const link = document.createElement('a')
     for (const attribute of Array.from(action.attributes)) {
         if (attribute.name === 'type' || attribute.name === 'disabled' || attribute.name === 'aria-busy') continue
@@ -122,9 +122,9 @@ function replaceGeneratedMediaPrepareAction(action: HTMLElement, media: HTMLElem
     link.innerHTML = action.innerHTML
     const label = link.querySelector<HTMLElement>('span')
     if (label) {
-        label.textContent = `Download ${link.download}`
+        label.textContent = downloadLabel
     } else {
-        link.textContent = `Download ${link.download}`
+        link.textContent = downloadLabel
     }
     action.replaceWith(link)
 }
@@ -685,7 +685,13 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
                     if (!loaded && generatedMediaAction instanceof HTMLButtonElement) {
                         const url = URL.createObjectURL(blob)
                         previewMediaUrlsRef.current.add(url)
-                        replaceGeneratedMediaPrepareAction(generatedMediaAction, media, url)
+                        const fileName = getGeneratedMediaFileName(media)
+                        replaceGeneratedMediaPrepareAction(
+                            generatedMediaAction,
+                            media,
+                            url,
+                            t('files.directories.downloadNamed', { name: fileName }),
+                        )
                         setPreparedBlob(null)
                         setPreviewRevision((revision) => revision + 1)
                         return
@@ -693,7 +699,8 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
                     downloadBlob(blob, getGeneratedMediaFileName(media))
                 })
                 .catch((err: unknown) => {
-                    setError(err instanceof Error ? err.message : 'Failed to download file')
+                    if (!generatedMediaAction.isConnected) return
+                    setError(err instanceof Error ? err.message : t('files.directories.download.error.default'))
                 })
                 .finally(() => {
                     if (!generatedMediaAction.isConnected) return

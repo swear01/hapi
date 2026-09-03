@@ -169,6 +169,24 @@ describe('FilePage markdown preview', () => {
         expect(window.localStorage.getItem('hapi-code-wrap')).toBeNull()
     })
 
+    it('keeps oversized source previews unwrapped', async () => {
+        window.localStorage.setItem('hapi-code-wrap', '1')
+        readSessionFileMock.mockResolvedValue({
+            success: true,
+            content: encodeBase64('x'.repeat(1_000_001)),
+            size: 1_000_001,
+            modified: fileModified,
+        })
+        renderWithProviders()
+
+        await waitFor(() => expect(screen.getByTestId('markdown-preview')).toBeInTheDocument())
+        fireEvent.click(screen.getByRole('button', { name: 'Source' }))
+
+        const sourcePre = (await screen.findByRole('code')).closest('pre')
+        expect(screen.queryByRole('button', { pressed: true })).not.toBeInTheDocument()
+        expect(sourcePre).toHaveStyle({ whiteSpace: 'pre' })
+    })
+
     it('preserves the file preview scroll position across route remounts', async () => {
         const firstRender = renderWithProviders()
 

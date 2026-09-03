@@ -77,7 +77,7 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
                 '-Command',
                 '(Get-CimInstance Win32_Process -Filter "ProcessId = 8328").CommandLine'
             ],
-            { stdio: 'pipe', windowsHide: true }
+            { stdio: 'pipe', windowsHide: true, timeout: 5_000 }
         )
     })
 
@@ -90,14 +90,14 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
     it('falls back to WMIC when PowerShell is unavailable', () => {
         spawnSyncMock
             .mockReturnValueOnce(unavailable('powershell'))
-            .mockReturnValueOnce(completed('hapi-local.exe runner start-sync'))
+            .mockReturnValueOnce(completed('CommandLine\r\nhapi-local.exe runner start-sync\r\n'))
 
         expect(getHapiRunnerProcessIdentity(9124)).toBe('runner')
         expect(spawnSyncMock).toHaveBeenNthCalledWith(
             2,
             'wmic',
             ['process', 'where', 'ProcessId=9124', 'get', 'CommandLine'],
-            { stdio: 'pipe', windowsHide: true }
+            { stdio: 'pipe', windowsHide: true, timeout: 5_000 }
         )
     })
 
@@ -119,10 +119,18 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
         expect(spawnSyncMock).toHaveBeenCalledTimes(2)
     })
 
+    it('reports unknown when WMIC says the process disappeared', () => {
+        spawnSyncMock
+            .mockReturnValueOnce(completed(''))
+            .mockReturnValueOnce(completed('No Instance(s) Available.\r\n'))
+
+        expect(getHapiRunnerProcessIdentity(8328)).toBe('unknown')
+    })
+
     it('falls back to WMIC when PowerShell exits non-zero', () => {
         spawnSyncMock
             .mockReturnValueOnce(completed('', 1))
-            .mockReturnValueOnce(completed('hapi-local.exe runner start-sync'))
+            .mockReturnValueOnce(completed('CommandLine\r\nhapi-local.exe runner start-sync\r\n'))
 
         expect(getHapiRunnerProcessIdentity(9124)).toBe('runner')
         expect(spawnSyncMock).toHaveBeenCalledTimes(2)
@@ -146,6 +154,17 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
         spawnSyncMock
             .mockReturnValueOnce(unavailable('powershell'))
             .mockReturnValueOnce(unavailable('wmic'))
+
+        expect(getHapiRunnerProcessIdentity(8328)).toBe('dead')
+    })
+
+    it('reports dead when the pid exits after a successful probe', () => {
+        vi.spyOn(process, 'kill')
+            .mockReturnValueOnce(true)
+            .mockImplementationOnce(() => {
+                throw new Error('ESRCH')
+            })
+        spawnSyncMock.mockReturnValueOnce(completed('hapi-local.exe runner start-sync'))
 
         expect(getHapiRunnerProcessIdentity(8328)).toBe('dead')
     })
@@ -181,6 +200,11 @@ describe('getHapiRunnerProcessIdentity on POSIX', () => {
         spawnSyncMock.mockReturnValueOnce(completed('hapi runner start-sync'))
 
         expect(getHapiRunnerProcessIdentity(9124)).toBe('runner')
+        expect(spawnSyncMock).toHaveBeenCalledWith(
+            'ps',
+            ['-p', '9124', '-o', 'command='],
+            { stdio: 'pipe', timeout: 5_000 }
+        )
     })
 
     it('reports unknown when ps cannot report a command line', () => {

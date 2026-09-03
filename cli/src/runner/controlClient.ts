@@ -154,9 +154,10 @@ export async function checkIfRunnerRunningAndCleanupStaleState(): Promise<boolea
   if (identity === 'unknown') {
     // The pid is alive but unidentifiable. Reporting it as the runner would let
     // callers signal a process that may not be ours, and clearing the state would
-    // drop the lock that keeps a second runner from starting. Do neither.
-    logger.debug('[RUNNER RUN] Runner PID could not be identified, leaving state untouched');
-    return false;
+    // drop the lock that keeps a second runner from starting. Treat it as occupied
+    // so callers do not spawn a replacement against the preserved lock.
+    logger.debug('[RUNNER RUN] Runner PID could not be identified, treating state as occupied');
+    return true;
   }
 
   logger.debug('[RUNNER RUN] Runner PID not running or not a hapi process, cleaning up state');

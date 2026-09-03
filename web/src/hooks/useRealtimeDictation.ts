@@ -86,13 +86,15 @@ export function useRealtimeDictation(config: {
                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
                     if (resumed) {
                         const followUpDraft = getDraft(pendingSend.sessionId)
-                        await transferComposerDraftThenNavigate(
-                            pendingSend.sessionId,
-                            targetSessionId,
-                            () => pendingSend.options.onSessionResolved?.(targetSessionId),
-                            [],
-                            { textOverride: followUpDraft === pendingSend.draftAtStart ? '' : followUpDraft },
-                        )
+                        if (followUpDraft !== '' && followUpDraft !== pendingSend.draftAtStart) {
+                            await transferComposerDraftThenNavigate(
+                                pendingSend.sessionId,
+                                targetSessionId,
+                                () => pendingSend.options.onSessionResolved?.(targetSessionId),
+                            )
+                        } else {
+                            pendingSend.options.onSessionResolved?.(targetSessionId)
+                        }
                     }
                     const cur = getDraft(pendingSend.sessionId)
                     if (cur === '' || cur === pendingSend.draftAtStart) {

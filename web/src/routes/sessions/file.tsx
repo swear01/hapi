@@ -303,6 +303,7 @@ export default function FilePage() {
         && !binaryFile
         && decodedContent.length > 0
         && contentSizeBytes <= MAX_COPYABLE_FILE_BYTES
+    const canWrapContent = contentSizeBytes <= MAX_COPYABLE_FILE_BYTES
 
     const canDownload = fileContentResult?.success === true && Boolean(fileContentResult.content)
 
@@ -564,16 +565,16 @@ export default function FilePage() {
                                             copied={contentCopied}
                                             copyLabel={t('file.page.copyContent')}
                                             onCopy={canCopyContent ? () => copyContent(decodedContent) : undefined}
-                                            codeWrap={codeWrap}
+                                            codeWrap={canWrapContent && codeWrap}
                                             wrapEnableLabel={t('code.wrap.enable')}
                                             wrapDisableLabel={t('code.wrap.disable')}
-                                            onToggleWrap={() => setCodeWrap(!codeWrap)}
+                                            onToggleWrap={canWrapContent ? () => setCodeWrap(!codeWrap) : undefined}
                                         />
                                         <pre
-                                            className={`shiki m-0 overflow-y-auto bg-[var(--app-code-bg)] p-3 text-xs font-mono ${codeWrap ? 'overflow-x-hidden' : 'overflow-x-auto'}`}
+                                            className={`shiki m-0 overflow-y-auto bg-[var(--app-code-bg)] p-3 text-xs font-mono ${canWrapContent && codeWrap ? 'overflow-x-hidden' : 'overflow-x-auto'}`}
                                             style={{
-                                                whiteSpace: codeWrap ? 'pre-wrap' : 'pre',
-                                                ...(codeWrap ? { wordBreak: 'break-word' as const } : {})
+                                                whiteSpace: canWrapContent && codeWrap ? 'pre-wrap' : 'pre',
+                                                ...(canWrapContent && codeWrap ? { wordBreak: 'break-word' as const } : {})
                                             }}
                                         >
                                             <code>{highlighted ?? decodedContent}</code>

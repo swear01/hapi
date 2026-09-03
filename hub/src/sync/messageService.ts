@@ -522,6 +522,8 @@ export class MessageService {
                 if (settled.status === 'invoked') return settled
                 if (settled.status === 'absent') return { status: 'cancelled', localId }
             } else {
+                // Keep scheduled-mature suppression while held indeterminate.
+                // Explicit retry emits messages-requeued; consume/discard clears it.
                 this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
             }
             return { status: 'busy', localId }

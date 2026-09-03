@@ -277,14 +277,15 @@ export function useDictation(config: {
                                     }
                                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
                                     if (resumed) {
-                                        const followUpDraft = getDraft(pendingSend.sessionId)
-                                        await transferComposerDraftThenNavigate(
-                                            pendingSend.sessionId,
-                                            targetSessionId,
-                                            () => pendingSend.options.onSessionResolved?.(targetSessionId),
-                                            [],
-                                            { textOverride: followUpDraft === pendingSend.draftAtStart ? '' : followUpDraft },
-                                        )
+                                        if (!draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                            await transferComposerDraftThenNavigate(
+                                                pendingSend.sessionId,
+                                                targetSessionId,
+                                                () => pendingSend.options.onSessionResolved?.(targetSessionId),
+                                            )
+                                        } else {
+                                            pendingSend.options.onSessionResolved?.(targetSessionId)
+                                        }
                                     }
                                     if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                                         clearDraft(pendingSend.sessionId)

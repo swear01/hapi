@@ -825,6 +825,51 @@ describe('useDictation', () => {
         expect(draftTransfer.transferComposerDraft).toHaveBeenCalledWith('session-A', 'session-A-resumed')
     })
 
+    it('preserves the replacement draft when the source draft did not change', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) }
+        })
+        class MockMediaRecorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
+        clearDraft('session-A')
+        saveDraft('session-A-resumed', 'existing replacement draft')
+        const onSessionResolved = vi.fn()
+        const { result } = renderHook(() => useDictation({
+            api: { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) } as unknown as ApiClient,
+            provider: 'openai',
+            mode: 'standard',
+            getCurrentText: () => '',
+            onTextChange: vi.fn(),
+            sendMessage: vi.fn(async () => {})
+        }))
+
+        await act(() => result.current.toggle())
+        await act(async () => {
+            await result.current.stopAndSend('session-A', 'initial text', undefined, {
+                resolveSessionId: async () => ({ sessionId: 'session-A-resumed', resumed: true }),
+                onSessionResolved,
+            })
+        })
+
+        await waitFor(() => expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed'))
+        expect(draftTransfer.transferComposerDraft).not.toHaveBeenCalled()
+        expect(getDraft('session-A-resumed')).toBe('existing replacement draft')
+    })
+
     it('does not notify when the resolver did not resume the session', async () => {
         const stopTrack = vi.fn()
         Object.defineProperty(navigator, 'mediaDevices', {

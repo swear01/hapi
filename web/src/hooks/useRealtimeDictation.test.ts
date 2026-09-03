@@ -167,6 +167,38 @@ describe('useRealtimeDictation', () => {
         ))
     })
 
+    it('preserves the replacement draft when the source draft did not change', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() }
+        })
+        const onSessionResolved = vi.fn()
+        clearDraft('session-A')
+        saveDraft('session-A-resumed', 'existing replacement draft')
+        const { result } = renderHook(() => useRealtimeDictation({
+            api: {
+                fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
+            } as unknown as ApiClient,
+            provider: 'elevenlabs',
+            mode: 'realtime',
+            onFinalTranscript: vi.fn(),
+            sendMessage: vi.fn(async () => {})
+        }))
+        scribe.commit.mockImplementation(() => {
+            (scribe.options as ScribeCallbacks).onCommittedTranscript?.({ text: 'spoken words' })
+        })
+
+        await act(() => result.current.toggle())
+        await act(() => result.current.stopAndSend('session-A', 'initial text', undefined, {
+            resolveSessionId: async () => ({ sessionId: 'session-A-resumed', resumed: true }),
+            onSessionResolved,
+        }))
+
+        await waitFor(() => expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed'))
+        expect(draftTransfer.transferComposerDraft).not.toHaveBeenCalled()
+        expect(getDraft('session-A-resumed')).toBe('existing replacement draft')
+    })
+
     it('recovers a post-resume send failure under the resumed session id', async () => {
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
