@@ -52,9 +52,18 @@ export function recoverFailedVoiceSend(args: {
     failedText: string
     /** Persisted draft baseline captured before the delivery attempt. */
     draftAtStart: string
+    sourceSessionId?: string
+    sourceDraftAtStart?: string
 }): void {
     const liveReplacement = args.mounted ? args.getCurrentText() : ''
-    const persistedDraft = getDraft(args.recoverySessionId)
+    const sourceSessionId = !args.mounted
+        && args.sourceSessionId !== args.recoverySessionId
+        ? args.sourceSessionId
+        : undefined
+    const sourceDraft = sourceSessionId ? getDraft(sourceSessionId) : ''
+    const persistedDraft = sourceDraft && sourceDraft !== args.sourceDraftAtStart
+        ? appendTranscript(getDraft(args.recoverySessionId), sourceDraft)
+        : getDraft(args.recoverySessionId)
     if (liveReplacement.trim() && liveReplacement !== args.initialText) {
         const merged = appendTranscript(liveReplacement, args.failedText)
         saveDraft(args.recoverySessionId, merged)
@@ -65,6 +74,7 @@ export function recoverFailedVoiceSend(args: {
         saveDraft(args.recoverySessionId, args.failedText)
         if (args.mounted) args.onTextChange(args.failedText)
     }
+    if (sourceSessionId) clearDraft(sourceSessionId)
 }
 
 
@@ -294,6 +304,8 @@ export function useDictation(config: {
                                         initialText: pendingSend.initialText,
                                         failedText: finalMessage,
                                         draftAtStart: recoveryDraftAtStart,
+                                        sourceSessionId: pendingSend.sessionId,
+                                        sourceDraftAtStart: pendingSend.draftAtStart,
                                     })
                                     if (resumed) {
                                         pendingSend.options.onSessionResolved?.(recoverySessionId)
