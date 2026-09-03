@@ -130,7 +130,12 @@ export type MachinesResponse = { machines: Machine[] }
 
 export type SpawnResponse =
     | { type: 'success'; sessionId: string }
-    | { type: 'error'; message: string }
+    | {
+        type: 'error'
+        message: string
+        code?: 'agent_unavailable' | 'runner_upgrade_required' | 'outside_workspace_roots'
+        agent?: z.infer<typeof AgentFlavorSchema>
+    }
 
 export const SessionPermissionModeRequestSchema = z.object({
     mode: PermissionModeSchema
@@ -176,6 +181,11 @@ export const CodexImportedMessageSchema = z.union([
     z.object({
         role: z.literal('agent'),
         content: z.object({ type: z.literal('codex'), data: z.unknown() }),
+        meta: z.object({ sentFrom: z.literal('cli') })
+    }),
+    z.object({
+        role: z.literal('agent'),
+        content: z.object({ type: z.literal('event'), data: z.unknown() }),
         meta: z.object({ sentFrom: z.literal('cli') })
     })
 ])
@@ -315,6 +325,18 @@ export const RenameSessionRequestSchema = z.object({
 })
 
 export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
+
+export const UpdateSessionSummaryRequestSchema = z.object({
+    text: z.string().trim().min(1).max(255)
+})
+
+export type UpdateSessionSummaryRequest = z.infer<typeof UpdateSessionSummaryRequestSchema>
+
+export const SessionTitleSuggestionResponseSchema = z.object({
+    title: z.string().min(1).max(255)
+})
+
+export type SessionTitleSuggestionResponse = z.infer<typeof SessionTitleSuggestionResponseSchema>
 
 export const SetSessionPinnedRequestSchema = z.object({
     mode: z.enum(['none', 'project', 'global'])
@@ -578,6 +600,7 @@ export type QueuedStateRequest = z.infer<typeof QueuedStateRequestSchema>
 
 export type QueuedStateResponse = {
     queuedLocalIds: string[]
+    indeterminateLocalIds?: string[]
     invokedLocalMessages: Array<{
         localId: string
         invokedAt: number
@@ -614,6 +637,21 @@ export const MachinePathsExistsRequestSchema = z.object({
 })
 
 export type MachinePathsExistsRequest = z.infer<typeof MachinePathsExistsRequestSchema>
+
+export const AgentAvailabilityReasonSchema = z.enum(['not_found', 'invalid_configuration'])
+export type AgentAvailabilityReason = z.infer<typeof AgentAvailabilityReasonSchema>
+
+export const AgentAvailabilityEntrySchema = z.object({
+    agent: AgentFlavorSchema,
+    available: z.boolean(),
+    reason: AgentAvailabilityReasonSchema.optional()
+})
+export type AgentAvailabilityEntry = z.infer<typeof AgentAvailabilityEntrySchema>
+
+export const AgentAvailabilityResponseSchema = z.object({
+    agents: z.array(AgentAvailabilityEntrySchema)
+})
+export type AgentAvailabilityResponse = z.infer<typeof AgentAvailabilityResponseSchema>
 
 export const AuthRequestSchema = z.union([
     z.object({ initData: z.string() }),
@@ -698,6 +736,8 @@ export type MachineListDirectoryResponse = {
 
 export type PathExistsResponse = {
     exists: Record<string, boolean>
+    /** Requested paths rejected by the runner's configured workspace roots. */
+    outsideWorkspaceRoots?: string[]
 }
 
 export type MachinePathsExistsResponse = PathExistsResponse
