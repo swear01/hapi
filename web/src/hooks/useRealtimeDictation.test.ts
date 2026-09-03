@@ -12,8 +12,12 @@ const scribe = vi.hoisted(() => ({
 }))
 
 const draftTransfer = vi.hoisted(() => ({
-    transferComposerDraft: vi.fn(async () => {}),
-    transferComposerDraftThenNavigate: vi.fn(async () => {})
+    transferComposerDraft: vi.fn(async (_sourceSessionId: string, _targetSessionId: string) => {}),
+    transferComposerDraftThenNavigate: vi.fn(async (
+        _sourceSessionId: string,
+        _targetSessionId: string,
+        _navigate: () => void | Promise<void>,
+    ) => {})
 }))
 
 vi.mock('@/lib/composer-draft-transfer', () => ({
