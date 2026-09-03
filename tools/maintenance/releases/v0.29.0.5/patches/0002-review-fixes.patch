@@ -1,0 +1,164 @@
+From 214c96d8d12fce7e292bb859e5eddb060ad7642e Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 3 Sep 2026 18:32:15 +0000
+Subject: [PATCH] fix: address v0.29.0.5 review findings
+
+---
+ hub/src/sync/titleSuggestion.test.ts          | 28 +++++++++++--------
+ hub/src/sync/titleSuggestion.ts               | 19 ++++---------
+ .../ChatStreamIdentityTests.swift             | 10 ++++---
+ 3 files changed, 28 insertions(+), 29 deletions(-)
+
+diff --git a/hub/src/sync/titleSuggestion.test.ts b/hub/src/sync/titleSuggestion.test.ts
+index d091083147e4be072eb197e51dd505d8da6300c6..373b3357cfe7a1b33a52b572a529cdb383d7ef57 100644
+--- a/hub/src/sync/titleSuggestion.test.ts
++++ b/hub/src/sync/titleSuggestion.test.ts
+@@ -7,7 +7,6 @@ import {
+     normalizeTitleSuggestion,
+     OpenAICompatibleTitleProvider,
+     readTitleProviderConfig,
+-    readTitleProviderRequestLimits,
+     readTitleSuggestionLimits,
+     TitleSuggestionError,
+     TitleSuggestionService
+@@ -65,6 +64,7 @@ describe('OpenAI-compatible title provider', () => {
+             baseUrl: 'https://example.test/v1',
+             apiKey: 'secret',
+             model: 'small-model',
++            maxTokens: 64,
+             timeoutMs: 20_000
+         })
+         expect(readTitleProviderConfig({ HAPI_TITLE_PROVIDER_API_KEY: 'secret' })).toBeNull()
+@@ -149,6 +149,7 @@ describe('OpenAI-compatible title provider', () => {
+             baseUrl: 'https://settings.example/v1',
+             apiKey: 'settings-secret',
+             model: 'settings-model',
++            maxTokens: 64,
+             timeoutMs: 10_000
+         })
+         expect(readTitleProviderConfig({
+@@ -159,6 +160,7 @@ describe('OpenAI-compatible title provider', () => {
+             baseUrl: 'https://env.example/v1',
+             apiKey: 'settings-secret',
+             model: 'env-model',
++            maxTokens: 64,
+             timeoutMs: 25_000
+         })
+         expect(readTitleProviderConfig({
+@@ -197,22 +199,26 @@ describe('OpenAI-compatible title provider', () => {
+     })
+ 
+     it('honors env-tunable max_tokens and timeout', async () => {
+-        expect(readTitleProviderRequestLimits({})).toEqual({ maxTokens: 64, timeoutMs: 10_000 })
+-        expect(readTitleProviderRequestLimits({
++        const config = readTitleProviderConfig({
++            HAPI_TITLE_PROVIDER_BASE_URL: 'https://example.test/v1',
++            HAPI_TITLE_PROVIDER_API_KEY: 'secret',
++            HAPI_TITLE_PROVIDER_MODEL: 'small-model',
+             HAPI_TITLE_PROVIDER_MAX_TOKENS: '4096',
+             HAPI_TITLE_PROVIDER_TIMEOUT_MS: '90000'
+-        })).toEqual({ maxTokens: 4096, timeoutMs: 90_000 })
++        })
++        expect(config).toMatchObject({ maxTokens: 4096, timeoutMs: 90_000 })
+         // Invalid values fall back to the defaults instead of breaking startup.
+-        expect(readTitleProviderRequestLimits({ HAPI_TITLE_PROVIDER_MAX_TOKENS: '-5' })).toEqual({ maxTokens: 64, timeoutMs: 10_000 })
++        expect(readTitleProviderConfig({
++            HAPI_TITLE_PROVIDER_BASE_URL: 'https://example.test/v1',
++            HAPI_TITLE_PROVIDER_API_KEY: 'secret',
++            HAPI_TITLE_PROVIDER_MODEL: 'small-model',
++            HAPI_TITLE_PROVIDER_MAX_TOKENS: '-5'
++        })).toMatchObject({ maxTokens: 64, timeoutMs: 10_000 })
+ 
+         let request: Request | undefined
++        if (!config) throw new Error('expected title provider config')
+         const provider = new OpenAICompatibleTitleProvider(
+-            {
+-                baseUrl: 'https://example.test/v1',
+-                apiKey: 'secret',
+-                model: 'small-model',
+-                maxTokens: 4096
+-            },
++            config,
+             async (input, init) => {
+                 request = new Request(String(input), init)
+                 return new Response(JSON.stringify({
+diff --git a/hub/src/sync/titleSuggestion.ts b/hub/src/sync/titleSuggestion.ts
+index fdd28e38511f809cb1e863f658e89dc617bcce6e..083c1cd34ec1134bf5f83df70175526ea5523857 100644
+--- a/hub/src/sync/titleSuggestion.ts
++++ b/hub/src/sync/titleSuggestion.ts
+@@ -77,6 +77,10 @@ export function readTitleProviderConfig(
+         baseUrl,
+         apiKey,
+         model,
++        maxTokens: readPositiveInteger(
++            env[TITLE_PROVIDER_MAX_TOKENS_ENV],
++            TITLE_SUGGESTION_MAX_TOKENS
++        ),
+         timeoutMs: readPositiveInteger(
+             env[TITLE_PROVIDER_TIMEOUT_ENV],
+             settings?.timeoutMs ?? TITLE_SUGGESTION_TIMEOUT_MS
+@@ -98,18 +102,6 @@ export function readTitleSuggestionLimits(
+     }
+ }
+ 
+-/// Some providers (e.g. reasoning models) need more than one emitted token
+-/// per title and more than 10s to produce it, so both knobs are tunable via
+-/// environment without changing the defaults for standard providers.
+-export function readTitleProviderRequestLimits(
+-    env: TitleProviderEnvironment = process.env
+-): { maxTokens: number; timeoutMs: number } {
+-    return {
+-        maxTokens: readPositiveInteger(env[TITLE_PROVIDER_MAX_TOKENS_ENV], TITLE_SUGGESTION_MAX_TOKENS),
+-        timeoutMs: readPositiveInteger(env[TITLE_PROVIDER_TIMEOUT_ENV], TITLE_SUGGESTION_TIMEOUT_MS)
+-    }
+-}
+-
+ function extractChatText(value: unknown): string | null {
+     if (typeof value === 'string') {
+         const text = value.trim()
+@@ -445,11 +437,10 @@ export function createTitleSuggestionService(
+     config: OpenAICompatibleTitleProviderConfig | null = readTitleProviderConfig()
+ ): TitleSuggestionService {
+     const limits = readTitleSuggestionLimits()
+-    const requestLimits = readTitleProviderRequestLimits()
+     return new TitleSuggestionService(
+         store,
+         {
+-            provider: config ? new OpenAICompatibleTitleProvider({ ...requestLimits, ...config }) : null,
++            provider: config ? new OpenAICompatibleTitleProvider(config) : null,
+             ...limits
+         }
+     )
+diff --git a/ios/Packages/HapiKit/Tests/HapiProtocolTests/ChatStreamIdentityTests.swift b/ios/Packages/HapiKit/Tests/HapiProtocolTests/ChatStreamIdentityTests.swift
+index 26b0d5b395ef920b369608f0aa94adf59d598fd8..f6af93f33f6682381b6dcf1ef7b6d0e7de95d565 100644
+--- a/ios/Packages/HapiKit/Tests/HapiProtocolTests/ChatStreamIdentityTests.swift
++++ b/ios/Packages/HapiKit/Tests/HapiProtocolTests/ChatStreamIdentityTests.swift
+@@ -56,19 +56,21 @@ struct ChatStreamIdentityTests {
+     func blankReasoningStreamIdsFallBackToRowIds() {
+         let rows = [
+             Self.agentMessage("blank-1", text: "one", streamId: ""),
+-            Self.agentMessage("blank-2", text: "two", streamId: "   ")
++            Self.agentMessage("blank-2", text: "two", streamId: "   "),
++            Self.agentMessage("nil-3", text: "three", streamId: nil)
+         ]
+ 
+-        #expect(Self.reasoningIds(rows) == ["blank-1:0", "blank-2:0"])
++        #expect(Self.reasoningIds(rows) == ["blank-1:0", "blank-2:0", "nil-3:0"])
+     }
+ 
+     @Test("blank text stream ids fall back to distinct row-derived ids")
+     func blankTextStreamIdsFallBackToRowIds() {
+         let rows = [
+             Self.textMessage("blank-1", text: "one", streamId: ""),
+-            Self.textMessage("blank-2", text: "two", streamId: "   ")
++            Self.textMessage("blank-2", text: "two", streamId: "   "),
++            Self.textMessage("nil-3", text: "three", streamId: nil)
+         ]
+ 
+-        #expect(Self.textIds(rows) == ["blank-1:0", "blank-2:0"])
++        #expect(Self.textIds(rows) == ["blank-1:0", "blank-2:0", "nil-3:0"])
+     }
+ }
+-- 
+2.43.0
+

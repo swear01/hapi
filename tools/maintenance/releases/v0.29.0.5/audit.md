@@ -214,7 +214,8 @@ Compared with `v0.29.0.4`, only draft #1762 is new. The other 153 open PR heads 
 Validated on Linux arm64 with the repository-pinned Bun 1.4.0 on 2026-09-03.
 
 - Fresh audit: all 154 live open-PR heads and mechanical statuses reconcile with `pr-audit.tsv` (54 carry, 96 defer, 4 drop). Only draft #1762 is new since `v0.29.0.4`; no existing head or status changed.
-- Rehearsal: the final 27-commit maintained patch stack replayed from exact upstream `980a921ba15665c54998a6ddb658103d467ff4cb` and produced source tree `a5b76c9181399f8b960fffb85d11f3f29dd1254f`.
+- Review follow-up: all three low-severity Swear Review findings were resolved by covering nil stream IDs and making `readTitleProviderConfig` the single source for provider timeout/max-token limits.
+- Rehearsal: the final 28-commit maintained patch stack replayed from exact upstream `980a921ba15665c54998a6ddb658103d467ff4cb` and produced source tree `85ad6564dc84c759099523e80d522fd38df2b371`.
 - Typecheck: CLI, Web, Hub, Relay, and Desktop passed both in the candidate and in the clean rehearsal.
 - Full unit gate: CLI 2,928 passed/2 skipped, Hub 1,522 passed/3 skipped, Web 3,279 passed, Shared 332 passed, Relay 80 passed, and Desktop 5 passed. The complete suite passed again in the clean replay worktree.
 - Focused regression tests: 55/55 Web timeline and Hub title-provider tests passed.
