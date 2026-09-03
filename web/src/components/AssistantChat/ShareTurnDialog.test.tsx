@@ -25,7 +25,7 @@ const snapshots = [{
     role: 'assistant' as const,
 }]
 
-function renderDialog(getGeneratedMediaBlob: (imageId: string) => Promise<Blob>, isOpen = true) {
+function renderDialog(getGeneratedMediaBlob?: (imageId: string) => Promise<Blob>, isOpen = true) {
     return render(
         <I18nProvider>
             <ShareTurnDialog
@@ -45,6 +45,26 @@ afterEach(() => {
 })
 
 describe('ShareTurnDialog generated-file lifecycle', () => {
+    it('removes generated-file controls when no loader is available', async () => {
+        renderDialog()
+
+        await waitFor(() => expect(screen.queryByRole('button', { name: 'Prepare download' })).not.toBeInTheDocument())
+    })
+
+    it('restores native link semantics after preparing a download', async () => {
+        vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:fixture')
+        renderDialog(vi.fn(async () => new Blob(['file'], { type: 'application/zip' })))
+
+        fireEvent.click(await screen.findByRole('button', { name: 'Prepare download' }))
+
+        await waitFor(() => {
+            const link = document.querySelector<HTMLAnchorElement>('a[download="fixture.zip"]')
+            expect(link).not.toBeNull()
+            expect(link).not.toHaveAttribute('role')
+            expect(link).not.toHaveAttribute('tabindex')
+        })
+    })
+
     it('ignores a generated-file response after the preview closes', async () => {
         let resolveBlob: ((blob: Blob) => void) | undefined
         const getGeneratedMediaBlob = vi.fn(() => new Promise<Blob>((resolve) => {

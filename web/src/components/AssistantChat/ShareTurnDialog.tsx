@@ -34,7 +34,7 @@ function nextFrame(): Promise<void> {
     })
 }
 
-function stripCaptureOnlyControls(root: HTMLElement): void {
+function stripCaptureOnlyControls(root: HTMLElement, canLoadGeneratedMedia: boolean): void {
     for (const element of Array.from(root.querySelectorAll(SHARE_HIDDEN_CONTENT_SELECTOR))) {
         if (!(element instanceof HTMLElement) || !root.contains(element)) continue
 
@@ -57,6 +57,11 @@ function stripCaptureOnlyControls(root: HTMLElement): void {
     }
     for (const element of Array.from(root.querySelectorAll('.happy-message-actions, .happy-message-actions-first-line, [data-hapi-share-action="true"], button[aria-expanded], input, textarea, select'))) {
         element.remove()
+    }
+    if (!canLoadGeneratedMedia) {
+        for (const element of Array.from(root.querySelectorAll('[data-hapi-generated-media-download="true"]'))) {
+            element.remove()
+        }
     }
     for (const anchor of Array.from(root.querySelectorAll('a'))) {
         anchor.removeAttribute('href')
@@ -119,6 +124,9 @@ function replaceGeneratedMediaPrepareAction(action: HTMLElement, media: HTMLElem
     link.download = getGeneratedMediaFileName(media)
     link.dataset.hapiGeneratedMediaDownload = 'true'
     link.dataset.hapiGeneratedMediaLoaded = 'true'
+    link.removeAttribute('role')
+    link.removeAttribute('tabindex')
+    link.classList.remove('cursor-pointer')
     link.replaceChildren(...Array.from(action.childNodes))
     const label = link.querySelector<HTMLElement>('span')
     if (label) {
@@ -612,7 +620,7 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
                 node.removeAttribute('id')
                 node.classList.remove('scroll-mt-4')
                 if (node.matches('[data-hapi-share-exclude="true"]')) continue
-                stripCaptureOnlyControls(node)
+                stripCaptureOnlyControls(node, Boolean(props.getGeneratedMediaBlob))
                 if ((node.innerText || node.textContent || '').trim().length === 0 && node.querySelector('img, video, canvas, svg') == null) continue
                 fragment.appendChild(node)
                 appendedSnapshot = true
@@ -632,7 +640,7 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
         setCopied(false)
         setPreviewImage(null)
         return undefined
-    }, [props.isOpen, props.sourceSnapshots, restoreTick])
+    }, [props.getGeneratedMediaBlob, props.isOpen, props.sourceSnapshots, restoreTick])
 
     useEffect(() => {
         return () => revokePreviewMediaUrls(previewMediaUrlsRef.current)

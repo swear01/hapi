@@ -237,6 +237,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     if (!runningRunnerVersionMatches) {
       logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
       if (!(await stopRunner())) {
+        console.error('Failed to verify and stop existing runner');
         throw new Error('Failed to verify and stop existing runner');
       }
     } else {

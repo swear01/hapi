@@ -90,13 +90,13 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
     it('falls back to WMIC when PowerShell is unavailable', () => {
         spawnSyncMock
             .mockReturnValueOnce(unavailable('powershell'))
-            .mockReturnValueOnce(completed('CommandLine\r\nhapi-local.exe runner start-sync\r\n'))
+            .mockReturnValueOnce(completed('CommandLine=hapi-local.exe runner start-sync\r\n'))
 
         expect(getHapiRunnerProcessIdentity(9124)).toBe('runner')
         expect(spawnSyncMock).toHaveBeenNthCalledWith(
             2,
             'wmic',
-            ['process', 'where', 'ProcessId=9124', 'get', 'CommandLine'],
+            ['process', 'where', 'ProcessId=9124', 'get', 'CommandLine', '/format:list'],
             { stdio: 'pipe', windowsHide: true, timeout: 5_000 }
         )
     })
@@ -104,7 +104,7 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
     it('falls back to WMIC when CIM reports no command line', () => {
         spawnSyncMock
             .mockReturnValueOnce(completed(''))
-            .mockReturnValueOnce(completed('CommandLine\r\nhapi-local.exe runner start-sync\r\n'))
+            .mockReturnValueOnce(completed('CommandLine=hapi-local.exe runner start-sync\r\n'))
 
         expect(getHapiRunnerProcessIdentity(9124)).toBe('runner')
         expect(spawnSyncMock).toHaveBeenCalledTimes(2)
@@ -113,7 +113,7 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
     it('reports unknown when WMIC prints only the column header', () => {
         spawnSyncMock
             .mockReturnValueOnce(completed(''))
-            .mockReturnValueOnce(completed('CommandLine\r\n\r\n'))
+            .mockReturnValueOnce(completed('CommandLine=\r\n'))
 
         expect(getHapiRunnerProcessIdentity(8328)).toBe('unknown')
         expect(spawnSyncMock).toHaveBeenCalledTimes(2)
@@ -130,7 +130,7 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
     it('falls back to WMIC when PowerShell exits non-zero', () => {
         spawnSyncMock
             .mockReturnValueOnce(completed('', 1))
-            .mockReturnValueOnce(completed('CommandLine\r\nhapi-local.exe runner start-sync\r\n'))
+            .mockReturnValueOnce(completed('CommandLine=hapi-local.exe runner start-sync\r\n'))
 
         expect(getHapiRunnerProcessIdentity(9124)).toBe('runner')
         expect(spawnSyncMock).toHaveBeenCalledTimes(2)

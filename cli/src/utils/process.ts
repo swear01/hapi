@@ -66,7 +66,7 @@ function getWindowsProcessCommandLine(pid: number): string | null {
   }
 
   const wmic = spawn.sync('wmic', [
-    'process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine'
+    'process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:list'
   ], { stdio: 'pipe', windowsHide: true, timeout: PROCESS_PROBE_TIMEOUT_MS });
   if (!wmic.error && wmic.status === 0) {
     const commandLine = readWmicCommandLine(wmic.stdout?.toString() ?? '');
@@ -77,16 +77,12 @@ function getWindowsProcessCommandLine(pid: number): string | null {
 }
 
 /**
- * `wmic ... get CommandLine` prints the `CommandLine` column header even when
- * the property itself is empty or unreadable, so the raw stdout is never empty
- * on success. Drop the header before deciding whether a command line was read.
+ * List format uses the locale-independent property name and avoids parsing a
+ * localized table header.
  */
 function readWmicCommandLine(stdout: string): string | null {
-  const lines = stdout.split(/\r?\n/);
-  const headerIndex = lines.findIndex(line => line.trim() === 'CommandLine');
-  if (headerIndex === -1) return null;
-  const value = lines.slice(headerIndex + 1).join('\n');
-  return value.trim() ? value : null;
+  const match = stdout.match(/(?:^|\r?\n)CommandLine=([^\r\n]*)/i);
+  return match?.[1]?.trim() || null;
 }
 
 /**
