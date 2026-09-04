@@ -224,7 +224,7 @@ When the Grok CLI build advertises them, HAPI uses Grok's ACP extension methods 
 
 The Create page discovers Grok's ACP model catalog and the reasoning-effort choices advertised for each model. Remote sessions can switch both model and effort between turns; HAPI applies them through ACP `session/set_model` and `session/set_mode`. From the terminal, pick them at launch with `--model <model>` and `--effort <level>`.
 
-HAPI also exposes Grok's common slash commands, discovers skills from `.grok/skills`, `~/.grok/skills`, and shared `.agents/skills`, and asks Grok to set a concise HAPI session title after the first normal prompt.
+HAPI also exposes Grok's common slash commands and discovers skills from `.grok/skills`, `~/.grok/skills`, and shared `.agents/skills`.
 
 ### Current limitations
 

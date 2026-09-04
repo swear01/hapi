@@ -7,12 +7,12 @@
  * - No E2E encryption; data is stored as JSON in SQLite
  */
 
-import { isKnownFlavor, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+import { isKnownFlavor, isSteeringSupportedForSession, resolveHapiYoloPermissionMode, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
 import {
+    MACHINE_CAPABILITIES,
     cliBinaryUpdatedOnDisk,
-    isMachineCapabilitySkewed,
 } from '@hapi/protocol/runnerCapabilities'
-import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
+import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse, SpawnSessionWithRemitRequest } from '@hapi/protocol/apiTypes'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
@@ -116,6 +116,24 @@ export type ClearOpencodeSessionResult =
         message: string
         code: 'session_not_found' | 'access_denied' | 'clear_unavailable' | 'spawn_failed' | 'replacement_link_failed'
     }
+
+export type SpawnSessionWithRemitResult =
+    | {
+        type: 'success'
+        sessionId: string
+        remitId: string
+        name: string
+        session: {
+            machineId: string
+            directory: string
+            agent: AgentFlavor
+            model: string | null
+            modelReasoningEffort: string | null
+            effort: string | null
+            permissionMode: PermissionMode | null
+        }
+    }
+    | { type: 'error'; message: string; code?: string; childSessionId?: string; cleanedUp?: boolean }
 
 export type CursorChatStoreStatusResult =
     | { type: 'success'; status: CursorChatStoreStatus }
@@ -1383,6 +1401,10 @@ export class SyncEngine {
         if (!machineId || !directory) {
             return { type: 'error', message: 'Session is missing machine or path metadata' }
         }
+        const targetMachine = this.getMachineByNamespace(machineId, namespace)
+        if (!targetMachine?.metadata?.capabilities?.includes(MACHINE_CAPABILITIES.SessionControlSkill)) {
+            return { type: 'error', message: 'Fork requires an upgraded runner with session-control skill delivery' }
+        }
 
         let rpcResult: Awaited<ReturnType<RpcGateway['forkConversation']>>
         try {
@@ -1672,13 +1694,24 @@ export class SyncEngine {
         try {
             await this.rpcGateway.killSession(sessionId)
         } catch (error) {
-            if (error instanceof RpcTargetMissingError) {
-                this.sessionCache.markSessionArchivedFromHub(sessionId, 'Archived from hub (CLI unreachable)')
-            } else {
-                throw error
-            }
+            if (!(error instanceof RpcTargetMissingError)) throw error
         }
+        this.sessionCache.markSessionArchivedFromHub(sessionId, 'Archived from hub')
         this.handleSessionEnd({ sid: sessionId, time: Date.now() })
+    }
+
+    async stopSession(sessionId: string): Promise<{ alreadyStopped: boolean }> {
+        const session = this.getSession(sessionId)
+        if (!session?.active) return { alreadyStopped: true }
+        let reason: SessionEndReason | undefined
+        try {
+            await this.rpcGateway.stopSessionProcess(sessionId)
+        } catch (error) {
+            if (!(error instanceof RpcTargetMissingError)) throw error
+            reason = 'error'
+        }
+        this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason })
+        return { alreadyStopped: false }
     }
 
     /**
@@ -1966,6 +1999,145 @@ export class SyncEngine {
         )
     }
 
+    async spawnSessionWithRemit(
+        machineId: string,
+        namespace: string,
+        request: SpawnSessionWithRemitRequest
+    ): Promise<SpawnSessionWithRemitResult> {
+        const existingIds = new Set(this.getSessions().map((session) => session.id))
+        let result: Awaited<ReturnType<SyncEngine['spawnSession']>>
+        try {
+            result = await this.spawnSession(
+                machineId,
+                request.directory,
+                request.agent,
+                request.model,
+                request.modelReasoningEffort,
+                request.yolo,
+                request.sessionType,
+                request.worktreeName,
+                undefined,
+                request.effort,
+                request.permissionMode,
+                request.serviceTier,
+                undefined,
+                request.collaborationMode,
+                request.copilotAgentMode,
+                request.startingMode
+            )
+        } catch (error) {
+            return {
+                type: 'error',
+                code: 'spawn_failed',
+                message: error instanceof Error ? error.message : 'Runner failed to create a session'
+            }
+        }
+        if (result.type === 'error') return result
+
+        const sessionId = result.sessionId
+        if (existingIds.has(sessionId)) {
+            return {
+                type: 'error',
+                code: 'spawn_not_fresh',
+                message: 'Runner returned an existing session id; remit was not delivered'
+            }
+        }
+
+        const fail = async (code: string, message: string): Promise<SpawnSessionWithRemitResult> => {
+            const cleanedUp = await this.cleanupSpawnedSession(machineId, namespace, sessionId)
+            return { type: 'error', code, message, childSessionId: sessionId, cleanedUp }
+        }
+
+        const waitDeadline = Date.now() + (request.waitActiveSecs ?? 60) * 1000
+        const active = await this.waitForSessionActive(sessionId, Math.max(1, waitDeadline - Date.now())).catch(() => false)
+        if (!active) return await fail('spawn_timeout', 'New session did not become active')
+        const ready = await this.waitForSessionReady(sessionId, Math.max(1, waitDeadline - Date.now())).catch(() => 'timeout' as const)
+        if (ready !== 'ready') {
+            return await fail(
+                ready === 'ended' ? 'spawn_ended' : 'spawn_timeout',
+                ready === 'ended' ? 'New session ended before becoming ready' : 'New session did not become ready'
+            )
+        }
+
+        const child = this.getSessionByNamespace(sessionId, namespace)
+        if (!child || child.metadata?.machineId !== machineId) {
+            return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
+        }
+        const childMetadata = child.metadata
+        const expectedAgent = request.agent ?? 'claude'
+        const expectedPermissionMode = request.permissionMode
+            ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
+        const directoryMatches = childMetadata.path === request.directory
+            || (request.sessionType === 'worktree' && childMetadata.worktree?.basePath === request.directory)
+        const selectionMatches = childMetadata.flavor === expectedAgent
+            && directoryMatches
+            && (request.model === undefined || child.model === request.model)
+            && (request.modelReasoningEffort === undefined || child.modelReasoningEffort === request.modelReasoningEffort)
+            && (request.effort === undefined || child.effort === request.effort)
+            && (expectedPermissionMode === undefined || child.permissionMode === expectedPermissionMode)
+        if (!selectionMatches) {
+            return await fail('spawn_selection_mismatch', 'New session did not apply the requested directory, agent, model, effort, or permission mode')
+        }
+
+        try {
+            if (request.name) await this.renameSession(sessionId, request.name)
+            await this.sendMessage(sessionId, {
+                text: request.message,
+                localId: request.remitId,
+                sentFrom: 'webapp'
+            })
+            const stored = this.getQueuedState(sessionId, [request.remitId])
+            const remitStored = stored.queuedLocalIds.includes(request.remitId)
+                || stored.indeterminateLocalIds?.includes(request.remitId) === true
+                || stored.invokedLocalMessages.some((message) => message.localId === request.remitId)
+            if (!remitStored) throw new Error('Remit was not stored with its correlation id')
+        } catch (error) {
+            return await fail(
+                'remit_delivery_failed',
+                error instanceof Error ? error.message : 'Failed to deliver remit'
+            )
+        }
+
+        const current = this.getSessionByNamespace(sessionId, namespace) ?? child
+        return {
+            type: 'success',
+            sessionId,
+            remitId: request.remitId,
+            name: current.metadata?.name?.trim() || sessionId.slice(0, 8),
+            session: {
+                machineId,
+                directory: current.metadata?.path ?? request.directory,
+                agent: expectedAgent,
+                model: current.model,
+                modelReasoningEffort: current.modelReasoningEffort,
+                effort: current.effort,
+                permissionMode: current.permissionMode ?? null
+            }
+        }
+    }
+
+    private async cleanupSpawnedSession(machineId: string, namespace: string, sessionId: string): Promise<boolean> {
+        let status: 'stopped' | 'already_gone' | 'still_alive' = 'still_alive'
+        for (let attempt = 0; attempt < 2 && status === 'still_alive'; attempt += 1) {
+            try {
+                status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
+            } catch {
+                status = 'still_alive'
+            }
+        }
+        if (status === 'still_alive') return false
+
+        const session = this.getSessionByNamespace(sessionId, namespace)
+        if (!session) return true
+        try {
+            if (session.active) this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
+            this.sessionCache.markSessionArchivedFromHub(sessionId, 'Failed atomic spawn-with-remit')
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /**
      * Spawn a fresh OpenCode HAPI session from a source that its own CLI has
      * already archived with the `cleared` lifecycle. Deliberately accepts only
@@ -1999,6 +2171,14 @@ export class SyncEngine {
         const metadata = source.metadata
         if (!source.active || metadata?.flavor !== 'opencode' || metadata.startedBy !== 'runner' || !metadata.machineId || !metadata.path) {
             return { type: 'error', message: 'Session is not an active runner-backed OpenCode session', code: 'clear_unavailable' }
+        }
+        const targetMachine = this.getMachineByNamespace(metadata.machineId, namespace)
+        if (!targetMachine?.metadata?.capabilities?.includes(MACHINE_CAPABILITIES.SessionControlSkill)) {
+            return {
+                type: 'error',
+                message: 'OpenCode clear requires an upgraded runner with session-control skill delivery',
+                code: 'clear_unavailable'
+            }
         }
         const existing = metadata.opencodeClearOperation
         const operation = !existing || existing.state === 'aborted'
@@ -2119,10 +2299,18 @@ export class SyncEngine {
         // The source metadata is client-controlled, so validate the recorded
         // machine through the namespace-scoped cache before any persistent or
         // runner-facing action.
-        if (!this.getMachineByNamespace(metadata.machineId, namespace)) {
+        const targetMachine = this.getMachineByNamespace(metadata.machineId, namespace)
+        if (!targetMachine) {
             return {
                 type: 'error',
                 message: 'OpenCode clear source machine is unavailable in this namespace',
+                code: 'clear_unavailable'
+            }
+        }
+        if (!targetMachine.metadata?.capabilities?.includes(MACHINE_CAPABILITIES.SessionControlSkill)) {
+            return {
+                type: 'error',
+                message: 'OpenCode clear requires an upgraded runner with session-control skill delivery',
                 code: 'clear_unavailable'
             }
         }
@@ -2871,6 +3059,9 @@ export class SyncEngine {
         )
         if (!targetMachine) {
             return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
+        }
+        if (!targetMachine.metadata?.capabilities?.includes(MACHINE_CAPABILITIES.SessionControlSkill)) {
+            return { type: 'error', message: 'Resume requires an upgraded runner with session-control skill delivery', code: 'resume_failed' }
         }
 
         if (flavor === 'pi' && resumeToken && targetMachine.runnerState?.capabilities?.piExistingSessionResume !== true) {

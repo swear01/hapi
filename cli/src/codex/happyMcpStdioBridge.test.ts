@@ -61,8 +61,7 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
 
         const description = harness.configs.get('display_image')?.description
         expect(description).toContain('human user')
-        expect(description).toContain('does not provide image input to the model')
-        expect(description).toContain('cannot be used to read, inspect, or analyze image contents')
+        expect(description).toContain('does not provide image input')
     })
 
     it('registers and forwards skill_lookup when the HTTP server enables it', async () => {
@@ -157,12 +156,12 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
             'inspect_peer'
         ])
     })
-    it('registers list_peers when included in --tools', async () => {
+    it('registers spawn_peer when included in --tools', async () => {
         await runHappyMcpStdioBridge([
             '--url',
             'http://127.0.0.1:43006',
             '--tools',
-            'change_title,display_image,display_video,display_media,list_peers,ping_peer,inspect_peer'
+            'change_title,display_image,display_video,display_media,spawn_peer'
         ])
 
         expect([...harness.tools.keys()]).toEqual([
@@ -170,9 +169,7 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
             'display_image',
             'display_video',
             'display_media',
-            'ping_peer',
-            'inspect_peer',
-            'list_peers',
+            'spawn_peer'
         ])
     })
 

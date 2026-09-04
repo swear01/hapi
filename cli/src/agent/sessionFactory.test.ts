@@ -7,25 +7,28 @@ const {
     getOrCreateMachineMock,
     sessionSyncClientMock,
     notifyRunnerSessionStartedMock,
-    readSettingsMock
+    readSettingsMock,
+    ensureSkillMock,
+    apiCreateMock
 } = vi.hoisted(() => ({
     getSessionMock: vi.fn(),
     getOrCreateSessionMock: vi.fn(),
     getOrCreateMachineMock: vi.fn(),
     sessionSyncClientMock: vi.fn(),
     notifyRunnerSessionStartedMock: vi.fn(async () => ({})),
-    readSettingsMock: vi.fn()
+    readSettingsMock: vi.fn(),
+    ensureSkillMock: vi.fn(async () => '/tmp/skill/SKILL.md'),
+    apiCreateMock: vi.fn()
 }))
 
 vi.mock('@/api/api', () => ({
     ApiClient: {
-        create: async () => ({
-            getSession: getSessionMock,
-            getOrCreateSession: getOrCreateSessionMock,
-            getOrCreateMachine: getOrCreateMachineMock,
-            sessionSyncClient: sessionSyncClientMock
-        })
+        create: apiCreateMock
     }
+}))
+
+vi.mock('@/modules/common/hapiSessionControlSkill', () => ({
+    ensureHapiSessionControlSkill: ensureSkillMock
 }))
 
 vi.mock('@/runner/controlClient', () => ({
@@ -60,6 +63,13 @@ import {
     buildSessionMetadata
 } from './sessionFactory'
 
+apiCreateMock.mockImplementation(async () => ({
+    getSession: getSessionMock,
+    getOrCreateSession: getOrCreateSessionMock,
+    getOrCreateMachine: getOrCreateMachineMock,
+    sessionSyncClient: sessionSyncClientMock
+}))
+
 function createSession(): Session {
     return {
         id: 'hapi-session-1',
@@ -93,6 +103,9 @@ function createSession(): Session {
 
 describe('bootstrapExistingSession', () => {
     beforeEach(() => {
+        ensureSkillMock.mockReset()
+        ensureSkillMock.mockResolvedValue('/tmp/skill/SKILL.md')
+        apiCreateMock.mockClear()
         getSessionMock.mockReset()
         getOrCreateSessionMock.mockReset()
         getOrCreateMachineMock.mockReset()
@@ -100,6 +113,17 @@ describe('bootstrapExistingSession', () => {
         notifyRunnerSessionStartedMock.mockClear()
         readSettingsMock.mockReset()
         delete process.env[HAPI_SESSION_ID_ENV]
+    })
+
+    it('fails before touching the hub when skill delivery cannot be verified', async () => {
+        ensureSkillMock.mockRejectedValueOnce(new Error('skill unavailable'))
+
+        await expect(bootstrapExistingSession({
+            sessionId: 'hapi-session-1',
+            flavor: 'codex',
+            workingDirectory: '/tmp/project'
+        })).rejects.toThrow('skill unavailable')
+        expect(apiCreateMock).not.toHaveBeenCalled()
     })
 
     it('loads an existing HAPI session and reports it to the runner', async () => {
@@ -251,12 +275,25 @@ describe('bootstrapExistingSession', () => {
 
 describe('bootstrapLazySession', () => {
     beforeEach(() => {
+        ensureSkillMock.mockReset()
+        ensureSkillMock.mockResolvedValue('/tmp/skill/SKILL.md')
+        apiCreateMock.mockClear()
         getOrCreateSessionMock.mockReset()
         getOrCreateMachineMock.mockReset()
         sessionSyncClientMock.mockReset()
         notifyRunnerSessionStartedMock.mockClear()
         readSettingsMock.mockReset()
         delete process.env[HAPI_SESSION_ID_ENV]
+    })
+
+    it('fails before touching the hub when skill delivery cannot be verified', async () => {
+        ensureSkillMock.mockRejectedValueOnce(new Error('skill unavailable'))
+
+        await expect(bootstrapLazySession({
+            flavor: 'codex',
+            workingDirectory: '/tmp/project'
+        })).rejects.toThrow('skill unavailable')
+        expect(apiCreateMock).not.toHaveBeenCalled()
     })
 
     it('does not export HAPI_SESSION_ID until the hub row is materialized', async () => {
@@ -340,12 +377,25 @@ describe('bootstrapLazySession', () => {
 
 describe('bootstrapSession HAPI_SESSION_ID export', () => {
     beforeEach(() => {
+        ensureSkillMock.mockReset()
+        ensureSkillMock.mockResolvedValue('/tmp/skill/SKILL.md')
+        apiCreateMock.mockClear()
         getOrCreateSessionMock.mockReset()
         getOrCreateMachineMock.mockReset()
         sessionSyncClientMock.mockReset()
         notifyRunnerSessionStartedMock.mockClear()
         readSettingsMock.mockReset()
         delete process.env[HAPI_SESSION_ID_ENV]
+    })
+
+    it('fails before touching the hub when skill delivery cannot be verified', async () => {
+        ensureSkillMock.mockRejectedValueOnce(new Error('skill unavailable'))
+
+        await expect(bootstrapSession({
+            flavor: 'claude',
+            workingDirectory: '/tmp/project'
+        })).rejects.toThrow('skill unavailable')
+        expect(apiCreateMock).not.toHaveBeenCalled()
     })
 
     it('exports the hub session id so spawned agents inherit it', async () => {

@@ -113,8 +113,8 @@ describe('startHappyServer skill_lookup', () => {
             'display_video',
             'display_media',
             'ping_peer',
-            'inspect_peer',
-            'list_peers'
+            'spawn_peer',
+            'inspect_peer'
         ])
     })
 
@@ -124,8 +124,7 @@ describe('startHappyServer skill_lookup', () => {
         const displayImage = tools.tools.find((tool) => tool.name === 'display_image')
 
         expect(displayImage?.description).toContain('human user')
-        expect(displayImage?.description).toContain('does not provide image input to the model')
-        expect(displayImage?.description).toContain('cannot be used to read, inspect, or analyze image contents')
+        expect(displayImage?.description).toContain('does not provide image input')
     })
 
     it('displays audio through display_media and emits a generated media message', async () => {
@@ -182,14 +181,14 @@ describe('startHappyServer skill_lookup', () => {
         await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url)))
         const tools = await mcp.listTools()
 
-        expect(server.toolNames).toEqual(['display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer'])
+        expect(server.toolNames).toEqual(['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'])
         expect(tools.tools.map((tool) => tool.name)).toEqual([
             'display_image',
             'display_video',
             'display_media',
             'ping_peer',
-            'inspect_peer',
-            'list_peers'
+            'spawn_peer',
+            'inspect_peer'
         ])
     })
 
@@ -202,14 +201,13 @@ describe('toClaudeAllowedHapiMcpTools', () => {
             'display_image',
             'display_video',
             'display_media',
-            'list_peers',
             'ping_peer',
             'inspect_peer',
+            'spawn_peer',
             'skill_lookup'
         ])).toEqual([
             'mcp__hapi__change_title',
             'mcp__hapi__display_image',
-            'mcp__hapi__list_peers',
             'mcp__hapi__skill_lookup'
         ])
         expect(toClaudeAllowedHapiMcpTools(['display_video'])).not.toContain('mcp__hapi__display_video')

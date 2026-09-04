@@ -1617,7 +1617,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         ]);
     });
 
-    it('injects the skill lookup instruction only on the first prompt', async () => {
+    it('forwards user prompts without HAPI-owned prose', async () => {
         const { session } = createSessionStub([
             { message: 'first', mode: createMode() },
             { message: 'second', mode: createMode() }
@@ -1625,11 +1625,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
 
         await opencodeRemoteLauncher(session as never);
 
-        expect(JSON.stringify(harness.promptContents[0])).toContain('$name');
-        expect(JSON.stringify(harness.promptContents[0])).toContain('skill_lookup');
-        expect(JSON.stringify(harness.promptContents[0])).toContain('hapi_display_image');
-        expect(JSON.stringify(harness.promptContents[0])).not.toContain('hapi_change_title');
-        expect(JSON.stringify(harness.promptContents[1])).not.toContain('skill_lookup');
+        expect(harness.promptContents[0]).toEqual([{ type: 'text', text: 'first' }]);
+        expect(harness.promptContents[1]).toEqual([{ type: 'text', text: 'second' }]);
     });
 
     it('spawns the ACP backend with an explicit --port/--hostname from allocateFreePort', async () => {
@@ -1655,8 +1652,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         await opencodeRemoteLauncher(session as never);
 
         expect(harness.bridgeOptions).toEqual({
-            enableChangeTitle: false,
-            skillLookup: { workingDirectory: '/tmp/hapi-opencode-test', flavor: 'opencode' }
+            enableChangeTitle: false
         });
         expect(harness.refreshSessionInfoCalls).toEqual([
             { sessionId: 'acp-session-1', cwd: '/tmp/hapi-opencode-test' },
@@ -1862,7 +1858,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(harness.promptCount).toBe(1);
     });
 
-    it('injects plan-mode instructions into plan turns', async () => {
+    it('forwards plan-mode prompts unchanged while permissions enforce plan mode', async () => {
         const { session } = createSessionStub([
             { message: 'design the fix', mode: createPlanMode() }
         ]);
@@ -1870,10 +1866,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         await opencodeRemoteLauncher(session as never);
 
         const content = harness.promptContents[0] as Array<{ type: string; text: string }>;
-        expect(content[0]?.text).toContain('You are in plan mode');
-        expect(content[0]?.text).toContain('Do not execute tools');
-        expect(content[0]?.text).toContain('design the fix');
-        expect(content[0]?.text).not.toContain('hapi_change_title');
+        expect(content).toEqual([{ type: 'text', text: 'design the fix' }]);
     });
 
     it('registers a listOpencodeModels RPC handler that returns the backend cache', async () => {
