@@ -960,11 +960,13 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
                 id
             )
         }
+        store.messages.addMessage(archivedIds[0]!, { text: 'cascade child' })
 
         const deleted = store.sessions.deleteArchivedSessions(archivedIds, 'default')
         expect(deleted?.map((session) => session.id).sort()).toEqual(archivedIds.sort())
         expect(store.sessions.getSession('atomic-a')).toBeNull()
         expect(store.sessions.getSession('atomic-b')).toBeNull()
+        expect(store.messages.getMessages(archivedIds[0]!)).toEqual([])
         store.close()
     })
 

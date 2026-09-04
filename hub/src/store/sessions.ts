@@ -721,10 +721,10 @@ export function deleteArchivedSessions(
         })
         if (!allArchived) return null
 
-        const result = db.prepare(
-            `DELETE FROM sessions WHERE namespace = ? AND id IN (${placeholders})`
-        ).run(namespace, ...uniqueIds)
-        if (result.changes !== uniqueIds.length) {
+        const deletedRows = db.prepare(
+            `DELETE FROM sessions WHERE namespace = ? AND id IN (${placeholders}) RETURNING id`
+        ).all(namespace, ...uniqueIds) as Array<{ id: string }>
+        if (deletedRows.length !== uniqueIds.length) {
             throw new Error('Failed to delete archived sessions')
         }
         return rows.map(toStoredSession)
