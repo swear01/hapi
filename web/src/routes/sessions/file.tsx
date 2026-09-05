@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useParams, useSearch } from '@tanstack/react-router'
 import type { GitCommandResponse } from '@/types/api'
 import { FileIcon } from '@/components/FileIcon'
-import { CopyIcon, CheckIcon } from '@/components/icons'
+import { CopyIcon, CheckIcon, WrapIcon } from '@/components/icons'
 import { useAppContext } from '@/lib/app-context'
 import { useAppGoBack } from '@/hooks/useAppGoBack'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
@@ -14,6 +14,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { decodeBase64 } from '@/lib/utils'
 import { ImagePreview } from '@/components/ImagePreview'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
+import { ExpandableErrorMessage } from '@/components/ExpandableErrorMessage'
 import { formatFileMetadata } from '@/lib/file-metadata'
 import {
     getInitialMarkdownPreviewMode,
@@ -22,6 +23,7 @@ import {
     type MarkdownPreviewMode,
 } from '@/lib/file-markdown-preview'
 import { downloadBase64File } from '@/lib/file-download'
+import { useCodeWrap } from '@/hooks/useCodeWrap'
 
 const MAX_COPYABLE_FILE_BYTES = 1_000_000
 const FILE_SCROLL_KEY_PREFIX = 'hapi-file-scroll-'
@@ -144,8 +146,17 @@ function FileContentHeader(props: {
     label: string
     copied: boolean
     copyLabel: string
-    onCopy: () => void
+    onCopy?: () => void
+    codeWrap?: boolean
+    wrapEnableLabel?: string
+    wrapDisableLabel?: string
+    onToggleWrap?: () => void
 }) {
+    const showWrapToggle = props.onToggleWrap !== undefined
+        && props.wrapEnableLabel !== undefined
+        && props.wrapDisableLabel !== undefined
+    const wrapLabel = props.codeWrap ? props.wrapDisableLabel : props.wrapEnableLabel
+
     return (
         <div
             data-hapi-file-content-header="true"
@@ -154,15 +165,34 @@ function FileContentHeader(props: {
             <div className="min-w-0 flex-1 truncate font-mono text-[11px] uppercase tracking-[0.08em] text-[var(--app-code-header-fg)]">
                 {props.label}
             </div>
-            <button
-                type="button"
-                onClick={props.onCopy}
-                className="shrink-0 rounded-md p-1 text-[var(--app-code-header-fg)] transition-colors hover:bg-[var(--app-code-copy-hover-bg)] hover:text-[var(--app-fg)]"
-                title={props.copyLabel}
-                aria-label={props.copyLabel}
-            >
-                {props.copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+                {showWrapToggle ? (
+                    <button
+                        type="button"
+                        data-hapi-code-wrap-toggle="true"
+                        data-hapi-wrap-enable-label={props.wrapEnableLabel}
+                        data-hapi-wrap-disable-label={props.wrapDisableLabel}
+                        onClick={props.onToggleWrap}
+                        className={`rounded-md p-1 transition-colors hover:bg-[var(--app-code-copy-hover-bg)] hover:text-[var(--app-fg)] ${props.codeWrap ? 'text-[var(--app-fg)]' : 'text-[var(--app-code-header-fg)]'}`}
+                        title={wrapLabel}
+                        aria-label={wrapLabel}
+                        aria-pressed={props.codeWrap}
+                    >
+                        <WrapIcon className="h-3.5 w-3.5" />
+                    </button>
+                ) : null}
+                {props.onCopy ? (
+                    <button
+                        type="button"
+                        onClick={props.onCopy}
+                        className="rounded-md p-1 text-[var(--app-code-header-fg)] transition-colors hover:bg-[var(--app-code-copy-hover-bg)] hover:text-[var(--app-fg)]"
+                        title={props.copyLabel}
+                        aria-label={props.copyLabel}
+                    >
+                        {props.copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+                    </button>
+                ) : null}
+            </div>
         </div>
     )
 }
@@ -273,10 +303,12 @@ export default function FilePage() {
         && !binaryFile
         && decodedContent.length > 0
         && contentSizeBytes <= MAX_COPYABLE_FILE_BYTES
+    const canWrapContent = contentSizeBytes <= MAX_COPYABLE_FILE_BYTES
 
     const canDownload = fileContentResult?.success === true && Boolean(fileContentResult.content)
 
     const [displayMode, setDisplayMode] = useState<'diff' | 'file'>('diff')
+    const { codeWrap, setCodeWrap } = useCodeWrap()
     const fileScrollRef = useRef<HTMLDivElement>(null)
     const restoredScrollKeyRef = useRef<string | null>(null)
     const fileScrollKey = useMemo(
@@ -322,6 +354,34 @@ export default function FilePage() {
         restoreFileScroll()
         restoredScrollKeyRef.current = fileScrollKey
     }, [diffQuery.isLoading, fileQuery.isLoading, fileScrollKey, restoreFileScroll])
+    useLayoutEffect(() => {
+        const element = fileScrollRef.current
+        if (!element) return
+        const content = element.querySelector<HTMLElement>('.file-preview-scroll-content')
+
+        const updateScrollbarCompensation = () => {
+            const scrollbarWidth = Math.max(0, element.offsetWidth - element.clientWidth)
+            element.style.setProperty('--file-preview-scrollbar-compensation', `${scrollbarWidth}px`)
+            const contentWidth = content?.getBoundingClientRect().width ?? element.clientWidth
+            const contentOffset = scrollbarWidth > 0
+                ? Math.min(
+                    scrollbarWidth / 2,
+                    Math.max(0, (element.offsetWidth - contentWidth) / 2)
+                )
+                : 0
+            element.style.setProperty('--file-preview-scroll-content-offset', `${contentOffset}px`)
+        }
+
+        updateScrollbarCompensation()
+        const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateScrollbarCompensation)
+        resizeObserver?.observe(element)
+        if (content) resizeObserver?.observe(content)
+        window.addEventListener('resize', updateScrollbarCompensation)
+        return () => {
+            resizeObserver?.disconnect()
+            window.removeEventListener('resize', updateScrollbarCompensation)
+        }
+    }, [])
 
     const setMarkdownPreviewMode = (mode: MarkdownPreviewMode) => {
         setMarkdownMode(mode)
@@ -438,23 +498,36 @@ export default function FilePage() {
                 </div>
             ) : null}
 
-            <div ref={fileScrollRef} data-hapi-file-scroll="true" className="app-scroll-y flex-1 min-h-0">
-                <div className="mx-auto w-full max-w-content p-4">
+            <div ref={fileScrollRef} data-hapi-file-scroll="true" className="app-scroll-y file-preview-scroll-y flex-1 min-h-0">
+                <div className="file-preview-scroll-content mx-auto w-full max-w-content p-4">
                     {diffErrorMessage ? (
-                        <div className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]">
-                            {diffErrorMessage}
-                        </div>
+                        <ExpandableErrorMessage
+                            message={diffErrorMessage}
+                            expandLabel={t('file.page.expandError')}
+                            collapseLabel={t('file.page.collapseError')}
+                            className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]"
+                        />
                     ) : null}
                     {missingPath ? (
                         <div className="text-sm text-[var(--app-hint)]">{t('file.page.missingPath')}</div>
                     ) : loading ? (
                         <FileContentSkeleton label={t('loading.file')} />
                     ) : fileErrorMessage ? (
-                        <div className="text-sm text-[var(--app-hint)]">{fileErrorMessage}</div>
+                        <ExpandableErrorMessage
+                            message={fileErrorMessage}
+                            expandLabel={t('file.page.expandError')}
+                            collapseLabel={t('file.page.collapseError')}
+                            className="text-sm text-[var(--app-hint)]"
+                        />
                     ) : displayMode === 'diff' && diffContent ? (
                         <DiffDisplay diffContent={diffContent} />
                     ) : displayMode === 'diff' && diffError ? (
-                        <div className="text-sm text-[var(--app-hint)]">{diffErrorMessage}</div>
+                        <ExpandableErrorMessage
+                            message={diffErrorMessage ?? ''}
+                            expandLabel={t('file.page.expandError')}
+                            collapseLabel={t('file.page.collapseError')}
+                            className="text-sm text-[var(--app-hint)]"
+                        />
                     ) : displayMode === 'file' ? (
                         imagePreviewUrl ? (
                             <ImagePreview
@@ -487,15 +560,25 @@ export default function FilePage() {
                                         data-hapi-file-source-preview="true"
                                         className="min-w-0 max-w-full overflow-hidden rounded-md bg-[var(--app-code-bg)]"
                                     >
-                                        {canCopyContent ? (
+                                        {canCopyContent || canWrapContent ? (
                                             <FileContentHeader
                                                 label={language ?? 'text'}
                                                 copied={contentCopied}
                                                 copyLabel={t('file.page.copyContent')}
-                                                onCopy={() => copyContent(decodedContent)}
+                                                onCopy={canCopyContent ? () => copyContent(decodedContent) : undefined}
+                                                codeWrap={canWrapContent && codeWrap}
+                                                wrapEnableLabel={t('code.wrap.enable')}
+                                                wrapDisableLabel={t('code.wrap.disable')}
+                                                onToggleWrap={canWrapContent ? () => setCodeWrap(!codeWrap) : undefined}
                                             />
                                         ) : null}
-                                        <pre className="shiki m-0 overflow-auto bg-[var(--app-code-bg)] p-3 text-xs font-mono">
+                                        <pre
+                                            className={`shiki m-0 overflow-y-auto bg-[var(--app-code-bg)] p-3 text-xs font-mono ${canWrapContent && codeWrap ? 'overflow-x-hidden' : 'overflow-x-auto'}`}
+                                            style={{
+                                                whiteSpace: canWrapContent && codeWrap ? 'pre-wrap' : 'pre',
+                                                ...(canWrapContent && codeWrap ? { wordBreak: 'break-word' as const } : {})
+                                            }}
+                                        >
                                             <code>{highlighted ?? decodedContent}</code>
                                         </pre>
                                     </div>

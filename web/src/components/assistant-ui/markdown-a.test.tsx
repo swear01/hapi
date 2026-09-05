@@ -54,12 +54,12 @@ function chatContext(overrides: Partial<HappyChatContextValue> = {}): HappyChatC
         sessionId: 'session-1',
         metadata: { path: '/home/ada/coding/hapi', host: 'local' },
         terminalToolDisplayMode: 'compact',
+        showSessionSummaryInChat: false,
         disabled: false,
         onRefresh: () => {},
         hasMoreMessages: false,
         isSyncingTail: false,
         isLoadingMoreMessages: false,
-        showSessionSummaryInChat: false,
         loadOlderMessagesPreservingScroll: async () => 'loaded',
         ...overrides,
     }
@@ -198,7 +198,6 @@ describe('cross-tab sync via storage event', () => {
             window.dispatchEvent(new StorageEvent('storage', {
                 key: STORAGE_KEY,
                 newValue: JSON.stringify(['obsidian']),
-                storageArea: localStorage,
             }))
         })
 

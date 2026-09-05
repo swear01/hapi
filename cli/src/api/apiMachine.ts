@@ -10,10 +10,12 @@ import { configuration } from '@/configuration'
 import type { ClientToServerEvents, ServerToClientEvents, Update, UpdateMachineBody } from '@hapi/protocol'
 import {
     ArchiveCodexSessionRpcRequestSchema,
+    ListClaudeSessionsRpcRequestSchema,
     ListCodexSessionsRpcRequestSchema,
     ListPiSessionsRpcRequestSchema,
     type ArchiveCodexSessionRpcResponse,
     type AgentAvailabilityResponse,
+    type ListClaudeSessionsRpcResponse,
     type ListCodexSessionsRpcResponse,
     type ListPiSessionsRpcResponse,
     type MachineDirectoryEntry,
@@ -29,6 +31,7 @@ import { backoff } from '@/utils/time'
 import { getInvokedCwd } from '@/utils/invokedCwd'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
+import { registerWorkspaceFileHandlers } from '../modules/common/workspaceFileHandlers'
 import {
     listOpencodeModelsForCwd,
     type ListOpencodeModelsForCwdRequest,
@@ -44,9 +47,11 @@ import {
     type ListCopilotModelsForCwdRequest,
     type ListCopilotModelsForCwdResponse
 } from '../modules/common/copilotModels'
+import { findCodexSessionPath } from '../modules/common/codexSessions'
 import type { SpawnSessionOptions, SpawnSessionResult } from '../modules/common/rpcTypes'
 import { applyVersionedAck } from './versionedUpdate'
 import { archiveLocalCodexSession, listLocalCodexSessionSummaries, listLocalCodexSessionsWithMessagesByIds } from '../modules/common/codexSessions'
+import { listLocalClaudeSessionMessagesPageById, listLocalClaudeSessionSummaries } from '../modules/common/claudeSessions'
 import { listLocalPiSessionSummaries, listLocalPiSessionsWithMessagesByIds } from '../modules/common/piSessions'
 import { buildSocketIoExtraHeaderOptions } from './hubExtraHeaders'
 import { collectMachineHealth } from '@/utils/machineHealth'
@@ -55,6 +60,12 @@ import { homedir } from 'node:os'
 import type { CursorChatStoreStatus } from '@hapi/protocol/apiTypes'
 import { MachinePathPolicy } from './machinePathPolicy'
 import { getAgentAvailabilityResponse } from '@/agent/agentAvailability'
+import type { HubUpgradeOffer, RunnerSelfUpgradeResponse } from '@hapi/protocol/upgradeChannel'
+import { applyRunnerSelfUpgrade } from '@/upgrade/selfUpgrade'
+import { buildMachineMetadata } from '@/agent/sessionFactory'
+import {
+    machineRegistrationNeedsRefresh,
+} from '@hapi/protocol/machineRegistration'
 
 export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
@@ -117,6 +128,10 @@ export class ApiMachineClient {
         })
 
         registerCommonHandlers(this.rpcHandlerManager, getInvokedCwd())
+        registerWorkspaceFileHandlers(this.rpcHandlerManager, {
+            resolveForCheck: (path) => this.pathPolicy.resolveForCheck(path),
+            isWithinSpawnRoots: (path) => this.pathPolicy.isWithinSpawnRoots(path),
+        })
 
         this.rpcHandlerManager.registerHandler<unknown, AgentAvailabilityResponse>(
             RPC_METHODS.AgentAvailability,
@@ -326,6 +341,41 @@ export class ApiMachineClient {
             }
         )
 
+        this.rpcHandlerManager.registerHandler<unknown, ListClaudeSessionsRpcResponse>(
+            RPC_METHODS.ListClaudeSessions,
+            async (params) => {
+                const parsed = ListClaudeSessionsRpcRequestSchema.safeParse(params)
+                if (!parsed.success) return { success: false, error: 'Invalid Claude sessions request' }
+                const rawCwd = typeof parsed.data.cwd === 'string' ? parsed.data.cwd.trim() : ''
+                if (rawCwd) {
+                    const resolvedCwd = await this.pathPolicy.resolveForCheck(rawCwd)
+                    if (!this.pathPolicy.isWithinSpawnRoots(resolvedCwd)) {
+                        return { success: false, error: 'Path is outside workspace roots' }
+                    }
+                }
+                if (parsed.data.mode === 'summaries') {
+                    const sessions = []
+                    for (const session of await listLocalClaudeSessionSummaries()) {
+                        if (await this.isLocalSessionWithinWorkspaceRoots(session)) sessions.push(session)
+                    }
+                    return { success: true, mode: 'summaries', sessions }
+                }
+                try {
+                    const page = await listLocalClaudeSessionMessagesPageById(parsed.data.sessionId, parsed.data.cursor, parsed.data.maxBytes)
+                    if (!page) return { success: false, error: 'Claude session transcript not found' }
+                    if (!await this.isLocalSessionWithinWorkspaceRoots(page.session)) {
+                        return { success: false, error: 'Path is outside workspace roots' }
+                    }
+                    return { success: true, mode: 'messages', page }
+                } catch (error) {
+                    return {
+                        success: false,
+                        error: error instanceof Error ? error.message : 'Failed to page Claude session transcript'
+                    }
+                }
+            }
+        )
+
         this.rpcHandlerManager.registerHandler<unknown, ListPiSessionsRpcResponse>(
             RPC_METHODS.ListPiSessions,
             async (params) => {
@@ -373,6 +423,17 @@ export class ApiMachineClient {
                     type: 'error',
                     errorMessage: 'Directory is outside this machine\'s workspace roots',
                     code: 'outside_workspace_roots',
+                }
+            }
+
+            if (agent === 'codex' && resumeSessionId && this.pathPolicy.hasWorkspaceRoots()) {
+                const codexSessionPath = await findCodexSessionPath(resumeSessionId)
+                if (!codexSessionPath) {
+                    return { type: 'error', errorMessage: 'Codex session path is unavailable or outside workspace roots' }
+                }
+                const resolvedCodexSessionPath = await this.pathPolicy.resolveForCheck(codexSessionPath)
+                if (!this.pathPolicy.isWithinSpawnRoots(resolvedCodexSessionPath)) {
+                    return { type: 'error', errorMessage: 'Codex session is outside this machine\'s workspace roots' }
                 }
             }
 
@@ -428,6 +489,24 @@ export class ApiMachineClient {
         this.rpcHandlerManager.registerHandler(RPC_METHODS.StopRunner, () => {
             setTimeout(() => requestShutdown(), 100)
             return { message: 'Runner stop request acknowledged' }
+        })
+
+        this.rpcHandlerManager.registerHandler<
+            { offer: HubUpgradeOffer },
+            RunnerSelfUpgradeResponse
+        >(RPC_METHODS.RunnerSelfUpgrade, async (params) => {
+            const offer = params?.offer
+            if (!offer || typeof offer !== 'object') {
+                throw new Error('offer is required')
+            }
+            return await applyRunnerSelfUpgrade({
+                offer,
+                downloadBaseUrl: configuration.apiUrl,
+                authToken: configuration.cliApiToken,
+                requestShutdown: () => {
+                    setTimeout(() => requestShutdown(), 500)
+                },
+            })
         })
     }
 
@@ -528,26 +607,42 @@ export class ApiMachineClient {
 
             const hubWorkspaceRoots = this.machine.metadata?.workspaceRoots
             const desiredWorkspaceRoots = this.workspaceRoots
-            if (!workspaceRootsEqual(desiredWorkspaceRoots, hubWorkspaceRoots)) {
-                if (desiredWorkspaceRoots?.length) {
-                    console.log(`[HAPI] Syncing workspace roots to hub: ${formatWorkspaceRoots(desiredWorkspaceRoots)} (current hub value: ${formatWorkspaceRoots(hubWorkspaceRoots)})`)
-                } else {
-                    console.log(`[HAPI] Clearing workspace roots on hub (was: ${formatWorkspaceRoots(hubWorkspaceRoots)})`)
+            const identity = buildMachineMetadata({
+                workspaceRoots: desiredWorkspaceRoots?.length ? desiredWorkspaceRoots : undefined,
+                startedCliMtimeMs: this.machine.metadata?.startedCliMtimeMs,
+                asRunner: true,
+            })
+            const needsRoots = !workspaceRootsEqual(desiredWorkspaceRoots, hubWorkspaceRoots)
+            const needsIdentity = machineRegistrationNeedsRefresh(this.machine.metadata, identity)
+
+            if (needsRoots || needsIdentity) {
+                if (needsRoots) {
+                    if (desiredWorkspaceRoots?.length) {
+                        console.log(`[HAPI] Syncing workspace roots to hub: ${formatWorkspaceRoots(desiredWorkspaceRoots)} (current hub value: ${formatWorkspaceRoots(hubWorkspaceRoots)})`)
+                    } else {
+                        console.log(`[HAPI] Clearing workspace roots on hub (was: ${formatWorkspaceRoots(hubWorkspaceRoots)})`)
+                    }
+                }
+                if (needsIdentity) {
+                    console.log(`[HAPI] Refreshing machine identity on hub (version=${identity.happyCliVersion}, capabilities=${(identity.capabilities ?? []).join(',') || '(none)'})`)
                 }
                 this.updateMachineMetadata((current) => {
-                    const base = current ?? this.machine.metadata
-                    if (!base) {
-                        return { workspaceRoots: desiredWorkspaceRoots } as MachineMetadata
+                    const merged = {
+                        ...identity,
+                        displayName: current?.displayName,
+                        startedCliMtimeMs: current?.startedCliMtimeMs ?? identity.startedCliMtimeMs,
                     }
                     if (desiredWorkspaceRoots?.length) {
-                        return { ...base, workspaceRoots: desiredWorkspaceRoots }
+                        return { ...merged, workspaceRoots: desiredWorkspaceRoots }
                     }
-                    const { workspaceRoots: _workspaceRoots, ...rest } = base
+                    const { workspaceRoots: _workspaceRoots, ...rest } = merged
                     return rest as MachineMetadata
                 }).then(() => {
-                    console.log(`[HAPI] Workspace roots synced: ${formatWorkspaceRoots(this.machine.metadata?.workspaceRoots)}`)
+                    if (needsRoots) {
+                        console.log(`[HAPI] Workspace roots synced: ${formatWorkspaceRoots(this.machine.metadata?.workspaceRoots)}`)
+                    }
                 }).catch((error) => {
-                    console.error('[HAPI] Failed to sync workspace roots:', error instanceof Error ? error.message : error)
+                    console.error('[HAPI] Failed to sync machine metadata:', error instanceof Error ? error.message : error)
                 })
             } else if (desiredWorkspaceRoots?.length) {
                 console.log(`[HAPI] Workspace roots already up to date on hub: ${formatWorkspaceRoots(desiredWorkspaceRoots)}`)
@@ -562,8 +657,12 @@ export class ApiMachineClient {
             this.stopKeepAlive()
         })
 
-        this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
+        this.socket.on('rpc-request', async (data: { method: string; params: string; requestId?: string }, callback: (response: string) => void) => {
             callback(await this.rpcHandlerManager.handleRequest(data))
+        })
+
+        this.socket.on('rpc-cancel', ({ requestId }) => {
+            this.rpcHandlerManager.cancelRequest(requestId)
         })
 
         this.socket.on('update', (data: Update) => {
@@ -611,6 +710,34 @@ export class ApiMachineClient {
         })
     }
 
+    /**
+     * Create the socket and resolve only after the first successful `connect`
+     * event (after onSocketConnect / RPC registration). Used by upgrade/mtime
+     * handoff so hubReadyAt is not written for a half-connected child.
+     *
+     * Transient `connect_error` events are ignored — Socket.IO reconnection
+     * stays active until success or timeout.
+     */
+    connectUntilReady(timeoutMs = 30_000): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.connect()
+            if (!this.socket) {
+                reject(new Error('Machine socket was not created'))
+                return
+            }
+            const timer = setTimeout(() => {
+                this.socket?.off('connect', onConnect)
+                reject(new Error(`Machine socket connect timed out after ${timeoutMs}ms`))
+            }, timeoutMs)
+            const onConnect = (): void => {
+                clearTimeout(timer)
+                resolve()
+            }
+            // Registered after connect()'s own handlers so onSocketConnect runs first.
+            this.socket.once('connect', onConnect)
+        })
+    }
+
     private startKeepAlive(): void {
         this.stopKeepAlive()
         const emitAlive = () => {
@@ -620,18 +747,41 @@ export class ApiMachineClient {
                 health: collectMachineHealth()
             })
             const installedCliMtimeMs = getInstalledCliMtimeMs()
-            if (
-                typeof installedCliMtimeMs === 'number'
-                && this.machine.metadata
-                && this.machine.metadata.installedCliMtimeMs !== installedCliMtimeMs
-            ) {
-                void this.updateMachineMetadata((current) => ({
-                    ...(current ?? this.machine.metadata!),
-                    installedCliMtimeMs,
-                })).catch((error) => {
-                    logger.debug('[API MACHINE] Failed to refresh installedCliMtimeMs', error)
-                })
+            if (!this.machine.metadata) {
+                return
             }
+            // Keepalive must refresh capabilities/version too — `/cli/machines`
+            // historically returned stale rows for existing machines, and a
+            // long-lived socket may never reconnect after a binary upgrade.
+            const identity = buildMachineMetadata({
+                workspaceRoots: this.workspaceRoots?.length ? this.workspaceRoots : undefined,
+                startedCliMtimeMs: this.machine.metadata.startedCliMtimeMs,
+                asRunner: true,
+            })
+            const needsIdentity = machineRegistrationNeedsRefresh(this.machine.metadata, identity)
+            const needsInstalledMtime = typeof installedCliMtimeMs === 'number'
+                && this.machine.metadata.installedCliMtimeMs !== installedCliMtimeMs
+            if (!needsIdentity && !needsInstalledMtime) {
+                return
+            }
+            void this.updateMachineMetadata((current) => {
+                const base: MachineMetadata = {
+                    ...identity,
+                    displayName: current?.displayName,
+                    startedCliMtimeMs: current?.startedCliMtimeMs ?? identity.startedCliMtimeMs,
+                    ...(typeof installedCliMtimeMs === 'number' ? { installedCliMtimeMs } : {}),
+                }
+                if (this.workspaceRoots?.length) {
+                    return { ...base, workspaceRoots: this.workspaceRoots }
+                }
+                // Keepalive must not clear workspace roots; connect owns that sync.
+                if (current?.workspaceRoots?.length) {
+                    return { ...base, workspaceRoots: current.workspaceRoots }
+                }
+                return base
+            }).catch((error) => {
+                logger.debug('[API MACHINE] Failed to refresh machine identity on keepalive', error)
+            })
         }
         // Prime CPU sampling so the first heartbeat already includes CPU %.
         collectMachineHealth()

@@ -1,6 +1,8 @@
 import type { ChildProcess } from 'node:child_process';
 import spawn from 'cross-spawn';
 
+const PROCESS_PROBE_TIMEOUT_MS = 5_000;
+
 export const isWindows = (): boolean => process.platform === 'win32';
 
 export function isProcessAlive(pid: number): boolean {
@@ -23,21 +25,22 @@ export function getProcessStartMarker(pid: number): string | null {
     const powershell = spawn.sync('powershell', [
       '-NoProfile', '-NonInteractive', '-Command',
       `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CreationDate`
-    ], { stdio: 'pipe', windowsHide: true });
+    ], { stdio: 'pipe', windowsHide: true, timeout: PROCESS_PROBE_TIMEOUT_MS });
     if (!powershell.error && powershell.status === 0) {
       const marker = powershell.stdout?.toString().trim();
       if (marker) return marker;
     }
     const result = spawn.sync('wmic', [
       'process', 'where', `ProcessId=${pid}`, 'get', 'CreationDate', '/value'
-    ], { stdio: 'pipe', windowsHide: true });
+    ], { stdio: 'pipe', windowsHide: true, timeout: PROCESS_PROBE_TIMEOUT_MS });
     if (result.error || result.status !== 0) return null;
     const match = (result.stdout?.toString() ?? '').match(/CreationDate=([^\r\n]+)/);
     return match?.[1]?.trim() || null;
   }
   const result = spawn.sync('ps', ['-p', String(pid), '-o', 'lstart='], {
     stdio: 'pipe',
-    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }
+    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+    timeout: PROCESS_PROBE_TIMEOUT_MS
   });
   if (result.error || result.status !== 0) return null;
   return result.stdout?.toString().trim() || null;
@@ -48,25 +51,68 @@ function isRunnerCommand(commandLine: string): boolean {
   return /(?:^|\s)runner(?:\s|$)/.test(commandLine) && /(?:^|\s)start-sync(?:\s|$)/.test(commandLine);
 }
 
-export function isHapiRunnerProcess(pid: number): boolean {
+function getWindowsProcessCommandLine(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+
+  const powershell = spawn.sync('powershell', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`
+  ], { stdio: 'pipe', windowsHide: true, timeout: PROCESS_PROBE_TIMEOUT_MS });
+  if (!powershell.error && powershell.status === 0) {
+    const commandLine = powershell.stdout?.toString() ?? '';
+    if (commandLine.trim()) return commandLine;
+  }
+
+  const wmic = spawn.sync('wmic', [
+    'process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/format:list'
+  ], { stdio: 'pipe', windowsHide: true, timeout: PROCESS_PROBE_TIMEOUT_MS });
+  if (!wmic.error && wmic.status === 0) {
+    const commandLine = readWmicCommandLine(wmic.stdout?.toString() ?? '');
+    if (commandLine) return commandLine;
+  }
+
+  return null;
+}
+
+/**
+ * List format uses the locale-independent property name and avoids parsing a
+ * localized table header.
+ */
+function readWmicCommandLine(stdout: string): string | null {
+  const match = stdout.match(/(?:^|\r?\n)CommandLine=([^\r\n]*)/i);
+  return match?.[1]?.trim() || null;
+}
+
+/**
+ * `unknown` means the process is alive but its command line could not be read.
+ * Callers must not signal or clean up on that answer: the pid may belong to an
+ * unrelated process that reused it, and it may equally be a healthy runner.
+ */
+export type RunnerProcessIdentity = 'runner' | 'foreign' | 'unknown' | 'dead';
+
+export function getHapiRunnerProcessIdentity(pid: number): RunnerProcessIdentity {
   if (!isProcessAlive(pid)) {
-    return false;
+    return 'dead';
   }
-  if (isWindows()) {
-    const result = spawn.sync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine'], { stdio: 'pipe' });
-    if (result.error) {
-      return true;
-    }
-    if (result.status !== 0) {
-      return isProcessAlive(pid);
-    }
-    return isRunnerCommand(result.stdout?.toString() ?? '');
+  const commandLine = isWindows()
+    ? getWindowsProcessCommandLine(pid)
+    : getPosixProcessCommandLine(pid);
+  if (commandLine === null) {
+    return isProcessAlive(pid) ? 'unknown' : 'dead';
   }
-  const result = spawn.sync('ps', ['-p', String(pid), '-o', 'command='], { stdio: 'pipe' });
-  if (result.error || result.status !== 0) {
-    return isProcessAlive(pid);
-  }
-  return isRunnerCommand(result.stdout?.toString() ?? '');
+  if (!isProcessAlive(pid)) return 'dead';
+  return isRunnerCommand(commandLine) ? 'runner' : 'foreign';
+}
+
+function getPosixProcessCommandLine(pid: number): string | null {
+  const result = spawn.sync('ps', ['-p', String(pid), '-o', 'command='], {
+    stdio: 'pipe',
+    timeout: PROCESS_PROBE_TIMEOUT_MS
+  });
+  if (result.error || result.status !== 0) return null;
+  return result.stdout?.toString().trim() || null;
 }
 
 function killProcessWindows(pid: number, force: boolean): boolean {

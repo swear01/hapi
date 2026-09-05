@@ -488,6 +488,150 @@ describe('updateSessionMetadata: protocol resume token preservation', () => {
         expect(metadata?.lifecycleState).toBe('archived')
     })
 
+    it('preserves lastModelError across sparse archive (durable alert state)', () => {
+        const store = makeStore()
+        const lastModelError = {
+            eventId: 'evt-1700000000000',
+            kind: 'quota_exhausted',
+            transient: false,
+            rawSnippet: 'Error: T: [resource_exhausted]',
+            atTs: 1_700_000_000_000,
+            priorAssistantClaimsDone: false
+        }
+        const session = store.sessions.getOrCreateSession(
+            'cursor-model-error-survives',
+            {
+                path: '/tmp/project',
+                host: 'example',
+                flavor: 'cursor',
+                cursorSessionId: 'err-uuid',
+                lastModelError
+            },
+            null,
+            'default'
+        )
+
+        store.sessions.updateSessionMetadata(
+            session.id,
+            {
+                lifecycleState: 'archived',
+                archivedBy: 'cli',
+                archiveReason: 'Session crashed'
+            },
+            session.metadataVersion,
+            'default'
+        )
+
+        const metadata = getMetadata(store, session.id) as Record<string, unknown> | null
+        expect(metadata?.lastModelError).toEqual(lastModelError)
+        expect(metadata?.lifecycleState).toBe('archived')
+    })
+
+    it('preserves lastModelError.acknowledgedAt against stale CLI rewrite of same eventId', () => {
+        const store = makeStore()
+        const eventId = 'evt-ack-1700000000111'
+        const atTs = 1_700_000_000_111
+        const session = store.sessions.getOrCreateSession(
+            'cursor-model-error-ack-survives',
+            {
+                path: '/tmp/project',
+                host: 'example',
+                flavor: 'cursor',
+                cursorSessionId: 'ack-uuid',
+                lastModelError: {
+                    eventId,
+                    kind: 'quota_exhausted',
+                    transient: false,
+                    rawSnippet: 'Error: T: [resource_exhausted]',
+                    atTs,
+                    priorAssistantClaimsDone: false,
+                    acknowledgedAt: 1_700_000_000_222
+                }
+            },
+            null,
+            'default'
+        )
+
+        // CLI local snapshot still has the same error without acknowledgedAt.
+        store.sessions.updateSessionMetadata(
+            session.id,
+            {
+                path: '/tmp/project',
+                host: 'example',
+                flavor: 'cursor',
+                cursorSessionId: 'ack-uuid',
+                lastModelError: {
+                    eventId,
+                    kind: 'quota_exhausted',
+                    transient: false,
+                    rawSnippet: 'Error: T: [resource_exhausted]',
+                    atTs,
+                    priorAssistantClaimsDone: false
+                }
+            },
+            session.metadataVersion,
+            'default'
+        )
+
+        const metadata = getMetadata(store, session.id) as {
+            lastModelError?: { atTs?: number; acknowledgedAt?: number }
+        } | null
+        expect(metadata?.lastModelError?.atTs).toBe(atTs)
+        expect(metadata?.lastModelError?.acknowledgedAt).toBe(1_700_000_000_222)
+    })
+
+    it('preserves lastModelError.notifiedAt against stale CLI rewrite of same eventId', () => {
+        const store = makeStore()
+        const eventId = 'evt-notified-1700000000333'
+        const atTs = 1_700_000_000_333
+        const session = store.sessions.getOrCreateSession(
+            'cursor-model-error-notified-survives',
+            {
+                path: '/tmp/project',
+                host: 'example',
+                flavor: 'cursor',
+                cursorSessionId: 'notify-uuid',
+                lastModelError: {
+                    eventId,
+                    kind: 'rate_limited',
+                    transient: true,
+                    rawSnippet: 'Error: T: [resource_exhausted]',
+                    atTs,
+                    priorAssistantClaimsDone: false,
+                    notifiedAt: 1_700_000_000_444
+                }
+            },
+            null,
+            'default'
+        )
+
+        store.sessions.updateSessionMetadata(
+            session.id,
+            {
+                path: '/tmp/project',
+                host: 'example',
+                flavor: 'cursor',
+                cursorSessionId: 'notify-uuid',
+                lastModelError: {
+                    eventId,
+                    kind: 'rate_limited',
+                    transient: true,
+                    rawSnippet: 'Error: T: [resource_exhausted]',
+                    atTs,
+                    priorAssistantClaimsDone: false
+                }
+            },
+            session.metadataVersion,
+            'default'
+        )
+
+        const metadata = getMetadata(store, session.id) as {
+            lastModelError?: { atTs?: number; notifiedAt?: number }
+        } | null
+        expect(metadata?.lastModelError?.atTs).toBe(atTs)
+        expect(metadata?.lastModelError?.notifiedAt).toBe(1_700_000_000_444)
+    })
+
     it('does not invent path or host when prior had none', () => {
         const store = makeStore()
         // create with minimal raw metadata (path is technically required by
@@ -942,6 +1086,119 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
         expect(after?.todos).toBeNull()
         expect(after?.todosUpdatedAt).toBe(51)
 
+        store.close()
+    })
+
+    it('deletes an archived group atomically', () => {
+        const store = makeStore()
+        const archivedIds = ['atomic-a', 'atomic-b']
+        for (const id of archivedIds) {
+            store.sessions.getOrCreateSession(
+                id,
+                { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+                null,
+                'default',
+                undefined,
+                undefined,
+                undefined,
+                id
+            )
+        }
+        store.messages.addMessage(archivedIds[0]!, { text: 'cascade child' })
+
+        const deleted = store.sessions.deleteArchivedSessions(archivedIds, 'default')
+        expect(deleted?.map((session) => session.id).sort()).toEqual(archivedIds.sort())
+        expect(store.sessions.getSession('atomic-a')).toBeNull()
+        expect(store.sessions.getSession('atomic-b')).toBeNull()
+        expect(store.messages.getMessages(archivedIds[0]!)).toEqual([])
+        store.close()
+    })
+
+    it('leaves every member when an archived session owns a running job', () => {
+        const store = makeStore()
+        const blocked = store.sessions.getOrCreateSession(
+            'atomic-running-job',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-running-job'
+        )
+        const sibling = store.sessions.getOrCreateSession(
+            'atomic-running-job-sibling',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-running-job-sibling'
+        )
+        store.sessionJobs.upsert(blocked.id, 'job', { label: 'Still running', status: 'running' })
+
+        expect(store.sessions.deleteArchivedSessions([blocked.id, sibling.id], 'default')).toBeNull()
+        expect(store.sessions.getSession(blocked.id)).not.toBeNull()
+        expect(store.sessions.getSession(sibling.id)).not.toBeNull()
+        expect(store.sessionJobs.get(blocked.id, 'job')?.status).toBe('running')
+        store.close()
+    })
+
+    it('rejects a cross-namespace member without deleting either row', () => {
+        const store = makeStore()
+        const local = store.sessions.getOrCreateSession(
+            'atomic-local',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-local'
+        )
+        const foreign = store.sessions.getOrCreateSession(
+            'atomic-foreign',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'other',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-foreign'
+        )
+
+        expect(store.sessions.deleteArchivedSessions([local.id, foreign.id], 'default')).toBeNull()
+        expect(store.sessions.getSession(local.id)).not.toBeNull()
+        expect(store.sessions.getSession(foreign.id)).not.toBeNull()
+        store.close()
+    })
+
+    it('leaves every member when one archived-group member is invalid', () => {
+        const store = makeStore()
+        const archived = store.sessions.getOrCreateSession(
+            'atomic-valid',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-valid'
+        )
+        const running = store.sessions.getOrCreateSession(
+            'atomic-invalid',
+            { path: '/tmp/project', host: 'localhost', lifecycleState: 'running' },
+            null,
+            'default',
+            undefined,
+            undefined,
+            undefined,
+            'atomic-invalid'
+        )
+        expect(store.sessions.deleteArchivedSessions([archived.id, running.id], 'default')).toBeNull()
+        expect(store.sessions.getSession(archived.id)).not.toBeNull()
+        expect(store.sessions.getSession(running.id)).not.toBeNull()
         store.close()
     })
 })

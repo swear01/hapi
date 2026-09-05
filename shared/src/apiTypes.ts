@@ -16,6 +16,21 @@ import type {
 } from './schemas'
 import type { SessionSummary } from './sessionSummary'
 
+export const SupportedLocaleSchema = z.enum(['en', 'zh-CN'])
+export type SupportedLocale = z.infer<typeof SupportedLocaleSchema>
+
+export const NamespaceSettingsResponseSchema = z.object({
+    locale: SupportedLocaleSchema
+})
+
+export type NamespaceSettingsResponse = z.infer<typeof NamespaceSettingsResponseSchema>
+
+export const UpdateNamespaceSettingsRequestSchema = z.object({
+    locale: SupportedLocaleSchema
+})
+
+export type UpdateNamespaceSettingsRequest = z.infer<typeof UpdateNamespaceSettingsRequestSchema>
+
 export const CreateOrLoadMachineRequestSchema = z.object({
     id: z.string().min(1),
     metadata: z.unknown(),
@@ -50,15 +65,12 @@ export const CliMessagesResponseSchema = z.object({
 export type CliMessagesResponse = z.infer<typeof CliMessagesResponseSchema>
 
 export const CreateSessionResponseSchema = z.object({
-    session: SessionSchema,
-    /** Hub opt-in for AGENT_NOTIFY_SUMMARY prompt injection (default off when omitted). */
-    sessionSummaryContract: z.boolean().optional()
+    session: SessionSchema
 })
 
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
 
 export const HubSettingsResponseSchema = z.object({
-    sessionSummaryContract: z.boolean(),
     /** Show compact AGENT_NOTIFY_SUMMARY in chat (default off / hide). */
     sessionSummaryInChat: z.boolean()
 })
@@ -67,11 +79,10 @@ export type HubSettingsResponse = z.infer<typeof HubSettingsResponseSchema>
 
 export const UpdateHubSettingsRequestSchema = z
     .object({
-        sessionSummaryContract: z.boolean().optional(),
         sessionSummaryInChat: z.boolean().optional()
     })
     .refine(
-        (data) => data.sessionSummaryContract !== undefined || data.sessionSummaryInChat !== undefined,
+        (data) => data.sessionSummaryInChat !== undefined,
         { message: 'At least one hub setting field is required' }
     )
 
@@ -229,6 +240,75 @@ export type ListCodexSessionsRpcResponse = z.infer<typeof ListCodexSessionsRpcRe
 export type ArchiveCodexSessionRpcRequest = z.infer<typeof ArchiveCodexSessionRpcRequestSchema>
 export type ArchiveCodexSessionRpcResponse = z.infer<typeof ArchiveCodexSessionRpcResponseSchema>
 
+export const ClaudeImportedMessageContentSchema = z.union([
+    z.object({
+        role: z.literal('user'),
+        content: z.object({ type: z.literal('text'), text: z.string() }),
+        meta: z.object({ sentFrom: z.literal('cli') })
+    }),
+    z.object({
+        role: z.literal('agent'),
+        content: z.object({ type: z.literal('output'), data: z.unknown() }),
+        meta: z.object({ sentFrom: z.literal('cli') })
+    })
+])
+
+export const ClaudeImportedMessageSchema = z.object({
+    localId: z.string().min(1),
+    createdAt: z.number(),
+    content: ClaudeImportedMessageContentSchema
+})
+
+export const ClaudeLocalSessionSummarySchema = z.object({
+    id: z.string().min(1),
+    title: z.string(),
+    lastUserMessage: z.string().nullable().optional(),
+    cwd: z.string().nullable().optional(),
+    file: z.string().min(1),
+    modifiedAt: z.number(),
+    model: z.string().nullable().optional(),
+    messageCount: z.number().int().nonnegative()
+})
+
+export const ClaudeLocalSessionWithMessagesSchema = ClaudeLocalSessionSummarySchema.extend({
+    messages: z.array(ClaudeImportedMessageSchema)
+})
+
+export const CLAUDE_IMPORT_PAGE_BYTES = 4 * 1024 * 1024
+export const CLAUDE_IMPORT_MIN_PAGE_BYTES = 64 * 1024
+export const CLAUDE_IMPORT_MAX_PAGE_BYTES = 8 * 1024 * 1024
+
+export const ClaudeLocalSessionMessagesPageSchema = z.object({
+    session: ClaudeLocalSessionSummarySchema,
+    messages: z.array(ClaudeImportedMessageSchema),
+    nextCursor: z.number().int().nonnegative().nullable()
+})
+
+export const ListClaudeSessionsRpcRequestSchema = z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('summaries'), cwd: z.string().nullable().optional() }),
+    z.object({
+        mode: z.literal('messages'),
+        cwd: z.string().nullable().optional(),
+        sessionId: z.string().min(1),
+        cursor: z.number().int().nonnegative().default(0),
+        maxBytes: z.number().int().min(CLAUDE_IMPORT_MIN_PAGE_BYTES).max(CLAUDE_IMPORT_MAX_PAGE_BYTES).default(CLAUDE_IMPORT_PAGE_BYTES)
+    })
+])
+
+export const ListClaudeSessionsRpcResponseSchema = z.union([
+    z.object({ success: z.literal(true), mode: z.literal('summaries'), sessions: z.array(ClaudeLocalSessionSummarySchema) }),
+    z.object({ success: z.literal(true), mode: z.literal('messages'), page: ClaudeLocalSessionMessagesPageSchema }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+
+export type ClaudeImportedMessageContent = z.infer<typeof ClaudeImportedMessageContentSchema>
+export type ClaudeImportedMessage = z.infer<typeof ClaudeImportedMessageSchema>
+export type ClaudeLocalSessionSummary = z.infer<typeof ClaudeLocalSessionSummarySchema>
+export type ClaudeLocalSessionWithMessages = z.infer<typeof ClaudeLocalSessionWithMessagesSchema>
+export type ClaudeLocalSessionMessagesPage = z.infer<typeof ClaudeLocalSessionMessagesPageSchema>
+export type ListClaudeSessionsRpcRequest = z.infer<typeof ListClaudeSessionsRpcRequestSchema>
+export type ListClaudeSessionsRpcResponse = z.infer<typeof ListClaudeSessionsRpcResponseSchema>
+
 export const PiImportedMessageContentSchema = CodexImportedMessageSchema
 
 export const PiImportedMessageSchema = z.object({
@@ -320,14 +400,18 @@ export const SessionServiceTierRequestSchema = z.object({
 
 export type SessionServiceTierRequest = z.infer<typeof SessionServiceTierRequestSchema>
 
+/** Hub session display-name ceiling (`PATCH /api/sessions/:id`). */
+export const SESSION_NAME_MAX_LENGTH = 255
+
 export const RenameSessionRequestSchema = z.object({
-    name: z.string().min(1).max(255)
+    name: z.string().min(1).max(SESSION_NAME_MAX_LENGTH)
 })
 
 export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>
 
 export const UpdateSessionSummaryRequestSchema = z.object({
-    text: z.string().trim().min(1).max(255)
+    text: z.string().trim().min(1).max(255),
+    clearName: z.boolean().optional()
 })
 
 export type UpdateSessionSummaryRequest = z.infer<typeof UpdateSessionSummaryRequestSchema>
@@ -435,6 +519,13 @@ export const ScratchlistEntryUpdateRequestSchema = z.object({
 )
 
 export type ScratchlistEntryUpdateRequest = z.infer<typeof ScratchlistEntryUpdateRequestSchema>
+
+/** Dismiss the model-error banner for a specific displayed error (by eventId). */
+export const AcknowledgeModelErrorRequestSchema = z.object({
+    eventId: z.string().min(1)
+})
+
+export type AcknowledgeModelErrorRequest = z.infer<typeof AcknowledgeModelErrorRequestSchema>
 
 /** Per-session legacy stream-json → ACP migrator request. See tiann/hapi#824. */
 export const CursorMigrateToAcpRequestSchema = z.object({
@@ -575,6 +666,16 @@ export type ForkConversationRpcResult = {
     forkSession?: boolean
 }
 
+/** Raw RPC response, including generic serialized handler failures. */
+export type ForkConversationRpcResponse = ForkConversationRpcResult | {
+    /** Serialized CLI handler failure returned through the generic RPC layer. */
+    error: string
+}
+
+export type RewindConversationErrorCode =
+    | 'ambiguous_native_boundary'
+    | 'ambiguous_native_boundary_fork_safe'
+
 export type RewindConversationRpcResult = {
     success: true
     /** Truncate HAPI transcript at/after this localId, then accept rehydrated history. */
@@ -588,6 +689,7 @@ export type RewindConversationRpcResult = {
 } | {
     success: false
     error: string
+    code?: RewindConversationErrorCode
     /** Native state is unchanged, cancelled, or was restored exactly. */
     outcome: 'rejected' | 'cancelled' | 'source_restored'
 }
@@ -617,13 +719,36 @@ export const SpawnSessionRequestSchema = z.object({
     permissionMode: PermissionModeSchema.optional(),
     sessionType: z.enum(['simple', 'worktree']).optional(),
     worktreeName: z.string().optional(),
+    resumeSessionId: z.string().optional(),
     serviceTier: z.enum(['fast', 'standard']).optional(),
     collaborationMode: CodexCollaborationModeSchema.optional(),
     copilotAgentMode: CopilotAgentModeSchema.optional(),
     startingMode: z.enum(['remote', 'pty']).optional()
+}).superRefine((data, ctx) => {
+    // Public machine-spawn only validates Codex transcript workspace roots.
+    // Hub-driven session resume for other flavors uses RPC, not this schema.
+    if (data.resumeSessionId && data.agent !== 'codex') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['resumeSessionId'],
+            message: 'resumeSessionId is only supported for Codex machine spawns'
+        })
+    }
 })
 
 export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>
+
+export const SpawnSessionWithRemitRequestSchema = SpawnSessionRequestSchema.safeExtend({
+    directory: z.string().trim().min(1),
+    message: z.string().refine((value) => value.trim().length > 0, {
+        message: 'message must contain non-whitespace'
+    }),
+    remitId: z.string().uuid(),
+    name: z.string().trim().min(1).max(SESSION_NAME_MAX_LENGTH).optional(),
+    waitActiveSecs: z.number().positive().max(300).optional()
+})
+
+export type SpawnSessionWithRemitRequest = z.infer<typeof SpawnSessionWithRemitRequestSchema>
 
 export const MachineListDirectoryRequestSchema = z.object({
     path: z.string().min(1),
@@ -742,6 +867,49 @@ export type PathExistsResponse = {
 
 export type MachinePathsExistsResponse = PathExistsResponse
 
+/** Requests served by the long-lived runner for archived-session file access. */
+export type WorkspaceReadFileRequest = {
+    cwd: string
+    path: string
+}
+
+export type WorkspaceListDirectoryRequest = {
+    cwd: string
+    path?: string
+}
+
+export type WorkspaceStatFilesRequest = {
+    cwd: string
+    paths: string[]
+}
+
+export type WorkspaceGitStatusRequest = {
+    cwd: string
+    timeout?: number
+}
+
+export type WorkspaceGitDiffNumstatRequest = {
+    cwd: string
+    staged?: boolean
+    timeout?: number
+}
+
+export type WorkspaceGitDiffFileRequest = {
+    cwd: string
+    filePath: string
+    staged?: boolean
+    timeout?: number
+}
+
+export type WorkspaceRipgrepRequest = {
+    cwd: string
+    args: string[]
+    fileSearch?: {
+        query: string
+        limit: number
+    }
+}
+
 export type CodexModelSummary = {
     id: string
     displayName: string
@@ -831,6 +999,19 @@ export type OpencodeReasoningEffortResponse = {
     error?: string
 }
 
+export type SessionReasoningEffortOption = {
+    value: string
+    name?: string
+}
+
+export type SessionReasoningEffortResponse = {
+    success: boolean
+    model?: string | null
+    options?: SessionReasoningEffortOption[]
+    currentValue?: string | null
+    error?: string
+}
+
 export type AgyModelSummary = {
     modelId: string
     name?: string
@@ -900,12 +1081,43 @@ export type SlashCommandsResponse = {
     error?: string
 }
 
+
+export type SqliteTableUsage = {
+    name: string
+    kind: 'table' | 'index'
+    /** Bytes of disk pages owned by this object (from the dbstat virtual table). */
+    bytes: number
+    /** Number of cells (rows) currently stored in this object. */
+    rows: number
+}
+
 export type SqliteStorageUsageResponse = {
     path: string
+    /** Physical on-disk size of the database file. */
     databaseBytes: number
     walBytes: number
     shmBytes: number
     totalBytes: number
+    /** SQLite page size in bytes (normally 4096). */
+    pageSize: number
+    /** Total pages in the database file. */
+    pageCount: number
+    /** Bytes held by free (reclaimable) pages that a VACUUM can return to disk. */
+    freelistBytes: number
+    /** Bytes actually occupied by live data plus b-tree overhead. */
+    usedBytes: number
+    /** Per-table / per-index usage, largest first. */
+    tables: SqliteTableUsage[]
+    /** True when tables were estimated from content length (no dbstat vtab on this runtime). */
+    breakdownApproximate: boolean
+}
+
+export type VacuumStorageResponse = {
+    path: string
+    beforeBytes: number
+    afterBytes: number
+    reclaimedBytes: number
+    durationMs: number
 }
 
 export type UsageSummaryBucket = {
@@ -917,6 +1129,24 @@ export type UsageSummaryBucket = {
     totalTokens: number
     uncachedTokens: number
     requests: number
+}
+
+export type UsageAgentStatus = 'complete' | 'context-only' | 'cost-only' | 'not-reported'
+
+/** One cost amount in its own currency (never collapsed). */
+export type UsageCost = {
+    amount: number
+    currency: string
+}
+
+export type UsageAgentAvailability = {
+    agent: string
+    /** Whether the underlying agent reports full token usage, only context,
+     *  only cumulative cost, or nothing at all. */
+    status: UsageAgentStatus
+    sessions: number
+    /** Cost attributed to the selected range across this agent's sessions. */
+    costs: UsageCost[]
 }
 
 export type UsageSummaryResponse = {
@@ -933,9 +1163,12 @@ export type UsageSummaryResponse = {
         uncachedTokens: number
         requests: number
         sessions: number
+        /** Cost attributed to the selected range across sessions. */
+        costs: UsageCost[]
     }
     daily: Array<UsageSummaryBucket & { key: string }>
     byAgent: UsageSummaryBucket[]
     byModel: UsageSummaryBucket[]
+    agents: UsageAgentAvailability[]
     updatedAt: number
 }

@@ -105,9 +105,19 @@ describe('EffortField', () => {
         expect(values).not.toContain('max')
     })
 
-    it('renders nothing for agents without an effort field', () => {
+    it('renders AGY static effort levels', () => {
         const { container } = render(
             <EffortField {...baseProps} agent="agy" />
+        )
+        const select = container.querySelector('select') as HTMLSelectElement
+        expect(Array.from(select.options).map((option) => option.value)).toEqual([
+            'auto', 'low', 'medium', 'high', 'xhigh', 'max'
+        ])
+    })
+
+    it('renders nothing for agents without an effort field', () => {
+        const { container } = render(
+            <EffortField {...baseProps} agent="gemini" />
         )
         expect(container.querySelector('select')).toBeNull()
     })

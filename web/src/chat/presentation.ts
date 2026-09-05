@@ -276,6 +276,18 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
     if (event.type === 'token-count') {
         return formatTokenCountEvent(event)
     }
+    if (event.type === 'modelError') {
+        // Banner already surfaces the full model-error UI; avoid dumping
+        // rawSnippet via the JSON.stringify fallback into the chat thread.
+        const kind = typeof event.kind === 'string' ? event.kind : 'unknown'
+        const transient = event.transient === true
+        return {
+            icon: '⚠️',
+            text: transient
+                ? `Model error (${kind}, transient)`
+                : `Model error (${kind})`
+        }
+    }
     try {
         return { icon: null, text: JSON.stringify(event) }
     } catch {

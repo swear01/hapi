@@ -9,10 +9,10 @@ HAPI is a wrapper around AI coding agents. One CLI (`hapi <agent>`) starts any s
 | Claude Code | `hapi` / `hapi claude` | Terminal wrapper (local) + Claude Agent SDK (remote) | ✓ | ✓ | `default` `acceptEdits` `auto` `bypassPermissions` `plan` | ✓ |
 | Codex | `hapi codex` | TUI wrapper (local) + `codex app-server` JSON-RPC (remote) | ✓ | ✓ | `default` `read-only` `safe-yolo` `yolo` (+ `plan` collaboration mode) | ✓ |
 | Cursor Agent | `hapi cursor` | ACP (`agent acp`); legacy stream-json resume | ✓ | ✓ | `default` `plan` `ask` `debug` `autoReview` `yolo` | ✓ |
-| Grok Build | `hapi grok` | ACP (`grok agent stdio`) | ✓ | ✓ | `default` `auto` `plan` `bypassPermissions` | ✓ |
+| Grok Build | `hapi grok` | ACP (`grok agent stdio`) | ✓ | ✓ | `default` `auto` `bypassPermissions` | ✓ |
 | GitHub Copilot | `hapi copilot` | ACP (`copilot --acp --stdio`) | ✓ | ✓ | `default` `read-only` `safe-yolo` `yolo` | ✓ |
 | Kimi | `hapi kimi` | ACP (`kimi acp`) | ✓ | ✓ | `default` `read-only` `safe-yolo` `yolo` | ✓ |
-| OpenCode | `hapi opencode` | ACP (`opencode acp`) | ✓ | ✓ | `default` `plan` `yolo` | ✓ |
+| OpenCode | `hapi opencode` | ACP (`opencode acp`) | ✓ | ✓ | `default` `yolo` | ✓ |
 | DeepSeek Harness | `hapi dsh` | ACP (`dsh-acp-demo` or configured server) | — | ✓ | Managed by DSH ACP composition | — |
 | Antigravity (agy) | `hapi agy` | Headless print mode (per-turn `agy -p` + NDJSON) | — | ✓ | `request-review` `always-proceed` | ✓ |
 | Pi | `hapi pi` | `pi --mode rpc` (JSON-line RPC over stdio) | — | ✓ | none (always auto-approve) | ✓ |
@@ -197,11 +197,10 @@ Sessions created from a HAPI runner start in remote mode automatically. Terminal
 
 ### Permission modes
 
-Grok exposes four permission modes:
+Grok exposes three permission modes:
 
 - `default` — tool requests are shown in HAPI for approval or denial.
 - `auto` — Grok's own Auto mode: HAPI forwards Grok's `/auto` command to the session. Auto depends on account and CLI-build availability — if Grok does not advertise the `/auto` command, HAPI falls back to `default` and posts a notice in the session.
-- `plan` — HAPI asks Grok to plan only and rejects tool execution requests.
 - `bypassPermissions` — tool requests are automatically approved for the session (`--yolo` shortcut).
 
 Use `bypassPermissions` only in a trusted workspace.
@@ -222,9 +221,11 @@ When the Grok CLI build advertises them, HAPI uses Grok's ACP extension methods 
 
 ### Model and effort controls
 
-The Create page discovers Grok's ACP model catalog and the reasoning-effort choices advertised for each model. Remote sessions can switch both model and effort between turns; HAPI applies them through ACP `session/set_model` and `session/set_mode`. From the terminal, pick them at launch with `--model <model>` and `--effort <level>`.
+The Web composer uses the same Model and Effort controls for every agent. On wide screens, available controls can appear as value buttons; Settings contains only controls not already exposed in the toolbar, and narrow screens move them back into Settings. HAPI only shows an Effort control when the runner reports usable choices: Claude/Grok/Pi use native effort values, Codex/OpenCode use model reasoning effort, Cursor uses model variants, Antigravity uses `--effort`, and ACP Copilot/Kimi sessions use their advertised thought-level options. Remote controls apply between turns; unavailable or unsupported options stay hidden.
 
-HAPI also exposes Grok's common slash commands, discovers skills from `.grok/skills`, `~/.grok/skills`, and shared `.agents/skills`, and asks Grok to set a concise HAPI session title after the first normal prompt.
+The Create page exposes static Antigravity effort levels and discovers model-dependent Grok/Codex choices where available. Copilot/Kimi effort choices are discovered after their ACP session starts. Remote sessions can switch model and effort between turns; HAPI applies them through the agent's native config path. From the terminal, use each agent's supported launch flags where available; local Copilot launches pass the selected effort through `--effort <level>`.
+
+HAPI also exposes Grok's common slash commands and discovers skills from `.grok/skills`, `~/.grok/skills`, and shared `.agents/skills`.
 
 ### Current limitations
 

@@ -1,0 +1,314 @@
+From bb85c5459c5a7e5fdda066d9800cee46dc8c051c Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:48:07 +0000
+Subject: [PATCH] carry: upstream PR #1633
+
+---
+ cli/src/codex/appServerTypes.ts             | 14 ++++++
+ cli/src/codex/codexAppServerClient.ts       |  7 +++
+ cli/src/codex/codexRemoteLauncher.test.ts   | 52 +++++++++++++++++++++
+ cli/src/codex/codexRemoteLauncher.ts        | 43 +++++++++++++++--
+ cli/src/codex/utils/appServerConfig.test.ts | 17 +++++++
+ cli/src/codex/utils/appServerConfig.ts      | 14 +++++-
+ 6 files changed, 141 insertions(+), 6 deletions(-)
+
+diff --git a/cli/src/codex/appServerTypes.ts b/cli/src/codex/appServerTypes.ts
+index 7753ef744..6b8bb715c 100644
+--- a/cli/src/codex/appServerTypes.ts
++++ b/cli/src/codex/appServerTypes.ts
+@@ -130,6 +130,20 @@ export interface ThreadStartResponse {
+     [key: string]: unknown;
+ }
+ 
++export interface ConfigReadParams {
++    cwd?: string | null;
++    includeLayers?: boolean;
++}
++
++export interface ConfigReadResponse {
++    config: {
++        model_context_window?: number | null;
++        model_auto_compact_token_limit?: number | null;
++        [key: string]: unknown;
++    };
++    [key: string]: unknown;
++}
++
+ export type ResponseItem = Record<string, unknown>;
+ 
+ export interface ThreadResumeParams {
+diff --git a/cli/src/codex/codexAppServerClient.ts b/cli/src/codex/codexAppServerClient.ts
+index 801c32d52..ef92f752d 100644
+--- a/cli/src/codex/codexAppServerClient.ts
++++ b/cli/src/codex/codexAppServerClient.ts
+@@ -29,6 +29,8 @@ import type {
+     TurnSteerResponse,
+     ThreadCompactStartParams,
+     ThreadCompactStartResponse,
++    ConfigReadParams,
++    ConfigReadResponse,
+     ThreadGoalSetParams,
+     ThreadGoalSetResponse,
+     ThreadGoalGetParams,
+@@ -288,6 +290,11 @@ export class CodexAppServerClient extends JsonLineParser {
+         return response as InitializeResponse;
+     }
+ 
++    async readConfig(params: ConfigReadParams): Promise<ConfigReadResponse> {
++        const response = await this.sendRequest('config/read', params, { timeoutMs: 30_000 });
++        return response as ConfigReadResponse;
++    }
++
+     async listModels(params?: ModelListParams): Promise<ModelListResponse> {
+         const response = await this.sendRequest('model/list', params ?? {}, {
+             timeoutMs: 30_000
+diff --git a/cli/src/codex/codexRemoteLauncher.test.ts b/cli/src/codex/codexRemoteLauncher.test.ts
+index e6663bec9..9e76c4a28 100644
+--- a/cli/src/codex/codexRemoteLauncher.test.ts
++++ b/cli/src/codex/codexRemoteLauncher.test.ts
+@@ -8,6 +8,9 @@ const harness = vi.hoisted(() => ({
+     registerRequestCalls: [] as string[],
+     requestHandlers: new Map<string, (params: unknown) => Promise<unknown> | unknown>(),
+     initializeCalls: [] as unknown[],
++    configReadCalls: [] as unknown[],
++    configReadResponse: { config: {} } as { config: Record<string, unknown> },
++    failConfigRead: false,
+     setFeatureEnablementCalls: [] as unknown[],
+     failSetFeatureEnablement: false,
+     listCollaborationModeCalls: 0,
+@@ -135,6 +138,14 @@ vi.mock('./codexAppServerClient', () => {
+             return { protocolVersion: 1 };
+         }
+ 
++        async readConfig(params: unknown): Promise<{ config: Record<string, unknown> }> {
++            harness.configReadCalls.push(params);
++            if (harness.failConfigRead) {
++                throw new Error('config/read unsupported');
++            }
++            return harness.configReadResponse;
++        }
++
+         setNotificationHandler(handler: ((method: string, params: unknown) => void) | null): void {
+             this.notificationHandler = handler;
+             harness.dispatchNotification = handler;
+@@ -1588,6 +1599,9 @@ describe('codexRemoteLauncher', () => {
+         harness.registerRequestCalls = [];
+         harness.requestHandlers = new Map();
+         harness.initializeCalls = [];
++        harness.configReadCalls = [];
++        harness.configReadResponse = { config: {} };
++        harness.failConfigRead = false;
+         harness.setFeatureEnablementCalls = [];
+         harness.failSetFeatureEnablement = false;
+         harness.listCollaborationModeCalls = 0;
+@@ -1765,6 +1779,10 @@ describe('codexRemoteLauncher', () => {
+                 experimentalApi: true
+             }
+         }]);
++        expect(harness.configReadCalls).toEqual([{
++            cwd: '/tmp/hapi-update',
++            includeLayers: false
++        }]);
+         expect(harness.setFeatureEnablementCalls).toEqual([{ enablement: { goals: true } }]);
+         expect(harness.notifications.map((entry) => entry.method)).toEqual([
+             'turn/started',
+@@ -1777,6 +1795,40 @@ describe('codexRemoteLauncher', () => {
+         expect(session.thinking).toBe(false);
+     });
+ 
++    it('forwards effective Codex context settings for fresh and resumed threads', async () => {
++        harness.configReadResponse = {
++            config: {
++                model_context_window: 400_000,
++                model_auto_compact_token_limit: 300_000
++            }
++        };
++
++        const fresh = createSessionStub();
++        await codexRemoteLauncher(fresh.session as never);
++        expect(harness.startThreadParams[0]?.config).toMatchObject({
++            model_context_window: 400_000,
++            model_auto_compact_token_limit: 300_000
++        });
++
++        harness.startThreadParams = [];
++        const resumed = createSessionStub();
++        resumed.session.sessionId = 'thread-existing';
++        await codexRemoteLauncher(resumed.session as never);
++        expect(harness.resumeThreadParams[0]?.config).toMatchObject({
++            model_context_window: 400_000,
++            model_auto_compact_token_limit: 300_000
++        });
++    });
++
++    it('keeps remote sessions working when config/read is unavailable', async () => {
++        harness.failConfigRead = true;
++        const { session } = createSessionStub();
++
++        await expect(codexRemoteLauncher(session as never)).resolves.toBe('exit');
++        expect(harness.startThreadParams[0]?.config).not.toHaveProperty('model_context_window');
++        expect(harness.startThreadParams[0]?.config).not.toHaveProperty('model_auto_compact_token_limit');
++    });
++
+     it('uses the native skill catalog for completion and structured turn input', async () => {
+         const { session, rpcHandlers } = createSessionStub(['$hapi inspect']);
+ 
+diff --git a/cli/src/codex/codexRemoteLauncher.ts b/cli/src/codex/codexRemoteLauncher.ts
+index c776fc491..99621c603 100644
+--- a/cli/src/codex/codexRemoteLauncher.ts
++++ b/cli/src/codex/codexRemoteLauncher.ts
+@@ -20,7 +20,11 @@ import { convertCodexEvent } from './utils/codexEventConverter';
+ import { createCodexSessionScanner, readLatestCodexUsageFromTail, type CodexSessionScanner } from './utils/codexSessionScanner';
+ import { emptyLiveUsageDimensions, filterTranscriptUsageForLive, markLiveUsageDimensions, type LiveUsageDimensions } from './utils/codexUsage';
+ import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
+-import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerConfig';
++import {
++    buildThreadStartParams,
++    buildTurnStartParams,
++    type CodexContextManagementConfig
++} from './utils/appServerConfig';
+ import type { SkillMetadata, ThreadGoal, ThreadGoalStatus } from './appServerTypes';
+ import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
+ import { parseCodexSpecialCommand } from './codexSpecialCommands';
+@@ -3769,6 +3773,31 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+             }
+         });
+ 
++        let contextManagementConfig: CodexContextManagementConfig | undefined;
++        try {
++            const effectiveConfig = (await appServerClient.readConfig({
++                cwd: session.path,
++                includeLayers: false
++            })).config;
++            const modelContextWindow = effectiveConfig.model_context_window;
++            const modelAutoCompactTokenLimit = effectiveConfig.model_auto_compact_token_limit;
++            contextManagementConfig = {
++                ...(typeof modelContextWindow === 'number' && Number.isInteger(modelContextWindow) && modelContextWindow > 0
++                    ? { modelContextWindow }
++                    : {}),
++                ...(typeof modelAutoCompactTokenLimit === 'number'
++                    && Number.isInteger(modelAutoCompactTokenLimit)
++                    && modelAutoCompactTokenLimit > 0
++                    ? { modelAutoCompactTokenLimit }
++                    : {})
++            };
++            if (Object.keys(contextManagementConfig).length === 0) {
++                contextManagementConfig = undefined;
++            }
++        } catch (error) {
++            logger.debug('[Codex] Failed to read effective context management config; using app-server defaults', error);
++        }
++
+         const publishConversationHistoryCapabilities = async () => {
+             const conversationHistory = this.conversationHistory.getCapabilitiesForMetadata()?.conversationHistory
+             try {
+@@ -3926,7 +3955,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                 cwd: session.path,
+                 mode,
+                 mcpServers,
+-                cliOverrides: session.codexCliOverrides
++                cliOverrides: session.codexCliOverrides,
++                contextManagementConfig
+             });
+ 
+             try {
+@@ -3991,7 +4021,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     cwd: session.path,
+                     mode,
+                     mcpServers,
+-                    cliOverrides: session.codexCliOverrides
++                    cliOverrides: session.codexCliOverrides,
++                    contextManagementConfig
+                 });
+                 try {
+                     const resumeResponse = await appServerClient.resumeThread({
+@@ -4022,7 +4053,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                     cwd: session.path,
+                     mode,
+                     mcpServers,
+-                    cliOverrides: session.codexCliOverrides
++                    cliOverrides: session.codexCliOverrides,
++                    contextManagementConfig
+                 });
+                 const threadResponse = await appServerClient.startThread({
+                     ...threadParams,
+@@ -4274,7 +4306,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
+                         cwd: session.path,
+                         mode: message.mode,
+                         mcpServers,
+-                        cliOverrides: session.codexCliOverrides
++                        cliOverrides: session.codexCliOverrides,
++                        contextManagementConfig
+                     });
+ 
+                     const resumeCandidate = session.sessionId ?? null;
+diff --git a/cli/src/codex/utils/appServerConfig.test.ts b/cli/src/codex/utils/appServerConfig.test.ts
+index caeb6303f..8d1d5252e 100644
+--- a/cli/src/codex/utils/appServerConfig.test.ts
++++ b/cli/src/codex/utils/appServerConfig.test.ts
+@@ -188,6 +188,23 @@ describe('appServerConfig', () => {
+         });
+     });
+ 
++    it('passes effective Codex context management settings via thread config', () => {
++        const params = buildThreadStartParams({
++            cwd: '/workspace/project',
++            mode: { permissionMode: 'default', collaborationMode: 'default' },
++            mcpServers,
++            contextManagementConfig: {
++                modelContextWindow: 400_000,
++                modelAutoCompactTokenLimit: 300_000
++            }
++        });
++
++        expect(params.config).toMatchObject({
++            model_context_window: 400_000,
++            model_auto_compact_token_limit: 300_000
++        });
++    });
++
+     it('translates Fast to the advertised app-server tier (priority) in thread params', () => {
+         const params = buildThreadStartParams({
+             cwd: '/workspace/project',
+diff --git a/cli/src/codex/utils/appServerConfig.ts b/cli/src/codex/utils/appServerConfig.ts
+index c87bc9cb3..5278bec8a 100644
+--- a/cli/src/codex/utils/appServerConfig.ts
++++ b/cli/src/codex/utils/appServerConfig.ts
+@@ -13,6 +13,11 @@ import type {
+ } from '../appServerTypes';
+ import { resolveCodexPermissionModeConfig } from './permissionModeConfig';
+ 
++export type CodexContextManagementConfig = {
++    modelContextWindow?: number;
++    modelAutoCompactTokenLimit?: number;
++};
++
+ export const codexCollaborationSpawnAgentInstructions = [
+     'Codex sub-agent spawning rules:',
+     '- Treat omitted fork_context the same as fork_context: true: a full-history fork inherits the parent agent type, model, and reasoning effort.',
+@@ -196,6 +201,7 @@ export function buildThreadStartParams(args: {
+     cliOverrides?: CodexCliOverrides;
+     baseInstructions?: string;
+     developerInstructions?: string;
++    contextManagementConfig?: CodexContextManagementConfig;
+ }): ThreadStartParams {
+     const approvalPolicy = resolveApprovalPolicy(args.mode);
+     const sandbox = resolveSandbox(args.mode);
+@@ -212,7 +218,13 @@ export function buildThreadStartParams(args: {
+     const configWithInstructions = {
+         ...config,
+         developer_instructions: resolvedDeveloperInstructions,
+-        ...(args.mode.modelReasoningEffort ? { model_reasoning_effort: args.mode.modelReasoningEffort } : {})
++        ...(args.mode.modelReasoningEffort ? { model_reasoning_effort: args.mode.modelReasoningEffort } : {}),
++        ...(args.contextManagementConfig?.modelContextWindow !== undefined
++            ? { model_context_window: args.contextManagementConfig.modelContextWindow }
++            : {}),
++        ...(args.contextManagementConfig?.modelAutoCompactTokenLimit !== undefined
++            ? { model_auto_compact_token_limit: args.contextManagementConfig.modelAutoCompactTokenLimit }
++            : {})
+     };
+ 
+     const params: ThreadStartParams = {
+-- 
+2.43.0
+

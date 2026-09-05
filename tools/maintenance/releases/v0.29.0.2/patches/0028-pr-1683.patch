@@ -1,0 +1,1037 @@
+From 00ba14ea94e8c3bfc748f775551fbcb5cad1b2f9 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 18:17:01 +0000
+Subject: [PATCH] carry: upstream PR #1683
+
+---
+ docs/guide/faq.md                        |   4 +-
+ docs/guide/installation.md               |   4 +
+ docs/guide/notifications.md              |  40 ++-
+ docs/guide/quick-start.md                |   2 +-
+ docs/public/schemas/settings.schema.json |  20 ++
+ hub/src/config/serverSettings.test.ts    |  81 ++++++
+ hub/src/config/serverSettings.ts         | 102 ++++++++
+ hub/src/config/settings.ts               |   4 +
+ hub/src/configuration.ts                 |  24 ++
+ hub/src/startHub.ts                      |  22 ++
+ hub/src/webhook/channel.test.ts          | 302 +++++++++++++++++++++++
+ hub/src/webhook/channel.ts               | 150 +++++++++++
+ hub/src/webhook/url.test.ts              |  20 ++
+ hub/src/webhook/url.ts                   |  13 +
+ 14 files changed, 785 insertions(+), 3 deletions(-)
+ create mode 100644 hub/src/webhook/channel.test.ts
+ create mode 100644 hub/src/webhook/channel.ts
+ create mode 100644 hub/src/webhook/url.test.ts
+ create mode 100644 hub/src/webhook/url.ts
+
+diff --git a/docs/guide/faq.md b/docs/guide/faq.md
+index 48e486b26..7a99ba427 100644
+--- a/docs/guide/faq.md
++++ b/docs/guide/faq.md
+@@ -72,11 +72,13 @@ Yes. Telegram is optional. You can use the web app directly in any browser or in
+ 
+ ### How do I receive notifications?
+ 
+-HAPI supports three methods:
++HAPI supports several methods:
+ 
+ 1. **PWA Push Notifications** - Enable when prompted, works even when app is closed
+ 2. **Telegram Bot** - See [Telegram Setup](./notifications.md#telegram-setup)
+ 3. **FCM native push** - Used by the Android/Wear OS companion apps; notifications are delivered via Firebase Cloud Messaging
++4. **Server酱 (ServerChan)** - See [ServerChan Setup](./notifications.md#serverchan-server酱-setup)
++5. **Generic webhook** - POST HAPI's JSON to a relay you control; see [Webhook setup](./notifications.md#webhook-setup)
+ 
+ ### Can I start sessions remotely?
+ 
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index 0355348f1..9510aeff0 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -196,6 +196,10 @@ On first run, HAPI:
+ | `WXPUSHER_TOPIC_IDS` | - | `wxPusherTopicIds` | Comma-separated WxPusher topic IDs |
+ | `WXPUSHER_NOTIFICATION` | `true` | `wxPusherNotification` | Enable WxPusher notifications |
+ | `WXPUSHER_BACKGROUND_ONLY` | `false` | `wxPusherBackgroundOnly` | Only send WxPusher notifications when no visible HAPI connection exists in the namespace |
++| `HAPI_WEBHOOK_URL` | - | `webhookUrl` | HTTP(S) URL of a relay that accepts HAPI notification JSON (not a drop-in for Bark/PushPlus) |
++| `HAPI_WEBHOOK_KEY` | - | `webhookKey` | Optional shared key sent as a `key` query param and `X-HAPI-Webhook-Key` header on every webhook request |
++| `HAPI_WEBHOOK_NOTIFICATION` | `true` | `webhookNotification` | Enable webhook notifications |
++| `HAPI_WEBHOOK_BACKGROUND_ONLY` | `false` | `webhookBackgroundOnly` | Only send webhook notifications when no visible HAPI connection exists in the namespace |
+ | `HAPI_RELAY_API` | `relay.hapi.run` | - | Relay API domain for the public relay |
+ | `HAPI_RELAY_AUTH` | Per-hub key issued by the relay | `relayAuthKey` | Relay auth key override (set only when an operator provides a key) |
+ | `HAPI_RELAY_FORCE_TCP` | `false` | - | Force TCP mode for relay |
+diff --git a/docs/guide/notifications.md b/docs/guide/notifications.md
+index 884694226..703fb7e21 100644
+--- a/docs/guide/notifications.md
++++ b/docs/guide/notifications.md
+@@ -1,6 +1,6 @@
+ # Notifications
+ 
+-Get notified when sessions need input, request permissions, fail, or complete — via Telegram, Server酱 (ServerChan), Web Push, or voice. WxPusher App can optionally deliver session completion notifications.
++Get notified when sessions need input, request permissions, fail, or complete — via Telegram, Server酱 (ServerChan), WxPusher App, a generic Webhook, Web Push, or voice.
+ 
+ Web Push works out of the box once you [install the PWA](./pwa.md); no configuration needed. The channels below are optional.
+ 
+@@ -91,6 +91,44 @@ When `WXPUSHER_BACKGROUND_ONLY=true`, a visible HAPI connection suppresses WxPus
+ 
+ These values can also be set in `settings.json` (`wxPusherAppToken`, `wxPusherUids`, `wxPusherTopicIds`, `wxPusherNotification`, `wxPusherBackgroundOnly`).
+ 
++## Webhook setup
++
++Send notifications to a relay you control — a self-hosted HTTP endpoint, a serverless function, or a Worker that forwards the payload onward (Telegram, Server酱, Bark, PushPlus, …). The hub posts **HAPI's own JSON**; Bark / PushPlus / WxPusher will not accept this body as a drop-in. Use a relay if the hub cannot reach `api.telegram.org` / `sctapi.ftqq.com` directly.
++
++1. Stand up an HTTP(S) endpoint that accepts `POST` with the JSON below and returns a `2xx` status
++2. Set the webhook URL and start the hub:
++
++```bash
++export HAPI_WEBHOOK_URL="https://your-endpoint.example.com/hook"
++export HAPI_PUBLIC_URL="https://your-public-url"
++
++hapi hub
++```
++
++The hub POSTs a JSON body to `HAPI_WEBHOOK_URL` for the same events as the other channels:
++
++```json
++{
++  "event": "ready",
++  "title": "HAPI Ready for input · my-session",
++  "content": "Claude 正在等待输入",
++  "url": "https://your-public-url/sessions/abc123",
++  "sessionId": "abc123"
++}
++```
++
++`event` is one of `ready`, `permission`, `task_failed`, or `completed`. Map `title`, `content`, and `url` in your relay to whatever the downstream gateway expects.
++
++Requests time out after 10 seconds and do not follow redirects (so a `key` query param / `X-HAPI-Webhook-Key` header cannot leak to a different host).
++
++Related environment variables:
++
++- `HAPI_WEBHOOK_KEY` - Optional shared key. When set, it is sent both as a `key` query parameter on the URL and as an `X-HAPI-Webhook-Key` header, so it works whether your endpoint reads credentials from the query string (matching the Server酱/PushPlus convention) or from headers
++- `HAPI_WEBHOOK_NOTIFICATION` - Enable/disable webhook notifications (default: `true`)
++- `HAPI_WEBHOOK_BACKGROUND_ONLY` - Only send webhook notifications when the namespace has no visible HAPI connection (default: `false`), same semantics as `SERVERCHAN_BACKGROUND_ONLY`
++
++These values can also be set in `settings.json` (`webhookUrl`, `webhookKey`, `webhookNotification`, `webhookBackgroundOnly`).
++
+ ## Voice assistant setup
+ 
+ Enable voice control:
+diff --git a/docs/guide/quick-start.md b/docs/guide/quick-start.md
+index 7a0986703..cac646177 100644
+--- a/docs/guide/quick-start.md
++++ b/docs/guide/quick-start.md
+@@ -40,6 +40,6 @@ Enter your access token to log in.
+ 
+ - [Seamless Handoff](./how-it-works.md#seamless-handoff) - Switch between terminal and phone seamlessly
+ - [Hub setup](./installation.md#hub-setup) - Access HAPI from anywhere
+-- [Notifications](./notifications.md#telegram-setup) - Set up Telegram, ServerChan, or WxPusher notifications
++- [Notifications](./notifications.md#telegram-setup) - Set up Telegram, ServerChan, WxPusher, or a webhook relay
+ - [Deployment](./deployment.md) - Run HAPI as a persistent background service
+ - [Install the App](./pwa.md) - Add HAPI to your home screen
+diff --git a/docs/public/schemas/settings.schema.json b/docs/public/schemas/settings.schema.json
+index a312b6311..f45fa9b00 100644
+--- a/docs/public/schemas/settings.schema.json
++++ b/docs/public/schemas/settings.schema.json
+@@ -98,6 +98,26 @@
+       "default": false,
+       "description": "Only send WxPusher notifications when no visible HAPI connection exists in the namespace. ENV: WXPUSHER_BACKGROUND_ONLY"
+     },
++    "webhookUrl": {
++      "type": "string",
++      "format": "uri",
++      "pattern": "^https?://",
++      "description": "HTTP(S) URL of a relay that accepts HAPI notification JSON. ENV: HAPI_WEBHOOK_URL"
++    },
++    "webhookKey": {
++      "type": "string",
++      "description": "Optional shared key sent as a 'key' query param and X-HAPI-Webhook-Key header on webhook requests. ENV: HAPI_WEBHOOK_KEY"
++    },
++    "webhookNotification": {
++      "type": "boolean",
++      "default": true,
++      "description": "Enable webhook notifications. ENV: HAPI_WEBHOOK_NOTIFICATION"
++    },
++    "webhookBackgroundOnly": {
++      "type": "boolean",
++      "default": false,
++      "description": "Only send webhook notifications when no visible HAPI connection exists in the namespace. ENV: HAPI_WEBHOOK_BACKGROUND_ONLY"
++    },
+     "relayAuthKey": {
+       "type": "string",
+       "description": "Per-hub relay auth key issued by the relay server. Auto-obtained if not set. ENV: HAPI_RELAY_AUTH"
+diff --git a/hub/src/config/serverSettings.test.ts b/hub/src/config/serverSettings.test.ts
+index 8237c179b..ecb373104 100644
+--- a/hub/src/config/serverSettings.test.ts
++++ b/hub/src/config/serverSettings.test.ts
+@@ -216,6 +216,87 @@ describe('loadServerSettings', () => {
+         await expect(loadServerSettings(dir)).rejects.toThrow('wxPusherUids must be an array of strings')
+     })
+ 
++    it('defaults webhook settings to disabled', async () => {
++        dir = makeTempDir()
++
++        const result = await loadServerSettings(dir)
++
++        expect(result.settings.webhookUrl).toBeNull()
++        expect(result.settings.webhookKey).toBeNull()
++        expect(result.settings.webhookBackgroundOnly).toBe(false)
++        expect(result.sources.webhookUrl).toBe('default')
++    })
++
++    it('loads webhook settings from environment and persists them', async () => {
++        dir = makeTempDir()
++        const originalUrl = process.env.HAPI_WEBHOOK_URL
++        const originalKey = process.env.HAPI_WEBHOOK_KEY
++        process.env.HAPI_WEBHOOK_URL = 'https://relay.example.com/hook'
++        process.env.HAPI_WEBHOOK_KEY = 'secret'
++
++        try {
++            const result = await loadServerSettings(dir)
++
++            expect(result.settings.webhookUrl).toBe('https://relay.example.com/hook')
++            expect(result.settings.webhookKey).toBe('secret')
++            expect(result.sources.webhookUrl).toBe('env')
++
++            const persisted = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'))
++            expect(persisted.webhookUrl).toBe('https://relay.example.com/hook')
++        } finally {
++            if (originalUrl === undefined) delete process.env.HAPI_WEBHOOK_URL
++            else process.env.HAPI_WEBHOOK_URL = originalUrl
++            if (originalKey === undefined) delete process.env.HAPI_WEBHOOK_KEY
++            else process.env.HAPI_WEBHOOK_KEY = originalKey
++        }
++    })
++
++    it('rejects a non-boolean webhook background-only setting', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            webhookBackgroundOnly: 'false'
++        }))
++
++        await expect(loadServerSettings(dir)).rejects.toThrow('webhookBackgroundOnly must be a boolean')
++    })
++
++    it('rejects a non-http webhook URL from the environment', async () => {
++        dir = makeTempDir()
++        process.env.HAPI_WEBHOOK_URL = 'ftp://example.com/hook'
++        try {
++            await expect(loadServerSettings(dir)).rejects.toThrow('HAPI_WEBHOOK_URL must be a valid http(s) URL')
++        } finally {
++            delete process.env.HAPI_WEBHOOK_URL
++        }
++    })
++
++    it('rejects a non-http webhook URL from settings.json', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            webhookUrl: 'not-a-url'
++        }))
++
++        await expect(loadServerSettings(dir)).rejects.toThrow('webhookUrl must be a valid http(s) URL')
++    })
++
++    it('rejects a non-string webhook key from settings.json', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            webhookKey: 12345
++        }))
++
++        await expect(loadServerSettings(dir)).rejects.toThrow('webhookKey must be a string')
++    })
++
++    it('rejects a non-boolean webhook notification setting', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            webhookNotification: 'false'
++        }))
++
++        await expect(loadServerSettings(dir)).rejects.toThrow('webhookNotification must be a boolean')
++    })
++
+     it('defaults push settings to null', async () => {
+         dir = makeTempDir()
+ 
+diff --git a/hub/src/config/serverSettings.ts b/hub/src/config/serverSettings.ts
+index 4184ee4e0..abb590e10 100644
+--- a/hub/src/config/serverSettings.ts
++++ b/hub/src/config/serverSettings.ts
+@@ -9,6 +9,7 @@
+  */
+ 
+ import { getSettingsFile, updateSettings, type TitleProviderSettings } from './settings'
++import { requireWebhookHttpUrl } from '../webhook/url'
+ 
+ const OLD_SETTINGS_FIELDS = ['webappHost', 'webappPort', 'webappUrl'] as const
+ 
+@@ -41,6 +42,10 @@ export interface ServerSettings {
+     wxPusherTopicIds: number[]
+     wxPusherNotification: boolean
+     wxPusherBackgroundOnly: boolean
++    webhookUrl: string | null
++    webhookKey: string | null
++    webhookNotification: boolean
++    webhookBackgroundOnly: boolean
+     listenHost: string
+     listenPort: number
+     publicUrl: string
+@@ -69,6 +74,10 @@ export interface ServerSettingsResult {
+         wxPusherTopicIds: 'env' | 'file' | 'default'
+         wxPusherNotification: 'env' | 'file' | 'default'
+         wxPusherBackgroundOnly: 'env' | 'file' | 'default'
++        webhookUrl: 'env' | 'file' | 'default'
++        webhookKey: 'env' | 'file' | 'default'
++        webhookNotification: 'env' | 'file' | 'default'
++        webhookBackgroundOnly: 'env' | 'file' | 'default'
+         listenHost: 'env' | 'file' | 'default'
+         listenPort: 'env' | 'file' | 'default'
+         publicUrl: 'env' | 'file' | 'default'
+@@ -164,6 +173,31 @@ function rejectOldSettingsFields(settings: object, settingsFile: string): void {
+     )
+ }
+ 
++function parseOptionalWebhookUrl(value: unknown, label: string): string | null {
++    if (value === null || value === undefined) {
++        return null
++    }
++    if (typeof value !== 'string') {
++        throw new Error(`${label} must be a valid http(s) URL`)
++    }
++    const trimmed = value.trim()
++    if (!trimmed) {
++        return null
++    }
++    return requireWebhookHttpUrl(trimmed, label)
++}
++
++function parseOptionalSecret(value: unknown, label: string): string | null {
++    if (value === null || value === undefined) {
++        return null
++    }
++    if (typeof value !== 'string') {
++        throw new Error(`${label} must be a string`)
++    }
++    const trimmed = value.trim()
++    return trimmed ? trimmed : null
++}
++
+ /**
+  * Load hub settings with priority: env > file > default
+  * Saves new env values to file when not already present
+@@ -185,6 +219,10 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+             wxPusherTopicIds: 'default',
+             wxPusherNotification: 'default',
+             wxPusherBackgroundOnly: 'default',
++            webhookUrl: 'default',
++            webhookKey: 'default',
++            webhookNotification: 'default',
++            webhookBackgroundOnly: 'default',
+             listenHost: 'default',
+             listenPort: 'default',
+             publicUrl: 'default',
+@@ -348,6 +386,66 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+             throw new Error('wxPusherBackgroundOnly must be a boolean')
+         }
+ 
++        // webhookUrl: env > file > null (http/https only)
++        let webhookUrl: string | null = null
++        if (process.env.HAPI_WEBHOOK_URL) {
++            webhookUrl = parseOptionalWebhookUrl(process.env.HAPI_WEBHOOK_URL, 'HAPI_WEBHOOK_URL')
++            sources.webhookUrl = 'env'
++            if (settings.webhookUrl === undefined && webhookUrl) {
++                settings.webhookUrl = webhookUrl
++                needsSave = true
++            }
++        } else if (settings.webhookUrl !== undefined) {
++            webhookUrl = parseOptionalWebhookUrl(settings.webhookUrl, 'webhookUrl')
++            sources.webhookUrl = 'file'
++        }
++
++        // webhookKey: env > file > null
++        let webhookKey: string | null = null
++        if (process.env.HAPI_WEBHOOK_KEY) {
++            webhookKey = parseOptionalSecret(process.env.HAPI_WEBHOOK_KEY, 'HAPI_WEBHOOK_KEY')
++            sources.webhookKey = 'env'
++            if (settings.webhookKey === undefined && webhookKey) {
++                settings.webhookKey = webhookKey
++                needsSave = true
++            }
++        } else if (settings.webhookKey !== undefined) {
++            webhookKey = parseOptionalSecret(settings.webhookKey, 'webhookKey')
++            sources.webhookKey = 'file'
++        }
++
++        // webhookNotification: env > file > true
++        let webhookNotification = true
++        if (process.env.HAPI_WEBHOOK_NOTIFICATION !== undefined) {
++            webhookNotification = process.env.HAPI_WEBHOOK_NOTIFICATION === 'true'
++            sources.webhookNotification = 'env'
++            if (settings.webhookNotification === undefined) {
++                settings.webhookNotification = webhookNotification
++                needsSave = true
++            }
++        } else if (typeof settings.webhookNotification === 'boolean') {
++            webhookNotification = settings.webhookNotification
++            sources.webhookNotification = 'file'
++        } else if (settings.webhookNotification !== undefined) {
++            throw new Error('webhookNotification must be a boolean')
++        }
++
++        // webhookBackgroundOnly: env > file > false
++        let webhookBackgroundOnly = false
++        if (process.env.HAPI_WEBHOOK_BACKGROUND_ONLY !== undefined) {
++            webhookBackgroundOnly = process.env.HAPI_WEBHOOK_BACKGROUND_ONLY === 'true'
++            sources.webhookBackgroundOnly = 'env'
++            if (settings.webhookBackgroundOnly === undefined) {
++                settings.webhookBackgroundOnly = webhookBackgroundOnly
++                needsSave = true
++            }
++        } else if (typeof settings.webhookBackgroundOnly === 'boolean') {
++            webhookBackgroundOnly = settings.webhookBackgroundOnly
++            sources.webhookBackgroundOnly = 'file'
++        } else if (settings.webhookBackgroundOnly !== undefined) {
++            throw new Error('webhookBackgroundOnly must be a boolean')
++        }
++
+         // listenHost: env > file > default
+         let listenHost = '127.0.0.1'
+         if (process.env.HAPI_LISTEN_HOST) {
+@@ -453,6 +551,10 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+                     wxPusherTopicIds,
+                     wxPusherNotification,
+                     wxPusherBackgroundOnly,
++                    webhookUrl,
++                    webhookKey,
++                    webhookNotification,
++                    webhookBackgroundOnly,
+                     listenHost,
+                     listenPort,
+                     publicUrl,
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index 46d96997d..601bb043a 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -34,6 +34,10 @@ export interface Settings {
+     wxPusherTopicIds?: number[]
+     wxPusherNotification?: boolean
+     wxPusherBackgroundOnly?: boolean
++    webhookUrl?: string
++    webhookKey?: string
++    webhookNotification?: boolean
++    webhookBackgroundOnly?: boolean
+     listenHost?: string
+     listenPort?: number
+     publicUrl?: string
+diff --git a/hub/src/configuration.ts b/hub/src/configuration.ts
+index 7180c47d5..4d0f14495 100644
+--- a/hub/src/configuration.ts
++++ b/hub/src/configuration.ts
+@@ -17,6 +17,11 @@
+  * - WXPUSHER_TOPIC_IDS: Comma-separated WxPusher topic IDs
+  * - WXPUSHER_NOTIFICATION: Enable/disable WxPusher notifications (default: true)
+  * - WXPUSHER_BACKGROUND_ONLY: Only send WxPusher notifications without visible HAPI clients (default: false)
++ * - HAPI_WEBHOOK_URL: HTTP(S) URL of a relay that accepts HAPI's notification JSON
++ *   (not a drop-in for Bark/PushPlus/WxPusher; the relay forwards onward)
++ * - HAPI_WEBHOOK_KEY: Optional shared key sent as a `key` query param and `X-HAPI-Webhook-Key` header
++ * - HAPI_WEBHOOK_NOTIFICATION: Enable/disable webhook notifications (default: true)
++ * - HAPI_WEBHOOK_BACKGROUND_ONLY: Only send webhook notifications without visible HAPI clients (default: false)
+  * - HAPI_LISTEN_HOST: Host/IP to bind the HTTP service (default: 127.0.0.1)
+  * - HAPI_LISTEN_PORT: Port for HTTP service (default: 3006)
+  * - HAPI_PUBLIC_URL: Public URL for external access (e.g., Telegram Mini App)
+@@ -58,6 +63,10 @@ export interface ConfigSources {
+     wxPusherTopicIds: ConfigSource
+     wxPusherNotification: ConfigSource
+     wxPusherBackgroundOnly: ConfigSource
++    webhookUrl: ConfigSource
++    webhookKey: ConfigSource
++    webhookNotification: ConfigSource
++    webhookBackgroundOnly: ConfigSource
+     listenHost: ConfigSource
+     listenPort: ConfigSource
+     publicUrl: ConfigSource
+@@ -106,6 +115,17 @@ class Configuration {
+ 
+     /** Only send WxPusher notifications when no visible HAPI client exists */
+     public readonly wxPusherBackgroundOnly: boolean
++    /** HTTP(S) URL of a relay that accepts HAPI notification JSON */
++    public readonly webhookUrl: string | null
++
++    /** Optional shared key sent with webhook requests */
++    public readonly webhookKey: string | null
++
++    /** Webhook notifications enabled */
++    public readonly webhookNotification: boolean
++
++    /** Only send webhook notifications when no visible HAPI client exists */
++    public readonly webhookBackgroundOnly: boolean
+ 
+     /** CLI auth token (shared secret) */
+     public cliApiToken: string
+@@ -176,6 +196,10 @@ class Configuration {
+         this.wxPusherTopicIds = serverSettings.wxPusherTopicIds
+         this.wxPusherNotification = serverSettings.wxPusherNotification
+         this.wxPusherBackgroundOnly = serverSettings.wxPusherBackgroundOnly
++        this.webhookUrl = serverSettings.webhookUrl
++        this.webhookKey = serverSettings.webhookKey
++        this.webhookNotification = serverSettings.webhookNotification
++        this.webhookBackgroundOnly = serverSettings.webhookBackgroundOnly
+         this.listenHost = serverSettings.listenHost
+         this.listenPort = serverSettings.listenPort
+         this.publicUrl = serverSettings.publicUrl
+diff --git a/hub/src/startHub.ts b/hub/src/startHub.ts
+index ea508d53a..7448eb68e 100644
+--- a/hub/src/startHub.ts
++++ b/hub/src/startHub.ts
+@@ -31,6 +31,7 @@ import { ensureCliArtifact, isTransientArtifactBuildFailure, resolveArtifactSour
+ import { readSettings } from './config/settings'
+ import { getFleetUpgradePolicy, initFleetUpgradePolicy } from './upgrade/fleetUpgradePolicy'
+ import { WxPusherChannel } from './wxpusher/channel'
++import { WebhookChannel } from './webhook/channel'
+ import QRCode from 'qrcode'
+ import type { Server as BunServer } from 'bun'
+ import type { WebSocketData } from '@socket.io/bun-engine'
+@@ -222,6 +223,16 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+     } else {
+         console.log('[Hub] WxPusher: disabled (no WXPUSHER_APP_TOKEN)')
+     }
++    if (config.webhookUrl) {
++        const source = formatSource(config.sources.webhookUrl)
++        const notificationSource = formatSource(config.sources.webhookNotification)
++        const backgroundOnlySource = formatSource(config.sources.webhookBackgroundOnly)
++        console.log(`[Hub] Webhook: enabled (${source})`)
++        console.log(`[Hub] Webhook notifications: ${config.webhookNotification ? 'enabled' : 'disabled'} (${notificationSource})`)
++        console.log(`[Hub] Webhook background-only: ${config.webhookBackgroundOnly ? 'enabled' : 'disabled'} (${backgroundOnlySource})`)
++    } else {
++        console.log('[Hub] Webhook: disabled (no HAPI_WEBHOOK_URL)')
++    }
+ 
+     // Display tunnel status
+     if (relayFlag.enabled) {
+@@ -378,6 +389,17 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+         }
+     }
+ 
++    // User-controlled HTTP endpoint last so a hung webhook cannot delay Telegram.
++    if (config.webhookUrl && config.webhookNotification) {
++        notificationChannels.push(new WebhookChannel(
++            config.webhookUrl,
++            config.webhookKey,
++            config.publicUrl,
++            visibilityTracker,
++            config.webhookBackgroundOnly
++        ))
++    }
++
+     notificationHub = new NotificationHub(syncEngine, notificationChannels, undefined, store)
+ 
+     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
+diff --git a/hub/src/webhook/channel.test.ts b/hub/src/webhook/channel.test.ts
+new file mode 100644
+index 000000000..254de24af
+--- /dev/null
++++ b/hub/src/webhook/channel.test.ts
+@@ -0,0 +1,302 @@
++import { describe, expect, it, mock } from 'bun:test'
++import type { SessionEndReason } from '@hapi/protocol'
++import type { Session } from '../sync/syncEngine'
++import { VisibilityTracker } from '../visibility/visibilityTracker'
++import { WebhookChannel } from './channel'
++
++function createSession(overrides: Partial<Session> = {}): Session {
++    return {
++        id: 'session-1',
++        namespace: 'default',
++        seq: 1,
++        createdAt: 0,
++        updatedAt: 0,
++        active: true,
++        activeAt: 0,
++        metadata: {
++            path: 'F:\\develop\\code\\usdt',
++            host: 'DESKTOP'
++        },
++        metadataVersion: 0,
++        agentState: null,
++        agentStateVersion: 0,
++        thinking: false,
++        thinkingAt: 0,
++        model: null,
++        modelReasoningEffort: null,
++        effort: null,
++        serviceTier: null,
++        ...overrides
++    }
++}
++
++describe('WebhookChannel', () => {
++    it('does not send completed task notifications', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', null, 'https://hapi.example.com')
++            await channel.sendTaskNotification(createSession(), {
++                status: 'completed',
++                summary: 'Subtask finished'
++            })
++
++            expect(fetchMock).not.toHaveBeenCalled()
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('sends failed task notifications with the configured key as a query param and header', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', 'secret-key', 'https://hapi.example.com')
++            await channel.sendTaskNotification(createSession(), {
++                status: 'failed',
++                summary: 'Subtask failed'
++            })
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++            const call = fetchMock.mock.calls[0] as unknown[] | undefined
++            const url = call?.[0] as URL
++            const init = call?.[1] as RequestInit | undefined
++
++            expect(url.toString()).toBe('https://example.com/hook?key=secret-key')
++            expect((init?.headers as Record<string, string>)['X-HAPI-Webhook-Key']).toBe('secret-key')
++            expect(init?.redirect).toBe('error')
++            expect(init?.signal).toBeInstanceOf(AbortSignal)
++
++            const body = JSON.parse(init?.body as string)
++            expect(body.event).toBe('task_failed')
++            expect(body.content).toBe('Subtask failed')
++            expect(body.sessionId).toBe('session-1')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('omits the key query param and header when no key is configured', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', null, 'https://hapi.example.com')
++            await channel.sendReady(createSession())
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++            const call = fetchMock.mock.calls[0] as unknown[] | undefined
++            const url = call?.[0] as URL
++            const init = call?.[1] as RequestInit | undefined
++
++            expect(url.toString()).toBe('https://example.com/hook')
++            expect((init?.headers as Record<string, string>)['X-HAPI-Webhook-Key']).toBeUndefined()
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('sends session completion notifications', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', null, 'https://hapi.example.com')
++            await channel.sendSessionCompletion(createSession({
++                id: 'session-complete',
++                metadata: {
++                    path: 'F:\\develop\\code\\usdt',
++                    host: 'DESKTOP',
++                    name: 'USDT review'
++                }
++            }), 'completed' satisfies SessionEndReason)
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++            const call = fetchMock.mock.calls[0] as unknown[] | undefined
++            const init = call?.[1] as RequestInit | undefined
++            const body = JSON.parse(init?.body as string)
++            expect(body.event).toBe('completed')
++            expect(body.title).toContain('USDT review')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('throws a descriptive error when the endpoint responds with a non-2xx status', async () => {
++        const fetchMock = mock(async () => new Response(
++            'invalid key=secret-key https://example.com/hook?key=secret-key',
++            { status: 400, statusText: 'Bad Request' }
++        ))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', 'secret-key', 'https://hapi.example.com')
++            let message = ''
++            try {
++                await channel.sendReady(createSession())
++            } catch (error) {
++                message = error instanceof Error ? error.message : String(error)
++            }
++            expect(message).toBe('Webhook 发送失败: HTTP 400 Bad Request')
++            expect(message).not.toContain('secret-key')
++            expect(message).not.toContain('invalid key')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('suppresses every notification when the namespace has a visible connection and backgroundOnly is set', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const visibilityTracker = new VisibilityTracker()
++            visibilityTracker.registerConnection('visible-1', 'default', 'visible')
++            const channel = new WebhookChannel(
++                'https://example.com/hook',
++                null,
++                'https://hapi.example.com',
++                visibilityTracker,
++                true
++            )
++
++            await channel.sendReady(createSession())
++            await channel.sendPermissionRequest(createSession())
++            await channel.sendTaskNotification(createSession(), {
++                status: 'failed',
++                summary: 'Subtask failed'
++            })
++            await channel.sendSessionCompletion(createSession(), 'completed' satisfies SessionEndReason)
++
++            expect(fetchMock).not.toHaveBeenCalled()
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('keeps sending when background-only mode is disabled', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const visibilityTracker = new VisibilityTracker()
++            visibilityTracker.registerConnection('visible-1', 'default', 'visible')
++            const channel = new WebhookChannel(
++                'https://example.com/hook',
++                null,
++                'https://hapi.example.com',
++                visibilityTracker,
++                false
++            )
++
++            await channel.sendReady(createSession())
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('rejects a non-http URL at construction', () => {
++        expect(() => new WebhookChannel('ftp://example.com/hook', null, 'https://hapi.example.com'))
++            .toThrow('Webhook URL must be a valid http(s) URL')
++        expect(() => new WebhookChannel('not-a-url', null, 'https://hapi.example.com'))
++            .toThrow('Webhook URL must be a valid http(s) URL')
++    })
++
++    it('maps a fetch timeout to a descriptive error', async () => {
++        const timeout = Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' })
++        const fetchMock = mock(async () => {
++            throw timeout
++        })
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', null, 'https://hapi.example.com')
++            await expect(channel.sendReady(createSession())).rejects.toThrow('Webhook 发送失败: 请求超时')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('wraps other fetch failures without echoing the webhook URL', async () => {
++        const fetchMock = mock(async () => {
++            throw new TypeError('unexpected redirect')
++        })
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WebhookChannel('https://example.com/hook', 'secret-key', 'https://hapi.example.com')
++            let message = ''
++            try {
++                await channel.sendReady(createSession())
++            } catch (error) {
++                message = error instanceof Error ? error.message : String(error)
++            }
++            expect(message).toBe('Webhook 发送失败: unexpected redirect')
++            expect(message).not.toContain('secret-key')
++            expect(message).not.toContain('example.com')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('sends when the namespace has no visible connection', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const visibilityTracker = new VisibilityTracker()
++            visibilityTracker.registerConnection('hidden-1', 'default', 'hidden')
++            const channel = new WebhookChannel(
++                'https://example.com/hook',
++                null,
++                'https://hapi.example.com',
++                visibilityTracker,
++                true
++            )
++
++            await channel.sendReady(createSession())
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('only considers visible connections in the same namespace', async () => {
++        const fetchMock = mock(async () => new Response('ok', { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const visibilityTracker = new VisibilityTracker()
++            visibilityTracker.registerConnection('visible-1', 'other-namespace', 'visible')
++            const channel = new WebhookChannel(
++                'https://example.com/hook',
++                null,
++                'https://hapi.example.com',
++                visibilityTracker,
++                true
++            )
++
++            await channel.sendReady(createSession())
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++})
+diff --git a/hub/src/webhook/channel.ts b/hub/src/webhook/channel.ts
+new file mode 100644
+index 000000000..bd12b9fdf
+--- /dev/null
++++ b/hub/src/webhook/channel.ts
+@@ -0,0 +1,150 @@
++import type { Session } from '../sync/syncEngine'
++import type { SessionEndReason } from '@hapi/protocol'
++import type { NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
++import { getAgentName, getSessionName } from '../notifications/sessionInfo'
++import type { VisibilityTracker } from '../visibility/visibilityTracker'
++import { requireWebhookHttpUrl } from './url'
++
++export const WEBHOOK_REQUEST_TIMEOUT_MS = 10_000
++
++function buildSessionUrl(baseUrl: string, sessionId: string): string {
++    try {
++        return new URL(`/sessions/${sessionId}`, baseUrl).toString()
++    } catch {
++        const normalized = baseUrl.replace(/\/+$/, '')
++        return `${normalized}/sessions/${sessionId}`
++    }
++}
++
++function isAbortError(error: unknown): boolean {
++    return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
++}
++
++/**
++ * Generic webhook notification channel.
++ *
++ * Unlike ServerChanChannel/HappyBot, this channel does not talk to a fixed
++ * provider. It POSTs HAPI's JSON payload to a user-supplied URL. Point this
++ * at a relay you control (self-hosted endpoint, serverless function, Worker)
++ * and have that relay forward to Telegram / Server酱 / Bark / etc.
++ *
++ * This is also the escape hatch for hubs that cannot reach the built-in
++ * providers directly (e.g. sctapi.ftqq.com / api.telegram.org are
++ * unreachable from the hub's network).
++ *
++ * Payload:
++ * {
++ *   "event": "ready" | "permission" | "task_failed" | "completed",
++ *   "title": string,
++ *   "content": string,
++ *   "url": string,        // deep link to the session
++ *   "sessionId": string
++ * }
++ *
++ * If a key is configured, it is sent two ways for maximum compatibility
++ * with existing webhook receivers: as a `key` query parameter on the URL
++ * (matching the convention used by Server酱/PushPlus-style APIs) and as an
++ * `X-HAPI-Webhook-Key` header.
++ */
++export class WebhookChannel implements NotificationChannel {
++    private readonly url: string
++    private readonly key: string | null
++
++    constructor(
++        url: string,
++        key: string | null,
++        private readonly publicUrl: string,
++        private readonly visibilityTracker: VisibilityTracker | null = null,
++        private readonly backgroundOnly = false
++    ) {
++        this.url = requireWebhookHttpUrl(url)
++        this.key = key?.trim() ? key.trim() : null
++    }
++
++    async sendReady(session: Session): Promise<void> {
++        if (!session.active || this.shouldSuppress(session)) {
++            return
++        }
++
++        const agentName = getAgentName(session)
++        await this.send('ready', 'HAPI Ready for input', `${agentName} 正在等待输入`, session)
++    }
++
++    async sendPermissionRequest(session: Session): Promise<void> {
++        if (!session.active || this.shouldSuppress(session)) {
++            return
++        }
++
++        const request = session.agentState?.requests
++            ? Object.values(session.agentState.requests)[0]
++            : null
++        const toolName = request?.tool ? ` (${request.tool})` : ''
++        await this.send('permission', 'HAPI Permission Request', `需要授权${toolName}`, session)
++    }
++
++    async sendTaskNotification(session: Session, notification: TaskNotification): Promise<void> {
++        if (!session.active || this.shouldSuppress(session)) {
++            return
++        }
++
++        const status = notification.status?.trim().toLowerCase()
++        const isFailure = status === 'failed' || status === 'error' || status === 'killed' || status === 'aborted'
++        if (!isFailure) {
++            return
++        }
++        await this.send('task_failed', 'HAPI Task failed', notification.summary, session)
++    }
++
++    async sendSessionCompletion(session: Session, _reason: SessionEndReason): Promise<void> {
++        if (this.shouldSuppress(session)) {
++            return
++        }
++
++        await this.send('completed', 'HAPI Session completed', '会话已结束。', session)
++    }
++
++    private async send(event: string, title: string, content: string, session: Session): Promise<void> {
++        const name = getSessionName(session)
++        const sessionUrl = buildSessionUrl(this.publicUrl, session.id)
++
++        const target = new URL(this.url)
++        if (this.key) {
++            target.searchParams.set('key', this.key)
++        }
++
++        let response: Response
++        try {
++            response = await fetch(target, {
++                method: 'POST',
++                redirect: 'error',
++                headers: {
++                    'content-type': 'application/json',
++                    ...(this.key ? { 'X-HAPI-Webhook-Key': this.key } : {})
++                },
++                body: JSON.stringify({
++                    event,
++                    title: `${title} · ${name}`,
++                    content,
++                    url: sessionUrl,
++                    sessionId: session.id
++                }),
++                signal: AbortSignal.timeout(WEBHOOK_REQUEST_TIMEOUT_MS)
++            })
++        } catch (error) {
++            if (isAbortError(error)) {
++                throw new Error('Webhook 发送失败: 请求超时')
++            }
++            throw new Error(`Webhook 发送失败: ${error instanceof Error ? error.message : String(error)}`)
++        }
++
++        if (!response.ok) {
++            throw new Error(`Webhook 发送失败: HTTP ${response.status} ${response.statusText}`)
++        }
++    }
++
++    private shouldSuppress(session: Session): boolean {
++        return this.backgroundOnly
++            && this.visibilityTracker !== null
++            && this.visibilityTracker.hasVisibleConnection(session.namespace)
++    }
++}
+diff --git a/hub/src/webhook/url.test.ts b/hub/src/webhook/url.test.ts
+new file mode 100644
+index 000000000..1db035ab5
+--- /dev/null
++++ b/hub/src/webhook/url.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from 'bun:test'
++import { requireWebhookHttpUrl } from './url'
++
++describe('requireWebhookHttpUrl', () => {
++    it('accepts http and https URLs', () => {
++        expect(requireWebhookHttpUrl(' https://example.com/hook ')).toBe('https://example.com/hook')
++        expect(requireWebhookHttpUrl('http://127.0.0.1:8080/hook')).toBe('http://127.0.0.1:8080/hook')
++    })
++
++    it('rejects non-http URLs without echoing the value', () => {
++        expect(() => requireWebhookHttpUrl('ftp://example.com/hook', 'HAPI_WEBHOOK_URL'))
++            .toThrow('HAPI_WEBHOOK_URL must be a valid http(s) URL')
++        expect(() => requireWebhookHttpUrl('not-a-url')).toThrow('Webhook URL must be a valid http(s) URL')
++        try {
++            requireWebhookHttpUrl('ftp://secret.example/hook')
++        } catch (error) {
++            expect(String(error)).not.toContain('secret.example')
++        }
++    })
++})
+diff --git a/hub/src/webhook/url.ts b/hub/src/webhook/url.ts
+new file mode 100644
+index 000000000..ae26e2faf
+--- /dev/null
++++ b/hub/src/webhook/url.ts
+@@ -0,0 +1,13 @@
++export function requireWebhookHttpUrl(url: string, label = 'Webhook URL'): string {
++    const trimmed = url.trim()
++    let parsed: URL
++    try {
++        parsed = new URL(trimmed)
++    } catch {
++        throw new Error(`${label} must be a valid http(s) URL`)
++    }
++    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
++        throw new Error(`${label} must be a valid http(s) URL`)
++    }
++    return trimmed
++}
+-- 
+2.43.0
+

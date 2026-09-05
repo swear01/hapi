@@ -1,19 +1,23 @@
 import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { ReactNode } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { I18nProvider } from '@/lib/i18n-context'
 import { SessionRowSummary } from './SessionRowSummary'
 
 afterEach(() => cleanup())
 
-function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+function renderWithI18n(children: ReactNode) {
+    return render(<I18nProvider>{children}</I18nProvider>)
+}
+
+function makeSummary(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
     return {
-        id: 'background-demo',
         active: true,
         thinking: false,
         activeAt: 0,
         updatedAt: 0,
-        metadata: { path: '/demo/status', name: 'Background demo', flavor: 'claude' },
+        metadata: null,
         metadataVersion: 0,
         agentStateVersion: 0,
         todosUpdatedAt: 0,
@@ -21,49 +25,53 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
         pendingRequestsCount: 0,
         pendingRequestKinds: [],
         pendingRequests: [],
-        backgroundTaskCount: 2,
+        backgroundTaskCount: 0,
         futureScheduledMessageCount: 0,
+        attachedJob: null,
+        attachedJobUpdatedAt: 0,
         nextScheduledAt: null,
         model: null,
         effort: null,
-        ...overrides
+        ...overrides,
     }
 }
 
-function renderSummary(showDetailedStatus: boolean) {
-    return render(
-        <I18nProvider>
+describe('SessionRowSummary model-error + attention', () => {
+    it('shows model-error and permission attention together', () => {
+        const summary = makeSummary({
+            id: 's-both',
+            pendingRequestsCount: 1,
+            pendingRequestKinds: ['permission'],
+            pendingRequests: [{ id: 'r1', kind: 'permission', tool: 'Bash', since: 0 }],
+            metadata: {
+                path: '/tmp/proj',
+                lastModelError: {
+                    eventId: 'evt-row-1',
+                    kind: 'model_not_found',
+                    transient: false,
+                    rawSnippet: 'Unknown model',
+                    atTs: 1,
+                    priorAssistantClaimsDone: false,
+                },
+            },
+        })
+
+        renderWithI18n(
             <SessionRowSummary
-                session={makeSummary()}
-                showDetailedStatus={showDetailedStatus}
+                session={summary}
+                showDetailedStatus
+                selected={false}
+                nestedTooltips={false}
             />
-        </I18nProvider>
-    )
-}
+        )
 
-describe('SessionRowSummary background status', () => {
-    beforeEach(() => {
-        localStorage.clear()
-    })
-
-    it('shows the basic running label in Basic mode', () => {
-        renderSummary(false)
-
-        expect(screen.getByText('Running', { exact: true })).toBeInTheDocument()
-        expect(screen.queryByRole('tooltip', { hidden: true })).not.toBeInTheDocument()
-    })
-
-    it('shows a detailed background dot with the task-count tooltip in Extended mode', () => {
-        renderSummary(true)
-
-        expect(screen.queryByText('Running', { exact: true })).not.toBeInTheDocument()
-        const tooltip = screen.getByRole('tooltip', { hidden: true })
-        expect(tooltip).toHaveTextContent('Background tasks running')
-        expect(tooltip).toHaveTextContent('2 tasks running')
+        expect(screen.getByLabelText(/Model error/i)).toBeTruthy()
+        expect(screen.getByLabelText('Permission required')).toBeTruthy()
     })
 
     it('refreshes unread attention when the local watermark version changes', () => {
         const session = makeSummary({
+            id: 's-unread',
             active: false,
             backgroundTaskCount: 0,
             updatedAt: 2_000,

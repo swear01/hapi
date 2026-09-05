@@ -17,8 +17,10 @@ export const copilotCommand: CommandDefinition = {
                 startingMode?: 'local' | 'remote'
                 permissionMode?: CopilotPermissionMode
                 model?: string
+                effort?: string
                 copilotAgentMode?: CopilotAgentMode
                 resumeSessionId?: string
+                existingSessionId?: string
             } = {}
 
             let hasExplicitPermissionMode = false
@@ -49,12 +51,22 @@ export const copilotCommand: CommandDefinition = {
                         throw new Error('Missing --resume value')
                     }
                     options.resumeSessionId = sessionId
+                } else if (arg === '--existing-session-id') {
+                    const sessionId = commandArgs[++i]
+                    if (!sessionId) throw new Error('Missing --existing-session-id value')
+                    options.existingSessionId = sessionId
                 } else if (arg === '--model') {
                     const model = commandArgs[++i]
                     if (!model) {
                         throw new Error('Missing --model value')
                     }
                     options.model = model
+                } else if (arg === '--effort') {
+                    const effort = commandArgs[++i]
+                    if (!effort) {
+                        throw new Error('Missing --effort value')
+                    }
+                    options.effort = effort
                 } else if (arg === '--copilot-agent-mode' || arg === '--mode') {
                     const mode = commandArgs[++i]
                     if (!mode || !isCopilotAgentMode(mode)) {

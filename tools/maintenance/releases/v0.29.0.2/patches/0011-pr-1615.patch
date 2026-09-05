@@ -1,0 +1,1084 @@
+From a95cef7f28f3ef971b3c5e8290127094d31cfaa2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:41:51 +0000
+Subject: [PATCH] carry: upstream PR #1615
+
+---
+ cli/src/test/globalSetup.ts                   |   2 +-
+ cli/src/test/integrationEnv.ts                |   1 +
+ docs/guide/installation.md                    |   5 +
+ docs/guide/notifications.md                   |  38 +++-
+ docs/guide/quick-start.md                     |   2 +-
+ docs/public/schemas/settings.schema.json      |  29 +++
+ hub/src/config/serverSettings.test.ts         | 112 ++++++++++
+ hub/src/config/serverSettings.ts              | 125 +++++++++++
+ hub/src/config/settings.ts                    |   5 +
+ hub/src/configuration.ts                      |  30 +++
+ hub/src/notifications/backgroundOnly.ts       |  12 ++
+ hub/src/notifications/notificationHub.test.ts |  53 +++++
+ hub/src/notifications/sessionInfo.ts          |  11 +-
+ hub/src/serverchan/channel.ts                 |  16 +-
+ hub/src/startHub.ts                           |  27 +++
+ hub/src/wxpusher/channel.test.ts              | 204 ++++++++++++++++++
+ hub/src/wxpusher/channel.ts                   | 100 +++++++++
+ 17 files changed, 755 insertions(+), 17 deletions(-)
+ create mode 100644 hub/src/notifications/backgroundOnly.ts
+ create mode 100644 hub/src/wxpusher/channel.test.ts
+ create mode 100644 hub/src/wxpusher/channel.ts
+
+diff --git a/cli/src/test/globalSetup.ts b/cli/src/test/globalSetup.ts
+index c3c02d61b..380c8a62f 100644
+--- a/cli/src/test/globalSetup.ts
++++ b/cli/src/test/globalSetup.ts
+@@ -72,7 +72,7 @@ export async function setup() {
+     }
+ 
+     // Use a minimal env whitelist to prevent shell credentials (DB_PATH,
+-    // TELEGRAM_BOT_TOKEN, ELEVENLABS_API_KEY, etc.) from leaking into the
++    // TELEGRAM_BOT_TOKEN, SERVERCHAN_*, WXPUSHER_*, ELEVENLABS_API_KEY, etc.) from leaking into the
+     // test hub and triggering real notifications or opening a production DB.
+     const hubEnv: NodeJS.ProcessEnv = {
+         PATH: process.env.PATH,
+diff --git a/cli/src/test/integrationEnv.ts b/cli/src/test/integrationEnv.ts
+index f71213f07..ffe2ac123 100644
+--- a/cli/src/test/integrationEnv.ts
++++ b/cli/src/test/integrationEnv.ts
+@@ -42,6 +42,7 @@ const SECRET_ENV_PATTERNS: RegExp[] = [
+     /^DB_PATH$/,
+     /^TELEGRAM_BOT_TOKEN$/,
+     /^SERVERCHAN_/i,
++    /^WXPUSHER_/i,
+     /^ELEVENLABS_/i,
+ ]
+ 
+diff --git a/docs/guide/installation.md b/docs/guide/installation.md
+index 056d51373..ecdf1f6a3 100644
+--- a/docs/guide/installation.md
++++ b/docs/guide/installation.md
+@@ -191,6 +191,11 @@ On first run, HAPI:
+ | `SERVERCHAN_SENDKEY` | - | `serverChanSendKey` | Server酱 (ServerChan) SendKey for push notifications |
+ | `SERVERCHAN_NOTIFICATION` | `true` | `serverChanNotification` | Enable ServerChan notifications |
+ | `SERVERCHAN_BACKGROUND_ONLY` | `false` | `serverChanBackgroundOnly` | Only send ServerChan notifications when no visible HAPI connection exists in the namespace |
++| `WXPUSHER_APP_TOKEN` | - | `wxPusherAppToken` | WxPusher application token for App/client notifications |
++| `WXPUSHER_UIDS` | - | `wxPusherUids` | Comma-separated WxPusher recipient UIDs |
++| `WXPUSHER_TOPIC_IDS` | - | `wxPusherTopicIds` | Comma-separated WxPusher topic IDs |
++| `WXPUSHER_NOTIFICATION` | `true` | `wxPusherNotification` | Enable WxPusher notifications |
++| `WXPUSHER_BACKGROUND_ONLY` | `false` | `wxPusherBackgroundOnly` | Only send WxPusher notifications when no visible HAPI connection exists in the namespace |
+ | `HAPI_RELAY_API` | `relay.hapi.run` | - | Relay API domain for the public relay |
+ | `HAPI_RELAY_AUTH` | Per-hub key issued by the relay | `relayAuthKey` | Relay auth key override (set only when an operator provides a key) |
+ | `HAPI_RELAY_FORCE_TCP` | `false` | - | Force TCP mode for relay |
+diff --git a/docs/guide/notifications.md b/docs/guide/notifications.md
+index f8d3a1318..884694226 100644
+--- a/docs/guide/notifications.md
++++ b/docs/guide/notifications.md
+@@ -1,6 +1,6 @@
+ # Notifications
+ 
+-Get notified when sessions need input, request permissions, fail, or complete — via Telegram, Server酱 (ServerChan), Web Push, or voice.
++Get notified when sessions need input, request permissions, fail, or complete — via Telegram, Server酱 (ServerChan), Web Push, or voice. WxPusher App can optionally deliver session completion notifications.
+ 
+ Web Push works out of the box once you [install the PWA](./pwa.md); no configuration needed. The channels below are optional.
+ 
+@@ -55,6 +55,42 @@ When `SERVERCHAN_BACKGROUND_ONLY=true`, a visible HAPI connection suppresses Ser
+ 
+ These values can also be set in `settings.json` (`serverChanSendKey`, `serverChanNotification`, `serverChanBackgroundOnly`).
+ 
++## WxPusher App Setup
++
++WxPusher sends notifications to its own Android, iOS, and desktop clients. This integration targets the standard WxPusher App/client delivery path, not the separate WeChat ClawBot channel.
++
++1. Create a WxPusher application and copy its `appToken`
++2. Install a WxPusher client, subscribe to the application, and copy your UID
++3. Set the token and recipient before starting the hub:
++
++```bash
++export WXPUSHER_APP_TOKEN="AT_your-app-token"
++export WXPUSHER_UIDS="UID_your-uid"
++export HAPI_PUBLIC_URL="https://your-public-url"
++
++hapi hub
++```
++
++Multiple UIDs can be separated by commas. Topic recipients can be configured with `WXPUSHER_TOPIC_IDS` instead:
++
++```bash
++export WXPUSHER_TOPIC_IDS="123,456"
++```
++
++The current WxPusher channel sends session completion notifications only. It remains disabled unless an app token and at least one UID or topic ID are configured.
++
++Related environment variables:
++
++- `WXPUSHER_APP_TOKEN` - WxPusher application token
++- `WXPUSHER_UIDS` - Comma-separated recipient UIDs
++- `WXPUSHER_TOPIC_IDS` - Comma-separated topic IDs
++- `WXPUSHER_NOTIFICATION` - Enable/disable WxPusher notifications (default: `true`)
++- `WXPUSHER_BACKGROUND_ONLY` - Only send WxPusher notifications when the namespace has no visible HAPI connection (default: `false`)
++
++When `WXPUSHER_BACKGROUND_ONLY=true`, a visible HAPI connection suppresses WxPusher for the entire namespace. Hidden, disconnected, or closed HAPI pages do not count as visible, so WxPusher can act as a background fallback. This is namespace-wide and does not select a particular device.
++
++These values can also be set in `settings.json` (`wxPusherAppToken`, `wxPusherUids`, `wxPusherTopicIds`, `wxPusherNotification`, `wxPusherBackgroundOnly`).
++
+ ## Voice assistant setup
+ 
+ Enable voice control:
+diff --git a/docs/guide/quick-start.md b/docs/guide/quick-start.md
+index c5343d58c..7a0986703 100644
+--- a/docs/guide/quick-start.md
++++ b/docs/guide/quick-start.md
+@@ -40,6 +40,6 @@ Enter your access token to log in.
+ 
+ - [Seamless Handoff](./how-it-works.md#seamless-handoff) - Switch between terminal and phone seamlessly
+ - [Hub setup](./installation.md#hub-setup) - Access HAPI from anywhere
+-- [Notifications](./notifications.md#telegram-setup) - Set up Telegram or ServerChan notifications
++- [Notifications](./notifications.md#telegram-setup) - Set up Telegram, ServerChan, or WxPusher notifications
+ - [Deployment](./deployment.md) - Run HAPI as a persistent background service
+ - [Install the App](./pwa.md) - Add HAPI to your home screen
+diff --git a/docs/public/schemas/settings.schema.json b/docs/public/schemas/settings.schema.json
+index 062160f3c..ed7cc68c0 100644
+--- a/docs/public/schemas/settings.schema.json
++++ b/docs/public/schemas/settings.schema.json
+@@ -69,6 +69,35 @@
+       "default": false,
+       "description": "Only send ServerChan notifications when no visible HAPI connection exists in the namespace. ENV: SERVERCHAN_BACKGROUND_ONLY"
+     },
++    "wxPusherAppToken": {
++      "type": "string",
++      "description": "WxPusher application token for App/client notifications. ENV: WXPUSHER_APP_TOKEN"
++    },
++    "wxPusherUids": {
++      "type": "array",
++      "items": {
++        "type": "string"
++      },
++      "description": "WxPusher recipient UIDs. ENV: WXPUSHER_UIDS (comma-separated)"
++    },
++    "wxPusherTopicIds": {
++      "type": "array",
++      "items": {
++        "type": "integer",
++        "minimum": 1
++      },
++      "description": "WxPusher topic recipient IDs. ENV: WXPUSHER_TOPIC_IDS (comma-separated)"
++    },
++    "wxPusherNotification": {
++      "type": "boolean",
++      "default": true,
++      "description": "Enable WxPusher notifications. ENV: WXPUSHER_NOTIFICATION"
++    },
++    "wxPusherBackgroundOnly": {
++      "type": "boolean",
++      "default": false,
++      "description": "Only send WxPusher notifications when no visible HAPI connection exists in the namespace. ENV: WXPUSHER_BACKGROUND_ONLY"
++    },
+     "relayAuthKey": {
+       "type": "string",
+       "description": "Per-hub relay auth key issued by the relay server. Auto-obtained if not set. ENV: HAPI_RELAY_AUTH"
+diff --git a/hub/src/config/serverSettings.test.ts b/hub/src/config/serverSettings.test.ts
+index 3bb4d3db7..6df75c4f6 100644
+--- a/hub/src/config/serverSettings.test.ts
++++ b/hub/src/config/serverSettings.test.ts
+@@ -11,9 +11,19 @@ function makeTempDir(): string {
+ describe('loadServerSettings', () => {
+     let dir: string | null = null
+     const originalBackgroundOnly = process.env.SERVERCHAN_BACKGROUND_ONLY
++    const originalWxPusherAppToken = process.env.WXPUSHER_APP_TOKEN
++    const originalWxPusherUids = process.env.WXPUSHER_UIDS
++    const originalWxPusherTopicIds = process.env.WXPUSHER_TOPIC_IDS
++    const originalWxPusherNotification = process.env.WXPUSHER_NOTIFICATION
++    const originalWxPusherBackgroundOnly = process.env.WXPUSHER_BACKGROUND_ONLY
+ 
+     beforeEach(() => {
+         delete process.env.SERVERCHAN_BACKGROUND_ONLY
++        delete process.env.WXPUSHER_APP_TOKEN
++        delete process.env.WXPUSHER_UIDS
++        delete process.env.WXPUSHER_TOPIC_IDS
++        delete process.env.WXPUSHER_NOTIFICATION
++        delete process.env.WXPUSHER_BACKGROUND_ONLY
+     })
+ 
+     afterEach(() => {
+@@ -26,6 +36,31 @@ describe('loadServerSettings', () => {
+         } else {
+             process.env.SERVERCHAN_BACKGROUND_ONLY = originalBackgroundOnly
+         }
++        if (originalWxPusherAppToken === undefined) {
++            delete process.env.WXPUSHER_APP_TOKEN
++        } else {
++            process.env.WXPUSHER_APP_TOKEN = originalWxPusherAppToken
++        }
++        if (originalWxPusherUids === undefined) {
++            delete process.env.WXPUSHER_UIDS
++        } else {
++            process.env.WXPUSHER_UIDS = originalWxPusherUids
++        }
++        if (originalWxPusherTopicIds === undefined) {
++            delete process.env.WXPUSHER_TOPIC_IDS
++        } else {
++            process.env.WXPUSHER_TOPIC_IDS = originalWxPusherTopicIds
++        }
++        if (originalWxPusherNotification === undefined) {
++            delete process.env.WXPUSHER_NOTIFICATION
++        } else {
++            process.env.WXPUSHER_NOTIFICATION = originalWxPusherNotification
++        }
++        if (originalWxPusherBackgroundOnly === undefined) {
++            delete process.env.WXPUSHER_BACKGROUND_ONLY
++        } else {
++            process.env.WXPUSHER_BACKGROUND_ONLY = originalWxPusherBackgroundOnly
++        }
+     })
+ 
+     it('rejects old webapp settings fields instead of migrating them', async () => {
+@@ -82,6 +117,83 @@ describe('loadServerSettings', () => {
+         await expect(loadServerSettings(dir)).rejects.toThrow('serverChanBackgroundOnly must be a boolean')
+     })
+ 
++    it('defaults WxPusher settings to disabled without credentials or recipients', async () => {
++        dir = makeTempDir()
++
++        const result = await loadServerSettings(dir)
++
++        expect(result.settings.wxPusherAppToken).toBeNull()
++        expect(result.settings.wxPusherUids).toEqual([])
++        expect(result.settings.wxPusherTopicIds).toEqual([])
++        expect(result.settings.wxPusherNotification).toBe(true)
++        expect(result.settings.wxPusherBackgroundOnly).toBe(false)
++        expect(result.sources.wxPusherAppToken).toBe('default')
++        expect(result.sources.wxPusherUids).toBe('default')
++        expect(result.sources.wxPusherTopicIds).toBe('default')
++    })
++
++    it('loads WxPusher settings from environment variables with normalized recipients', async () => {
++        dir = makeTempDir()
++        process.env.WXPUSHER_APP_TOKEN = 'AT_TEST'
++        process.env.WXPUSHER_UIDS = ' UID_ONE,UID_TWO,UID_ONE '
++        process.env.WXPUSHER_TOPIC_IDS = '12, 34,12'
++        process.env.WXPUSHER_NOTIFICATION = 'false'
++        process.env.WXPUSHER_BACKGROUND_ONLY = 'true'
++
++        const result = await loadServerSettings(dir)
++
++        expect(result.settings.wxPusherAppToken).toBe('AT_TEST')
++        expect(result.settings.wxPusherUids).toEqual(['UID_ONE', 'UID_TWO'])
++        expect(result.settings.wxPusherTopicIds).toEqual([12, 34])
++        expect(result.settings.wxPusherNotification).toBe(false)
++        expect(result.settings.wxPusherBackgroundOnly).toBe(true)
++        expect(result.sources.wxPusherAppToken).toBe('env')
++        expect(result.sources.wxPusherUids).toBe('env')
++        expect(result.sources.wxPusherTopicIds).toBe('env')
++        expect(result.sources.wxPusherNotification).toBe('env')
++        expect(result.sources.wxPusherBackgroundOnly).toBe('env')
++    })
++
++    it('loads WxPusher settings from settings.json', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            wxPusherAppToken: 'AT_FILE',
++            wxPusherUids: ['UID_FILE'],
++            wxPusherTopicIds: [99],
++            wxPusherNotification: false,
++            wxPusherBackgroundOnly: true,
++        }))
++
++        const result = await loadServerSettings(dir)
++
++        expect(result.settings.wxPusherAppToken).toBe('AT_FILE')
++        expect(result.settings.wxPusherUids).toEqual(['UID_FILE'])
++        expect(result.settings.wxPusherTopicIds).toEqual([99])
++        expect(result.settings.wxPusherNotification).toBe(false)
++        expect(result.settings.wxPusherBackgroundOnly).toBe(true)
++        expect(result.sources.wxPusherAppToken).toBe('file')
++        expect(result.sources.wxPusherUids).toBe('file')
++        expect(result.sources.wxPusherTopicIds).toBe('file')
++    })
++
++    it('rejects invalid WxPusher topic IDs from the environment', async () => {
++        dir = makeTempDir()
++        process.env.WXPUSHER_TOPIC_IDS = '12,nope'
++
++        await expect(loadServerSettings(dir)).rejects.toThrow(
++            'WXPUSHER_TOPIC_IDS must be a comma-separated list of positive integers'
++        )
++    })
++
++    it('rejects invalid WxPusher recipient arrays from settings.json', async () => {
++        dir = makeTempDir()
++        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
++            wxPusherUids: ['UID_OK', 123],
++        }))
++
++        await expect(loadServerSettings(dir)).rejects.toThrow('wxPusherUids must be an array of strings')
++    })
++
+     it('defaults push settings to null', async () => {
+         dir = makeTempDir()
+ 
+diff --git a/hub/src/config/serverSettings.ts b/hub/src/config/serverSettings.ts
+index 1f5edfe56..909057110 100644
+--- a/hub/src/config/serverSettings.ts
++++ b/hub/src/config/serverSettings.ts
+@@ -36,6 +36,11 @@ export interface ServerSettings {
+     serverChanSendKey: string | null
+     serverChanNotification: boolean
+     serverChanBackgroundOnly: boolean
++    wxPusherAppToken: string | null
++    wxPusherUids: string[]
++    wxPusherTopicIds: number[]
++    wxPusherNotification: boolean
++    wxPusherBackgroundOnly: boolean
+     listenHost: string
+     listenPort: number
+     publicUrl: string
+@@ -58,6 +63,11 @@ export interface ServerSettingsResult {
+         serverChanSendKey: 'env' | 'file' | 'default'
+         serverChanNotification: 'env' | 'file' | 'default'
+         serverChanBackgroundOnly: 'env' | 'file' | 'default'
++        wxPusherAppToken: 'env' | 'file' | 'default'
++        wxPusherUids: 'env' | 'file' | 'default'
++        wxPusherTopicIds: 'env' | 'file' | 'default'
++        wxPusherNotification: 'env' | 'file' | 'default'
++        wxPusherBackgroundOnly: 'env' | 'file' | 'default'
+         listenHost: 'env' | 'file' | 'default'
+         listenPort: 'env' | 'file' | 'default'
+         publicUrl: 'env' | 'file' | 'default'
+@@ -102,6 +112,33 @@ function deriveCorsOrigins(publicUrl: string): string[] {
+     }
+ }
+ 
++function parseCommaSeparatedStrings(value: string): string[] {
++    return [...new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean))]
++}
++
++function parseTopicIds(value: string): number[] {
++    const entries = parseCommaSeparatedStrings(value)
++    const topicIds = entries.map((entry) => Number(entry))
++    if (topicIds.some((topicId) => !Number.isSafeInteger(topicId) || topicId <= 0)) {
++        throw new Error('WXPUSHER_TOPIC_IDS must be a comma-separated list of positive integers')
++    }
++    return [...new Set(topicIds)]
++}
++
++function readStringArraySetting(value: unknown, field: string): string[] {
++    if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
++        throw new Error(`${field} must be an array of strings`)
++    }
++    return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))]
++}
++
++function readTopicIdArraySetting(value: unknown, field: string): number[] {
++    if (!Array.isArray(value) || value.some((entry) => !Number.isSafeInteger(entry) || entry <= 0)) {
++        throw new Error(`${field} must be an array of positive integers`)
++    }
++    return [...new Set(value)]
++}
++
+ function rejectOldSettingsFields(settings: object, settingsFile: string): void {
+     const oldFields = OLD_SETTINGS_FIELDS.filter((field) => field in settings)
+     if (oldFields.length === 0) {
+@@ -129,6 +166,11 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+             serverChanSendKey: 'default',
+             serverChanNotification: 'default',
+             serverChanBackgroundOnly: 'default',
++            wxPusherAppToken: 'default',
++            wxPusherUids: 'default',
++            wxPusherTopicIds: 'default',
++            wxPusherNotification: 'default',
++            wxPusherBackgroundOnly: 'default',
+             listenHost: 'default',
+             listenPort: 'default',
+             publicUrl: 'default',
+@@ -214,6 +256,84 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+             throw new Error('serverChanBackgroundOnly must be a boolean')
+         }
+ 
++        // wxPusherAppToken: env > file > null
++        let wxPusherAppToken: string | null = null
++        if (process.env.WXPUSHER_APP_TOKEN) {
++            wxPusherAppToken = process.env.WXPUSHER_APP_TOKEN
++            sources.wxPusherAppToken = 'env'
++            if (settings.wxPusherAppToken === undefined) {
++                settings.wxPusherAppToken = wxPusherAppToken
++                needsSave = true
++            }
++        } else if (settings.wxPusherAppToken !== undefined) {
++            if (typeof settings.wxPusherAppToken !== 'string') {
++                throw new Error('wxPusherAppToken must be a string')
++            }
++            wxPusherAppToken = settings.wxPusherAppToken
++            sources.wxPusherAppToken = 'file'
++        }
++
++        // wxPusherUids: env > file > []
++        let wxPusherUids: string[] = []
++        if (process.env.WXPUSHER_UIDS !== undefined) {
++            wxPusherUids = parseCommaSeparatedStrings(process.env.WXPUSHER_UIDS)
++            sources.wxPusherUids = 'env'
++            if (settings.wxPusherUids === undefined) {
++                settings.wxPusherUids = wxPusherUids
++                needsSave = true
++            }
++        } else if (settings.wxPusherUids !== undefined) {
++            wxPusherUids = readStringArraySetting(settings.wxPusherUids, 'wxPusherUids')
++            sources.wxPusherUids = 'file'
++        }
++
++        // wxPusherTopicIds: env > file > []
++        let wxPusherTopicIds: number[] = []
++        if (process.env.WXPUSHER_TOPIC_IDS !== undefined) {
++            wxPusherTopicIds = parseTopicIds(process.env.WXPUSHER_TOPIC_IDS)
++            sources.wxPusherTopicIds = 'env'
++            if (settings.wxPusherTopicIds === undefined) {
++                settings.wxPusherTopicIds = wxPusherTopicIds
++                needsSave = true
++            }
++        } else if (settings.wxPusherTopicIds !== undefined) {
++            wxPusherTopicIds = readTopicIdArraySetting(settings.wxPusherTopicIds, 'wxPusherTopicIds')
++            sources.wxPusherTopicIds = 'file'
++        }
++
++        // wxPusherNotification: env > file > true
++        let wxPusherNotification = true
++        if (process.env.WXPUSHER_NOTIFICATION !== undefined) {
++            wxPusherNotification = process.env.WXPUSHER_NOTIFICATION === 'true'
++            sources.wxPusherNotification = 'env'
++            if (settings.wxPusherNotification === undefined) {
++                settings.wxPusherNotification = wxPusherNotification
++                needsSave = true
++            }
++        } else if (settings.wxPusherNotification !== undefined) {
++            if (typeof settings.wxPusherNotification !== 'boolean') {
++                throw new Error('wxPusherNotification must be a boolean')
++            }
++            wxPusherNotification = settings.wxPusherNotification
++            sources.wxPusherNotification = 'file'
++        }
++
++        // wxPusherBackgroundOnly: env > file > false
++        let wxPusherBackgroundOnly = false
++        if (process.env.WXPUSHER_BACKGROUND_ONLY !== undefined) {
++            wxPusherBackgroundOnly = process.env.WXPUSHER_BACKGROUND_ONLY === 'true'
++            sources.wxPusherBackgroundOnly = 'env'
++            if (settings.wxPusherBackgroundOnly === undefined) {
++                settings.wxPusherBackgroundOnly = wxPusherBackgroundOnly
++                needsSave = true
++            }
++        } else if (typeof settings.wxPusherBackgroundOnly === 'boolean') {
++            wxPusherBackgroundOnly = settings.wxPusherBackgroundOnly
++            sources.wxPusherBackgroundOnly = 'file'
++        } else if (settings.wxPusherBackgroundOnly !== undefined) {
++            throw new Error('wxPusherBackgroundOnly must be a boolean')
++        }
++
+         // listenHost: env > file > default
+         let listenHost = '127.0.0.1'
+         if (process.env.HAPI_LISTEN_HOST) {
+@@ -313,6 +433,11 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
+                     serverChanSendKey,
+                     serverChanNotification,
+                     serverChanBackgroundOnly,
++                    wxPusherAppToken,
++                    wxPusherUids,
++                    wxPusherTopicIds,
++                    wxPusherNotification,
++                    wxPusherBackgroundOnly,
+                     listenHost,
+                     listenPort,
+                     publicUrl,
+diff --git a/hub/src/config/settings.ts b/hub/src/config/settings.ts
+index 7c83f7bfe..fef0b1c9e 100644
+--- a/hub/src/config/settings.ts
++++ b/hub/src/config/settings.ts
+@@ -22,6 +22,11 @@ export interface Settings {
+     serverChanSendKey?: string
+     serverChanNotification?: boolean
+     serverChanBackgroundOnly?: boolean
++    wxPusherAppToken?: string
++    wxPusherUids?: string[]
++    wxPusherTopicIds?: number[]
++    wxPusherNotification?: boolean
++    wxPusherBackgroundOnly?: boolean
+     listenHost?: string
+     listenPort?: number
+     publicUrl?: string
+diff --git a/hub/src/configuration.ts b/hub/src/configuration.ts
+index e55416d3c..f7447b60e 100644
+--- a/hub/src/configuration.ts
++++ b/hub/src/configuration.ts
+@@ -12,6 +12,11 @@
+  * - SERVERCHAN_SENDKEY: Server酱 SendKey/AppKey for push notifications
+  * - SERVERCHAN_NOTIFICATION: Enable/disable Server酱 notifications (default: true)
+  * - SERVERCHAN_BACKGROUND_ONLY: Only send Server酱 notifications without visible HAPI clients (default: false)
++ * - WXPUSHER_APP_TOKEN: WxPusher App token for push notifications
++ * - WXPUSHER_UIDS: Comma-separated WxPusher recipient UIDs
++ * - WXPUSHER_TOPIC_IDS: Comma-separated WxPusher topic IDs
++ * - WXPUSHER_NOTIFICATION: Enable/disable WxPusher notifications (default: true)
++ * - WXPUSHER_BACKGROUND_ONLY: Only send WxPusher notifications without visible HAPI clients (default: false)
+  * - HAPI_LISTEN_HOST: Host/IP to bind the HTTP service (default: 127.0.0.1)
+  * - HAPI_LISTEN_PORT: Port for HTTP service (default: 3006)
+  * - HAPI_PUBLIC_URL: Public URL for external access (e.g., Telegram Mini App)
+@@ -46,6 +51,11 @@ export interface ConfigSources {
+     serverChanSendKey: ConfigSource
+     serverChanNotification: ConfigSource
+     serverChanBackgroundOnly: ConfigSource
++    wxPusherAppToken: ConfigSource
++    wxPusherUids: ConfigSource
++    wxPusherTopicIds: ConfigSource
++    wxPusherNotification: ConfigSource
++    wxPusherBackgroundOnly: ConfigSource
+     listenHost: ConfigSource
+     listenPort: ConfigSource
+     publicUrl: ConfigSource
+@@ -80,6 +90,21 @@ class Configuration {
+     /** Only send Server酱 notifications when no visible HAPI client exists */
+     public readonly serverChanBackgroundOnly: boolean
+ 
++    /** WxPusher App token */
++    public readonly wxPusherAppToken: string | null
++
++    /** WxPusher recipient UIDs */
++    public readonly wxPusherUids: string[]
++
++    /** WxPusher recipient topic IDs */
++    public readonly wxPusherTopicIds: number[]
++
++    /** WxPusher notifications enabled */
++    public readonly wxPusherNotification: boolean
++
++    /** Only send WxPusher notifications when no visible HAPI client exists */
++    public readonly wxPusherBackgroundOnly: boolean
++
+     /** CLI auth token (shared secret) */
+     public cliApiToken: string
+ 
+@@ -142,6 +167,11 @@ class Configuration {
+         this.serverChanSendKey = serverSettings.serverChanSendKey
+         this.serverChanNotification = serverSettings.serverChanNotification
+         this.serverChanBackgroundOnly = serverSettings.serverChanBackgroundOnly
++        this.wxPusherAppToken = serverSettings.wxPusherAppToken
++        this.wxPusherUids = serverSettings.wxPusherUids
++        this.wxPusherTopicIds = serverSettings.wxPusherTopicIds
++        this.wxPusherNotification = serverSettings.wxPusherNotification
++        this.wxPusherBackgroundOnly = serverSettings.wxPusherBackgroundOnly
+         this.listenHost = serverSettings.listenHost
+         this.listenPort = serverSettings.listenPort
+         this.publicUrl = serverSettings.publicUrl
+diff --git a/hub/src/notifications/backgroundOnly.ts b/hub/src/notifications/backgroundOnly.ts
+new file mode 100644
+index 000000000..7494a8ef7
+--- /dev/null
++++ b/hub/src/notifications/backgroundOnly.ts
+@@ -0,0 +1,12 @@
++import type { Session } from '../sync/syncEngine'
++import type { VisibilityTracker } from '../visibility/visibilityTracker'
++
++export function shouldSuppressBackgroundNotification(
++    session: Session,
++    visibilityTracker: VisibilityTracker | null,
++    backgroundOnly: boolean
++): boolean {
++    return backgroundOnly
++        && visibilityTracker !== null
++        && visibilityTracker.hasVisibleConnection(session.namespace)
++}
+diff --git a/hub/src/notifications/notificationHub.test.ts b/hub/src/notifications/notificationHub.test.ts
+index 0703c344f..c8ab98334 100644
+--- a/hub/src/notifications/notificationHub.test.ts
++++ b/hub/src/notifications/notificationHub.test.ts
+@@ -9,6 +9,7 @@ import type {
+ } from './notificationTypes'
+ import type { Store } from '../store'
+ import { NotificationHub } from './notificationHub'
++import { WxPusherChannel } from '../wxpusher/channel'
+ 
+ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+ 
+@@ -1096,4 +1097,56 @@ describe('NotificationHub', () => {
+ 
+         hub.stop()
+     })
++
++    it('continues with later completion channels after a WxPusher request times out', async () => {
++        const engine = new FakeSyncEngine()
++        const laterChannel = new StubChannel()
++        const originalFetch = globalThis.fetch
++        const originalConsoleError = console.error
++        const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
++            const signal = init?.signal
++            return await new Promise<Response>((_resolve, reject) => {
++                if (!signal) {
++                    reject(new Error('missing abort signal'))
++                    return
++                }
++                const rejectOnAbort = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'))
++                if (signal.aborted) {
++                    rejectOnAbort()
++                    return
++                }
++                signal.addEventListener('abort', rejectOnAbort, { once: true })
++            })
++        }
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++        console.error = () => {}
++
++        try {
++            const wxPusherChannel = new WxPusherChannel(
++                'AT_TEST',
++                ['UID_ONE'],
++                [],
++                'https://hapi.example.com',
++                null,
++                false,
++                5
++            )
++            const hub = new NotificationHub(engine as unknown as SyncEngine, [wxPusherChannel, laterChannel])
++            const session = createSession({ id: 'session-timeout', active: false })
++            engine.setSession(session)
++
++            engine.emit({
++                type: 'session-ended',
++                sessionId: session.id,
++                reason: 'completed' satisfies SessionEndReason
++            })
++            await sleep(25)
++
++            expect(laterChannel.sessionCompletions).toHaveLength(1)
++            hub.stop()
++        } finally {
++            globalThis.fetch = originalFetch
++            console.error = originalConsoleError
++        }
++    })
+ })
+diff --git a/hub/src/notifications/sessionInfo.ts b/hub/src/notifications/sessionInfo.ts
+index aab0f7ced..4f9f87f60 100644
+--- a/hub/src/notifications/sessionInfo.ts
++++ b/hub/src/notifications/sessionInfo.ts
+@@ -5,7 +5,7 @@ export function getSessionName(session: Session): string {
+     if (session.metadata?.name) return session.metadata.name
+     if (session.metadata?.summary?.text) return session.metadata.summary.text
+     if (session.metadata?.path) {
+-        const parts = session.metadata.path.split('/').filter(Boolean)
++        const parts = session.metadata.path.split(/[\\/]/).filter(Boolean)
+         return parts.length > 0 ? parts[parts.length - 1] : session.id.slice(0, 8)
+     }
+     return session.id.slice(0, 8)
+@@ -16,3 +16,12 @@ export function getAgentName(session: Session): string {
+     if (!flavor || !isKnownFlavor(flavor)) return 'Agent'
+     return getFlavorLabel(flavor)
+ }
++
++export function buildSessionUrl(baseUrl: string, sessionId: string): string {
++    try {
++        return new URL(`/sessions/${sessionId}`, baseUrl).toString()
++    } catch {
++        const normalized = baseUrl.replace(/\/+$/, '')
++        return `${normalized}/sessions/${sessionId}`
++    }
++}
+diff --git a/hub/src/serverchan/channel.ts b/hub/src/serverchan/channel.ts
+index b58395b6e..3f1b9674a 100644
+--- a/hub/src/serverchan/channel.ts
++++ b/hub/src/serverchan/channel.ts
+@@ -1,18 +1,10 @@
+ import type { Session } from '../sync/syncEngine'
+ import type { SessionEndReason } from '@hapi/protocol'
+ import type { NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
+-import { getAgentName, getSessionName } from '../notifications/sessionInfo'
++import { buildSessionUrl, getAgentName, getSessionName } from '../notifications/sessionInfo'
++import { shouldSuppressBackgroundNotification } from '../notifications/backgroundOnly'
+ import type { VisibilityTracker } from '../visibility/visibilityTracker'
+ 
+-function buildSessionUrl(baseUrl: string, sessionId: string): string {
+-    try {
+-        return new URL(`/sessions/${sessionId}`, baseUrl).toString()
+-    } catch {
+-        const normalized = baseUrl.replace(/\/+$/, '')
+-        return `${normalized}/sessions/${sessionId}`
+-    }
+-}
+-
+ export class ServerChanChannel implements NotificationChannel {
+     constructor(
+         private readonly sendKey: string,
+@@ -95,8 +87,6 @@ export class ServerChanChannel implements NotificationChannel {
+     }
+ 
+     private shouldSuppress(session: Session): boolean {
+-        return this.backgroundOnly
+-            && this.visibilityTracker !== null
+-            && this.visibilityTracker.hasVisibleConnection(session.namespace)
++        return shouldSuppressBackgroundNotification(session, this.visibilityTracker, this.backgroundOnly)
+     }
+ }
+diff --git a/hub/src/startHub.ts b/hub/src/startHub.ts
+index b3e61b86c..a5d4aed92 100644
+--- a/hub/src/startHub.ts
++++ b/hub/src/startHub.ts
+@@ -30,6 +30,7 @@ import { findMonorepoRoot, defaultHubPackageRoot, resolveUpgradeOffer, setConfig
+ import { ensureCliArtifact, isTransientArtifactBuildFailure, resolveArtifactSourceFingerprint, retainArtifactOffer } from './upgrade/cliArtifact'
+ import { readSettings } from './config/settings'
+ import { getFleetUpgradePolicy, initFleetUpgradePolicy } from './upgrade/fleetUpgradePolicy'
++import { WxPusherChannel } from './wxpusher/channel'
+ import QRCode from 'qrcode'
+ import type { Server as BunServer } from 'bun'
+ import type { WebSocketData } from '@socket.io/bun-engine'
+@@ -210,6 +211,17 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+     } else {
+         console.log('[Hub] ServerChan: disabled (no SERVERCHAN_SENDKEY)')
+     }
++    if (config.wxPusherAppToken) {
++        const source = formatSource(config.sources.wxPusherAppToken)
++        const notificationSource = formatSource(config.sources.wxPusherNotification)
++        const backgroundOnlySource = formatSource(config.sources.wxPusherBackgroundOnly)
++        const recipientCount = config.wxPusherUids.length + config.wxPusherTopicIds.length
++        console.log(`[Hub] WxPusher: ${recipientCount > 0 ? 'configured' : 'disabled (no WXPUSHER_UIDS or WXPUSHER_TOPIC_IDS)'} (${source})`)
++        console.log(`[Hub] WxPusher notifications: ${config.wxPusherNotification ? 'enabled' : 'disabled'} (${notificationSource})`)
++        console.log(`[Hub] WxPusher background-only: ${config.wxPusherBackgroundOnly ? 'enabled' : 'disabled'} (${backgroundOnlySource})`)
++    } else {
++        console.log('[Hub] WxPusher: disabled (no WXPUSHER_APP_TOKEN)')
++    }
+ 
+     // Display tunnel status
+     if (relayFlag.enabled) {
+@@ -339,6 +351,21 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
+         ))
+     }
+ 
++    if (
++        config.wxPusherAppToken
++        && config.wxPusherNotification
++        && (config.wxPusherUids.length > 0 || config.wxPusherTopicIds.length > 0)
++    ) {
++        notificationChannels.push(new WxPusherChannel(
++            config.wxPusherAppToken,
++            config.wxPusherUids,
++            config.wxPusherTopicIds,
++            config.publicUrl,
++            visibilityTracker,
++            config.wxPusherBackgroundOnly
++        ))
++    }
++
+     // Initialize Telegram bot (optional)
+     if (config.telegramEnabled && config.telegramBotToken) {
+         happyBot = new HappyBot({
+diff --git a/hub/src/wxpusher/channel.test.ts b/hub/src/wxpusher/channel.test.ts
+new file mode 100644
+index 000000000..f95d0dac2
+--- /dev/null
++++ b/hub/src/wxpusher/channel.test.ts
+@@ -0,0 +1,204 @@
++import { describe, expect, it, mock } from 'bun:test'
++import type { SessionEndReason } from '@hapi/protocol'
++import type { Session } from '../sync/syncEngine'
++import { VisibilityTracker } from '../visibility/visibilityTracker'
++import { WXPUSHER_SEND_URL, WxPusherChannel } from './channel'
++
++function createSession(overrides: Partial<Session> = {}): Session {
++    return {
++        id: 'session-1',
++        namespace: 'default',
++        seq: 1,
++        createdAt: 0,
++        updatedAt: 0,
++        active: false,
++        activeAt: 0,
++        metadata: {
++            path: 'F:\\develop\\code\\hapi',
++            host: 'DESKTOP',
++            name: 'WxPusher review'
++        },
++        metadataVersion: 0,
++        agentState: null,
++        agentStateVersion: 0,
++        thinking: false,
++        thinkingAt: 0,
++        model: null,
++        modelReasoningEffort: null,
++        effort: null,
++        serviceTier: null,
++        ...overrides
++    }
++}
++
++describe('WxPusherChannel', () => {
++    it('sends session completion notifications to configured recipients', async () => {
++        const fetchMock = mock(async () => new Response(JSON.stringify({ code: 1000, msg: '处理成功' }), {
++            status: 200,
++            headers: { 'content-type': 'application/json' }
++        }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WxPusherChannel(
++                'AT_TEST',
++                ['UID_ONE', 'UID_TWO'],
++                [42],
++                'https://hapi.example.com'
++            )
++
++            await channel.sendSessionCompletion(createSession(), 'completed' satisfies SessionEndReason)
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++            const call = fetchMock.mock.calls[0] as unknown[] | undefined
++            expect(String(call?.[0])).toBe(WXPUSHER_SEND_URL)
++            const init = call?.[1] as RequestInit | undefined
++            expect(init?.method).toBe('POST')
++            expect(init?.headers).toEqual({ 'content-type': 'application/json' })
++            expect(JSON.parse(String(init?.body))).toEqual({
++                appToken: 'AT_TEST',
++                content: 'Agent · WxPusher review\n\n会话已结束。\n\nhttps://hapi.example.com/sessions/session-1',
++                summary: 'HAPI Session completed',
++                contentType: 1,
++                uids: ['UID_ONE', 'UID_TWO'],
++                topicIds: [42],
++                url: 'https://hapi.example.com/sessions/session-1',
++            })
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('uses the basename for a Windows path fallback', async () => {
++        const fetchMock = mock(async () => new Response(JSON.stringify({ code: 1000 }), { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WxPusherChannel('AT_TEST', ['UID_ONE'], [], 'https://hapi.example.com')
++            const session = createSession({
++                metadata: {
++                    path: 'F:\\develop\\code\\hapi',
++                    host: 'DESKTOP',
++                    name: ''
++                }
++            })
++
++            await channel.sendSessionCompletion(session, 'completed' satisfies SessionEndReason)
++
++            const call = fetchMock.mock.calls[0] as unknown[] | undefined
++            const init = call?.[1] as RequestInit | undefined
++            const message = JSON.parse(String(init?.body)) as { content?: string }
++            expect(message.content).toContain('Agent · hapi\n\n会话已结束。')
++            expect(message.content).not.toContain('F:\\develop\\code\\hapi')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('does not send ready, permission, or task notifications', async () => {
++        const fetchMock = mock(async () => new Response(JSON.stringify({ code: 1000 }), { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WxPusherChannel('AT_TEST', ['UID_ONE'], [], 'https://hapi.example.com')
++            const session = createSession()
++
++            await channel.sendReady(session)
++            await channel.sendPermissionRequest(session)
++            await channel.sendTaskNotification(session, { status: 'failed', summary: 'failed' })
++
++            expect(fetchMock).not.toHaveBeenCalled()
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('suppresses completion notifications when a visible connection exists in background-only mode', async () => {
++        const fetchMock = mock(async () => new Response(JSON.stringify({ code: 1000 }), { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const visibilityTracker = new VisibilityTracker()
++            visibilityTracker.registerConnection('visible-1', 'default', 'visible')
++            const channel = new WxPusherChannel(
++                'AT_TEST',
++                ['UID_ONE'],
++                [],
++                'https://hapi.example.com',
++                visibilityTracker,
++                true
++            )
++
++            await channel.sendSessionCompletion(createSession(), 'completed' satisfies SessionEndReason)
++
++            expect(fetchMock).not.toHaveBeenCalled()
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('sends completion notifications when no visible connection exists', async () => {
++        const fetchMock = mock(async () => new Response(JSON.stringify({ code: 1000 }), { status: 200 }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const visibilityTracker = new VisibilityTracker()
++            visibilityTracker.registerConnection('hidden-1', 'default', 'hidden')
++            const channel = new WxPusherChannel(
++                'AT_TEST',
++                ['UID_ONE'],
++                [],
++                'https://hapi.example.com',
++                visibilityTracker,
++                true
++            )
++
++            await channel.sendSessionCompletion(createSession(), 'completed' satisfies SessionEndReason)
++
++            expect(fetchMock).toHaveBeenCalledTimes(1)
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('rejects non-successful HTTP responses', async () => {
++        const fetchMock = mock(async () => new Response('rate limited', {
++            status: 429,
++            statusText: 'Too Many Requests'
++        }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WxPusherChannel('AT_TEST', ['UID_ONE'], [], 'https://hapi.example.com')
++
++            await expect(channel.sendSessionCompletion(createSession(), 'completed' satisfies SessionEndReason))
++                .rejects.toThrow('WxPusher send failed: HTTP 429 Too Many Requests - rate limited')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++
++    it('rejects unsuccessful WxPusher API responses', async () => {
++        const fetchMock = mock(async () => new Response(JSON.stringify({ code: 1001, msg: 'invalid token' }), {
++            status: 200,
++            headers: { 'content-type': 'application/json' }
++        }))
++        const originalFetch = globalThis.fetch
++        globalThis.fetch = fetchMock as unknown as typeof fetch
++
++        try {
++            const channel = new WxPusherChannel('AT_TEST', ['UID_ONE'], [], 'https://hapi.example.com')
++
++            await expect(channel.sendSessionCompletion(createSession(), 'completed' satisfies SessionEndReason))
++                .rejects.toThrow('WxPusher send failed: invalid token')
++        } finally {
++            globalThis.fetch = originalFetch
++        }
++    })
++})
+diff --git a/hub/src/wxpusher/channel.ts b/hub/src/wxpusher/channel.ts
+new file mode 100644
+index 000000000..07d5803d4
+--- /dev/null
++++ b/hub/src/wxpusher/channel.ts
+@@ -0,0 +1,100 @@
++import type { Session } from '../sync/syncEngine'
++import type { SessionEndReason } from '@hapi/protocol'
++import type { NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
++import { shouldSuppressBackgroundNotification } from '../notifications/backgroundOnly'
++import { buildSessionUrl, getAgentName, getSessionName } from '../notifications/sessionInfo'
++import type { VisibilityTracker } from '../visibility/visibilityTracker'
++
++export const WXPUSHER_SEND_URL = 'https://wxpusher.zjiecode.com/api/send/message'
++export const WXPUSHER_REQUEST_TIMEOUT_MS = 10_000
++
++type WxPusherResponse = {
++    code?: number
++    msg?: string
++    message?: string
++}
++
++export type WxPusherMessage = {
++    appToken: string
++    content: string
++    summary: string
++    contentType: 1
++    uids?: string[]
++    topicIds?: number[]
++    url: string
++}
++
++function isWxPusherResponse(value: unknown): value is WxPusherResponse {
++    return typeof value === 'object' && value !== null
++}
++
++export class WxPusherChannel implements NotificationChannel {
++    constructor(
++        private readonly appToken: string,
++        private readonly uids: string[],
++        private readonly topicIds: number[],
++        private readonly publicUrl: string,
++        private readonly visibilityTracker: VisibilityTracker | null = null,
++        private readonly backgroundOnly = false,
++        private readonly requestTimeoutMs = WXPUSHER_REQUEST_TIMEOUT_MS
++    ) {}
++
++    async sendReady(_session: Session): Promise<void> {}
++
++    async sendPermissionRequest(_session: Session): Promise<void> {}
++
++    async sendTaskNotification(_session: Session, _notification: TaskNotification): Promise<void> {}
++
++    async sendSessionCompletion(session: Session, _reason: SessionEndReason): Promise<void> {
++        if (shouldSuppressBackgroundNotification(session, this.visibilityTracker, this.backgroundOnly)) {
++            return
++        }
++
++        const agentName = getAgentName(session)
++        const name = getSessionName(session)
++        const url = buildSessionUrl(this.publicUrl, session.id)
++        await this.send({
++            appToken: this.appToken,
++            content: `${agentName} · ${name}\n\n会话已结束。\n\n${url}`,
++            summary: 'HAPI Session completed',
++            contentType: 1,
++            ...(this.uids.length > 0 ? { uids: this.uids } : {}),
++            ...(this.topicIds.length > 0 ? { topicIds: this.topicIds } : {}),
++            url,
++        })
++    }
++
++    private async send(message: WxPusherMessage): Promise<void> {
++        const response = await fetch(WXPUSHER_SEND_URL, {
++            method: 'POST',
++            headers: {
++                'content-type': 'application/json',
++            },
++            body: JSON.stringify(message),
++            signal: AbortSignal.timeout(this.requestTimeoutMs),
++        })
++
++        const responseText = await response.text().catch(() => '')
++        if (!response.ok) {
++            throw new Error(
++                `WxPusher send failed: HTTP ${response.status} ${response.statusText}${responseText ? ` - ${responseText}` : ''}`
++            )
++        }
++
++        let result: unknown = null
++        if (responseText) {
++            try {
++                result = JSON.parse(responseText) as unknown
++            } catch {
++                throw new Error(`WxPusher send failed: invalid JSON response${responseText ? ` - ${responseText}` : ''}`)
++            }
++        }
++
++        if (!isWxPusherResponse(result) || result.code !== 1000) {
++            const message = isWxPusherResponse(result)
++                ? result.msg ?? result.message
++                : undefined
++            throw new Error(`WxPusher send failed: ${(message ?? responseText) || 'unknown error'}`)
++        }
++    }
++}
+-- 
+2.43.0
+

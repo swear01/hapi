@@ -62,6 +62,26 @@ describe('resolveToolAutoApprovalDecision ping_peer', () => {
     })
 })
 
+describe('resolveToolAutoApprovalDecision spawn_peer', () => {
+    it.each([
+        'spawn_peer',
+        'mcp__hapi__spawn_peer',
+        'hapi_spawn_peer',
+        'Spawn Peer Session'
+    ])('does not auto-approve %s in default mode', (toolName) => {
+        expect(resolveToolAutoApprovalDecision('default', toolName, 'call-1')).toBeNull()
+    })
+
+    it.each([
+        'spawn_peer',
+        'mcp__hapi__spawn_peer',
+        'hapi_spawn_peer',
+        'Spawn Peer Session'
+    ])('does not auto-approve %s in read-only mode', (toolName) => {
+        expect(resolveToolAutoApprovalDecision('read-only', toolName, 'call-1')).toBeNull()
+    })
+})
+
 describe('resolveToolAutoApprovalDecision inspect_peer', () => {
     it.each([
         'inspect_peer',
@@ -81,23 +101,14 @@ describe('resolveToolAutoApprovalDecision inspect_peer', () => {
         expect(resolveToolAutoApprovalDecision('read-only', toolName, 'call-1')).toBeNull()
     })
 })
-
-describe('resolveToolAutoApprovalDecision list_peers', () => {
+describe('resolveToolAutoApprovalDecision session_job', () => {
     it.each([
-        'list_peers',
-        'hapi_list_peers',
-        'happy__list_peers',
-        'mcp__hapi__list_peers',
-        'List Peer Sessions'
-    ])('auto-approves the exact discovery tool name %s', (toolName) => {
-        expect(resolveToolAutoApprovalDecision('default', toolName, 'call-1')).toBe('approved')
-    })
-
-    it('does not approve another tool whose name only contains list_peers', () => {
-        expect(resolveToolAutoApprovalDecision(
-            'default',
-            'list_peers_and_write',
-            'call-1'
-        )).toBeNull()
+        'session_job',
+        'hapi_session_job',
+        'mcp__hapi__session_job',
+        'Session-Attached Job'
+    ])('does not name-only auto-approve spoofable job tool %s', (toolName) => {
+        // Bridge / --allowedTools own the approve path; global title allowlist must not.
+        expect(resolveToolAutoApprovalDecision('default', toolName, 'call-1')).toBeNull()
     })
 })

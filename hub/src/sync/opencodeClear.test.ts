@@ -1,16 +1,25 @@
 import { describe, expect, it, mock } from 'bun:test'
+import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { Store } from '../store'
 import { SyncEngine, type SyncEvent } from './syncEngine'
 
-function createEngine(onCliEmit?: (payload: unknown) => void) {
+function createEngine(
+    onCliEmit?: (payload: unknown) => void,
+    capabilities: string[] = [MACHINE_CAPABILITIES.SessionControlSkill]
+) {
     const store = new Store(':memory:')
     const engine = new SyncEngine(store, {
         of: () => ({ to: () => ({ emit: (_event: string, payload: unknown) => onCliEmit?.(payload) }) })
     } as never, new RpcRegistry(), { broadcast() {} } as never)
     engine.getOrCreateMachine(
         'machine-1',
-        { host: 'host', platform: 'linux', happyCliVersion: 'test' },
+        {
+            host: 'host',
+            platform: 'linux',
+            happyCliVersion: 'test',
+            capabilities
+        },
         null,
         'default'
     )
@@ -43,6 +52,23 @@ function setSpawn(engine: SyncEngine, spawnSession: ReturnType<typeof mock>) {
 }
 
 describe('SyncEngine.clearOpenCodeSession', () => {
+    it('rejects clear before reservation when the runner cannot deliver the control skill', () => {
+        const { engine } = createEngine(undefined, [])
+        try {
+            const source = engine.getOrCreateSession('old-runner-clear-source', {
+                path: '/tmp/project', host: 'host', machineId: 'machine-1', flavor: 'opencode', startedBy: 'runner'
+            }, null, 'default')
+            engine.handleSessionAlive({ sid: source.id, time: Date.now() })
+
+            expect(engine.reserveOpenCodeClearSession(source.id, 'default')).toEqual({
+                type: 'error',
+                message: 'OpenCode clear requires an upgraded runner with session-control skill delivery',
+                code: 'clear_unavailable'
+            })
+            expect(engine.getSessionByNamespace(source.id, 'default')?.metadata?.opencodeClearOperation).toBeUndefined()
+        } finally { engine.stop() }
+    })
+
     it.each(['resume', 'reopen'] as const)('allows %s after a failed native cleanup aborts clear', async (action) => {
         const { store, engine } = createEngine()
         try {
@@ -87,6 +113,60 @@ describe('SyncEngine.clearOpenCodeSession', () => {
             const spawnSession = mock(async (...args: unknown[]) => ({ type: 'success' as const, sessionId: args[12] as string }))
             setSpawn(engine, spawnSession)
             await expect(engine.clearOpenCodeSession(source.id, 'default')).resolves.toEqual({ type: 'success', sessionId: reserved.sessionId })
+        } finally { engine.stop() }
+    })
+
+    it('transfers a running attached job to the clear replacement so source id PATCHes land', async () => {
+        const { store, engine } = createEngine()
+        try {
+            const source = engine.getOrCreateSession('job-clear-source', {
+                path: '/tmp/project', host: 'host', machineId: 'machine-1', flavor: 'opencode', startedBy: 'runner'
+            }, null, 'default')
+            engine.handleSessionAlive({ sid: source.id, time: Date.now() })
+            const upserted = store.sessionJobs.upsert(source.id, 'beets', {
+                label: 'beets import',
+                status: 'running',
+                remaining: 11
+            })
+            expect(upserted.outcome).toBe('upserted')
+            const runId = upserted.outcome === 'upserted' ? upserted.job.runId : undefined
+            expect(runId).toBeTruthy()
+
+            const reserved = engine.reserveOpenCodeClearSession(source.id, 'default')
+            expect(reserved.type).toBe('success')
+            if (reserved.type !== 'success') throw new Error('reservation failed')
+            expect(engine.confirmOpenCodeClearCleanup(source.id, 'default', reserved.sessionId)).toMatchObject({
+                type: 'success'
+            })
+            const metadataBeforeEnd = engine.getSessionByNamespace(source.id, 'default')!.metadata!
+            engine.handleSessionEnd({ sid: source.id, time: Date.now(), reason: 'cleared' })
+            const storedAfterEnd = store.sessions.getSessionByNamespace(source.id, 'default')!
+            store.sessions.updateSessionMetadata(
+                source.id,
+                { ...metadataBeforeEnd, lifecycleState: 'archived', archiveReason: 'Cleared by /clear' },
+                storedAfterEnd.metadataVersion,
+                'default'
+            )
+            ;(engine as unknown as { sessionCache: { refreshSession(id: string): unknown } }).sessionCache.refreshSession(source.id)
+
+            const spawnSession = mock(async (...args: unknown[]) => ({ type: 'success' as const, sessionId: args[12] as string }))
+            setSpawn(engine, spawnSession)
+            await expect(engine.clearOpenCodeSession(source.id, 'default')).resolves.toEqual({
+                type: 'success',
+                sessionId: reserved.sessionId
+            })
+
+            expect(store.sessionJobs.getPrimaryRunning(source.id)).toBeNull()
+            expect(store.sessionJobs.getPrimaryRunning(reserved.sessionId)?.key).toBe('beets')
+            expect(engine.resolveAttachedJobSessionId(source.id, 'default')).toBe(reserved.sessionId)
+
+            const ownerId = engine.resolveAttachedJobSessionId(source.id, 'default')
+            const patched = store.sessionJobs.patch(ownerId, 'beets', {
+                remaining: 4,
+                expectedRunId: runId
+            })
+            expect(patched.outcome).toBe('patched')
+            expect(store.sessionJobs.get(reserved.sessionId, 'beets')?.remaining).toBe(4)
         } finally { engine.stop() }
     })
 

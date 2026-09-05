@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite'
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 import { MachineStore } from './machineStore'
@@ -8,7 +9,9 @@ import { addMessage } from './messages'
 import type { StoredMessage } from './types'
 import { PushStore } from './pushStore'
 import { FcmStore } from './fcmStore'
+import { NotificationPreferenceStore } from './notificationPreferenceStore'
 import { ScratchlistStore } from './scratchlistStore'
+import { SessionJobsStore } from './sessionJobsStore'
 import { SessionStore } from './sessionStore'
 import { UserStore } from './userStore'
 import { UsageStore } from './usageStore'
@@ -22,6 +25,7 @@ export type {
     StoredPushSubscription,
     StoredFcmDevice,
     StoredScratchlistEntry,
+    StoredSessionJob,
     StoredSession,
     StoredUser,
     VersionedUpdateResult
@@ -31,7 +35,9 @@ export { MachineStore } from './machineStore'
 export { MessageStore } from './messageStore'
 export { PushStore } from './pushStore'
 export { FcmStore } from './fcmStore'
+export { NotificationPreferenceStore } from './notificationPreferenceStore'
 export { ScratchlistStore } from './scratchlistStore'
+export { SessionJobsStore } from './sessionJobsStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 export { UsageStore } from './usageStore'
@@ -42,7 +48,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 25
+const SCHEMA_VERSION: number = 29
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -52,10 +58,12 @@ const REQUIRED_TABLES = [
     'push_subscriptions',
     'fcm_devices',
     'session_scratchlist',
+    'session_jobs',
     'usage_events',
     'usage_scan_state',
     'events',
-    'event_links'
+    'event_links',
+    'notification_preferences'
 ] as const
 
 export class Store {
@@ -70,8 +78,10 @@ export class Store {
     readonly push: PushStore
     readonly fcm: FcmStore
     readonly scratchlist: ScratchlistStore
+    readonly sessionJobs: SessionJobsStore
     readonly usage: UsageStore
     readonly workGraph: WorkGraphStore
+    readonly notificationPrefs: NotificationPreferenceStore
 
     /**
      * Filesystem path of the underlying SQLite database, or ':memory:' for
@@ -80,6 +90,124 @@ export class Store {
      */
     get dbPath(): string {
         return this._dbPath
+    }
+
+    /**
+     * Prefers the dbstat virtual table; when the runtime lacks it (Linux Bun
+     * 1.3.x builds do not enable ENABLE_DBSTAT_VTAB) falls back to row counts
+     * plus a content-length byte estimate and flags the result.
+     */
+    storageInsights(): {
+        pageSize: number
+        pageCount: number
+        freelistCount: number
+        tables: Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }>
+        breakdownApproximate: boolean
+    } {
+        const pageSize = (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size
+        const pageCount = (this.db.query('PRAGMA page_count').get() as { page_count: number }).page_count
+        const freelistCount = (
+            this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }
+        ).freelist_count
+        let tables: Array<{ name: string; kind: string; bytes: number; rows: number }>
+        let breakdownApproximate = false
+        try {
+            tables = (
+                this.db.query(
+                    `SELECT d.name AS name,
+                            COALESCE(m.type, 'table') AS kind,
+                            d.pgsize AS bytes,
+                            d.ncell AS rows
+                     FROM dbstat d
+                     LEFT JOIN sqlite_master m ON m.name = d.name
+                     WHERE d.aggregate = TRUE
+                       AND d.name NOT IN ('sqlite_schema', 'sqlite_master')
+                     ORDER BY d.pgsize DESC`
+                ).all() as Array<{ name: string; kind: string; bytes: number; rows: number }>
+            )
+        } catch (error) {
+            if (!(error instanceof Error) || !error.message.includes('dbstat')) {
+                throw error
+            }
+            breakdownApproximate = true
+            tables = this.estimateTableUsage()
+        }
+        return {
+            pageSize,
+            pageCount,
+            freelistCount,
+            tables: tables.map((table) => ({
+                ...table,
+                kind: table.kind === 'index' ? 'index' : 'table',
+            })),
+            breakdownApproximate,
+        }
+    }
+
+    /**
+     * Fallback per-table usage for runtimes without the dbstat virtual table:
+     * exact row counts plus an approximate byte size from the sum of column
+     * content lengths. Indexes are omitted (their pages are not cheaply
+     * countable without dbstat); the estimate covers the dominant user tables.
+     */
+    estimateTableUsage(): Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }> {
+        const tables = this.db
+            .query(
+                `SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name`
+            )
+            .all() as Array<{ name: string }>
+        const result: Array<{ name: string; kind: 'table' | 'index'; bytes: number; rows: number }> = []
+        for (const { name } of tables) {
+            const quoted = `"${name.replaceAll('"', '""')}"`
+            const columns = this.db.query(`PRAGMA table_info(${quoted})`).all() as Array<{ name: string }>
+            if (columns.length === 0) continue
+            const contentExpr = columns
+                .map(
+                    (column) =>
+                        `COALESCE(LENGTH(CAST(${`"${column.name.replaceAll('"', '""')}"`} AS BLOB)), 0)`,
+                )
+                .join(' + ')
+            const row = this.db
+                .query(`SELECT COUNT(*) AS rows, COALESCE(SUM(${contentExpr}), 0) AS bytes FROM ${quoted}`)
+                .get() as { rows: number; bytes: number }
+            if (row.rows > 0 || row.bytes > 0) {
+                result.push({ name, kind: 'table', bytes: row.bytes, rows: row.rows })
+            }
+        }
+        return result
+    }
+
+    /**
+     * Rebuilds the database with VACUUM and then checkpoint-truncates the
+     * WAL so the main file actually shrinks (in WAL mode VACUUM alone only
+     * repacks through the write-ahead log). Returns the file size before and
+     * after so the caller can report how much space was reclaimed.
+     */
+    vacuum(): { beforeBytes: number; afterBytes: number; reclaimedBytes: number; durationMs: number } {
+        if (this._dbPath === ':memory:' || this._dbPath.startsWith('file::memory:')) {
+            throw new Error('VACUUM is not supported for in-memory databases')
+        }
+        const beforeBytes = statSync(this._dbPath).size
+        const started = performance.now()
+        this.db.exec('VACUUM')
+        const checkpoint = (
+            this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number }
+        )
+        if (checkpoint.busy > 0) {
+            throw new Error(
+                `WAL checkpoint was blocked by ${checkpoint.busy} other connection(s); the file did not shrink`
+            )
+        }
+        const durationMs = Math.round(performance.now() - started)
+        const afterBytes = statSync(this._dbPath).size
+        return {
+            beforeBytes,
+            afterBytes,
+            reclaimedBytes: Math.max(0, beforeBytes - afterBytes),
+            durationMs,
+        }
     }
 
     constructor(dbPath: string) {
@@ -124,8 +252,10 @@ export class Store {
         this.push = new PushStore(this.db)
         this.fcm = new FcmStore(this.db)
         this.scratchlist = new ScratchlistStore(this.db)
+        this.sessionJobs = new SessionJobsStore(this.db)
         this.usage = new UsageStore(this.db)
         this.workGraph = new WorkGraphStore(this.db)
+        this.notificationPrefs = new NotificationPreferenceStore(this.db)
     }
 
     /**
@@ -302,6 +432,14 @@ export class Store {
         })()
     }
 
+    /**
+     * Run `fn` in one SQLite transaction. Nested `runInTransaction` calls
+     * become savepoints (bun:sqlite). Throw to roll back.
+     */
+    runInTransaction<T>(fn: () => T): T {
+        return this.db.transaction(fn)()
+    }
+
     close(): void {
         if (this.closed) return
         this.db.close()
@@ -343,10 +481,19 @@ export class Store {
             18: () => this.migrateFromV18ToV19(),
             19: () => this.migrateFromV19ToV20(),
             20: () => this.migrateFromV20ToV21(),
+            // Upstream #1115 dual-pin at v21→v22; #1467 A2A events at v22→v23;
+            // iOS push_key at v23→v24; steer delivery_state at v24→v25;
+            // #1404 session_jobs at v25→v26; run_id fence at v26→v27.
             21: () => this.migrateFromV21ToV22(),
             22: () => this.migrateFromV22ToV23(),
             23: () => this.migrateFromV23ToV24(),
+            // Fork reconciliation: complete jobs/events through V27, retain
+            // deployed V28 databases, then add ACP usage cost fields at V29.
             24: () => this.migrateFromV24ToV25(),
+            25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
+            28: () => this.migrateFromV28ToV29(),
         })
 
         if (currentVersion === 0) {
@@ -512,6 +659,26 @@ export class Store {
             CREATE INDEX IF NOT EXISTS idx_session_scratchlist_session_created
                 ON session_scratchlist(session_id, created_at DESC);
 
+            CREATE TABLE IF NOT EXISTS session_jobs (
+                session_id TEXT NOT NULL,
+                job_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done REAL,
+                total REAL,
+                remaining REAL,
+                unit TEXT,
+                detail TEXT,
+                run_id TEXT,
+                heartbeat_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, job_key),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_jobs_session_status_updated
+                ON session_jobs(session_id, status, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS usage_events (
                 session_id TEXT NOT NULL,
                 source_key TEXT NOT NULL,
@@ -528,6 +695,9 @@ export class Store {
                 last_output_tokens INTEGER,
                 last_cache_read_tokens INTEGER,
                 last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -591,6 +761,15 @@ export class Store {
                 ON event_links(namespace, from_event_id);
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
+
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                namespace TEXT PRIMARY KEY,
+                permission_requests INTEGER NOT NULL DEFAULT 1,
+                session_ready INTEGER NOT NULL DEFAULT 1,
+                task_notifications INTEGER NOT NULL DEFAULT 1,
+                session_completion INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
         `)
     }
 
@@ -877,6 +1056,13 @@ export class Store {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                last_input_tokens INTEGER,
+                last_output_tokens INTEGER,
+                last_cache_read_tokens INTEGER,
+                last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -951,6 +1137,7 @@ export class Store {
     }
 
     private migrateFromV21ToV22(): void {
+        // Upstream #1115 dual-pin columns.
         const columns = this.getSessionColumnNames()
         if (columns.size === 0) return
         if (!columns.has('pinned')) {
@@ -961,20 +1148,79 @@ export class Store {
         }
     }
 
-    /** v23→v24: add the iOS push envelope key. */
+    /** v23→v24: add push and notification preference state. */
     private migrateFromV23ToV24(): void {
         const fcmColumns = this.db.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
         if (fcmColumns.length > 0 && !fcmColumns.some((column) => column.name === 'push_key')) {
             this.db.exec('ALTER TABLE fcm_devices ADD COLUMN push_key TEXT')
         }
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                namespace TEXT PRIMARY KEY,
+                permission_requests INTEGER NOT NULL DEFAULT 1,
+                session_ready INTEGER NOT NULL DEFAULT 1,
+                task_notifications INTEGER NOT NULL DEFAULT 1,
+                session_completion INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
+        `)
     }
 
-    /** v24→v25: add durable unknown-delivery state for steers. */
+    /** v24→v25: add delivery state and session-attached jobs. */
     private migrateFromV24ToV25(): void {
+        const fcmColumns = this.db.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        if (fcmColumns.length > 0 && !fcmColumns.some((column) => column.name === 'push_key')) {
+            this.db.exec('ALTER TABLE fcm_devices ADD COLUMN push_key TEXT')
+        }
         const messageColumns = this.getMessageColumnNames()
         if (messageColumns.size > 0 && !messageColumns.has('delivery_state')) {
             this.db.exec("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'")
         }
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS session_jobs (
+                session_id TEXT NOT NULL,
+                job_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done REAL,
+                total REAL,
+                remaining REAL,
+                unit TEXT,
+                detail TEXT,
+                run_id TEXT,
+                heartbeat_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, job_key),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_jobs_session_status_updated
+                ON session_jobs(session_id, status, updated_at DESC);
+        `)
+        const cols = this.db.prepare('PRAGMA table_info(session_jobs)').all() as Array<{ name: string }>
+        if (!cols.some((c) => c.name === 'run_id')) {
+            this.db.exec('ALTER TABLE session_jobs ADD COLUMN run_id TEXT')
+        }
+    }
+
+    private addUsageCostColumnsAndRebuildIndex(): void {
+        const usageColumns = new Set(
+            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        if (!usageColumns.has('context_only')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
+        }
+        if (!usageColumns.has('cost')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
+        }
+        if (!usageColumns.has('cost_currency')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
+        }
+        this.db.exec(`
+            DELETE FROM usage_events;
+            DELETE FROM usage_scan_state;
+        `)
     }
 
     /**
@@ -1033,6 +1279,119 @@ export class Store {
             CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
                 ON event_links(namespace, to_event_id);
         `)
+    }
+
+    private migrateFromV25ToV26(): void {
+        // Fork repair: upstream #1467's V22→V23 creates the A2A events ledger,
+        // but fork-maintained DBs that were already past V22 skipped that step.
+        // Idempotently create the ledger tables when missing (v0.27.2.2 hub).
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                ts INTEGER NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                sink_kind TEXT,
+                sink_ref TEXT,
+                event_type TEXT NOT NULL,
+                summary TEXT,
+                payload_json TEXT,
+                artifact_refs TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                related_session_id TEXT,
+                related_event_id TEXT,
+                provenance TEXT,
+                idempotency_key TEXT,
+                dedupe_key TEXT,
+                confidence REAL,
+                severity TEXT,
+                expires_at INTEGER,
+                namespace TEXT NOT NULL,
+                principal_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_ts
+                ON events(namespace, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_related_session
+                ON events(namespace, related_session_id, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_namespace_expires
+                ON events(namespace, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_namespace_idempotency
+                ON events(namespace, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS event_links (
+                id TEXT PRIMARY KEY,
+                from_event_id TEXT NOT NULL,
+                to_event_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                metadata_json TEXT,
+                namespace TEXT NOT NULL,
+                FOREIGN KEY (from_event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (to_event_id) REFERENCES events(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_from
+                ON event_links(namespace, from_event_id);
+            CREATE INDEX IF NOT EXISTS idx_event_links_namespace_to
+                ON event_links(namespace, to_event_id);
+
+            CREATE TABLE IF NOT EXISTS session_jobs (
+                session_id TEXT NOT NULL,
+                job_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done REAL,
+                total REAL,
+                remaining REAL,
+                unit TEXT,
+                detail TEXT,
+                heartbeat_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, job_key),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_jobs_session_status_updated
+                ON session_jobs(session_id, status, updated_at DESC);
+        `)
+    }
+
+    private migrateFromV26ToV27(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS session_jobs (
+                session_id TEXT NOT NULL,
+                job_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                done REAL,
+                total REAL,
+                remaining REAL,
+                unit TEXT,
+                detail TEXT,
+                run_id TEXT,
+                heartbeat_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, job_key),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_jobs_session_status_updated
+                ON session_jobs(session_id, status, updated_at DESC);
+        `)
+        const columns = this.db.prepare('PRAGMA table_info(session_jobs)').all() as Array<{ name: string }>
+        if (!columns.some((column) => column.name === 'run_id')) {
+            this.db.exec('ALTER TABLE session_jobs ADD COLUMN run_id TEXT')
+        }
+    }
+
+    private migrateFromV27ToV28(): void {
+        // Schema-alignment no-op: keep deployed v0.27.2.3 V28 databases valid.
+    }
+
+    private migrateFromV28ToV29(): void {
+        this.migrateFromV23ToV24()
+        this.migrateFromV24ToV25()
+        this.addUsageCostColumnsAndRebuildIndex()
     }
 
     private getSessionColumnNames(): Set<string> {

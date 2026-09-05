@@ -1,0 +1,2081 @@
+From 4647d851ba33e592c357cc130e0934456d257eac Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:30:07 +0000
+Subject: [PATCH] carry: upstream PR #1581
+
+---
+ .../AssistantChat/AttachmentItem.tsx          |   7 +-
+ .../HappyComposer.sendError.test.tsx          | 278 +++++++++++++++++-
+ .../AssistantChat/HappyComposer.tsx           | 158 ++++++++--
+ .../SortableComposerAttachments.tsx           |  10 +-
+ web/src/components/SessionChat.test.ts        |  67 +++++
+ web/src/components/SessionChat.tsx            | 179 ++++++++---
+ web/src/components/ShareSeedConsumer.test.tsx |  13 +-
+ web/src/components/ShareSeedConsumer.tsx      |  11 +-
+ .../hooks/mutations/useSendMessage.test.tsx   | 106 ++++++-
+ web/src/hooks/mutations/useSendMessage.ts     |  37 ++-
+ web/src/hooks/useComposerDraft.test.ts        |  13 +-
+ web/src/hooks/useComposerDraft.ts             |   6 +
+ web/src/lib/attachmentAdapter.test.ts         |  15 +
+ web/src/lib/attachmentAdapter.ts              |  19 +-
+ web/src/lib/composer-send-state.test.ts       | 171 +++++++++++
+ web/src/lib/composer-send-state.ts            | 114 +++++++
+ web/src/router.tsx                            |   4 +-
+ 17 files changed, 1099 insertions(+), 109 deletions(-)
+ create mode 100644 web/src/lib/composer-send-state.test.ts
+ create mode 100644 web/src/lib/composer-send-state.ts
+
+diff --git a/web/src/components/AssistantChat/AttachmentItem.tsx b/web/src/components/AssistantChat/AttachmentItem.tsx
+index e42af7393..bb5f809c0 100644
+--- a/web/src/components/AssistantChat/AttachmentItem.tsx
++++ b/web/src/components/AssistantChat/AttachmentItem.tsx
+@@ -94,7 +94,10 @@ function DragHandle(props: AttachmentDragHandleProps & { isFile?: boolean }) {
+     )
+ }
+ 
+-export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandleProps } = {}) {
++export function AttachmentItem(props: {
++    dragHandleProps?: AttachmentDragHandleProps
++    onRemove?: () => void
++} = {}) {
+     const { name, status, previewUrl } = useThreadComposerAttachment() as ComposerAttachmentWithPreview
+     const isParking = useComposerParking()
+     const isUploading = status.type === 'running'
+@@ -142,6 +145,7 @@ export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandlePr
+                 ) : null}
+                 {!isParking ? (
+                     <AttachmentPrimitive.Remove
++                        onClick={props.onRemove}
+                         className="hapi-composer-attachment-control absolute right-1 top-1 z-20 flex h-8 w-8 items-start justify-end rounded-md bg-transparent text-white transition-colors hover:bg-black/15 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white"
+                         aria-label="Remove attachment"
+                         title="Remove attachment"
+@@ -172,6 +176,7 @@ export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandlePr
+             {isError ? <span className="text-xs text-red-500 whitespace-nowrap">Upload failed</span> : null}
+             {!isParking ? (
+                 <AttachmentPrimitive.Remove
++                    onClick={props.onRemove}
+                     className="hapi-composer-attachment-control hapi-composer-attachment-file-control -mx-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-transparent text-[var(--app-hint)] transition-colors hover:text-[var(--app-fg)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--app-link)]"
+                     aria-label="Remove attachment"
+                     title="Remove attachment"
+diff --git a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+index 3d741d1e7..d17c8f56b 100644
+--- a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+@@ -5,8 +5,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+ import type { ComposerSendIntent } from '@/lib/messageDelivery'
++import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
++import { getComposerDraftRevision, resetComposerSendStateForTests } from '@/lib/composer-send-state'
++
++vi.mock('@/lib/clearDraftsAfterSend', () => ({
++    clearDraftsAfterSend: vi.fn(),
++}))
++
+ import { HappyComposer, type ComposerSendError } from './HappyComposer'
+ 
++const mockClearDraftsAfterSend = vi.mocked(clearDraftsAfterSend)
++
+ /**
+  * HappyComposer owns the recovery guard, while assistant-ui owns the live
+  * composer store. This focused harness supplies the small subset of that
+@@ -30,6 +39,10 @@ const runtime = vi.hoisted(() => ({
+         thread: { isRunning: false, isDisabled: false },
+     } as FakeRuntimeState,
+     setSnapshot: null as null | ((updater: (current: FakeRuntimeState) => FakeRuntimeState) => void),
++    restoredAttachmentIds: null as null | ((ids: readonly string[]) => void),
++    attachmentRemove: null as null | (() => void),
++    attachmentReorder: null as null | ((activeId: string, targetId: string, position: 'before' | 'after') => void),
++    dictationTextChange: null as null | ((text: string) => void),
+     pendingSendIntentRef: null as null | { current: ComposerSendIntent },
+     sentIntents: [] as ComposerSendIntent[],
+     modelChanges: [] as Array<{ provider: string; modelId: string } | string | null>,
+@@ -46,6 +59,12 @@ vi.mock('@assistant-ui/react', async () => {
+                         composer: { ...current.composer, text },
+                     }))
+                 },
++                clearAttachments: async () => {
++                    runtime.setSnapshot!((current) => ({
++                        ...current,
++                        composer: { ...current.composer, attachments: [] },
++                    }))
++                },
+                 send: () => {
+                     const intent = runtime.pendingSendIntentRef?.current ?? 'default'
+                     runtime.sentIntents.push(intent)
+@@ -87,7 +106,10 @@ vi.mock('@assistant-ui/react', async () => {
+                     />
+                 ),
+             ),
+-            Attachments: () => null,
++            Attachments: (props: { components?: { Attachment?: React.ComponentType } }) => {
++                const Attachment = props.components?.Attachment
++                return Attachment ? <Attachment /> : null
++            },
+         },
+     }
+ })
+@@ -98,7 +120,36 @@ vi.mock('@/lib/composerSegments', () => ({
+         showContinueHint ? 'misc.typeMessage' : 'misc.typeAMessage',
+ }))
+ vi.mock('@/hooks/useComposerDraft', () => ({
+-    useComposerDraft: (sessionId: string | undefined) => ({ sessionId, complete: true, restoredAny: false, hasStoredAttachments: false }),
++    useComposerDraft: (
++        sessionId: string | undefined,
++        _composerText: string,
++        _attachments: readonly FakeAttachment[],
++        _canRestoreAttachments: boolean,
++        _setText: (text: string) => void,
++        _addAttachment: (file: File) => Promise<void>,
++        onRestoredAttachmentIds?: (ids: readonly string[]) => void,
++    ) => {
++        runtime.restoredAttachmentIds = onRestoredAttachmentIds ?? null
++        return { sessionId, complete: true, restoredAny: false, hasStoredAttachments: false }
++    },
++}))
++vi.mock('@/hooks/useDictation', () => ({
++    useDictation: (config: { onTextChange: (text: string) => void }) => {
++        runtime.dictationTextChange = config.onTextChange
++        return {
++            supported: false,
++            status: 'disconnected',
++            error: null,
++            partialTranscript: '',
++            toggle: async () => {},
++        }
++    },
++}))
++vi.mock('@/components/AssistantChat/AttachmentItem', () => ({
++    AttachmentItem: (props: { onRemove?: () => void }) => {
++        runtime.attachmentRemove = props.onRemove ?? null
++        return null
++    },
+ }))
+ vi.mock('@/hooks/useComposerEnterBehavior', () => ({ useComposerEnterBehavior: () => ({ composerEnterBehavior: 'send' }) }))
+ vi.mock('@/hooks/usePlatform', () => ({ usePlatform: () => ({ haptic: { impact: () => {}, notification: () => {} }, isTouch: false }) }))
+@@ -109,7 +160,14 @@ vi.mock('@/components/ChatInput/FloatingOverlay', () => ({ FloatingOverlay: ({ c
+ vi.mock('@/components/ChatInput/Autocomplete', () => ({ Autocomplete: () => null }))
+ vi.mock('@/components/AssistantChat/StatusBar', () => ({ StatusBar: () => null }))
+ vi.mock('@/components/AssistantChat/SortableComposerAttachments', () => ({
+-    SortableComposerAttachments: () => null,
++    SortableComposerAttachments: (props: {
++        onRemove?: () => void
++        onReorder?: (activeId: string, targetId: string, position: 'before' | 'after') => void
++    }) => {
++        runtime.attachmentRemove = props.onRemove ?? null
++        runtime.attachmentReorder = props.onReorder ?? null
++        return null
++    },
+ }))
+ vi.mock('@/components/AssistantChat/ComposerButtons', () => ({
+     ComposerButtons: (props: {
+@@ -146,12 +204,18 @@ type HarnessControls = {
+     remount: () => void
+     programmaticSetText: (text: string) => void
+     queuedEditSetText: (text: string) => void
++    scratchlistPromoteSetText: (text: string) => void
++    hydrateSubmittedAttachment: () => void
++    hydrateReorderableAttachments: () => void
++    reorderAttachments: () => void
++    dictationSetText: (text: string) => void
+     acceptSend: () => void
+     setSending: (sending: boolean) => void
+     setThreadDisabled: (disabled: boolean) => void
+     settleSend: (error?: ComposerSendError) => void
+     settleRetrySend: () => void
+     settleAttachmentSendFailure: () => void
++    resumeSameSession: () => void
+     getClearErrorCalls: () => number
+ }
+ 
+@@ -160,6 +224,7 @@ function ComposerHarness(props: {
+     initialSchedule?: PendingSchedule | null
+     piRunning?: boolean
+     sessionId?: string
++    canRestoreAttachments?: boolean
+     controls: { current: HarnessControls | null }
+ }) {
+     const [snapshot, setSnapshot] = useState<FakeRuntimeState>(() => ({
+@@ -169,12 +234,14 @@ function ComposerHarness(props: {
+     const [schedule, setSchedule] = useState<PendingSchedule | null>(props.initialSchedule ?? null)
+     const [sendError, setSendError] = useState<ComposerSendError | null>(null)
+     const [isSending, setIsSending] = useState(false)
++    const [canRestoreAttachments, setCanRestoreAttachments] = useState(props.canRestoreAttachments ?? true)
+     const [composerKey, setComposerKey] = useState('composer-a')
+     const [programmaticEditRevision, setProgrammaticEditRevision] = useState(0)
+     const [sendAcceptance, setSendAcceptance] = useState<{
+         attemptId: string | null
+         sessionId: string
+         programmaticEditRevision: number
++        draftRevision: number
+     } | null>(null)
+     const [sendSettlement, setSendSettlement] = useState<{
+         attemptId: string
+@@ -204,10 +271,13 @@ function ComposerHarness(props: {
+                 attachments: [{ id: 'new-attachment', status: { type: 'complete' } }],
+             },
+         })),
+-        removeAttachments: () => setSnapshot((current) => ({
+-            ...current,
+-            composer: { ...current.composer, attachments: [] },
+-        })),
++        removeAttachments: () => {
++            runtime.attachmentRemove?.()
++            setSnapshot((current) => ({
++                ...current,
++                composer: { ...current.composer, attachments: [] },
++            }))
++        },
+         acceptAndClearSchedule: () => setSchedule(null),
+         remount: () => setComposerKey((key) => key === 'composer-a' ? 'composer-b' : 'composer-a'),
+         programmaticSetText: (text) => setSnapshot((current) => ({
+@@ -221,10 +291,48 @@ function ComposerHarness(props: {
+                 composer: { ...current.composer, text },
+             }))
+         },
++        scratchlistPromoteSetText: (text) => {
++            setProgrammaticEditRevision((revision) => revision + 1)
++            setSnapshot((current) => ({
++                ...current,
++                composer: { ...current.composer, text },
++            }))
++        },
++        hydrateSubmittedAttachment: () => {
++            runtime.restoredAttachmentIds?.(['new-attachment'])
++            setSnapshot((current) => ({
++                ...current,
++                composer: {
++                    ...current.composer,
++                    attachments: [{ id: 'new-attachment', status: { type: 'complete' } }],
++                },
++            }))
++        },
++        hydrateReorderableAttachments: () => {
++            runtime.restoredAttachmentIds?.(['new-attachment', 'second-attachment'])
++            setSnapshot((current) => ({
++                ...current,
++                composer: {
++                    ...current.composer,
++                    text: 'foo',
++                    attachments: [
++                        { id: 'new-attachment', status: { type: 'complete' } },
++                        { id: 'second-attachment', status: { type: 'complete' } },
++                    ],
++                },
++            }))
++        },
++        reorderAttachments: () => runtime.attachmentReorder?.('new-attachment', 'second-attachment', 'after'),
++        dictationSetText: (text) => runtime.dictationTextChange?.(text),
+         acceptSend: () => {
+             setIsSending(true)
+             setSendSettlement(null)
+-            setSendAcceptance({ attemptId: 'attempt-1', sessionId, programmaticEditRevision })
++            setSendAcceptance({
++                attemptId: 'attempt-1',
++                sessionId,
++                programmaticEditRevision,
++                draftRevision: getComposerDraftRevision(sessionId),
++            })
+         },
+         setSending: setIsSending,
+         setThreadDisabled: (disabled) => setSnapshot((current) => ({
+@@ -262,6 +370,13 @@ function ComposerHarness(props: {
+             })
+             setIsSending(false)
+         },
++        resumeSameSession: () => {
++            setCanRestoreAttachments(true)
++            setSnapshot((current) => ({
++                ...current,
++                composer: { ...current.composer, text: props.initialText },
++            }))
++        },
+         getClearErrorCalls: () => clearErrorCallsRef.current,
+     }
+ 
+@@ -272,6 +387,7 @@ function ComposerHarness(props: {
+                 sessionId={sessionId}
+                 disabled={isSending}
+                 pendingSchedule={schedule}
++                canRestoreAttachments={canRestoreAttachments}
+                 sendAcceptance={sendAcceptance}
+                 programmaticEditRevision={programmaticEditRevision}
+                 sendSettlement={sendSettlement}
+@@ -304,11 +420,12 @@ function renderComposer(
+     initialSchedule: PendingSchedule | null = { type: 'absolute', ms: 1234 },
+     piRunning = false,
+     sessionId = 'session-a',
++    canRestoreAttachments = true,
+ ) {
+     const controls: { current: HarnessControls | null } = { current: null }
+     runtime.sentIntents = []
+     runtime.modelChanges = []
+-    render(<ComposerHarness initialText={initialText} initialSchedule={initialSchedule} piRunning={piRunning} sessionId={sessionId} controls={controls} />)
++    render(<ComposerHarness initialText={initialText} initialSchedule={initialSchedule} piRunning={piRunning} sessionId={sessionId} canRestoreAttachments={canRestoreAttachments} controls={controls} />)
+     return controls
+ }
+ 
+@@ -358,6 +475,10 @@ describe('HappyComposer send-error atomic restore', () => {
+     afterEach(() => {
+         cleanup()
+         runtime.setSnapshot = null
++        runtime.restoredAttachmentIds = null
++        runtime.attachmentRemove = null
++        resetComposerSendStateForTests()
++        mockClearDraftsAfterSend.mockReset()
+     })
+ 
+     it('collapses an expanded composer only after an accepted send succeeds', async () => {
+@@ -516,6 +637,144 @@ describe('HappyComposer send-error atomic restore', () => {
+         act(() => controls.current!.settleSend())
+ 
+         await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++
++        act(() => controls.current!.remount())
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++    })
++
++    it('preserves a same-text user draft after a keyed remount', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        fireEvent.change(input(), { target: { value: 'foo' } })
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('clears stale text restored by a same-session resume', async () => {
++        const controls = renderComposer('foo', null, false, 'session-a', false)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.resumeSameSession())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue(''))
++        await waitFor(() => expect(runtime.snapshot.composer.attachments).toHaveLength(0))
++        expect(mockClearDraftsAfterSend).toHaveBeenCalledWith('session-a', null, 'foo')
++    })
++
++    it('preserves a same-text edit made before resumed acceptance is published', async () => {
++        const controls = renderComposer('foo', null)
++        act(() => controls.current!.programmaticSetText(''))
++        fireEvent.change(input(), { target: { value: 'foo' } })
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('preserves a matching draft when an attachment is added after the send', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.programmaticSetText('foo'))
++        act(() => controls.current!.addAttachment())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('preserves a same-text dictation draft after a remount', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.dictationSetText('foo'))
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('clears sent attachments restored by draft hydration after a remount', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.hydrateSubmittedAttachment())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue(''))
++        expect(mockClearDraftsAfterSend).toHaveBeenCalledWith('session-a', null, 'foo')
++    })
++
++    it('preserves a reordered restored attachment draft after a remount', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.hydrateReorderableAttachments())
++        act(() => controls.current!.reorderAttachments())
++        expect(getComposerDraftRevision('session-a')).toBe(1)
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('preserves a same-text schedule change after a remount', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.programmaticSetText('foo'))
++        fireEvent.click(screen.getByRole('button', { name: 'select schedule' }))
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('preserves a same-text draft after removing a hydrated attachment', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.hydrateSubmittedAttachment())
++        act(() => controls.current!.programmaticSetText('foo'))
++        act(() => controls.current!.removeAttachments())
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++
++    it('preserves a same-text scratchlist promotion after a remount', async () => {
++        const controls = renderComposer('foo', null)
++        send()
++
++        act(() => controls.current!.acceptSend())
++        act(() => controls.current!.remount())
++        act(() => controls.current!.scratchlistPromoteSetText('foo'))
++        act(() => controls.current!.settleSend())
++
++        await waitFor(() => expect(input()).toHaveValue('foo'))
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
+     })
+ 
+     it('preserves a matching draft when a retry settles without composer acceptance', async () => {
+@@ -536,6 +795,7 @@ describe('HappyComposer send-error atomic restore', () => {
+         act(() => controls.current!.settleSend())
+ 
+         await waitFor(() => expect(input()).toHaveValue(''))
++        expect(mockClearDraftsAfterSend).toHaveBeenCalledWith('session-resolved', null, 'foo')
+     })
+ 
+     it('preserves a later same-text draft after success and a session remount', async () => {
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 0e9ba0270..28518e05d 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -43,7 +43,9 @@ import type { PiThinkingLevel } from '@hapi/protocol'
+ import { markSkillUsed } from '@/lib/recent-skills'
+ import { useComposerDraft } from '@/hooks/useComposerDraft'
+ import type { AttachmentDraftInput } from '@/lib/composer-attachment-drafts'
+-import { clearComposerDraftSnapshotIfText, persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
++import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
++import { consumePendingComposerSend, getComposerDraftRevision, recordComposerDraftChange } from '@/lib/composer-send-state'
++import { persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
+ import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
+ import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
+ import { Autocomplete } from '@/components/ChatInput/Autocomplete'
+@@ -285,6 +287,7 @@ export function ModelEffortSettingsSection(props: {
+ export function HappyComposer(props: {
+     sessionId?: string
+     onUploadDraftSnapshot?: (text: string, attachments: AttachmentDraftInput[]) => void
++    onReleaseSentAttachments?: (ids: readonly string[]) => void
+     canRestoreAttachments?: boolean
+     disabled?: boolean
+     permissionMode?: PermissionMode
+@@ -394,6 +397,7 @@ export function HappyComposer(props: {
+         attemptId: string | null
+         sessionId?: string
+         programmaticEditRevision?: number
++        draftRevision?: number
+     } | null
+     /** Monotonic programmatic Queued Edit revision owned outside this keyed composer. */
+     programmaticEditRevision?: number
+@@ -506,15 +510,20 @@ export function HappyComposer(props: {
+         const nextOrder = moveAttachmentId(currentOrder, activeId, targetId, position)
+         if (nextOrder.every((id, index) => id === currentOrder[index])) return
+         attachmentOrderRef.current = nextOrder
++        userAttachmentGenerationRef.current += 1
++        if (sessionId) recordComposerDraftChange(sessionId)
+         setAttachmentOrderRevision((revision) => revision + 1)
+-    }, [attachmentIds, attachmentOrderRef])
++    }, [attachmentIds, attachmentOrderRef, sessionId])
+     const orderedAttachments = orderItemsById(attachments, orderedAttachmentIds)
+     const threadIsRunning = useAuiState((s) => s.thread.isRunning)
+     const threadIsDisabled = useAuiState((s) => s.thread.isDisabled)
+     const composerTextRef = useRef(composerText)
+     composerTextRef.current = composerText
+     const getCurrentComposerText = useCallback(() => composerTextRef.current, [])
+-    const setComposerText = useCallback((text: string) => api.composer().setText(text), [api])
++    const setComposerText = useCallback((text: string) => {
++        if (sessionId) recordComposerDraftChange(sessionId)
++        api.composer().setText(text)
++    }, [api, sessionId])
+     const voiceInput = useVoiceInputPreferences(props.voiceTranscriptionApi ?? null)
+     const dictationConfig = useMemo(() => ({
+         api: props.voiceTranscriptionApi ?? null,
+@@ -587,10 +596,13 @@ export function HappyComposer(props: {
+     const lastSendAcceptanceRef = useRef(props.sendAcceptance)
+     const pendingSendAttemptIdRef = useRef<string | null>(null)
+     const pendingSendEditGenerationRef = useRef<number | null>(null)
++    const pendingSendAttachmentGenerationRef = useRef<number | null>(null)
++    const pendingSendScheduleGenerationRef = useRef<number | null>(null)
+     const acceptedSendEditGenerationRef = useRef<{
+         attemptId: string
+         generation: number
+-        startedHere: boolean
++        attachmentGeneration: number
++        scheduleGeneration: number
+     } | null>(null)
+     const handledSuccessfulSendRef = useRef<string | null>(null)
+     const [showSettings, setShowSettings] = useState(false)
+@@ -612,18 +624,30 @@ export function HappyComposer(props: {
+         if (acceptance.attemptId === null) {
+             pendingSendAttemptIdRef.current = null
+             pendingSendEditGenerationRef.current = null
++            pendingSendAttachmentGenerationRef.current = null
++            pendingSendScheduleGenerationRef.current = null
+             acceptedSendEditGenerationRef.current = null
++            if (acceptance.sessionId) {
++                consumePendingComposerSend(acceptance.sessionId, null)
++            }
+             setIsExpanded(false)
+             return
+         }
+         pendingSendAttemptIdRef.current = acceptance.attemptId
+         const pendingGeneration = pendingSendEditGenerationRef.current
+-        acceptedSendEditGenerationRef.current = {
+-            attemptId: acceptance.attemptId,
+-            generation: pendingGeneration ?? userEditGenerationRef.current,
+-            startedHere: pendingGeneration !== null,
+-        }
++        const pendingAttachmentGeneration = pendingSendAttachmentGenerationRef.current
++        const pendingScheduleGeneration = pendingSendScheduleGenerationRef.current
++        acceptedSendEditGenerationRef.current = pendingGeneration === null
++            ? null
++            : {
++                attemptId: acceptance.attemptId,
++                generation: pendingGeneration,
++                attachmentGeneration: pendingAttachmentGeneration ?? userAttachmentGenerationRef.current,
++                scheduleGeneration: pendingScheduleGeneration ?? userScheduleGenerationRef.current,
++            }
+         pendingSendEditGenerationRef.current = null
++        pendingSendAttachmentGenerationRef.current = null
++        pendingSendScheduleGenerationRef.current = null
+         const settlement = props.sendSettlement
+         if (!settlement || settlement.attemptId !== acceptance.attemptId) return
+         pendingSendAttemptIdRef.current = null
+@@ -655,6 +679,7 @@ export function HappyComposer(props: {
+     const userScheduleGenerationRef = useRef(0)
+     const userAttachmentGenerationRef = useRef(0)
+     const observedAttachmentIdsRef = useRef(new Set(attachments.map((attachment) => attachment.id)))
++    const restoredDraftAttachmentIdsRef = useRef(new Set<string>())
+     const sendRestoreGuardRef = useRef<{
+         userEditGeneration: number
+         userScheduleGeneration: number
+@@ -680,7 +705,12 @@ export function HappyComposer(props: {
+ 
+     const recordUserEdit = useCallback(() => {
+         userEditGenerationRef.current += 1
+-    }, [])
++        if (sessionId) recordComposerDraftChange(sessionId)
++    }, [sessionId])
++    const handleAttachmentRemove = useCallback(() => {
++        userAttachmentGenerationRef.current += 1
++        if (sessionId) recordComposerDraftChange(sessionId)
++    }, [sessionId])
+ 
+     const handleUserEdit = useCallback(() => {
+         recordUserEdit()
+@@ -721,6 +751,9 @@ export function HappyComposer(props: {
+         props.canRestoreAttachments ?? active,
+         (text) => api.composer().setText(text),
+         (file) => api.composer().addAttachment(file),
++        (ids) => {
++            for (const id of ids) restoredDraftAttachmentIdsRef.current.add(id)
++        },
+     )
+     const canHydrateAttachments = props.canRestoreAttachments ?? active
+     const hiddenAttachmentStatePending =
+@@ -785,6 +818,19 @@ export function HappyComposer(props: {
+         })
+     }, [active, attachmentRevision, draftHydration.complete, draftHydration.sessionId, props.canRestoreAttachments, sessionId])
+ 
++    // A user-added attachment must make a successful-send cleanup unsafe even
++    // when the text remains unchanged. Keep this effect before the settlement
++    // decision so the generation is current for the same render commit.
++    useEffect(() => {
++        for (const attachment of attachments) {
++            if (observedAttachmentIdsRef.current.has(attachment.id)) continue
++            observedAttachmentIdsRef.current.add(attachment.id)
++            if (restoredDraftAttachmentIdsRef.current.delete(attachment.id)) continue
++            userAttachmentGenerationRef.current += 1
++            if (sessionId) recordComposerDraftChange(sessionId)
++        }
++    }, [attachments, sessionId])
++
+     // A keyed session remount can hydrate the text that assistant-ui cleared
+     // before the POST settled. Once that exact send succeeds, clear only an
+     // untouched matching draft; a new user edit must win over settlement.
+@@ -801,6 +847,7 @@ export function HappyComposer(props: {
+         const consumeSettlement = () => {
+             handledSuccessfulSendRef.current = settlementKey
+             props.onConsumeSendSettlement?.(settlement.attemptId)
++            consumePendingComposerSend(sessionId, settlement.attemptId)
+         }
+ 
+         // Retry settlements reuse the failed message's local id and do not
+@@ -819,6 +866,14 @@ export function HappyComposer(props: {
+         }
+         if (draftHydration.sessionId !== sessionId || !draftHydration.complete) return
+ 
++        if (
++            props.sendAcceptance?.draftRevision !== undefined
++            && getComposerDraftRevision(sessionId) > props.sendAcceptance.draftRevision
++        ) {
++            consumeSettlement()
++            return
++        }
++
+         const acceptedSend = acceptedSendEditGenerationRef.current
+         const sendEditGeneration = acceptedSend?.attemptId === settlement.attemptId
+             ? acceptedSend.generation
+@@ -841,11 +896,33 @@ export function HappyComposer(props: {
+             > (props.sendAcceptance?.programmaticEditRevision ?? 0)
+ 
+         // Queued-message Edit restores text through the assistant-ui store and
+-        // does not fire the composer input handlers. If the accepted send
+-        // started in this composer, an exact-text replacement is still newer
+-        // state and must survive the settlement. A keyed remount has no local
+-        // accepted-send marker, so its hydrated stale draft remains clearable.
+-        if (editedProgrammaticallyAfterSend || (composerText === settlement.text && acceptedSend?.startedHere)) {
++        // does not fire the composer input handlers. Its external revision is
++        // the only signal that an exact-text replacement is newer state. A
++        // same-session resume can rehydrate the submitted text without that
++        // revision, so it must remain clearable.
++        if (editedProgrammaticallyAfterSend) {
++            consumeSettlement()
++            return
++        }
++
++        const attachmentGeneration = acceptedSend?.attemptId === settlement.attemptId
++            ? acceptedSend.attachmentGeneration
++            : pendingSendAttachmentGenerationRef.current
++        const attachmentsChangedAfterSend = attachmentGeneration !== null
++            ? userAttachmentGenerationRef.current > attachmentGeneration
++            : userAttachmentGenerationRef.current > 0
++        if (attachmentsChangedAfterSend) {
++            consumeSettlement()
++            return
++        }
++
++        const scheduleGeneration = acceptedSend?.attemptId === settlement.attemptId
++            ? acceptedSend.scheduleGeneration
++            : pendingSendScheduleGenerationRef.current
++        const scheduleChangedAfterSend = scheduleGeneration !== null
++            ? userScheduleGenerationRef.current > scheduleGeneration
++            : userScheduleGenerationRef.current > 0
++        if (scheduleChangedAfterSend) {
+             consumeSettlement()
+             return
+         }
+@@ -853,9 +930,32 @@ export function HappyComposer(props: {
+         if (composerText === settlement.text) {
+             api.composer().setText('')
+         }
+-        clearComposerDraftSnapshotIfText(sessionId, settlement.text)
++        if (attachments.length > 0) {
++            props.onReleaseSentAttachments?.(attachments.map(({ id }) => id))
++            void api.composer().clearAttachments()
++        }
++        clearDraftsAfterSend(
++            settlement.sessionId,
++            null,
++            settlement.text,
++        )
+         consumeSettlement()
+-    }, [api, composerText, draftHydration.complete, draftHydration.sessionId, props.onConsumeSendSettlement, props.programmaticEditRevision, props.sendAcceptance, props.sendSettlement, sessionId])
++    }, [api, attachments.length, composerText, draftHydration.complete, draftHydration.sessionId, props.onConsumeSendSettlement, props.onReleaseSentAttachments, props.programmaticEditRevision, props.sendAcceptance, props.sendSettlement, sessionId])
++
++    // Failed sends use the separate sendError recovery path, so their terminal
++    // settlement can be consumed immediately and must not remain in the
++    // module-level store after a later send succeeds.
++    useEffect(() => {
++        const settlement = props.sendSettlement
++        if (
++            !settlement
++            || settlement.status !== 'error'
++            || settlement.sessionId !== sessionId
++            || !sessionId
++        ) return
++        props.onConsumeSendSettlement?.(settlement.attemptId)
++        consumePendingComposerSend(sessionId, settlement.attemptId)
++    }, [props.onConsumeSendSettlement, props.sendSettlement, sessionId])
+ 
+     // assistant-ui clears `composer.text` synchronously the moment a send is
+     // invoked AND `SessionChat.handleSend` clears `pendingSchedule` after the
+@@ -953,19 +1053,6 @@ export function HappyComposer(props: {
+         onClearSendError?.()
+     }, [sendError, attachments, composerText, onClearSendError])
+ 
+-    // A user-added attachment must make a recovery unsafe even if it is removed
+-    // again before the send error arrives. This runs even without a local send
+-    // guard so a post-resume composer gets the same protection. Attachment IDs
+-    // already present at mount are the baseline; assistant-ui's send clear only
+-    // removes IDs and therefore does not look like a user addition.
+-    useEffect(() => {
+-        for (const attachment of attachments) {
+-            if (observedAttachmentIdsRef.current.has(attachment.id)) continue
+-            observedAttachmentIdsRef.current.add(attachment.id)
+-            userAttachmentGenerationRef.current += 1
+-        }
+-    }, [attachments])
+-
+     useEffect(() => {
+         if (richMentionsEnabled) {
+             // Rich input owns mirror text + selection via onMirrorChange.
+@@ -1250,19 +1337,21 @@ export function HappyComposer(props: {
+ 
+     const handleUserSchedule = useCallback((nextPendingSchedule: PendingSchedule) => {
+         userScheduleGenerationRef.current += 1
++        if (sessionId) recordComposerDraftChange(sessionId)
+         if (sendError) onClearSendError?.()
+         setPendingSchedule(nextPendingSchedule)
+-    }, [onClearSendError, sendError, setPendingSchedule])
++    }, [onClearSendError, sendError, sessionId, setPendingSchedule])
+ 
+     const handleUserClearSchedule = useCallback(() => {
+         userScheduleGenerationRef.current += 1
++        if (sessionId) recordComposerDraftChange(sessionId)
+         if (sendError) onClearSendError?.()
+         if (isControlled) {
+             onClearScheduleProp?.()
+         } else {
+             setPendingScheduleLocal(null)
+         }
+-    }, [isControlled, onClearScheduleProp, onClearSendError, sendError])
++    }, [isControlled, onClearScheduleProp, onClearSendError, sendError, sessionId])
+     // Preserve the original controlled-mode contract: without a parent clear
+     // handler the schedule button opens the picker instead of claiming it can
+     // clear a value it does not own.
+@@ -1399,10 +1488,14 @@ export function HappyComposer(props: {
+             // this ref synchronously from assistant-ui's onNew callback.
+             if (pendingSendIntentRef) pendingSendIntentRef.current = effectiveIntent
+             pendingSendEditGenerationRef.current = userEditGenerationRef.current
++            pendingSendAttachmentGenerationRef.current = userAttachmentGenerationRef.current
++            pendingSendScheduleGenerationRef.current = userScheduleGenerationRef.current
+             api.composer().send()
+         } catch (error) {
+             resetPendingSendIntent()
+             pendingSendEditGenerationRef.current = null
++            pendingSendAttachmentGenerationRef.current = null
++            pendingSendScheduleGenerationRef.current = null
+             throw error
+         }
+         // SessionChat owns clearing the schedule — it clears only after awaiting
+@@ -2440,6 +2533,7 @@ export function HappyComposer(props: {
+                                     orderedAttachmentIds={orderedAttachmentIds}
+                                     disabled={controlsDisabled}
+                                     onReorder={handleAttachmentReorder}
++                                    onRemove={handleAttachmentRemove}
+                                 />
+                             </div>
+                         ) : null}
+diff --git a/web/src/components/AssistantChat/SortableComposerAttachments.tsx b/web/src/components/AssistantChat/SortableComposerAttachments.tsx
+index b7326f024..686ff5e59 100644
+--- a/web/src/components/AssistantChat/SortableComposerAttachments.tsx
++++ b/web/src/components/AssistantChat/SortableComposerAttachments.tsx
+@@ -32,6 +32,7 @@ type SortableComposerAttachmentProps = {
+     onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>, id: string) => void
+     onContextMenu: (event: ReactMouseEvent<Element>, id: string) => void
+     onClick: (event: ReactMouseEvent<Element>, id: string) => void
++    onRemove?: () => void
+ }
+ 
+ type AttachmentDropTarget = {
+@@ -64,6 +65,7 @@ function SortableComposerAttachment(props: SortableComposerAttachmentProps) {
+         onKeyDown,
+         onContextMenu,
+         onClick,
++        onRemove,
+     } = props
+     const handlePointerDown = useCallback(
+         (event: ReactPointerEvent<HTMLButtonElement>) => onPointerDown(event, attachment.id, false),
+@@ -100,8 +102,8 @@ function SortableComposerAttachment(props: SortableComposerAttachmentProps) {
+         [attachment.name, disabled, handleKeyDown, handlePointerDown],
+     )
+     const AttachmentWithHandle = useCallback(
+-        () => <AttachmentItem dragHandleProps={dragHandleProps} />,
+-        [dragHandleProps],
++        () => <AttachmentItem dragHandleProps={dragHandleProps} onRemove={onRemove} />,
++        [dragHandleProps, onRemove],
+     )
+ 
+     return (
+@@ -123,8 +125,9 @@ export function SortableComposerAttachments(props: {
+     orderedAttachmentIds: readonly string[]
+     disabled?: boolean
+     onReorder: (activeId: string, targetId: string, position: AttachmentDropPosition) => void
++    onRemove?: () => void
+ }) {
+-    const { attachments, orderedAttachmentIds, onReorder, disabled = false } = props
++    const { attachments, orderedAttachmentIds, onReorder, onRemove, disabled = false } = props
+     const [draggingId, setDraggingId] = useState<string | null>(null)
+     const dragRef = useRef<DragState | null>(null)
+     const suppressClickIdRef = useRef<string | null>(null)
+@@ -267,6 +270,7 @@ export function SortableComposerAttachments(props: {
+                         onKeyDown={handleKeyDown}
+                         onContextMenu={handleContextMenu}
+                         onClick={handleClick}
++                        onRemove={onRemove}
+                     />
+                 )
+             })}
+diff --git a/web/src/components/SessionChat.test.ts b/web/src/components/SessionChat.test.ts
+index a4e54a12e..cf721c747 100644
+--- a/web/src/components/SessionChat.test.ts
++++ b/web/src/components/SessionChat.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import {
+     applyGlobalSelectAll,
++    applyComposerAcceptanceRevision,
+     applyModelChangeWithReasoningRollback,
+     buildGoalStateMessages,
+     isScratchlistHotkeyBlockedTarget,
+@@ -9,6 +10,7 @@ import {
+     mergeStagedAttachmentsInOrder,
+     resolvePiContextWindow,
+     resolveLatestCompletedBoundaryIdForView,
++    runAcceptedSendCleanup,
+     shouldAutoClearPendingSchedule,
+     shouldRouteToScratchlist,
+ } from './SessionChat'
+@@ -51,6 +53,71 @@ describe('applyModelChangeWithReasoningRollback', () => {
+     })
+ })
+ 
++describe('runAcceptedSendCleanup', () => {
++    it('publishes acceptance before deferred post-send cleanup', async () => {
++        const order: string[] = []
++        let releaseCleanup!: () => void
++        const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
++
++        const resultPromise = runAcceptedSendCleanup(
++            async () => {
++                order.push('send')
++                return 'accepted'
++            },
++            (accepted) => {
++                order.push(accepted)
++                return accepted
++            },
++            async () => {
++                order.push('cleanup-start')
++                await cleanup
++                order.push('cleanup-end')
++            },
++        )
++
++        await Promise.resolve()
++        expect(order).toEqual(['send', 'accepted', 'cleanup-start'])
++
++        releaseCleanup()
++        await expect(resultPromise).resolves.toBe('accepted')
++        expect(order).toEqual(['send', 'accepted', 'cleanup-start', 'cleanup-end'])
++    })
++})
++
++describe('applyComposerAcceptanceRevision', () => {
++    it('keeps the original same-session revision across async staging', () => {
++        const acceptance = {
++            attemptId: 'attempt-1',
++            sessionId: 'session-a',
++            programmaticEditRevision: 7,
++            draftRevision: 8,
++        }
++
++        expect(applyComposerAcceptanceRevision(acceptance, 'session-a', {
++            programmaticEditRevision: 1,
++            draftRevision: 2,
++        })).toEqual({
++            ...acceptance,
++            programmaticEditRevision: 1,
++            draftRevision: 2,
++        })
++    })
++
++    it('does not replace revisions from a different resolved session', () => {
++        const acceptance = {
++            attemptId: 'attempt-1',
++            sessionId: 'session-b',
++            programmaticEditRevision: 7,
++            draftRevision: 8,
++        }
++
++        expect(applyComposerAcceptanceRevision(acceptance, 'session-a', {
++            programmaticEditRevision: 1,
++            draftRevision: 2,
++        })).toBe(acceptance)
++    })
++})
++
+ describe('resolvePiContextWindow', () => {
+     const models = [
+         { provider: 'provider-a', modelId: 'shared-model', contextWindow: 100_000 },
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 9ce32aa6b..7996daa96 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1,4 +1,4 @@
+-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
++import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+ import { flushSync } from 'react-dom'
+ import { useNavigate } from '@tanstack/react-router'
+ import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+@@ -56,7 +56,7 @@ import {
+ import type { MessageDeliveryMode } from '@hapi/protocol'
+ import { isSteeringSupportedForSession } from '@hapi/protocol'
+ import type { OlderLoadOutcome } from '@/lib/message-window-store'
+-import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
++import { createAttachmentAdapter, type ChatAttachmentAdapter } from '@/lib/attachmentAdapter'
+ import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
+ import {
+     createScratchlistAttachmentAdapter,
+@@ -79,6 +79,14 @@ import {
+ import { useTranslation } from '@/lib/use-translation'
+ import type { SendMessageAcceptance, SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
+ import { handoffComposerDraft, transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
++import {
++    getComposerDraftRevision,
++    getComposerProgrammaticEditRevision,
++    getPendingComposerSend,
++    recordComposerProgrammaticEdit,
++    recordPendingComposerSend,
++    subscribeComposerSendState,
++} from '@/lib/composer-send-state'
+ import { SessionHeader } from '@/components/SessionHeader'
+ import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
+ import { ModelErrorBanner, hasActiveModelError } from '@/components/ModelErrorBanner'
+@@ -327,6 +335,32 @@ function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
+     return message.invokedAt == null && message.scheduledAt != null
+ }
+ 
++/** Publish mutation acceptance before any best-effort post-send cleanup. */
++export async function runAcceptedSendCleanup<T>(
++    send: () => Promise<T | false>,
++    onAccepted: (value: T) => T,
++    cleanup: () => Promise<void>,
++): Promise<T | false> {
++    const accepted = await send()
++    if (!accepted) return false
++    const result = onAccepted(accepted)
++    await cleanup()
++    return result
++}
++
++/** Keep edits made before async send staging newer than the submitted draft. */
++export function applyComposerAcceptanceRevision(
++    acceptance: SendMessageAcceptance,
++    sessionId: string,
++    submitted: Pick<SendMessageAcceptance, 'programmaticEditRevision' | 'draftRevision'>,
++): SendMessageAcceptance {
++    if (acceptance.sessionId !== sessionId) return acceptance
++    return {
++        ...acceptance,
++        ...submitted,
++    }
++}
++
+ /**
+  * Watches for incoming `abort-restore` events (emitted by the PTY launcher
+  * when the user aborts a running turn) and surfaces the aborted prompt text —
+@@ -397,11 +431,13 @@ export function ScratchlistDrawerHost(props: {
+         deliveryMode?: MessageDeliveryMode,
+     ) => Promise<boolean | SendMessageAcceptance>
+     onExitScratchlistMode: () => void
++    onProgrammaticEdit?: () => void
+     disabled?: boolean
+ }) {
+     const assistantApi = useAui()
+     const handlePromoteToComposer = useCallback(async (entry: ScratchlistEntry) => {
+         if (props.disabled) return
++        props.onProgrammaticEdit?.()
+         assistantApi.composer().setText(entry.text)
+         // Exit scratchlist mode before rehydrating attachments so addAttachment
+         // uses the normal chat upload adapter (not the scratchlist hub adapter).
+@@ -416,7 +452,7 @@ export function ScratchlistDrawerHost(props: {
+                 assistantApi.composer()
+             )
+         }
+-    }, [assistantApi, props.api, props.disabled, props.onExitScratchlistMode, props.sessionId])
++    }, [assistantApi, props.api, props.disabled, props.onExitScratchlistMode, props.onProgrammaticEdit, props.sessionId])
+     const handlePromoteToQueue = useCallback(async (entry: ScratchlistEntry) => {
+         if (props.disabled) return false
+         let attachments: AttachmentMetadata[] | undefined
+@@ -512,9 +548,10 @@ type SessionChatProps = {
+         attemptId: string | null
+         sessionId: string
+         programmaticEditRevision: number
++        draftRevision: number
+     } | null
+     programmaticEditRevision?: number
+-    onSendAccepted?: (sessionId: string, attemptId: string | null) => void
++    onSendAccepted?: (acceptance: SendMessageAcceptance, text: string) => void
+     onProgrammaticEdit?: () => void
+     viewMode: 'tail' | 'history'
+     messagesVersion: number
+@@ -558,6 +595,8 @@ type SessionChatProps = {
+     onAbortRestore?: (text: string) => void
+ }
+ 
++type ReleasableAttachmentAdapter = ChatAttachmentAdapter | ScratchlistAttachmentAdapter
++
+ /**
+  * Public entry point. Thin wrapper around `SessionChatInner` keyed by
+  * the session id so that ALL inner state - including the scratchlist
+@@ -575,28 +614,34 @@ type SessionChatProps = {
+  * SessionChatInner.
+  */
+ export function SessionChat(props: SessionChatProps) {
+-    const sendAcceptanceBySessionRef = useRef(new Map<string, {
+-        attemptId: string | null
+-        sessionId: string
+-        programmaticEditRevision: number
+-    }>())
+-    const programmaticEditRevisionBySessionRef = useRef(new Map<string, number>())
+-    const [, forceComposerStateUpdate] = useState(0)
+     const sessionId = props.session.id
+-    const sendAcceptance = sendAcceptanceBySessionRef.current.get(sessionId) ?? null
+-    const programmaticEditRevision = programmaticEditRevisionBySessionRef.current.get(sessionId) ?? 0
+-    const onSendAccepted = useCallback((acceptedSessionId: string, attemptId: string | null) => {
+-        sendAcceptanceBySessionRef.current.set(acceptedSessionId, {
+-            attemptId,
+-            sessionId: acceptedSessionId,
+-            programmaticEditRevision: programmaticEditRevisionBySessionRef.current.get(acceptedSessionId) ?? 0,
++    const pendingSend = useSyncExternalStore(
++        subscribeComposerSendState,
++        () => getPendingComposerSend(sessionId),
++        () => null,
++    )
++    const programmaticEditRevision = useSyncExternalStore(
++        subscribeComposerSendState,
++        () => getComposerProgrammaticEditRevision(sessionId),
++        () => 0,
++    )
++    const sendAcceptance = useMemo(() => pendingSend
++        ? {
++            attemptId: pendingSend.attemptId,
++            sessionId: pendingSend.sessionId,
++            programmaticEditRevision: pendingSend.programmaticEditRevision,
++            draftRevision: pendingSend.draftRevision,
++        }
++        : null, [pendingSend])
++    const onSendAccepted = useCallback((acceptance: SendMessageAcceptance, text: string) => {
++        recordPendingComposerSend({
++            ...acceptance,
++            text,
++            programmaticEditRevision: acceptance.programmaticEditRevision,
+         })
+-        forceComposerStateUpdate((version) => version + 1)
+-    }, [])
++    }, [sessionId])
+     const onProgrammaticEdit = useCallback(() => {
+-        const nextRevision = (programmaticEditRevisionBySessionRef.current.get(sessionId) ?? 0) + 1
+-        programmaticEditRevisionBySessionRef.current.set(sessionId, nextRevision)
+-        forceComposerStateUpdate((version) => version + 1)
++        recordComposerProgrammaticEdit(sessionId)
+     }, [sessionId])
+ 
+     return (
+@@ -855,6 +900,14 @@ function SessionChatInner(props: SessionChatProps) {
+             scheduledAt?: number | null,
+             deliveryMode: MessageDeliveryMode = 'queue',
+         ): Promise<SendMessageAcceptance | false> => {
++            // assistant-ui has already cleared the live composer by the time
++            // this async route runs. Capture the original interaction
++            // boundary before hub-attachment staging can await blob work and
++            // the user can enter a replacement draft.
++            const submittedComposerRevision = {
++                programmaticEditRevision: getComposerProgrammaticEditRevision(props.session.id),
++                draftRevision: getComposerDraftRevision(props.session.id),
++            }
+             if (
+                 scratchlistMode
+                 && scheduledAt == null
+@@ -867,13 +920,28 @@ function SessionChatInner(props: SessionChatProps) {
+                 // scratchlist mode is on. Prefer onParkScratchlist (clears
+                 // only after accept).
+                 const accepted = await scratchlist.add(text, attachments)
++                if (accepted) {
++                    props.onSendAccepted?.({
++                        attemptId: null,
++                        sessionId: props.session.id,
++                        programmaticEditRevision: props.programmaticEditRevision ?? 0,
++                        draftRevision: getComposerDraftRevision(props.session.id),
++                    }, text)
++                }
+                 await finalizeMigratedScratchlistParkCleanup(
+                     props.api,
+                     props.session.id,
+                     attachments,
+                     accepted,
+                 )
+-                return accepted ? { attemptId: null, sessionId: props.session.id } : false
++                return accepted
++                    ? {
++                        attemptId: null,
++                        sessionId: props.session.id,
++                        programmaticEditRevision: props.programmaticEditRevision ?? 0,
++                        draftRevision: getComposerDraftRevision(props.session.id),
++                    }
++                    : false
+             }
+             // If the user uploaded while scratchlist mode was on, then toggled
+             // it off before send, pending items still carry hub paths. Stage
+@@ -887,24 +955,42 @@ function SessionChatInner(props: SessionChatProps) {
+                     hubItems,
+                 )
+                 const ordered = mergeStagedAttachmentsInOrder(list, staged)
+-                const accepted = await props.onSend(
+-                    text,
+-                    ordered,
+-                    scheduledAt,
+-                    deliveryMode,
++                return runAcceptedSendCleanup(
++                    () => props.onSend(
++                        text,
++                        ordered,
++                        scheduledAt,
++                        deliveryMode,
++                    ),
++                    (accepted) => {
++                        const composerAcceptance = applyComposerAcceptanceRevision(
++                            accepted,
++                            props.session.id,
++                            submittedComposerRevision,
++                        )
++                        props.onSendAccepted?.(composerAcceptance, text)
++                        return composerAcceptance
++                    },
++                    async () => {
++                        // Hub blobs were copied into the normal upload dir; drop the
++                        // scratchlist copies so they stop counting against the session cap.
++                        await Promise.allSettled(
++                            hubItems.map((att) => props.api.deleteScratchlistAttachment(props.session.id, att.id))
++                        )
++                    },
+                 )
+-                if (accepted) {
+-                    // Hub blobs were copied into the normal upload dir; drop the
+-                    // scratchlist copies so they stop counting against the session cap.
+-                    await Promise.allSettled(
+-                        hubItems.map((att) => props.api.deleteScratchlistAttachment(props.session.id, att.id))
+-                    )
+-                }
+-                return accepted
+             }
+-            return props.onSend(text, attachments, scheduledAt, deliveryMode)
++            const accepted = await props.onSend(text, attachments, scheduledAt, deliveryMode)
++            if (!accepted) return false
++            const composerAcceptance = applyComposerAcceptanceRevision(
++                accepted,
++                props.session.id,
++                submittedComposerRevision,
++            )
++            props.onSendAccepted?.(composerAcceptance, text)
++            return composerAcceptance
+         },
+-        [props.onSend, props.api, props.session.id, scratchlist, scratchlistMode],
++        [props.onSend, props.onSendAccepted, props.api, props.programmaticEditRevision, props.session.id, scratchlist, scratchlistMode],
+     )
+     const agentFlavor = props.session.metadata?.flavor ?? null
+     const controlledByUser = props.session.agentState?.controlledByUser === true
+@@ -1790,7 +1876,6 @@ function SessionChatInner(props: SessionChatProps) {
+         })
+         const accepted = await onSendForComposer(text, attachments, scheduledAt, deliveryMode)
+         if (!accepted) return
+-        props.onSendAccepted?.(accepted.sessionId, accepted.attemptId)
+         if (!routedToScratchlist) {
+             // Clear pendingSchedule only after the mutation is actually
+             // accepted - covers both pre-mutation guards AND async
+@@ -1804,7 +1889,7 @@ function SessionChatInner(props: SessionChatProps) {
+         }
+     }, [agentFlavor, onSendForComposer, props.session.thinking, scratchlistMode, updatePendingSchedule])
+ 
+-    const attachmentAdapter = useMemo(() => {
++    const attachmentAdapter = useMemo<ReleasableAttachmentAdapter | undefined>(() => {
+         if (props.session.active && scratchlistMode) {
+             const adapter = createScratchlistAttachmentAdapter(props.api, props.session.id)
+             scratchlistAdapterRef.current = adapter
+@@ -1852,6 +1937,10 @@ function SessionChatInner(props: SessionChatProps) {
+         )
+     }, [props.api, props.session.id, props.session.active, props.resolveSessionIdForUpload, scratchlistMode, inactiveCanResume])
+ 
++    const releaseSentAttachments = useCallback((ids: readonly string[]) => {
++        attachmentAdapter?.releaseWithoutDelete(ids)
++    }, [attachmentAdapter])
++
+ 
+     const runtime = useHappyRuntime({
+         session: props.session,
+@@ -1932,7 +2021,11 @@ function SessionChatInner(props: SessionChatProps) {
+             ) : null}
+ 
+             <AssistantRuntimeProvider runtime={runtime}>
+-                <ShareSeedConsumer sessionId={props.session.id} sessionActive={props.session.active} />
++                <ShareSeedConsumer
++                    sessionId={props.session.id}
++                    sessionActive={props.session.active}
++                    onProgrammaticEdit={props.onProgrammaticEdit}
++                />
+                 <AbortRestoreConsumer messages={normalizedMessages} onAbortRestore={props.onAbortRestore ?? (() => {})} />
+                 <DragDropZone disabled={(!props.session.active && !inactiveCanResume) || props.isSending || pendingSchedule != null || isScratchlistParking}>
+                     <div className="relative flex min-h-0 flex-1 flex-col">
+@@ -2021,6 +2114,7 @@ function SessionChatInner(props: SessionChatProps) {
+                                     onDelete={scratchlist.remove}
+                                     onSend={props.onSend}
+                                     onExitScratchlistMode={() => setScratchlistMode(false)}
++                                    onProgrammaticEdit={props.onProgrammaticEdit}
+                                     disabled={props.isSending || isScratchlistParking}
+                                 />
+                             ) : null}
+@@ -2046,6 +2140,7 @@ function SessionChatInner(props: SessionChatProps) {
+                         key={`composer-${props.session.id}`}
+                         sessionId={props.session.id}
+                         canRestoreAttachments={props.session.active}
++                        onReleaseSentAttachments={releaseSentAttachments}
+                         onUploadDraftSnapshot={(text, attachments) => {
+                             uploadDraftSnapshotRef.current = { text, attachments }
+                         }}
+diff --git a/web/src/components/ShareSeedConsumer.test.tsx b/web/src/components/ShareSeedConsumer.test.tsx
+index 82b45aaa6..a84c15ac3 100644
+--- a/web/src/components/ShareSeedConsumer.test.tsx
++++ b/web/src/components/ShareSeedConsumer.test.tsx
+@@ -8,11 +8,12 @@ import {
+     setSharePendingTransfer,
+ } from '@/lib/sharePendingState'
+ 
+-const { setText, addAttachment, getShareTransfer, deleteShareTransfer } = vi.hoisted(() => ({
++const { setText, addAttachment, getShareTransfer, deleteShareTransfer, onProgrammaticEdit } = vi.hoisted(() => ({
+     setText: vi.fn(),
+     addAttachment: vi.fn(async () => undefined),
+     getShareTransfer: vi.fn(),
+     deleteShareTransfer: vi.fn(async () => undefined),
++    onProgrammaticEdit: vi.fn(),
+ }))
+ 
+ vi.mock('@assistant-ui/react', () => ({
+@@ -40,6 +41,7 @@ afterEach(() => {
+     addAttachment.mockReset()
+     getShareTransfer.mockReset()
+     deleteShareTransfer.mockReset()
++    onProgrammaticEdit.mockReset()
+     try { window.sessionStorage.clear() } catch { /* noop */ }
+ })
+ 
+@@ -76,11 +78,12 @@ describe('ShareSeedConsumer', () => {
+         other.unmount()
+ 
+         retargetSharePendingTransfer('session-a', 'session-b')
+-        render(<ShareSeedConsumer sessionId="session-b" sessionActive={true} />)
++        render(<ShareSeedConsumer sessionId="session-b" sessionActive={true} onProgrammaticEdit={onProgrammaticEdit} />)
+ 
+         await waitFor(() => {
+             expect(getShareTransfer).toHaveBeenCalledWith('xfer-handoff')
+             expect(setText).toHaveBeenCalledWith('shared payload')
++            expect(onProgrammaticEdit).toHaveBeenCalledOnce()
+         })
+         expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).toBeNull()
+     })
+@@ -94,11 +97,12 @@ describe('ShareSeedConsumer', () => {
+         expect(peekSharePendingTransfer()?.transferId).toBe('xfer-same-id')
+         expect(getShareTransfer).not.toHaveBeenCalled()
+ 
+-        rerender(<ShareSeedConsumer sessionId="session-a" sessionActive={true} />)
++        rerender(<ShareSeedConsumer sessionId="session-a" sessionActive={true} onProgrammaticEdit={onProgrammaticEdit} />)
+ 
+         await waitFor(() => {
+             expect(getShareTransfer).toHaveBeenCalledWith('xfer-same-id')
+             expect(setText).toHaveBeenCalledWith('shared payload')
++            expect(onProgrammaticEdit).toHaveBeenCalledOnce()
+         })
+         expect(window.sessionStorage.getItem(SHARE_PENDING_TRANSFER_KEY)).toBeNull()
+     })
+@@ -108,12 +112,13 @@ describe('ShareSeedConsumer', () => {
+ 
+         render(
+             <StrictMode>
+-                <ShareSeedConsumer sessionId="session-a" sessionActive={true} />
++                <ShareSeedConsumer sessionId="session-a" sessionActive={true} onProgrammaticEdit={onProgrammaticEdit} />
+             </StrictMode>,
+         )
+ 
+         await waitFor(() => {
+             expect(setText).toHaveBeenCalledWith('shared payload')
++            expect(onProgrammaticEdit).toHaveBeenCalledOnce()
+         })
+         expect(getShareTransfer).toHaveBeenCalledTimes(1)
+         expect(setText).toHaveBeenCalledTimes(1)
+diff --git a/web/src/components/ShareSeedConsumer.tsx b/web/src/components/ShareSeedConsumer.tsx
+index a2f824bb0..d7ded28a6 100644
+--- a/web/src/components/ShareSeedConsumer.tsx
++++ b/web/src/components/ShareSeedConsumer.tsx
+@@ -30,7 +30,11 @@ import { getDraft } from '@/lib/composer-drafts'
+  *  - The IDB row is deleted after the seed completes so a back-button
+  *    refresh of /sessions/:id doesn't re-attach the same payload.
+  */
+-export function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
++export function ShareSeedConsumer(props: {
++    sessionId: string
++    sessionActive: boolean
++    onProgrammaticEdit?: () => void
++}) {
+     const assistantApi = useAui()
+     const composerText = useAuiState((s) => s.composer.text)
+     const composerTextRef = useRef(composerText)
+@@ -55,6 +59,9 @@ export function ShareSeedConsumer(props: { sessionId: string; sessionActive: boo
+                     .filter((part) => typeof part === 'string' && part.length > 0)
+                     .join('\n')
+                     .trim()
++                if (seedText.length > 0 || payload.files.length > 0) {
++                    props.onProgrammaticEdit?.()
++                }
+                 if (seedText.length > 0) {
+                     const existingText = composerTextRef.current.trim().length > 0
+                         ? composerTextRef.current
+@@ -79,7 +86,7 @@ export function ShareSeedConsumer(props: { sessionId: string; sessionActive: boo
+                 console.error('share-seed pull failed', err)
+             }
+         })()
+-    }, [props.sessionActive, props.sessionId, assistantApi])
++    }, [props.onProgrammaticEdit, props.sessionActive, props.sessionId, assistantApi])
+ 
+     return null
+ }
+diff --git a/web/src/hooks/mutations/useSendMessage.test.tsx b/web/src/hooks/mutations/useSendMessage.test.tsx
+index a7cb9529c..8a99c49a9 100644
+--- a/web/src/hooks/mutations/useSendMessage.test.tsx
++++ b/web/src/hooks/mutations/useSendMessage.test.tsx
+@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import type { ReactNode } from 'react'
+ import { useSendMessage, type SendMessageAcceptance } from './useSendMessage'
+ import { ApiError, type ApiClient } from '@/api/client'
++import { recordComposerProgrammaticEdit, resetComposerSendStateForTests } from '@/lib/composer-send-state'
+ 
+ vi.mock('@/lib/message-window-store', () => ({
+     appendOptimisticMessage: vi.fn(),
+@@ -46,6 +47,7 @@ function deferred<T>() {
+ describe('useSendMessage', () => {
+     beforeEach(() => {
+         vi.clearAllMocks()
++        resetComposerSendStateForTests()
+     })
+ 
+     it('calls onSuccess with the session ID that was sent', async () => {
+@@ -166,6 +168,36 @@ describe('useSendMessage', () => {
+         })
+     })
+ 
++    it('captures the resolved target revision before resume navigation', async () => {
++        const targetSessionId = 'session-resolved-before-revision-test'
++        const api = createMockApi()
++        const onSessionResolved = vi.fn(async () => {
++            // Simulate a same-text Queued Edit exposed by the target route
++            // while resume navigation is still in flight.
++            recordComposerProgrammaticEdit(targetSessionId)
++        })
++        const { result } = renderHook(
++            () => useSendMessage(api, 'session-original', {
++                resolveSessionId: async () => ({ sessionId: targetSessionId, resumed: true }),
++                onSessionResolved,
++            }),
++            { wrapper: createWrapper() },
++        )
++
++        let accepted: Awaited<ReturnType<typeof result.current.sendMessage>> | undefined
++        await act(async () => {
++            accepted = await result.current.sendMessage('hello')
++        })
++
++        expect(accepted).toEqual({
++            attemptId: 'local-id-1',
++            sessionId: targetSessionId,
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
++        expect(onSessionResolved).toHaveBeenCalledOnce()
++    })
++
+     it('does not call onSuccess when send fails', async () => {
+         const onSuccess = vi.fn()
+         const api = createMockApi(async () => {
+@@ -579,7 +611,12 @@ describe('useSendMessage', () => {
+         act(() => {
+             acceptedPromise = result.current.sendMessage('hello')
+         })
+-        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1', sessionId: 'session-A' })
++        await expect(acceptedPromise!).resolves.toEqual({
++            attemptId: 'local-id-1',
++            sessionId: 'session-A',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
+     })
+ 
+     it('resolves false when blocked (no api) so the caller can preserve schedule state', async () => {
+@@ -639,7 +676,12 @@ describe('useSendMessage', () => {
+         act(() => {
+             acceptedPromise = result.current.sendMessage('hello')
+         })
+-        await expect(acceptedPromise!).resolves.toEqual({ attemptId: 'local-id-1', sessionId: 'session-resolved' })
++        await expect(acceptedPromise!).resolves.toEqual({
++            attemptId: 'local-id-1',
++            sessionId: 'session-resolved',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
+     })
+ 
+     it('awaits onSessionResolved before starting the send mutation', async () => {
+@@ -909,6 +951,66 @@ describe('useSendMessage', () => {
+         })
+     })
+ 
++    it('preserves settled sends per session while switching routes', async () => {
++        const requests: Array<ReturnType<typeof deferred<void>>> = []
++        const api = createMockApi(() => {
++            const request = deferred<void>()
++            requests.push(request)
++            return request.promise
++        })
++        const { result, rerender } = renderHook(
++            ({ sessionId }: { sessionId: string }) => useSendMessage(api, sessionId),
++            {
++                initialProps: { sessionId: 'session-A' },
++                wrapper: createWrapper(),
++            },
++        )
++
++        act(() => {
++            void result.current.sendMessage('message A')
++        })
++        await waitFor(() => expect(requests).toHaveLength(1))
++
++        rerender({ sessionId: 'session-B' })
++        await act(async () => {
++            requests[0].resolve()
++            await requests[0].promise
++        })
++        await waitFor(() => expect(result.current.isSending).toBe(false))
++        expect(result.current.sendSettlement).toBeNull()
++
++        act(() => {
++            void result.current.sendMessage('message B')
++        })
++        await waitFor(() => expect(requests).toHaveLength(2))
++        await act(async () => {
++            requests[1].resolve()
++            await requests[1].promise
++        })
++
++        await waitFor(() => expect(result.current.sendSettlement).toEqual(expect.objectContaining({
++            sessionId: 'session-B',
++            text: 'message B',
++        })))
++
++        rerender({ sessionId: 'session-A' })
++        expect(result.current.sendSettlement).toEqual(expect.objectContaining({
++            sessionId: 'session-A',
++            text: 'message A',
++        }))
++
++        act(() => {
++            result.current.consumeSendSettlement('local-id-1')
++        })
++        expect(result.current.sendSettlement).toBeNull()
++
++        rerender({ sessionId: 'session-B' })
++        expect(result.current.sendSettlement).toEqual(expect.objectContaining({
++            sessionId: 'session-B',
++            text: 'message B',
++        }))
++    })
++
+     it('downgrades a failed steer to queue when retrying the message', async () => {
+         const sendMock = vi.fn(async () => {})
+         const api = createMockApi(sendMock)
+diff --git a/web/src/hooks/mutations/useSendMessage.ts b/web/src/hooks/mutations/useSendMessage.ts
+index a30df4d63..e863a252c 100644
+--- a/web/src/hooks/mutations/useSendMessage.ts
++++ b/web/src/hooks/mutations/useSendMessage.ts
+@@ -1,5 +1,5 @@
+ import { useMutation } from '@tanstack/react-query'
+-import { useCallback, useRef, useState } from 'react'
++import { useCallback, useRef, useState, useSyncExternalStore } from 'react'
+ import type { ApiClient } from '@/api/client'
+ import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
+ import { makeClientSideId } from '@/lib/messages'
+@@ -12,6 +12,14 @@ import {
+ import { usePlatform } from '@/hooks/usePlatform'
+ import type { MessageDeliveryMode } from '@hapi/protocol'
+ import { getRetryDeliveryMode } from '@/lib/messageDelivery'
++import {
++    consumeComposerSendSettlement,
++    getComposerDraftRevision,
++    getComposerProgrammaticEditRevision,
++    getComposerSendSettlement,
++    publishComposerSendSettlement,
++    subscribeComposerSendState,
++} from '@/lib/composer-send-state'
+ 
+ type SendMessageInput = {
+     sessionId: string
+@@ -27,6 +35,8 @@ type SendMessageInput = {
+ export type SendMessageAcceptance = {
+     attemptId: string | null
+     sessionId: string
++    programmaticEditRevision: number
++    draftRevision: number
+ }
+ 
+ export type SendMessageSettlement = {
+@@ -212,12 +222,15 @@ export function useSendMessage(
+ } {
+     const { haptic } = usePlatform()
+     const [isResolving, setIsResolving] = useState(false)
+-    const [sendSettlement, setSendSettlement] = useState<SendMessageSettlement | null>(null)
++    const sendSettlement = useSyncExternalStore(
++        subscribeComposerSendState,
++        () => getComposerSendSettlement(sessionId),
++        () => null,
++    )
+     const consumeSendSettlement = useCallback((attemptId: string) => {
+-        setSendSettlement((current) =>
+-            current?.attemptId === attemptId ? null : current
+-        )
+-    }, [])
++        if (!sessionId) return
++        consumeComposerSendSettlement(sessionId, attemptId)
++    }, [sessionId])
+     const resolveGuardRef = useRef(false)
+     const isSessionThinkingRef = useRef(options?.isSessionThinking ?? false)
+     isSessionThinkingRef.current = options?.isSessionThinking ?? false
+@@ -242,7 +255,7 @@ export function useSendMessage(
+             return { successStatus }
+         },
+         onSuccess: (_, input, context) => {
+-            setSendSettlement({
++            publishComposerSendSettlement({
+                 attemptId: input.localId,
+                 sessionId: input.sessionId,
+                 text: input.text,
+@@ -258,7 +271,7 @@ export function useSendMessage(
+             options?.onSuccess?.(input.sessionId, input.text)
+         },
+         onError: (error, input) => {
+-            setSendSettlement({
++            publishComposerSendSettlement({
+                 attemptId: input.localId,
+                 sessionId: input.sessionId,
+                 text: input.text,
+@@ -321,12 +334,18 @@ export function useSendMessage(
+         const createdAt = Date.now()
+         let targetSessionId = sessionId
+         let sendAttachments = attachments
++        let programmaticEditRevision = getComposerProgrammaticEditRevision(targetSessionId)
++        let draftRevision = getComposerDraftRevision(targetSessionId)
+         if (options?.resolveSessionId) {
+             resolveGuardRef.current = true
+             setIsResolving(true)
+             try {
+                 const resolved = await options.resolveSessionId(sessionId)
+                 targetSessionId = resolved.sessionId
++                // Capture before resume navigation can mount the target
++                // composer and let a same-text programmatic edit advance it.
++                programmaticEditRevision = getComposerProgrammaticEditRevision(targetSessionId)
++                draftRevision = getComposerDraftRevision(targetSessionId)
+                 if (resolved.resumed) {
+                     // Await draft transfer / navigation before the mutation so
+                     // hidden inactive attachments move with the resumed id
+@@ -380,7 +399,7 @@ export function useSendMessage(
+             deliveryMode,
+             source: 'send',
+         })
+-        return { attemptId: localId, sessionId: targetSessionId }
++        return { attemptId: localId, sessionId: targetSessionId, programmaticEditRevision, draftRevision }
+     }
+ 
+     const retryMessage = (localId: string): boolean => {
+diff --git a/web/src/hooks/useComposerDraft.test.ts b/web/src/hooks/useComposerDraft.test.ts
+index 6abc3a25e..8a46bdda3 100644
+--- a/web/src/hooks/useComposerDraft.test.ts
++++ b/web/src/hooks/useComposerDraft.test.ts
+@@ -184,12 +184,23 @@ describe('useComposerDraft', () => {
+     it('restores saved attachments when the composer is empty', async () => {
+         const file = new File(['image'], 'image.png', { type: 'image/png' })
+         mockGetDraftAttachments.mockResolvedValue([file])
++        mockGetRestoredUploadMetadata.mockReturnValue({ id: 'stored-file' })
+         const addAttachment = vi.fn(async () => {})
++        const onRestoredAttachmentIds = vi.fn()
+ 
+-        const { result } = renderHook(() => useComposerDraft('session-1', '', [], true, vi.fn(), addAttachment))
++        const { result } = renderHook(() => useComposerDraft(
++            'session-1',
++            '',
++            [],
++            true,
++            vi.fn(),
++            addAttachment,
++            onRestoredAttachmentIds,
++        ))
+         await act(async () => flushRAF())
+ 
+         expect(addAttachment).toHaveBeenCalledWith(file)
++        expect(onRestoredAttachmentIds).toHaveBeenCalledWith(['stored-file'])
+         expect(result.current).toEqual({
+             sessionId: 'session-1',
+             complete: true,
+diff --git a/web/src/hooks/useComposerDraft.ts b/web/src/hooks/useComposerDraft.ts
+index 59c0c7215..3ec405ebc 100644
+--- a/web/src/hooks/useComposerDraft.ts
++++ b/web/src/hooks/useComposerDraft.ts
+@@ -38,6 +38,7 @@ export function useComposerDraft(
+     canRestoreAttachments: boolean,
+     setText: (text: string) => void,
+     addAttachment: (file: File) => Promise<void>,
++    onRestoredAttachmentIds?: (ids: readonly string[]) => void,
+ ): ComposerDraftHydration {
+     const composerTextRef = useRef(composerText)
+     composerTextRef.current = composerText
+@@ -126,6 +127,11 @@ export function useComposerDraft(
+                     const id = getRestoredUploadMetadata(file)?.id
+                     return !id || !visibleIds.has(id)
+                 })
++                onRestoredAttachmentIds?.(
++                    filesToRestore
++                        .map((file) => getRestoredUploadMetadata(file)?.id)
++                        .filter((id): id is string => Boolean(id)),
++                )
+                 // Text is already known to be restored; attachment presence by
+                 // itself is not. An upload can fail, so only successful adds
+                 // contribute to restoredAny in the final completion update.
+diff --git a/web/src/lib/attachmentAdapter.test.ts b/web/src/lib/attachmentAdapter.test.ts
+index fb96827fa..2419c35b2 100644
+--- a/web/src/lib/attachmentAdapter.test.ts
++++ b/web/src/lib/attachmentAdapter.test.ts
+@@ -63,6 +63,21 @@ describe('attachmentAdapter', () => {
+         })])
+     })
+ 
++    it('releases sent attachments without deleting their upload files', async () => {
++        const { createAttachmentAdapter } = await import('./attachmentAdapter')
++        const deleteUploadFile = vi.fn(async () => {})
++        const adapter = createAttachmentAdapter({ deleteUploadFile } as never, 'session-1')
++
++        adapter.releaseWithoutDelete(['attachment-ready'])
++        await adapter.remove({
++            id: 'attachment-ready',
++            path: '/uploads/ready.png',
++            uploadSessionId: 'session-1',
++        } as never)
++
++        expect(deleteUploadFile).not.toHaveBeenCalled()
++    })
++
+     it('uploads an image when the initial preview read fails', async () => {
+         let readCount = 0
+         class FileReaderMock {
+diff --git a/web/src/lib/attachmentAdapter.ts b/web/src/lib/attachmentAdapter.ts
+index 01db33eb0..2a7f444be 100644
+--- a/web/src/lib/attachmentAdapter.ts
++++ b/web/src/lib/attachmentAdapter.ts
+@@ -16,6 +16,15 @@ type PendingUploadAttachment = PendingAttachment & {
+     uploadSessionId?: string
+ }
+ 
++export type ChatAttachmentAdapter = AttachmentAdapter & {
++    /**
++     * Successful message delivery owns the upload path. Mark sent chips so
++     * assistant-ui can remove them from the composer without deleting files
++     * that the agent may still need to read.
++     */
++    releaseWithoutDelete(ids: Iterable<string>): void
++}
++
+ export function createAttachmentAdapter(
+     api: ApiClient,
+     sessionId: string,
+@@ -24,8 +33,9 @@ export function createAttachmentAdapter(
+     // the pick is cancelled — so the caller can navigate off a deleted source.
+     // Cancellation is re-checked at transfer save time via isCancelled().
+     onSessionResolved?: (sessionId: string, pending: AttachmentDraftHandoff) => Promise<void>,
+-): AttachmentAdapter {
++): ChatAttachmentAdapter {
+     const cancelledAttachmentIds = new Set<string>()
++    const releasedWithoutDeleteIds = new Set<string>()
+ 
+     const deleteUpload = async (path?: string, uploadSessionId = sessionId) => {
+         if (!path) return
+@@ -42,6 +52,12 @@ export function createAttachmentAdapter(
+         // this adapter's add() method can run.
+         accept: '*',
+ 
++        releaseWithoutDelete(ids: Iterable<string>): void {
++            for (const id of ids) {
++                releasedWithoutDeleteIds.add(id)
++            }
++        },
++
+         async *add({ file }): AsyncGenerator<PendingAttachment> {
+             // Upload paths are scoped to the session that created them. An
+             // inactive composer may resume into a different session id, so its
+@@ -185,6 +201,7 @@ export function createAttachmentAdapter(
+ 
+         async remove(attachment: Attachment): Promise<void> {
+             cancelledAttachmentIds.add(attachment.id)
++            if (releasedWithoutDeleteIds.delete(attachment.id)) return
+             const path = (attachment as PendingUploadAttachment).path
+             const uploadSessionId = (attachment as PendingUploadAttachment).uploadSessionId
+             await deleteUpload(path, uploadSessionId)
+diff --git a/web/src/lib/composer-send-state.test.ts b/web/src/lib/composer-send-state.test.ts
+new file mode 100644
+index 000000000..62094d32e
+--- /dev/null
++++ b/web/src/lib/composer-send-state.test.ts
+@@ -0,0 +1,171 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import type { SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
++import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
++import {
++    consumeComposerSendSettlement,
++    consumePendingComposerSend,
++    getComposerDraftRevision,
++    getComposerProgrammaticEditRevision,
++    getComposerSendSettlement,
++    getPendingComposerSend,
++    publishComposerSendSettlement,
++    recordComposerProgrammaticEdit,
++    recordComposerDraftChange,
++    recordPendingComposerSend,
++    resetComposerSendStateForTests,
++} from './composer-send-state'
++
++vi.mock('@/lib/clearDraftsAfterSend', () => ({
++    clearDraftsAfterSend: vi.fn(),
++}))
++
++const mockClearDraftsAfterSend = vi.mocked(clearDraftsAfterSend)
++
++const settlement = (sessionId: string, attemptId: string): SendMessageSettlement => ({
++    sessionId,
++    attemptId,
++    text: `text-${sessionId}`,
++    status: 'success',
++    source: 'send',
++})
++
++describe('composer send state', () => {
++    beforeEach(() => {
++        resetComposerSendStateForTests()
++        mockClearDraftsAfterSend.mockClear()
++    })
++
++    it('retains accepted sends and settlements while the chat tree is unmounted', () => {
++        recordPendingComposerSend({
++            sessionId: 'session-A',
++            attemptId: 'attempt-A',
++            text: 'message A',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
++        publishComposerSendSettlement(settlement('session-A', 'attempt-A'))
++
++        expect(getPendingComposerSend('session-A')).toEqual(expect.objectContaining({
++            attemptId: 'attempt-A',
++        }))
++        expect(getComposerSendSettlement('session-A')).toEqual(expect.objectContaining({
++            attemptId: 'attempt-A',
++        }))
++
++        consumePendingComposerSend('session-A', 'attempt-A')
++        consumeComposerSendSettlement('session-A', 'attempt-A')
++        expect(getPendingComposerSend('session-A')).toBeNull()
++        expect(getComposerSendSettlement('session-A')).toBeNull()
++    })
++
++    it('keeps independent session settlements isolated', () => {
++        publishComposerSendSettlement(settlement('session-A', 'attempt-A'))
++        publishComposerSendSettlement(settlement('session-B', 'attempt-B'))
++
++        consumeComposerSendSettlement('session-B', 'attempt-B')
++
++        expect(getComposerSendSettlement('session-A')).toEqual(expect.objectContaining({
++            attemptId: 'attempt-A',
++        }))
++        expect(getComposerSendSettlement('session-B')).toBeNull()
++    })
++
++    it('selects the currently accepted attempt when same-session sends settle out of order', () => {
++        recordPendingComposerSend({
++            sessionId: 'session-A',
++            attemptId: 'attempt-B',
++            text: 'message B',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
++        publishComposerSendSettlement(settlement('session-A', 'attempt-B'))
++        publishComposerSendSettlement(settlement('session-A', 'attempt-A'))
++
++        expect(getComposerSendSettlement('session-A')?.attemptId).toBe('attempt-B')
++
++        consumeComposerSendSettlement('session-A', 'attempt-B')
++        consumePendingComposerSend('session-A', 'attempt-B')
++        expect(getComposerSendSettlement('session-A')?.attemptId).toBe('attempt-A')
++        consumeComposerSendSettlement('session-A', 'attempt-A')
++    })
++
++    it('increments programmatic edit revisions per session', () => {
++        expect(getComposerProgrammaticEditRevision('session-A')).toBe(0)
++        recordComposerProgrammaticEdit('session-A')
++        recordComposerProgrammaticEdit('session-A')
++        recordComposerProgrammaticEdit('session-B')
++        expect(getComposerProgrammaticEditRevision('session-A')).toBe(2)
++        expect(getComposerProgrammaticEditRevision('session-B')).toBe(1)
++    })
++
++    it('tracks all draft changes independently per session', () => {
++        expect(getComposerDraftRevision('session-A')).toBe(0)
++        recordComposerDraftChange('session-A')
++        recordComposerProgrammaticEdit('session-A')
++        recordComposerDraftChange('session-B')
++        expect(getComposerDraftRevision('session-A')).toBe(2)
++        expect(getComposerDraftRevision('session-B')).toBe(1)
++    })
++
++    it('consumes failed settlements so they cannot reappear after later sends', () => {
++        publishComposerSendSettlement({
++            ...settlement('session-A', 'attempt-error'),
++            status: 'error',
++        })
++
++        consumeComposerSendSettlement('session-A', 'attempt-error')
++
++        expect(getComposerSendSettlement('session-A')).toBeNull()
++    })
++
++    it('reconciles a successful send when acceptance and settlement meet', () => {
++        recordPendingComposerSend({
++            sessionId: 'session-A',
++            attemptId: 'attempt-A',
++            text: 'message A',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
++
++        publishComposerSendSettlement(settlement('session-A', 'attempt-A'))
++
++        expect(mockClearDraftsAfterSend).toHaveBeenCalledWith(
++            'session-A',
++            null,
++            'text-session-A',
++        )
++    })
++
++    it('reconciles when settlement arrives before acceptance', () => {
++        publishComposerSendSettlement(settlement('session-A', 'attempt-A'))
++
++        recordPendingComposerSend({
++            sessionId: 'session-A',
++            attemptId: 'attempt-A',
++            text: 'message A',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
++
++        expect(mockClearDraftsAfterSend).toHaveBeenCalledWith(
++            'session-A',
++            null,
++            'text-session-A',
++        )
++    })
++
++    it('does not reconcile after a newer draft revision', () => {
++        recordPendingComposerSend({
++            sessionId: 'session-A',
++            attemptId: 'attempt-A',
++            text: 'message A',
++            programmaticEditRevision: 0,
++            draftRevision: 0,
++        })
++        recordComposerDraftChange('session-A')
++
++        publishComposerSendSettlement(settlement('session-A', 'attempt-A'))
++
++        expect(mockClearDraftsAfterSend).not.toHaveBeenCalled()
++    })
++})
+diff --git a/web/src/lib/composer-send-state.ts b/web/src/lib/composer-send-state.ts
+new file mode 100644
+index 000000000..ebf7bc539
+--- /dev/null
++++ b/web/src/lib/composer-send-state.ts
+@@ -0,0 +1,114 @@
++import type { SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
++import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
++
++export type PendingComposerSend = {
++    attemptId: string | null
++    sessionId: string
++    text: string
++    programmaticEditRevision: number
++    draftRevision: number
++}
++
++const pendingComposerSends = new Map<string, PendingComposerSend>()
++const composerProgrammaticEditRevisions = new Map<string, number>()
++const composerDraftRevisions = new Map<string, number>()
++const composerSendSettlements = new Map<string, Map<string, SendMessageSettlement>>()
++const listeners = new Set<() => void>()
++
++/** Test isolation; production state intentionally survives route unmounts. */
++export function resetComposerSendStateForTests(): void {
++    pendingComposerSends.clear()
++    composerProgrammaticEditRevisions.clear()
++    composerDraftRevisions.clear()
++    composerSendSettlements.clear()
++    notify()
++}
++
++function notify(): void {
++    for (const listener of listeners) listener()
++}
++
++export function subscribeComposerSendState(listener: () => void): () => void {
++    listeners.add(listener)
++    return () => listeners.delete(listener)
++}
++
++export function getPendingComposerSend(sessionId: string): PendingComposerSend | null {
++    return pendingComposerSends.get(sessionId) ?? null
++}
++
++export function recordPendingComposerSend(send: PendingComposerSend): void {
++    pendingComposerSends.set(send.sessionId, send)
++    reconcileSuccessfulSend(send.sessionId)
++    notify()
++}
++
++export function consumePendingComposerSend(sessionId: string, attemptId: string | null): void {
++    const current = pendingComposerSends.get(sessionId)
++    if (!current || current.attemptId !== attemptId) return
++    pendingComposerSends.delete(sessionId)
++    notify()
++}
++
++export function getComposerProgrammaticEditRevision(sessionId: string): number {
++    return composerProgrammaticEditRevisions.get(sessionId) ?? 0
++}
++
++export function getComposerDraftRevision(sessionId: string): number {
++    return composerDraftRevisions.get(sessionId) ?? 0
++}
++
++export function recordComposerDraftChange(sessionId: string): void {
++    composerDraftRevisions.set(sessionId, getComposerDraftRevision(sessionId) + 1)
++    notify()
++}
++
++export function recordComposerProgrammaticEdit(sessionId: string): void {
++    composerProgrammaticEditRevisions.set(
++        sessionId,
++        getComposerProgrammaticEditRevision(sessionId) + 1,
++    )
++    composerDraftRevisions.set(sessionId, getComposerDraftRevision(sessionId) + 1)
++    notify()
++}
++
++export function getComposerSendSettlement(sessionId: string | null): SendMessageSettlement | null {
++    if (!sessionId) return null
++    const byAttempt = composerSendSettlements.get(sessionId)
++    if (!byAttempt) return null
++    const pendingAttemptId = pendingComposerSends.get(sessionId)?.attemptId
++    if (pendingAttemptId !== null && pendingAttemptId !== undefined) {
++        return byAttempt.get(pendingAttemptId) ?? null
++    }
++    return byAttempt.values().next().value ?? null
++}
++
++export function publishComposerSendSettlement(settlement: SendMessageSettlement): void {
++    const byAttempt = composerSendSettlements.get(settlement.sessionId) ?? new Map<string, SendMessageSettlement>()
++    byAttempt.set(settlement.attemptId, settlement)
++    composerSendSettlements.set(settlement.sessionId, byAttempt)
++    reconcileSuccessfulSend(settlement.sessionId)
++    notify()
++}
++
++/**
++ * Clear durable draft storage as soon as both halves of a successful send are
++ * known. The mounted composer still owns live assistant-ui cleanup, but this
++ * path keeps a route-unmounted or refreshed page from resurrecting a sent
++ * draft. A newer draft revision always wins and remains intact.
++ */
++function reconcileSuccessfulSend(sessionId: string): void {
++    const pending = pendingComposerSends.get(sessionId)
++    if (!pending?.attemptId) return
++    const settlement = composerSendSettlements.get(sessionId)?.get(pending.attemptId)
++    if (settlement?.status !== 'success') return
++    if (getComposerDraftRevision(sessionId) !== pending.draftRevision) return
++    clearDraftsAfterSend(sessionId, null, settlement.text)
++}
++
++export function consumeComposerSendSettlement(sessionId: string, attemptId: string): void {
++    const byAttempt = composerSendSettlements.get(sessionId)
++    if (!byAttempt?.delete(attemptId)) return
++    if (byAttempt.size === 0) composerSendSettlements.delete(sessionId)
++    notify()
++}
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index 15d8817f0..626df045d 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -47,7 +47,6 @@ import { queryKeys } from '@/lib/query-keys'
+ import { useToast } from '@/lib/toast-context'
+ import { useTranslation } from '@/lib/use-translation'
+ import { seedMessageWindowFromSession, syncTailMessages } from '@/lib/message-window-store'
+-import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
+ import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+ import { getDraftAttachments } from '@/lib/composer-attachment-drafts'
+ import { refreshSessionDetailPreservingActive } from '@/lib/session-detail-optimistic'
+@@ -607,8 +606,7 @@ function SessionPage() {
+         consumeSendSettlement,
+     } = useSendMessage(api, sessionId, {
+         isSessionThinking: session?.thinking ?? false,
+-        onSuccess: (sentSessionId, sentText) => {
+-            clearDraftsAfterSend(sentSessionId, sessionId, sentText)
++        onSuccess: (sentSessionId) => {
+             // 中文注释：一旦用户已经在 Hapi 内继续这个 Codex 会话，就清除"刚从 Codex 导入"的标记。
+             clearCodexImportedSession(session?.metadata?.codexSessionId)
+             // A successful send supersedes any previously-rendered error
+-- 
+2.43.0
+

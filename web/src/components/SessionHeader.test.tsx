@@ -1,15 +1,35 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Session } from '@/types/api'
 import type { ApiClient } from '@/api/client'
+import type { CodexModelSummary, Session } from '@/types/api'
 import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
 import { resolveSessionHeaderMachineLabel, SessionHeader } from './SessionHeader'
 
+const mocks = vi.hoisted(() => ({
+    telegramApp: false,
+    useCodexModels: vi.fn((): { models: CodexModelSummary[]; isLoading: boolean; error: string | null } => ({
+        models: [],
+        isLoading: false,
+        error: null
+    }))
+}))
+
+vi.mock('@/hooks/useTelegram', () => ({
+    isTelegramApp: () => mocks.telegramApp
+}))
+
+vi.mock('@/hooks/queries/useCodexModels', () => ({
+    useCodexModels: mocks.useCodexModels
+}))
+
 afterEach(() => {
     cleanup()
     localStorage.clear()
+    mocks.telegramApp = false
+    mocks.useCodexModels.mockClear()
+    mocks.useCodexModels.mockReturnValue({ models: [], isLoading: false, error: null })
 })
 
 function ToastMessages() {
@@ -83,7 +103,7 @@ describe('resolveSessionHeaderMachineLabel', () => {
 })
 
 describe('SessionHeader', () => {
-    it('hides title generation when the Hub does not advertise the capability', () => {
+    it('keeps title generation discoverable when the Hub does not advertise the capability', () => {
         const api = {
             getMachines: vi.fn().mockResolvedValue({ machines: [] }),
             getScratchlist: vi.fn().mockResolvedValue({ entries: [] })
@@ -107,7 +127,7 @@ describe('SessionHeader', () => {
         fireEvent.click(screen.getByTitle('More actions'))
         fireEvent.click(screen.getByRole('menuitem', { name: /Rename/ }))
 
-        expect(screen.queryByRole('button', { name: 'Generate' })).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Generate' })).toBeInTheDocument()
     })
 
     it('manually syncs an inactive Pi session through its owning machine', async () => {
@@ -205,6 +225,65 @@ describe('SessionHeader', () => {
         expect(onToggleTerminal).toHaveBeenCalledOnce()
     })
 
+    it('does not request the Codex model catalog in Telegram', () => {
+        mocks.telegramApp = true
+
+        const { container } = renderHeader(baseSession({
+            metadata: { flavor: 'codex', path: '/repo', host: 'machine', machineId: 'machine-1' }
+        }))
+
+        expect(container).toBeEmptyDOMElement()
+        expect(mocks.useCodexModels).toHaveBeenCalledWith(expect.objectContaining({
+            enabled: false
+        }))
+    })
+
+    it('does not request the Codex model catalog without a renderable model row', () => {
+        renderHeader(baseSession({
+            metadata: { flavor: 'codex', path: '/repo', host: 'machine', machineId: 'machine-1' },
+            model: null
+        }))
+
+        expect(mocks.useCodexModels).toHaveBeenLastCalledWith(expect.objectContaining({
+            enabled: false
+        }))
+
+        cleanup()
+        mocks.useCodexModels.mockClear()
+        localStorage.setItem('hapi-session-header-metadata', JSON.stringify({ model: false }))
+        renderHeader(baseSession({
+            metadata: { flavor: 'codex', path: '/repo', host: 'machine', machineId: 'machine-1' },
+            model: 'gpt-5.6-sol'
+        }))
+
+        expect(mocks.useCodexModels).toHaveBeenLastCalledWith(expect.objectContaining({
+            enabled: false
+        }))
+    })
+
+    it('renders the catalog display name for an explicit Codex model', () => {
+        mocks.useCodexModels.mockReturnValue({
+            models: [{
+                id: 'gpt-5.6-sol',
+                displayName: 'GPT-5.6 Sol Catalog',
+                isDefault: true,
+                supportedReasoningEfforts: []
+            }],
+            isLoading: false,
+            error: null
+        })
+
+        renderHeader(baseSession({
+            metadata: { flavor: 'codex', path: '/repo', host: 'machine', machineId: 'machine-1' },
+            model: 'gpt-5.6-sol'
+        }))
+
+        expect(mocks.useCodexModels).toHaveBeenLastCalledWith(expect.objectContaining({
+            enabled: true
+        }))
+        expect(screen.getByText(/GPT-5\.6 Sol Catalog/)).toBeInTheDocument()
+    })
+
     it('shows an inherited catalog-default Fast tier', () => {
         renderHeader(baseSession(), { serviceTier: 'priority' })
         expect(screen.getByText('fast')).toBeInTheDocument()
@@ -275,6 +354,32 @@ describe('SessionHeader', () => {
 
         expect(screen.getByTestId('session-header-machine')).toHaveTextContent(/oos-linux/)
         expect(screen.getByTestId('session-header-age')).toHaveTextContent(/5m ago|5分钟前/)
+    })
+
+    it('shows the project label from the worktree base path separately from its branch', () => {
+        renderHeader(baseSession({
+            metadata: {
+                flavor: 'cursor',
+                path: '/home/user/coding/hapi-worktrees/fix-resume',
+                host: 'machine',
+                worktree: {
+                    basePath: '/home/user/coding/hapi',
+                    branch: 'fix/resume',
+                    name: 'fix-resume',
+                    worktreePath: '/home/user/coding/hapi-worktrees/fix-resume'
+                }
+            }
+        }))
+
+        expect(screen.getByTestId('session-header-project')).toHaveTextContent('project: coding/hapi')
+        expect(screen.getByText('worktree: fix/resume')).toBeInTheDocument()
+    })
+
+    it('hides the project label when its display setting is disabled', () => {
+        localStorage.setItem('hapi-session-header-metadata', JSON.stringify({ project: false }))
+        renderHeader(baseSession({ metadata: { flavor: 'cursor', path: '/home/user/coding/hapi', host: 'machine' } }))
+
+        expect(screen.queryByTestId('session-header-project')).not.toBeInTheDocument()
     })
 
     it('advances relative age on the minute tick without a session prop change', () => {

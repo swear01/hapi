@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
@@ -22,12 +23,13 @@ describe('Pi conversation-history hub integration', () => {
             store.messages.markMessagesInvoked(session.id, ['local-boundary'], Date.now())
             ;(engine as any).rpcGateway.rewindConversation = async () => ({
                 success: false,
-                error: 'Pi rewind was cancelled',
-                outcome: 'cancelled',
+                error: 'Codex native boundary is ambiguous',
+                code: 'ambiguous_native_boundary',
+                outcome: 'rejected',
             })
 
             await expect(engine.rewindConversation(session.id, 'default', 'local-boundary')).resolves.toEqual({
-                type: 'error', message: 'Pi rewind was cancelled',
+                type: 'error', message: 'Codex native boundary is ambiguous', code: 'ambiguous_native_boundary',
             })
             expect(engine.getSession(session.id)?.metadata?.conversationHistoryDiverged).not.toBe(true)
         } finally {
@@ -72,6 +74,12 @@ describe('Pi conversation-history hub integration', () => {
                 conversationHistoryPoints: { local1: true, local2: true },
                 conversationHistoryEntryIds: { local1: 'entry-1', local2: 'entry-2' },
             }, null, 'default', 'source-model', 'high')
+            engine.getOrCreateMachine('machine-1', {
+                host: 'localhost',
+                platform: 'linux',
+                happyCliVersion: 'test',
+                capabilities: [MACHINE_CAPABILITIES.SessionControlSkill]
+            }, null, 'default')
             engine.handleSessionAlive({ sid: source.id, time: Date.now(), mode: 'remote' })
             store.messages.addMessage(source.id, { role: 'user', content: 'one' }, 'local1')
             store.messages.addMessage(source.id, { role: 'user', content: 'two' }, 'local2')

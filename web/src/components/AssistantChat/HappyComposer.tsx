@@ -21,6 +21,7 @@ import {
 } from 'react'
 import { useNarrowViewport } from '@/hooks/useNarrowViewport'
 import { isRichComposerMentionsEnabled, resolveComposerPlaceholderKey } from '@/lib/composerSegments'
+import { dictationDirectSendEligible } from '@/lib/dictationSend'
 import type { SessionMentionResolveResult } from '@/components/AssistantChat/RichComposerInput'
 import {
     RichComposerInput,
@@ -29,11 +30,13 @@ import {
 import { useFue } from '@/lib/use-fue'
 import { FueCallout, FueDot } from '@/components/Fue'
 import type { AgentState, CodexCollaborationMode, PermissionMode, PiModelSummary } from '@/types/api'
+import type { CodexUsage } from '@hapi/protocol/types'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
 import { useActiveSuggestions } from '@/hooks/useActiveSuggestions'
 import { applySuggestion } from '@/utils/applySuggestion'
+import { DEFAULT_AUTOCOMPLETE_PREFIXES } from '@/lib/autocomplete'
 import { usePlatform } from '@/hooks/usePlatform'
 import { usePWAInstall } from '@/hooks/usePWAInstall'
 import { supportsEffort, supportsModelChange, PI_THINKING_LEVEL_LABELS } from '@hapi/protocol'
@@ -41,6 +44,8 @@ import type { PiThinkingLevel } from '@hapi/protocol'
 import { markSkillUsed } from '@/lib/recent-skills'
 import { useComposerDraft } from '@/hooks/useComposerDraft'
 import type { AttachmentDraftInput } from '@/lib/composer-attachment-drafts'
+import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
+import { consumePendingComposerSend, getComposerDraftRevision, recordComposerDraftChange } from '@/lib/composer-send-state'
 import { persistInactiveComposerAttachments, setComposerDraftSnapshot, updateComposerDraftTextSnapshot, attachmentDraftRevision, resetInactiveComposerAttachmentVisibility } from '@/lib/composer-draft-transfer'
 import { useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
@@ -61,9 +66,10 @@ import { groupModelsByProvider } from './piModelGroups'
 import type { ApiClient } from '@/api/client'
 import { useVoiceInputPreferences } from '@/hooks/useVoiceInputPreferences'
 import { useDictation } from '@/hooks/useDictation'
-import type { ComposerSendIntent } from '@/lib/messageDelivery'
+import { resolveMessageDeliveryMode, type ComposerSendIntent } from '@/lib/messageDelivery'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import { moveAttachmentId, orderItemsById, reconcileAttachmentOrder, type AttachmentDropPosition } from '@/lib/attachmentOrder'
+import type { SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
 
 export interface TextInputState {
     text: string
@@ -79,6 +85,37 @@ export function getComposerEscapeAction(input: {
     if (input.threadIsRunning) return 'abort'
     if (input.isExpanded) return 'collapse'
     return null
+}
+
+/**
+ * Enter key after IME / Shift+Enter / suggestions are handled.
+ *
+ * Expanded composer always uses newline semantics (long-form drafting) even when
+ * Settings → Chat → Enter behavior is `send`. Collapsed honors that setting.
+ * Ctrl/Cmd+Enter sends in newline (or expanded) mode; plain modifiers otherwise
+ * are ignored (and the caller still preventDefaults in send mode).
+ */
+export type ComposerEnterKeyAction = 'send' | 'newline' | 'ignore'
+
+export function resolveComposerEnterKeyAction(input: {
+    composerEnterBehavior: 'send' | 'newline'
+    isExpanded: boolean
+    ctrlOrMeta: boolean
+    altKey: boolean
+}): ComposerEnterKeyAction {
+    // The current main branch no longer has the old Pi Alt+Enter queue
+    // gesture (#1480). Preserve its existing send-mode modifier behavior
+    // rather than turning that shortcut into an unintended line break.
+    if (input.isExpanded && input.altKey && input.composerEnterBehavior === 'send') {
+        return 'ignore'
+    }
+    const insertNewline = input.isExpanded || input.composerEnterBehavior === 'newline'
+    if (insertNewline) {
+        if (input.ctrlOrMeta && !input.altKey) return 'send'
+        return 'newline'
+    }
+    if (!input.ctrlOrMeta && !input.altKey) return 'send'
+    return 'ignore'
 }
 
 /**
@@ -282,6 +319,7 @@ export function ModelEffortSettingsSection(props: {
 export function HappyComposer(props: {
     sessionId?: string
     onUploadDraftSnapshot?: (text: string, attachments: AttachmentDraftInput[]) => void
+    onReleaseSentAttachments?: (ids: readonly string[]) => void
     canRestoreAttachments?: boolean
     disabled?: boolean
     permissionMode?: PermissionMode
@@ -295,12 +333,15 @@ export function HappyComposer(props: {
     thinking?: boolean
     agentState?: AgentState | null
     backgroundTaskCount?: number
+    machineUptimeSeconds?: number
     contextSize?: number
     contextCacheRead?: number
     contextWindow?: number | null
     /** Model for the context-window heuristic; see StatusBar.contextModel. */
     contextModel?: string | null
+    codexUsage?: CodexUsage | null
     controlledByUser?: boolean
+    allowConfigChangesWhileThinking?: boolean
     agentFlavor?: string | null
     availableModelOptions?: Array<{ value: string | null; label: string }>
     /** Full Pi model data with thinkingLevelMap for provider grouping + thinking level filtering */
@@ -341,6 +382,23 @@ export function HappyComposer(props: {
     onVoiceToggle?: () => void
     onVoiceMicToggle?: () => void
     voiceTranscriptionApi?: ApiClient
+    /**
+     * Resolves the target session for a voice dictation direct-send (same
+     * contract as `useSendMessage`'s `resolveSessionId`): an inactive
+     * session must be resumed before the message POST, otherwise the hub
+     * rejects it with 409 `session_inactive`. Captured at send time and
+     * applied after transcription completes, so the send survives
+     * navigation while the recording is being processed. When provided,
+     * direct voice sends are allowed on inactive sessions (they resume
+     * first instead of being downgraded to a plain stop).
+     */
+    resolveSessionIdForVoice?: (sessionId: string) => Promise<{ sessionId: string; resumed: boolean }>
+    /**
+     * Called when the voice direct-send resumed an inactive session and
+     * the message was delivered to the resumed session id, so the caller
+     * can navigate/seed the live session (mirrors `onSessionResolved`).
+     */
+    onVoiceSessionResolved?: (sessionId: string) => void
     // Schedule props (lifted from internal state when provided)
     pendingSchedule?: PendingSchedule | null
     onSchedule?: (pending: PendingSchedule) => void
@@ -368,9 +426,18 @@ export function HappyComposer(props: {
     onClearSendError?: () => void
     onSuppressSendErrorRestore?: (id: number) => void
     /** Emitted by SessionChat after a send is accepted. Null attempt ids are settled scratchlist sends. */
-    sendAcceptance?: { attemptId: string | null } | null
+    sendAcceptance?: {
+        attemptId: string | null
+        sessionId?: string
+        programmaticEditRevision?: number
+        draftRevision?: number
+    } | null
+    /** Monotonic programmatic Queued Edit revision owned outside this keyed composer. */
+    programmaticEditRevision?: number
     /** Terminal result for a chat mutation, including attachment-bearing failures. */
-    sendSettlement?: { attemptId: string; status: 'success' | 'error' } | null
+    sendSettlement?: SendMessageSettlement | null
+    /** Consume a terminal result after this composer makes its clear/preserve decision. */
+    onConsumeSendSettlement?: (attemptId: string) => void
     /**
      * Resume/handoff path for inactive drafts that only exist in IndexedDB
      * (no visible text/attachments for assistant-ui to append).
@@ -402,11 +469,14 @@ export function HappyComposer(props: {
         thinking = false,
         agentState,
         backgroundTaskCount,
+        machineUptimeSeconds,
         contextSize,
         contextCacheRead,
         contextWindow,
         contextModel,
+        codexUsage,
         controlledByUser = false,
+        allowConfigChangesWhileThinking = false,
         agentFlavor,
         availableModelOptions,
         piModels,
@@ -429,7 +499,7 @@ export function HappyComposer(props: {
         onSwitchToRemote,
         onTerminal,
         terminalUnsupported = false,
-        autocompletePrefixes = ['@', '/', '$'],
+        autocompletePrefixes = [...DEFAULT_AUTOCOMPLETE_PREFIXES],
         autocompleteSuggestions = defaultSuggestionHandler,
         voiceStatus = 'disconnected',
         voiceMicMuted = false,
@@ -474,22 +544,32 @@ export function HappyComposer(props: {
         const nextOrder = moveAttachmentId(currentOrder, activeId, targetId, position)
         if (nextOrder.every((id, index) => id === currentOrder[index])) return
         attachmentOrderRef.current = nextOrder
+        userAttachmentGenerationRef.current += 1
+        if (sessionId) recordComposerDraftChange(sessionId)
         setAttachmentOrderRevision((revision) => revision + 1)
-    }, [attachmentIds, attachmentOrderRef])
+    }, [attachmentIds, attachmentOrderRef, sessionId])
     const orderedAttachments = orderItemsById(attachments, orderedAttachmentIds)
     const threadIsRunning = useAuiState((s) => s.thread.isRunning)
     const threadIsDisabled = useAuiState((s) => s.thread.isDisabled)
     const composerTextRef = useRef(composerText)
     composerTextRef.current = composerText
     const getCurrentComposerText = useCallback(() => composerTextRef.current, [])
-    const setComposerText = useCallback((text: string) => api.composer().setText(text), [api])
+    const setComposerText = useCallback((text: string) => {
+        if (sessionId) recordComposerDraftChange(sessionId)
+        api.composer().setText(text)
+    }, [api, sessionId])
     const voiceInput = useVoiceInputPreferences(props.voiceTranscriptionApi ?? null)
     const dictationConfig = useMemo(() => ({
         api: props.voiceTranscriptionApi ?? null,
         provider: voiceInput.provider,
         mode: voiceInput.transcriptionMode,
         getCurrentText: getCurrentComposerText,
-        onTextChange: setComposerText
+        onTextChange: setComposerText,
+        sendMessage: async (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => {
+            if (props.voiceTranscriptionApi) {
+                await props.voiceTranscriptionApi.sendMessage(sessionId, text, null, undefined, undefined, deliveryMode)
+            }
+        }
     }), [
         props.voiceTranscriptionApi,
         voiceInput.provider,
@@ -500,8 +580,12 @@ export function HappyComposer(props: {
     const dictation = useDictation(dictationConfig)
     const dictationActive = voiceInput.voiceMode === 'dictation'
     const effectiveVoiceStatus = dictationActive ? dictation.status : voiceStatus
+    const handleDictationToggle = useCallback(async () => {
+        await dictation.toggle()
+    }, [dictation])
+
     const effectiveVoiceToggle = dictationActive
-        ? (dictation.supported ? dictation.toggle : undefined)
+        ? (dictation.supported ? handleDictationToggle : undefined)
         : onVoiceToggle
     const previousVoiceModeRef = useRef(voiceInput.voiceMode)
     useEffect(() => {
@@ -545,6 +629,16 @@ export function HappyComposer(props: {
     const [isExpanded, setIsExpanded] = useState(false)
     const lastSendAcceptanceRef = useRef(props.sendAcceptance)
     const pendingSendAttemptIdRef = useRef<string | null>(null)
+    const pendingSendEditGenerationRef = useRef<number | null>(null)
+    const pendingSendAttachmentGenerationRef = useRef<number | null>(null)
+    const pendingSendScheduleGenerationRef = useRef<number | null>(null)
+    const acceptedSendEditGenerationRef = useRef<{
+        attemptId: string
+        generation: number
+        attachmentGeneration: number
+        scheduleGeneration: number
+    } | null>(null)
+    const handledSuccessfulSendRef = useRef<string | null>(null)
     const [showSettings, setShowSettings] = useState(false)
     // Anchored settings sheet: the model/effort value buttons open only their
     // own section; the gear (null) opens the full sheet.
@@ -557,17 +651,37 @@ export function HappyComposer(props: {
     const isControlled = onScheduleProp !== undefined
     const pendingSchedule = isControlled ? (pendingScheduleProp ?? null) : pendingScheduleLocal
     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
-
     useEffect(() => {
         const acceptance = props.sendAcceptance
         if (!acceptance || acceptance === lastSendAcceptanceRef.current) return
         lastSendAcceptanceRef.current = acceptance
         if (acceptance.attemptId === null) {
             pendingSendAttemptIdRef.current = null
+            pendingSendEditGenerationRef.current = null
+            pendingSendAttachmentGenerationRef.current = null
+            pendingSendScheduleGenerationRef.current = null
+            acceptedSendEditGenerationRef.current = null
+            if (acceptance.sessionId) {
+                consumePendingComposerSend(acceptance.sessionId, null)
+            }
             setIsExpanded(false)
             return
         }
         pendingSendAttemptIdRef.current = acceptance.attemptId
+        const pendingGeneration = pendingSendEditGenerationRef.current
+        const pendingAttachmentGeneration = pendingSendAttachmentGenerationRef.current
+        const pendingScheduleGeneration = pendingSendScheduleGenerationRef.current
+        acceptedSendEditGenerationRef.current = pendingGeneration === null
+            ? null
+            : {
+                attemptId: acceptance.attemptId,
+                generation: pendingGeneration,
+                attachmentGeneration: pendingAttachmentGeneration ?? userAttachmentGenerationRef.current,
+                scheduleGeneration: pendingScheduleGeneration ?? userScheduleGenerationRef.current,
+            }
+        pendingSendEditGenerationRef.current = null
+        pendingSendAttachmentGenerationRef.current = null
+        pendingSendScheduleGenerationRef.current = null
         const settlement = props.sendSettlement
         if (!settlement || settlement.attemptId !== acceptance.attemptId) return
         pendingSendAttemptIdRef.current = null
@@ -599,6 +713,7 @@ export function HappyComposer(props: {
     const userScheduleGenerationRef = useRef(0)
     const userAttachmentGenerationRef = useRef(0)
     const observedAttachmentIdsRef = useRef(new Set(attachments.map((attachment) => attachment.id)))
+    const restoredDraftAttachmentIdsRef = useRef(new Set<string>())
     const sendRestoreGuardRef = useRef<{
         userEditGeneration: number
         userScheduleGeneration: number
@@ -624,7 +739,12 @@ export function HappyComposer(props: {
 
     const recordUserEdit = useCallback(() => {
         userEditGenerationRef.current += 1
-    }, [])
+        if (sessionId) recordComposerDraftChange(sessionId)
+    }, [sessionId])
+    const handleAttachmentRemove = useCallback(() => {
+        userAttachmentGenerationRef.current += 1
+        if (sessionId) recordComposerDraftChange(sessionId)
+    }, [sessionId])
 
     const handleUserEdit = useCallback(() => {
         recordUserEdit()
@@ -665,6 +785,9 @@ export function HappyComposer(props: {
         props.canRestoreAttachments ?? active,
         (text) => api.composer().setText(text),
         (file) => api.composer().addAttachment(file),
+        (ids) => {
+            for (const id of ids) restoredDraftAttachmentIdsRef.current.add(id)
+        },
     )
     const canHydrateAttachments = props.canRestoreAttachments ?? active
     const hiddenAttachmentStatePending =
@@ -675,6 +798,20 @@ export function HappyComposer(props: {
     const hasAnyAttachments = hasAttachments || hasHiddenAttachments
     const blocksScheduling =
         hasAttachments || hasHiddenAttachments || hiddenAttachmentStatePending
+    // Mirrors handleSend's dictation branch (see dictationDirectSendEligible):
+    // the dictation Send button must only appear when clicking it will actually
+    // run the session-bound stopAndSend path. With attachments (visible or
+    // hidden persisted) / a pending schedule / scratchlist mode handleSend
+    // falls back to dictation.toggle() (stop + transcribe), so a visible
+    // "Send" control would be misleading.
+    const dictationCanDirectSend = dictationActive
+        && dictationDirectSendEligible({
+            active,
+            resolveSessionIdAvailable: props.resolveSessionIdForVoice !== undefined,
+            blocksScheduling,
+            pendingSchedule,
+            scratchlistMode: props.scratchlistMode ?? false,
+        })
     const canSend = (hasText || hasAnyAttachments) && attachmentsReady && !controlsDisabled
 
     useEffect(() => {
@@ -714,6 +851,145 @@ export function HappyComposer(props: {
             console.warn('[composer-draft] inactive persistence failed', error)
         })
     }, [active, attachmentRevision, draftHydration.complete, draftHydration.sessionId, props.canRestoreAttachments, sessionId])
+
+    // A user-added attachment must make a successful-send cleanup unsafe even
+    // when the text remains unchanged. Keep this effect before the settlement
+    // decision so the generation is current for the same render commit.
+    useEffect(() => {
+        for (const attachment of attachments) {
+            if (observedAttachmentIdsRef.current.has(attachment.id)) continue
+            observedAttachmentIdsRef.current.add(attachment.id)
+            if (restoredDraftAttachmentIdsRef.current.delete(attachment.id)) continue
+            userAttachmentGenerationRef.current += 1
+            if (sessionId) recordComposerDraftChange(sessionId)
+        }
+    }, [attachments, sessionId])
+
+    // A keyed session remount can hydrate the text that assistant-ui cleared
+    // before the POST settled. Once that exact send succeeds, clear only an
+    // untouched matching draft; a new user edit must win over settlement.
+    useEffect(() => {
+        const settlement = props.sendSettlement
+        if (
+            !settlement
+            || settlement.status !== 'success'
+            || settlement.sessionId !== sessionId
+            || !sessionId
+        ) return
+        const settlementKey = `${settlement.sessionId}:${settlement.attemptId}`
+        if (handledSuccessfulSendRef.current === settlementKey) return
+        const consumeSettlement = () => {
+            handledSuccessfulSendRef.current = settlementKey
+            props.onConsumeSendSettlement?.(settlement.attemptId)
+            consumePendingComposerSend(sessionId, settlement.attemptId)
+        }
+
+        // Retry settlements reuse the failed message's local id and do not
+        // represent a composer-accepted send. Consume them without touching a
+        // matching draft that belongs to the operator.
+        if (
+            settlement.source !== 'send'
+            || (
+                props.sendAcceptance?.sessionId !== undefined
+                && props.sendAcceptance.sessionId !== sessionId
+            )
+            || props.sendAcceptance?.attemptId !== settlement.attemptId
+        ) {
+            consumeSettlement()
+            return
+        }
+        if (draftHydration.sessionId !== sessionId || !draftHydration.complete) return
+
+        if (
+            props.sendAcceptance?.draftRevision !== undefined
+            && getComposerDraftRevision(sessionId) > props.sendAcceptance.draftRevision
+        ) {
+            consumeSettlement()
+            return
+        }
+
+        const acceptedSend = acceptedSendEditGenerationRef.current
+        const sendEditGeneration = acceptedSend?.attemptId === settlement.attemptId
+            ? acceptedSend.generation
+            : pendingSendEditGenerationRef.current
+        const userEditedAfterSend = sendEditGeneration !== null
+            ? userEditGenerationRef.current > sendEditGeneration
+            : userEditGenerationRef.current > 0
+        if (userEditedAfterSend) {
+            consumeSettlement()
+            return
+        }
+
+        if (composerText !== settlement.text && composerText !== '') {
+            consumeSettlement()
+            return
+        }
+
+        const editedProgrammaticallyAfterSend =
+            (props.programmaticEditRevision ?? 0)
+            > (props.sendAcceptance?.programmaticEditRevision ?? 0)
+
+        // Queued-message Edit restores text through the assistant-ui store and
+        // does not fire the composer input handlers. Its external revision is
+        // the only signal that an exact-text replacement is newer state. A
+        // same-session resume can rehydrate the submitted text without that
+        // revision, so it must remain clearable.
+        if (editedProgrammaticallyAfterSend) {
+            consumeSettlement()
+            return
+        }
+
+        const attachmentGeneration = acceptedSend?.attemptId === settlement.attemptId
+            ? acceptedSend.attachmentGeneration
+            : pendingSendAttachmentGenerationRef.current
+        const attachmentsChangedAfterSend = attachmentGeneration !== null
+            ? userAttachmentGenerationRef.current > attachmentGeneration
+            : userAttachmentGenerationRef.current > 0
+        if (attachmentsChangedAfterSend) {
+            consumeSettlement()
+            return
+        }
+
+        const scheduleGeneration = acceptedSend?.attemptId === settlement.attemptId
+            ? acceptedSend.scheduleGeneration
+            : pendingSendScheduleGenerationRef.current
+        const scheduleChangedAfterSend = scheduleGeneration !== null
+            ? userScheduleGenerationRef.current > scheduleGeneration
+            : userScheduleGenerationRef.current > 0
+        if (scheduleChangedAfterSend) {
+            consumeSettlement()
+            return
+        }
+
+        if (composerText === settlement.text) {
+            api.composer().setText('')
+        }
+        if (attachments.length > 0) {
+            props.onReleaseSentAttachments?.(attachments.map(({ id }) => id))
+            void api.composer().clearAttachments()
+        }
+        clearDraftsAfterSend(
+            settlement.sessionId,
+            null,
+            settlement.text,
+        )
+        consumeSettlement()
+    }, [api, attachments.length, composerText, draftHydration.complete, draftHydration.sessionId, props.onConsumeSendSettlement, props.onReleaseSentAttachments, props.programmaticEditRevision, props.sendAcceptance, props.sendSettlement, sessionId])
+
+    // Failed sends use the separate sendError recovery path, so their terminal
+    // settlement can be consumed immediately and must not remain in the
+    // module-level store after a later send succeeds.
+    useEffect(() => {
+        const settlement = props.sendSettlement
+        if (
+            !settlement
+            || settlement.status !== 'error'
+            || settlement.sessionId !== sessionId
+            || !sessionId
+        ) return
+        props.onConsumeSendSettlement?.(settlement.attemptId)
+        consumePendingComposerSend(sessionId, settlement.attemptId)
+    }, [props.onConsumeSendSettlement, props.sendSettlement, sessionId])
 
     // assistant-ui clears `composer.text` synchronously the moment a send is
     // invoked AND `SessionChat.handleSend` clears `pendingSchedule` after the
@@ -810,19 +1086,6 @@ export function HappyComposer(props: {
         if (composerText === restored.text && attachments.length === 0) return
         onClearSendError?.()
     }, [sendError, attachments, composerText, onClearSendError])
-
-    // A user-added attachment must make a recovery unsafe even if it is removed
-    // again before the send error arrives. This runs even without a local send
-    // guard so a post-resume composer gets the same protection. Attachment IDs
-    // already present at mount are the baseline; assistant-ui's send clear only
-    // removes IDs and therefore does not look like a user addition.
-    useEffect(() => {
-        for (const attachment of attachments) {
-            if (observedAttachmentIdsRef.current.has(attachment.id)) continue
-            observedAttachmentIdsRef.current.add(attachment.id)
-            userAttachmentGenerationRef.current += 1
-        }
-    }, [attachments])
 
     useEffect(() => {
         if (richMentionsEnabled) {
@@ -964,6 +1227,13 @@ export function HappyComposer(props: {
         haptic('light')
     }, [api, suggestions, inputState, autocompletePrefixes, haptic, richMentionsEnabled, handleUserEdit])
 
+    const handleSessionMentionDrop = useCallback((mention: { id: string; title: string }) => {
+        if (mention.id === sessionId) return
+        handleUserEdit()
+        richInputRef.current?.focus()
+        richInputRef.current?.insertSessionMention(mention, [])
+    }, [handleUserEdit, sessionId])
+
     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
     const showSwitchButton = Boolean(controlledByUser && onSwitchToRemote)
@@ -1080,19 +1350,34 @@ export function HappyComposer(props: {
             onEffortChange(getHighestThinkingLevel(selectedPiModel.thinkingLevelMap))
         }
     }, [selectedPiModel, effort, onEffortChange])
-    const claudeEffortOptions = useMemo(
-        () => agentFlavor === 'pi'
-            ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
-            : agentFlavor === 'grok' && availableEffortOptions && availableEffortOptions.length > 0
-                ? [
-                    { value: null, label: 'Default' },
-                    ...availableEffortOptions.map((option) => ({
-                        value: option.value,
-                        label: option.name ?? option.value
-                    }))
-                ]
-            : getClaudeComposerEffortOptions(effort),
-        [agentFlavor, effort, selectedPiModel, availableEffortOptions]
+    const effortOptions = useMemo(
+        () => agentFlavor === 'agy'
+            ? [
+                { value: null, label: 'Auto' },
+                { value: 'low', label: 'Low' },
+                { value: 'medium', label: 'Medium' },
+                { value: 'high', label: 'High' },
+            ]
+            : agentFlavor === 'pi'
+                ? getPiThinkingLevelOptions(effort, selectedPiModel?.thinkingLevelMap)
+                : availableEffortOptions && availableEffortOptions.length > 0
+                    ? [
+                        ...((agentFlavor === 'grok' || agentFlavor === 'copilot' || agentFlavor === 'kimi')
+                            && !availableEffortOptions.some((option) => {
+                                const value = option.value.toLowerCase()
+                                const name = option.name?.toLowerCase() ?? ''
+                                return value === 'default' || value === 'auto' || name === 'default' || name === 'auto'
+                            })
+                            ? [{ value: null, label: t('newSession.model.default') }]
+                            : []),
+                        ...availableEffortOptions.map((option) => ({
+                            value: option.value,
+                            label: option.name ?? option.value
+                        }))
+                    ]
+                    : getClaudeComposerEffortOptions(effort),
+        [agentFlavor, effort, selectedPiModel, availableEffortOptions, t]
+
     )
     const permissionModes = useMemo(
         () => permissionModeOptions.map((option) => option.mode),
@@ -1101,19 +1386,21 @@ export function HappyComposer(props: {
 
     const handleUserSchedule = useCallback((nextPendingSchedule: PendingSchedule) => {
         userScheduleGenerationRef.current += 1
+        if (sessionId) recordComposerDraftChange(sessionId)
         if (sendError) onClearSendError?.()
         setPendingSchedule(nextPendingSchedule)
-    }, [onClearSendError, sendError, setPendingSchedule])
+    }, [onClearSendError, sendError, sessionId, setPendingSchedule])
 
     const handleUserClearSchedule = useCallback(() => {
         userScheduleGenerationRef.current += 1
+        if (sessionId) recordComposerDraftChange(sessionId)
         if (sendError) onClearSendError?.()
         if (isControlled) {
             onClearScheduleProp?.()
         } else {
             setPendingScheduleLocal(null)
         }
-    }, [isControlled, onClearScheduleProp, onClearSendError, sendError])
+    }, [isControlled, onClearScheduleProp, onClearSendError, sendError, sessionId])
     // Preserve the original controlled-mode contract: without a parent clear
     // handler the schedule button opens the picker instead of claiming it can
     // clear a value it does not own.
@@ -1126,6 +1413,42 @@ export function HappyComposer(props: {
     }, [pendingSendIntentRef])
 
     const handleSend = useCallback(async (intent: ComposerSendIntent = 'default') => {
+        if (dictationActive && (dictation.status === 'connected' || dictation.status === 'connecting')) {
+            const canDirectSend = dictation.status === 'connected'
+                && dictationDirectSendEligible({
+                    active,
+                    resolveSessionIdAvailable: props.resolveSessionIdForVoice !== undefined,
+                    blocksScheduling,
+                    pendingSchedule,
+                    scratchlistMode: props.scratchlistMode ?? false,
+                })
+                && intent === 'default'
+            if (canDirectSend) {
+                richInputRef.current?.flushSerializedText()
+                const targetSessionId = props.sessionId ?? ''
+                const initialText = api.composer().getState().text
+                const deliveryMode = resolveMessageDeliveryMode({
+                    agentFlavor: props.agentFlavor,
+                    isSessionThinking: props.thinking ?? false,
+                    intent: 'default'
+                })
+                api.composer().setText('')
+                if (targetSessionId && dictation.stopAndSend) {
+                    await dictation.stopAndSend(targetSessionId, initialText, deliveryMode, {
+                        // Inactive sessions cannot accept a message POST until they
+                        // are resumed (hub returns 409 `session_inactive`), so the
+                        // voice send runs the same resume step as the text pipeline.
+                        resolveSessionId: props.resolveSessionIdForVoice,
+                        onSessionResolved: props.onVoiceSessionResolved,
+                    })
+                } else {
+                    await dictation.toggle()
+                }
+            } else {
+                await dictation.toggle()
+            }
+            return
+        }
         // SessionChat preloads the ref only when restoring a rejected send:
         // queue retries remain queue, while an ordinary fresh send always
         // starts from the explicit/default argument. Capture it before the
@@ -1153,11 +1476,19 @@ export function HappyComposer(props: {
             && pendingSchedule == null
             && props.onParkScratchlist
         ) {
-            if (!canSend || parkInFlightRef.current) return
+            const snapshot = api.composer().getState()
+            const liveAttachmentsReady = snapshot.attachments.every((attachment) => {
+                if (attachment.status.type === 'complete') return true
+                if (attachment.status.type !== 'requires-action') return false
+                return Boolean((attachment as { path?: string }).path)
+            })
+            const liveCanSend = (
+                snapshot.text.trim().length > 0 || snapshot.attachments.length > 0
+            ) && liveAttachmentsReady && !controlsDisabled
+            if (!liveCanSend || parkInFlightRef.current) return
             parkInFlightRef.current = true
             setIsParkingScratchlist(true)
             try {
-                const snapshot = api.composer().getState()
                 const prepared = await props.onParkScratchlist(
                     snapshot.text,
                     orderItemsById(snapshot.attachments, attachmentOrderRef.current),
@@ -1205,9 +1536,16 @@ export function HappyComposer(props: {
             // Must be adjacent to send(): useHappyRuntime consumes and resets
             // this ref synchronously from assistant-ui's onNew callback.
             if (pendingSendIntentRef) pendingSendIntentRef.current = effectiveIntent
+            pendingSendEditGenerationRef.current = userEditGenerationRef.current
+            pendingSendAttachmentGenerationRef.current = userAttachmentGenerationRef.current
+            pendingSendScheduleGenerationRef.current = userScheduleGenerationRef.current
+            setIsExpanded(false)
             api.composer().send()
         } catch (error) {
             resetPendingSendIntent()
+            pendingSendEditGenerationRef.current = null
+            pendingSendAttachmentGenerationRef.current = null
+            pendingSendScheduleGenerationRef.current = null
             throw error
         }
         // SessionChat owns clearing the schedule — it clears only after awaiting
@@ -1237,6 +1575,19 @@ export function HappyComposer(props: {
         attachmentOrderRef,
         pendingSendIntentRef,
         resetPendingSendIntent,
+        dictationActive,
+        dictation.status,
+        dictationActive,
+        dictation.status,
+        handleDictationToggle,
+        dictation.toggle,
+        dictation.stopAndSend,
+        props.sessionId,
+        props.agentFlavor,
+        props.thinking,
+        active,
+        props.resolveSessionIdForVoice,
+        props.onVoiceSessionResolved,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
@@ -1264,18 +1615,20 @@ export function HappyComposer(props: {
             return
         }
 
-        // Only plain Enter (no modifiers) sends; other modifier combos are ignored
+        // Collapsed: honor Settings Enter behavior. Expanded: always newline
+        // (plain Enter inserts; Ctrl/Cmd+Enter or the send button submits).
         if (key === 'Enter') {
-            if (composerEnterBehavior === 'newline') {
-                if ((e.ctrlKey || e.metaKey) && !e.altKey && canSend) {
-                    e.preventDefault()
-                    flushAndSend()
-                    setShowContinueHint(false)
-                }
+            const action = resolveComposerEnterKeyAction({
+                composerEnterBehavior,
+                isExpanded,
+                ctrlOrMeta: e.ctrlKey || e.metaKey,
+                altKey: e.altKey,
+            })
+            if (action === 'newline') {
                 return
             }
             e.preventDefault()
-            if (!e.ctrlKey && !e.altKey && !e.metaKey && canSend) {
+            if (action === 'send' && canSend) {
                 flushAndSend()
                 setShowContinueHint(false)
             }
@@ -1373,7 +1726,7 @@ export function HappyComposer(props: {
 
         window.addEventListener('keydown', handleGlobalKeyDown)
         return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-    }, [model, onModelChange, haptic, agentFlavor, availableModelOptions])
+    }, [model, onModelChange, haptic, agentFlavor, availableModelOptions, piModels])
 
     const handleChange = useCallback((e: ReactChangeEvent<HTMLTextAreaElement>) => {
         const selection = {
@@ -1621,7 +1974,9 @@ export function HappyComposer(props: {
     // Pi turns run for minutes with thread.isDisabled set the whole time, so
     // Pi keeps its model/effort controls live mid-turn (#1442) — the generic
     // disable rule (controlsDisabled) would lock them for the entire turn.
-    const modelEffortControlsDisabled = agentFlavor === 'pi' ? configurationControlsDisabled : controlsDisabled
+    const modelEffortControlsDisabled = allowConfigChangesWhileThinking || agentFlavor === 'pi'
+        ? configurationControlsDisabled
+        : controlsDisabled
     const modelValueLabel = useMemo(() => {
         if (isNarrowViewport) return undefined
         if (!onModelChange || !supportsModelChange(agentFlavor)) return undefined
@@ -1640,13 +1995,20 @@ export function HappyComposer(props: {
         // option so the localized option label is always found.
         const normalizedKey = !rawKey || rawKey === 'auto' || rawKey === 'default' ? null : rawKey
         const option = modelOptions.find((candidate) => candidate.value === normalizedKey)
-        return option?.label ?? rawKey ?? undefined
-    }, [isNarrowViewport, onModelChange, agentFlavor, selectedPiModel, model, modelOptions, selectedModelBase])
+        return option?.label ?? (normalizedKey === null ? t('newSession.model.default') : rawKey ?? undefined)
+    }, [isNarrowViewport, onModelChange, agentFlavor, selectedPiModel, model, modelOptions, selectedModelBase, t])
     const effortValueLabel = useMemo(() => {
         if (isNarrowViewport) return undefined
-        if (!onEffortChange || !supportsEffort(agentFlavor)) return undefined
-        // Pi: without a resolved catalog entry there is no capability map to
-        // derive levels from; hide the button until the selected model is known.
+        if (showModelEffortSettings && visibleModelEffortOptions) {
+            const selected = selectedModelVariant ?? cursorDrillDownDefaultVariant ?? model
+            return visibleModelEffortOptions.find((candidate) => candidate.value === selected)?.label
+        }
+        if (showModelReasoningEffortSettings) {
+            return codexReasoningEffortOptions.find((candidate) => candidate.value === modelReasoningEffort)?.label
+                ?? modelReasoningEffort
+                ?? t('newSession.model.default')
+        }
+        if (!showEffortSettings) return undefined
         if (agentFlavor === 'pi') {
             if (!selectedPiModel || selectedPiModel.reasoning === false) return undefined
             const effectiveLevel = effort && isThinkingLevelSupported(effort, selectedPiModel?.thinkingLevelMap)
@@ -1656,9 +2018,25 @@ export function HappyComposer(props: {
                 ? (PI_THINKING_LEVEL_LABELS[effectiveLevel as PiThinkingLevel] ?? effectiveLevel)
                 : undefined
         }
-        const option = claudeEffortOptions.find((candidate) => candidate.value === effort)
-        return option?.label ?? (effort ? effort : undefined)
-    }, [isNarrowViewport, onEffortChange, agentFlavor, selectedPiModel, effort, claudeEffortOptions])
+        const option = effortOptions.find((candidate) => candidate.value === effort)
+        return option?.label ?? (effort == null ? t('newSession.model.default') : effort)
+    }, [
+        isNarrowViewport,
+        showModelEffortSettings,
+        visibleModelEffortOptions,
+        selectedModelVariant,
+        cursorDrillDownDefaultVariant,
+        model,
+        showModelReasoningEffortSettings,
+        codexReasoningEffortOptions,
+        modelReasoningEffort,
+        showEffortSettings,
+        agentFlavor,
+        selectedPiModel,
+        effort,
+        effortOptions,
+        t,
+    ])
 
     // Wrapper for DOM onClick consumers: never leak the MouseEvent into the
     // `section` parameter (the gear must always open the full sheet).
@@ -1754,39 +2132,39 @@ export function HappyComposer(props: {
                                             ? selectedModelBase === option.value
                                             : model === option.value
                                         return (
-                                        <button
-                                            key={option.value ?? 'auto'}
-                                            type="button"
-                                            disabled={modelEffortControlsDisabled}
-                                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                                modelEffortControlsDisabled
-                                                    ? 'cursor-not-allowed opacity-50'
-                                                    : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                            }`}
-                                            onClick={() => {
-                                                if (resolveModelVariantsForBase) {
-                                                    handleCursorModelRowClick(option.value)
-                                                } else {
-                                                    handleModelChange(option.value)
-                                                }
-                                            }}
-                                            onMouseDown={(e) => e.preventDefault()}
-                                        >
-                                            <div
-                                                className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                    isSelected
-                                                        ? 'border-[var(--app-link)]'
-                                                        : 'border-[var(--app-hint)]'
+                                            <button
+                                                key={option.value ?? 'auto'}
+                                                type="button"
+                                                disabled={modelEffortControlsDisabled}
+                                                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                                                    modelEffortControlsDisabled
+                                                        ? 'cursor-not-allowed opacity-50'
+                                                        : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
                                                 }`}
+                                                onClick={() => {
+                                                    if (resolveModelVariantsForBase) {
+                                                        handleCursorModelRowClick(option.value)
+                                                    } else {
+                                                        handleModelChange(option.value)
+                                                    }
+                                                }}
+                                                onMouseDown={(e) => e.preventDefault()}
                                             >
-                                                {isSelected && (
-                                                    <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                                )}
-                                            </div>
-                                            <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
-                                                {option.label}
-                                            </span>
-                                        </button>
+                                                <div
+                                                    className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                                                        isSelected
+                                                            ? 'border-[var(--app-link)]'
+                                                            : 'border-[var(--app-hint)]'
+                                                    }`}
+                                                >
+                                                    {isSelected && (
+                                                        <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                                                    )}
+                                                </div>
+                                                <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+                                                    {option.label}
+                                                </span>
+                                            </button>
                                         )
                                     })}
                             </div>
@@ -1865,7 +2243,7 @@ export function HappyComposer(props: {
                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
                                     {t('misc.effort')}
                                 </div>
-                                {claudeEffortOptions.map((option) => (
+                                {effortOptions.map((option) => (
                                     <button
                                         key={option.value ?? 'auto'}
                                         type="button"
@@ -2059,7 +2437,6 @@ export function HappyComposer(props: {
                             </div>
                         ) : null}
 
-                        
                     </FloatingOverlay>
                 </div>
             )
@@ -2107,11 +2484,12 @@ export function HappyComposer(props: {
         agentFlavor,
         modelOptions,
         codexReasoningEffortOptions,
-        claudeEffortOptions,
+        effortOptions,
         fastModeOptions,
         suggestions,
         selectedIndex,
         controlsDisabled,
+        configurationControlsDisabled,
         collaborationMode,
         permissionMode,
         model,
@@ -2163,6 +2541,7 @@ export function HappyComposer(props: {
                         thinking={thinking}
                         agentState={agentState}
                         backgroundTaskCount={backgroundTaskCount}
+                        machineUptimeSeconds={machineUptimeSeconds}
                         contextSize={contextSize}
                         contextCacheRead={contextCacheRead}
                         contextWindow={contextWindow}
@@ -2231,6 +2610,7 @@ export function HappyComposer(props: {
                                     orderedAttachmentIds={orderedAttachmentIds}
                                     disabled={controlsDisabled}
                                     onReorder={handleAttachmentReorder}
+                                    onRemove={handleAttachmentRemove}
                                 />
                             </div>
                         ) : null}
@@ -2257,6 +2637,7 @@ export function HappyComposer(props: {
                                         onMirrorChange={handleRichMirrorChange}
                                         onKeyDown={handleKeyDown}
                                         onPaste={handlePaste}
+                                        onSessionMentionDrop={handleSessionMentionDrop}
                                         onFocus={() => engageRichComposerFue()}
                                         resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                                         onEdit={handleRichEdit}
@@ -2347,6 +2728,7 @@ export function HappyComposer(props: {
                             onSwitch={handleSwitch}
                             voiceEnabled={voiceEnabled}
                             dictationEnabled={dictationActive}
+                            dictationCanDirectSend={dictationCanDirectSend}
                             voiceStatus={effectiveVoiceStatus}
                             voiceMicMuted={dictationActive ? false : voiceMicMuted}
                             onVoiceToggle={effectiveVoiceToggle ?? (() => {})}
@@ -2367,6 +2749,7 @@ export function HappyComposer(props: {
                             scratchlistMode={props.scratchlistMode}
                             scratchlistCount={props.scratchlistCount}
                             onScratchlistToggle={props.onScratchlistToggle}
+                            codexUsage={agentFlavor === 'codex' ? codexUsage : undefined}
                         />
                     </div>
                 </ComposerPrimitive.Root>

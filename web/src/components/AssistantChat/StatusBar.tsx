@@ -20,6 +20,7 @@ import {
 import { isFastServiceTier } from './codexFastMode'
 import { useTranslation } from '@/lib/use-translation'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
+import { formatMachineUptimeSeconds } from '@/lib/machineHealth'
 
 // Vibing messages for thinking state
 const VIBING_MESSAGES = [
@@ -196,6 +197,7 @@ export function StatusBar(props: {
     thinking: boolean
     agentState: AgentState | null | undefined
     backgroundTaskCount?: number
+    machineUptimeSeconds?: number
     contextSize?: number
     contextCacheRead?: number
     contextWindow?: number | null
@@ -222,6 +224,9 @@ export function StatusBar(props: {
         () => getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t),
         [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
     )
+    const machineUptimeLabel = props.machineUptimeSeconds === undefined
+        ? null
+        : formatMachineUptimeSeconds(props.machineUptimeSeconds)
 
     const contextHeuristicModel = props.contextModel ?? props.model
     const contextWarning = useMemo(
@@ -302,6 +307,11 @@ export function StatusBar(props: {
                         {connectionStatus.text}
                     </span>
                 </div>
+                {machineUptimeLabel ? (
+                    <span className="shrink-0 whitespace-nowrap text-[10px] leading-4 text-[var(--app-hint)]">
+                        {t('machine.health.uptimeCompact', { value: machineUptimeLabel })}
+                    </span>
+                ) : null}
                 {contextUsageLabel ? (
                     <Popover.Root>
                         <Popover.Trigger asChild>

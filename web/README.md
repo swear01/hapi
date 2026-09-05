@@ -89,6 +89,11 @@ See `src/router.tsx` for route definitions.
 - Real-time voice control
 - Standard and realtime composer dictation with provider capability selection
 
+### Composer (`src/components/AssistantChat/HappyComposer.tsx`)
+
+- The expanded editor inserts a newline on Enter and sends on Ctrl/Cmd+Enter.
+- Submitting immediately collapses the expanded editor; failed text sends still restore the draft.
+
 ### New session (`src/components/NewSession/`)
 
 Modular session creation:

@@ -15,8 +15,13 @@ import { readWorktreeEnv } from '@/utils/worktreeEnv'
 import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv'
 import packageJson from '../../package.json'
+import { durableTargetGeneration, readUpgradeTarget } from '@/upgrade/upgradeTarget'
+import { ensureHapiSessionControlSkill } from '@/modules/common/hapiSessionControlSkill'
 
 export { HAPI_SESSION_ID_ENV, exportHapiSessionEnv, exportHapiHubAuthEnv } from '@/agent/hapiSessionEnv'
+
+export const HAPI_RUNNER_SESSION_TYPE_ENV = 'HAPI_RUNNER_SESSION_TYPE'
+export const HAPI_RUNNER_WORKTREE_NAME_ENV = 'HAPI_RUNNER_WORKTREE_NAME'
 
 export type SessionStartedBy = 'runner' | 'terminal'
 
@@ -55,9 +60,11 @@ export function buildMachineMetadata(options?: {
 }): MachineMetadata {
     const installedCliMtimeMs = getInstalledCliMtimeMs()
     const startedCliMtimeMs = options?.startedCliMtimeMs ?? installedCliMtimeMs
+    const cliArtifactGeneration = durableTargetGeneration(readUpgradeTarget()) ?? undefined
     const base: MachineMetadata = {
         host: process.env.HAPI_HOSTNAME || os.hostname(),
         platform: os.platform(),
+        arch: process.arch,
         happyCliVersion: packageJson.version,
         homeDir: os.homedir(),
         happyHomeDir: configuration.happyHomeDir,
@@ -70,10 +77,13 @@ export function buildMachineMetadata(options?: {
     return {
         ...base,
         capabilities: [...CURRENT_MACHINE_CAPABILITIES],
+        versionHandoffDisabled: process.env.HAPI_DISABLE_VERSION_HANDOFF === '1',
+        // Explicit supervisor opt-in only. HAPI_DISABLE_VERSION_HANDOFF is orthogonal
+        // (skips mtime/version self-restart) and must not imply Restart=always.
+        supervisedRestart: process.env.HAPI_RUNNER_SUPERVISED === '1',
         ...(typeof startedCliMtimeMs === 'number' ? { startedCliMtimeMs } : {}),
         ...(typeof installedCliMtimeMs === 'number' ? { installedCliMtimeMs } : {}),
-        // Always boolean so hub merge can clear a prior true on unsupervised restart.
-        supervisedRestart: process.env.HAPI_RUNNER_SUPERVISED === '1',
+        ...(cliArtifactGeneration ? { cliArtifactGeneration } : {}),
     }
 }
 
@@ -87,6 +97,11 @@ export function buildSessionMetadata(options: {
 }): Metadata {
     const happyLibDir = runtimePath()
     const worktreeInfo = readWorktreeEnv()
+    const runnerSessionType = process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
+    const sessionType = runnerSessionType === 'simple' || runnerSessionType === 'worktree'
+        ? runnerSessionType
+        : undefined
+    const worktreeName = process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]?.trim() || worktreeInfo?.name
     const now = options.now ?? Date.now()
 
     return {
@@ -105,6 +120,8 @@ export function buildSessionMetadata(options: {
         lifecycleState: 'running',
         lifecycleStateSince: now,
         flavor: options.flavor,
+        sessionType,
+        worktreeName: sessionType === 'worktree' ? worktreeName : undefined,
         capabilities: {
             terminal: true
         },
@@ -123,6 +140,7 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.claudeSessionId !== undefined) preserved.claudeSessionId = metadata.claudeSessionId
     if (metadata.codexSessionId !== undefined) preserved.codexSessionId = metadata.codexSessionId
     if (metadata.codexSourceSessionId !== undefined) preserved.codexSourceSessionId = metadata.codexSourceSessionId
+    if (metadata.codexUsage !== undefined) preserved.codexUsage = metadata.codexUsage
     if (metadata.geminiSessionId !== undefined) preserved.geminiSessionId = metadata.geminiSessionId
     if (metadata.opencodeSessionId !== undefined) preserved.opencodeSessionId = metadata.opencodeSessionId
     if (metadata.grokSessionId !== undefined) preserved.grokSessionId = metadata.grokSessionId
@@ -132,9 +150,12 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.kimiSessionId !== undefined) preserved.kimiSessionId = metadata.kimiSessionId
     if (metadata.copilotSessionId !== undefined) preserved.copilotSessionId = metadata.copilotSessionId
     if (metadata.piSessionId !== undefined) preserved.piSessionId = metadata.piSessionId
+    if (metadata.claudeImportState !== undefined) preserved.claudeImportState = metadata.claudeImportState
     if (metadata.piResumeAttempt !== undefined) preserved.piResumeAttempt = metadata.piResumeAttempt
     if (metadata.ptyResumeAttempt !== undefined) preserved.ptyResumeAttempt = metadata.ptyResumeAttempt
     if (metadata.preferredPermissionMode !== undefined) preserved.preferredPermissionMode = metadata.preferredPermissionMode
+    if (metadata.sessionType !== undefined) preserved.sessionType = metadata.sessionType
+    if (metadata.worktreeName !== undefined) preserved.worktreeName = metadata.worktreeName
     if (metadata.tools !== undefined) preserved.tools = metadata.tools
     if (metadata.slashCommands !== undefined) preserved.slashCommands = metadata.slashCommands
     if (metadata.worktree !== undefined) preserved.worktree = metadata.worktree
@@ -198,6 +219,7 @@ async function reportSessionStarted(sessionId: string, metadata: Metadata): Prom
 
 export async function bootstrapSession(options: SessionBootstrapOptions): Promise<SessionBootstrapResult> {
     const workingDirectory = options.workingDirectory ?? getInvokedCwd()
+    await ensureHapiSessionControlSkill(options.flavor, workingDirectory)
     const startedBy = options.startedBy ?? 'terminal'
     const sessionTag = options.tag ?? randomUUID()
     const agentState = options.agentState === undefined ? {} : options.agentState
@@ -246,6 +268,7 @@ export async function bootstrapSession(options: SessionBootstrapOptions): Promis
 
 export async function bootstrapLazySession(options: SessionBootstrapOptions): Promise<SessionBootstrapResult> {
     const workingDirectory = options.workingDirectory ?? getInvokedCwd()
+    await ensureHapiSessionControlSkill(options.flavor, workingDirectory)
     const startedBy = options.startedBy ?? 'terminal'
     if (startedBy !== 'terminal') {
         throw new Error('Lazy session bootstrap is only supported for terminal sessions')
@@ -337,6 +360,7 @@ export async function bootstrapExistingSession(options: {
     workingDirectory: string
     metadataOverrides?: Partial<Metadata>
 }): Promise<SessionBootstrapResult> {
+    await ensureHapiSessionControlSkill(options.flavor, options.workingDirectory)
     const startedBy = options.startedBy ?? 'terminal'
     const api = await ApiClient.create()
     const machineId = await getMachineIdOrExit()
@@ -370,6 +394,9 @@ export async function bootstrapExistingSession(options: {
 
     const session = api.sessionSyncClient(sessionInfo)
     session.updateMetadata(buildUpdatedMetadata)
+    if (!await session.flushMetadata()) {
+        throw new Error('Unable to persist existing-session metadata')
+    }
 
     exportHapiSessionEnv(sessionInfo.id)
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     applyGlobalSelectAll,
+    applyComposerAcceptanceRevision,
     applyModelChangeWithReasoningRollback,
     buildGoalStateMessages,
     isScratchlistHotkeyBlockedTarget,
@@ -9,11 +10,33 @@ import {
     mergeStagedAttachmentsInOrder,
     resolvePiContextWindow,
     resolveLatestCompletedBoundaryIdForView,
+    runAcceptedSendCleanup,
     shouldAutoClearPendingSchedule,
     shouldRouteToScratchlist,
+    isRewindForkFallbackError,
 } from './SessionChat'
+import { ApiError } from '@/api/client'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
+
+describe('isRewindForkFallbackError', () => {
+    it('recognizes the structured safe-Fork boundary code', () => {
+        expect(isRewindForkFallbackError(new ApiError(
+            'native boundary is ambiguous',
+            409,
+            'ambiguous_native_boundary_fork_safe'
+        ))).toBe(true)
+    })
+
+    it('does not classify unsafe or message-only errors as fallback candidates', () => {
+        expect(isRewindForkFallbackError(new ApiError(
+            'native boundary is ambiguous',
+            409,
+            'ambiguous_native_boundary'
+        ))).toBe(false)
+        expect(isRewindForkFallbackError(new Error('ambiguous native boundary'))).toBe(false)
+    })
+})
 
 describe('applyModelChangeWithReasoningRollback', () => {
     it('restores the previous effort when the model switch fails after clearing it', async () => {
@@ -48,6 +71,71 @@ describe('applyModelChangeWithReasoningRollback', () => {
         expect(setModelReasoningEffort).toHaveBeenCalledOnce()
         expect(setModelReasoningEffort).toHaveBeenCalledWith(null)
         expect(setModel).toHaveBeenCalledWith('gpt-next')
+    })
+})
+
+describe('runAcceptedSendCleanup', () => {
+    it('publishes acceptance before deferred post-send cleanup', async () => {
+        const order: string[] = []
+        let releaseCleanup!: () => void
+        const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+
+        const resultPromise = runAcceptedSendCleanup(
+            async () => {
+                order.push('send')
+                return 'accepted'
+            },
+            (accepted) => {
+                order.push(accepted)
+                return accepted
+            },
+            async () => {
+                order.push('cleanup-start')
+                await cleanup
+                order.push('cleanup-end')
+            },
+        )
+
+        await Promise.resolve()
+        expect(order).toEqual(['send', 'accepted', 'cleanup-start'])
+
+        releaseCleanup()
+        await expect(resultPromise).resolves.toBe('accepted')
+        expect(order).toEqual(['send', 'accepted', 'cleanup-start', 'cleanup-end'])
+    })
+})
+
+describe('applyComposerAcceptanceRevision', () => {
+    it('keeps the original same-session revision across async staging', () => {
+        const acceptance = {
+            attemptId: 'attempt-1',
+            sessionId: 'session-a',
+            programmaticEditRevision: 7,
+            draftRevision: 8,
+        }
+
+        expect(applyComposerAcceptanceRevision(acceptance, 'session-a', {
+            programmaticEditRevision: 1,
+            draftRevision: 2,
+        })).toEqual({
+            ...acceptance,
+            programmaticEditRevision: 1,
+            draftRevision: 2,
+        })
+    })
+
+    it('does not replace revisions from a different resolved session', () => {
+        const acceptance = {
+            attemptId: 'attempt-1',
+            sessionId: 'session-b',
+            programmaticEditRevision: 7,
+            draftRevision: 8,
+        }
+
+        expect(applyComposerAcceptanceRevision(acceptance, 'session-a', {
+            programmaticEditRevision: 1,
+            draftRevision: 2,
+        })).toBe(acceptance)
     })
 })
 

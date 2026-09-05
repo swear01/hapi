@@ -9,7 +9,9 @@
  *    These are blanked rather than dropped because `spawnHappyCLI` merges
  *    `{ ...process.env, ...options.env }` — a blank value still wins over the
  *    inherited one, while a missing key would let the parent value through.
- * 2. Every child carries a unique per-run marker (`HAPI_TEST_MARKER=<tmpHome>`)
+ * 2. Every child uses the run's temporary home, so runtime discovery cannot
+ *    read or write the developer's agent skills and configuration.
+ * 3. Every child carries a unique per-run marker (`HAPI_TEST_MARKER=<tmpHome>`)
  *    that the final audit (see `auditTestProcesses.ts`) can use to recognize
  *    test-owned processes even after they have been orphaned/reparented to
  *    PID 1.
@@ -42,6 +44,7 @@ const SECRET_ENV_PATTERNS: RegExp[] = [
     /^DB_PATH$/,
     /^TELEGRAM_BOT_TOKEN$/,
     /^SERVERCHAN_/i,
+    /^WXPUSHER_/i,
     /^ELEVENLABS_/i,
 ]
 
@@ -70,6 +73,8 @@ export function buildTestChildEnv(baseEnv: NodeJS.ProcessEnv = process.env): Nod
     if (!tmpHome) {
         throw new Error('[test env] Missing HAPI_HOME — setup.ts must point the worker at the temp hub home first')
     }
+    env.HOME = tmpHome
+    env.USERPROFILE = tmpHome
     env[TEST_OWNED_MARKER_KEY] = tmpHome
     return env
 }

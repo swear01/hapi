@@ -10,7 +10,7 @@ import packageJson from '../../package.json';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { isBunCompiled, projectPath } from '@/projectPath';
-import { isProcessAlive, isHapiRunnerProcess, killProcess } from '@/utils/process';
+import { isProcessAlive, getHapiRunnerProcessIdentity, killProcess } from '@/utils/process';
 import { configuration } from '@/configuration';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
 
@@ -103,8 +103,12 @@ export async function stopRunnerSession(sessionId: string): Promise<'stopped' | 
     : 'still_alive';
 }
 
-export async function spawnRunnerSession(directory: string, sessionId?: string): Promise<any> {
-  const result = await runnerPost('/spawn-session', { directory, sessionId });
+export async function spawnRunnerSession(
+  directory: string,
+  sessionId?: string,
+  options?: { sessionType?: 'simple' | 'worktree'; worktreeName?: string }
+): Promise<any> {
+  const result = await runnerPost('/spawn-session', { directory, sessionId, ...options });
   return result;
 }
 
@@ -146,7 +150,17 @@ export async function checkIfRunnerRunningAndCleanupStaleState(): Promise<boolea
   }
 
   // Verify PID is alive AND belongs to hapi (not a reused PID from another process)
-  if (isHapiRunnerProcess(state.pid)) {
+  const identity = getHapiRunnerProcessIdentity(state.pid);
+  if (identity === 'runner') {
+    return true;
+  }
+
+  if (identity === 'unknown') {
+    // The pid is alive but unidentifiable. Reporting it as the runner would let
+    // callers signal a process that may not be ours, and clearing the state would
+    // drop the lock that keeps a second runner from starting. Treat it as occupied
+    // so callers do not spawn a replacement against the preserved lock.
+    logger.debug('[RUNNER RUN] Runner PID could not be identified, treating state as occupied');
     return true;
   }
 
@@ -242,21 +256,37 @@ export async function isRunnerRunningCurrentlyInstalledHappyVersion(): Promise<b
  * Used by the self-restart handoff in run.ts so the dying runner does not exit
  * until its replacement has actually come up and written its own state.
  *
- * Returns true when runner.state.json shows a different (and live) PID than
- * `oldPid`, false on timeout.
+ * Requires `hubReadyAt` so a child that dies after claiming the PID (but
+ * before hub registration/RPC connect) cannot be treated as a successful handoff.
+ *
+ * Returns true when runner.state.json shows a different live PID with hubReadyAt,
+ * false on timeout.
  */
 export async function waitForRunnerHandoff(
   oldPid: number,
-  options: { timeoutMs?: number; pollIntervalMs?: number } = {}
+  options: {
+    timeoutMs?: number
+    pollIntervalMs?: number
+    readState?: () => Promise<Awaited<ReturnType<typeof readRunnerState>>>
+    isAlive?: (pid: number) => boolean
+  } = {}
 ): Promise<boolean> {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollIntervalMs = options.pollIntervalMs ?? 500;
+  const readState = options.readState ?? readRunnerState;
+  const isAlive = options.isAlive ?? isProcessAlive;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     try {
-      const state = await readRunnerState();
-      if (state && state.pid !== oldPid && isProcessAlive(state.pid)) {
+      const state = await readState();
+      if (
+        state
+        && state.pid !== oldPid
+        && typeof state.hubReadyAt === 'number'
+        && state.hubReadyAt > 0
+        && isAlive(state.pid)
+      ) {
         logger.debug(`[RUNNER CONTROL] Handoff confirmed: new runner PID ${state.pid} replaced ${oldPid}`);
         return true;
       }
@@ -278,12 +308,23 @@ export async function cleanupRunnerState(): Promise<void> {
   }
 }
 
-export async function stopRunner() {
+export async function stopRunner(): Promise<boolean> {
   try {
     const state = await readRunnerState();
     if (!state) {
       logger.debug('No runner state found');
-      return;
+      return true;
+    }
+
+    // Every stop is a signal to the persisted pid and port, so gate the whole
+    // sequence on a confirmed identity. Callers derive their decision from a
+    // boolean, and a pid we cannot identify may belong to an unrelated process
+    // that reused it, whose port may have been reused as well.
+    const identity = getHapiRunnerProcessIdentity(state.pid);
+    if (identity !== 'runner') {
+      logger.debug(`Not stopping PID ${state.pid}: identity is ${identity}`);
+      if (identity !== 'unknown') await cleanupRunnerState();
+      return identity !== 'unknown';
     }
 
     logger.debug(`Stopping runner with PID ${state.pid}`);
@@ -295,20 +336,21 @@ export async function stopRunner() {
       // Wait for runner to die
       await waitForProcessDeath(state.pid, 2000);
       logger.debug('Runner stopped gracefully via HTTP');
-      return;
+      return true;
     } catch (error) {
       logger.debug('HTTP stop failed, will force kill', error);
     }
 
-    // Force kill
     const killed = await killProcess(state.pid, true);
     if (killed) {
       logger.debug('Force killed runner');
     } else {
       logger.debug('Runner already dead or could not be killed');
     }
+    return killed || !isProcessAlive(state.pid);
   } catch (error) {
     logger.debug('Error stopping runner', error);
+    return false;
   }
 }
 

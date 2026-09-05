@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/Spinner'
 import { useTerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { useTranslation } from '@/lib/use-translation'
-import { CloseIcon } from '@/components/icons'
+import { CheckIcon, CloseIcon } from '@/components/icons'
 import { ShareTurnDialog } from '@/components/AssistantChat/ShareTurnDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { getSessionTitle } from '@/lib/sessionTitle'
@@ -29,6 +29,7 @@ import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { useMachines } from '@/hooks/queries/useMachines'
 import { useMachineLabels } from '@/hooks/useMachineLabels'
 import { resolveSessionHeaderMachineLabel } from '@/components/SessionHeader'
+import { getSessionProjectLabel, getSessionProjectPath } from '@/lib/sessionProjectLabel'
 import { formatRelativeTime } from '@/lib/relativeTime'
 import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { getShareTurnReasoningLabel, selectShareTurnMetadata } from '@/lib/shareTurnMetadata'
@@ -49,7 +50,7 @@ type PendingScrollRestore = {
     targetHistoryVersion: number | null
 }
 
-type HistoryLoadSource = 'coverage' | 'user' | 'consumer'
+type HistoryLoadSource = 'coverage' | 'user' | 'consumer' | 'outline'
 type PullToLoadState = 'idle' | 'pulling' | 'ready'
 
 type HistoryLoaderState = {
@@ -143,6 +144,8 @@ const WHEEL_GESTURE_GAP_MS = 250
 const KEYBOARD_SCROLL_INTENT_WINDOW_MS = 750
 const POINTER_CANCEL_INTENT_WINDOW_MS = 750
 const UPWARD_SCROLL_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+const NAVIGATION_TRANSIENT_RETRY_DELAY_MS = 200
+const MAX_NAVIGATION_TRANSIENT_RETRIES = 150
 
 export function getPullToLoadState(distancePx: number): PullToLoadState {
     if (distancePx >= TOP_PULL_TRIGGER_PX) {
@@ -158,6 +161,7 @@ type ScrollIntent = {
     distanceFromBottom: number
     isNearBottom: boolean
     isScrollingUp: boolean
+    isScrollingDown: boolean
 }
 
 type LocateOutlineTargetOptions = {
@@ -179,8 +183,33 @@ export function getScrollIntent(params: {
     return {
         distanceFromBottom,
         isNearBottom: distanceFromBottom <= thresholdPx,
-        isScrollingUp: params.scrollTop < params.previousScrollTop - MANUAL_SCROLL_EPSILON_PX
+        isScrollingUp: params.scrollTop < params.previousScrollTop - MANUAL_SCROLL_EPSILON_PX,
+        isScrollingDown: params.scrollTop > params.previousScrollTop + MANUAL_SCROLL_EPSILON_PX
     }
+}
+
+export function shouldShowScrollToBottomButton(intent: ScrollIntent): boolean {
+    return intent.isScrollingDown && !intent.isNearBottom
+}
+
+export function getScrollToBottomButtonVisibility(
+    wasVisible: boolean,
+    intent: ScrollIntent
+): boolean {
+    if (intent.isNearBottom || intent.isScrollingUp) {
+        return false
+    }
+    if (intent.isScrollingDown) {
+        return true
+    }
+    return wasVisible
+}
+
+export function shouldRenderScrollToBottomButton(
+    isVisible: boolean,
+    unseenCount: number
+): boolean {
+    return isVisible && unseenCount === 0
 }
 
 export function shouldCancelInitialScrollSettling(
@@ -258,20 +287,76 @@ export function getHistoryCoverageRetryDelay(deadline: number, now: number): num
     return Math.max(0, deadline - now) + 16
 }
 
-function NewMessagesIndicator(props: { count: number; onClick: () => void }) {
+export async function loadOlderForNavigationWithRetry(
+    loadOlder: () => Promise<OlderHistoryLoadResult>,
+    options: {
+        maxTransientRetries?: number
+        retryDelayMs?: number
+        wait?: (delayMs: number) => Promise<void>
+    } = {}
+): Promise<boolean> {
+    const maxTransientRetries = options.maxTransientRetries ?? MAX_NAVIGATION_TRANSIENT_RETRIES
+    const retryDelayMs = options.retryDelayMs ?? NAVIGATION_TRANSIENT_RETRY_DELAY_MS
+    const wait = options.wait ?? ((delayMs: number) => new Promise<void>((resolve) => {
+        window.setTimeout(resolve, delayMs)
+    }))
+
+    for (let transientRetries = 0; ; transientRetries += 1) {
+        const result = await loadOlder()
+        if (result === 'loaded') return true
+        if (result === 'terminal-stop' || transientRetries >= maxTransientRetries) return false
+        await wait(retryDelayMs)
+    }
+}
+
+const SCROLL_TO_BOTTOM_BUTTON_CLASS = 'absolute bottom-0 right-2 z-10 h-6 w-6 rounded-full border-[var(--app-border)] bg-[var(--app-secondary-bg)] px-0 text-[var(--app-fg)] hover:bg-[var(--app-bg)]'
+
+function ScrollToBottomButton(props: { onClick: () => void; count?: number }) {
     const { t } = useTranslation()
+    const hasCount = typeof props.count === 'number'
+    const label = hasCount
+        ? `${t('misc.newMessage', { n: props.count! })} — ${t('misc.scrollToBottom')}`
+        : t('misc.scrollToBottom')
+    const buttonClass = hasCount
+        ? 'absolute bottom-0 right-2 z-10 h-6 w-6 rounded-full border-[var(--app-button)] bg-[var(--app-button)] px-0 text-[var(--app-button-text)] hover:opacity-90'
+        : SCROLL_TO_BOTTOM_BUTTON_CLASS
+
+    return (
+        <Button
+            variant="outline"
+            type="button"
+            onClick={props.onClick}
+            aria-label={label}
+            title={label}
+            className={buttonClass}
+        >
+            {hasCount ? (
+                <span className="translate-y-px text-[10px] font-semibold leading-none tabular-nums" aria-hidden="true">
+                    {props.count! > 99 ? '99+' : props.count}
+                </span>
+            ) : (
+                <svg
+                    className="h-4 w-4 translate-y-px"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                >
+                    <path d="m6 9 6 6 6-6" />
+                </svg>
+            )}
+        </Button>
+    )
+}
+
+function NewMessagesIndicator(props: { count: number; onClick: () => void }) {
     if (props.count === 0) {
         return null
     }
-
-    return (
-        <button
-            onClick={props.onClick}
-            className="absolute bottom-20 left-1/2 -translate-x-1/2 bg-[var(--app-button)] text-[var(--app-button-text)] px-3 py-1.5 rounded-full text-sm font-medium shadow-lg animate-bounce-in z-10"
-        >
-            {t('misc.newMessage', { n: props.count })} &#8595;
-        </button>
-    )
+    return <ScrollToBottomButton count={props.count} onClick={props.onClick} />
 }
 
 function MessageSkeleton() {
@@ -482,7 +567,7 @@ export function HappyThread(props: {
     messagesWarning: string | null
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
-    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean, options?: { shouldInstallBoundary?: () => boolean }) => Promise<OlderLoadOutcome>
     onCancelLoadMore: () => void
     unseenCount: number
     rawMessagesCount: number
@@ -501,12 +586,18 @@ export function HappyThread(props: {
     const machineLabelsById = useMachineLabels(machines)
     const [shareTurn, setShareTurn] = useState<ShareTurnState>(null)
     const shareDialogOpen = shareTurn !== null
+    const getGeneratedMediaBlob = useCallback(
+        (imageId: string) => props.api.getGeneratedImageBlob(props.sessionId, imageId),
+        [props.api, props.sessionId]
+    )
     const shareTitle = shareTurn ? getSessionTitle(props.session) : ''
     const shareRelativeTimeTick = useMinuteTick(headerMetadata.lastActive && shareDialogOpen)
     const shareMetadataItems = useMemo(() => {
         const agentFlavor = props.session.metadata?.flavor ?? null
         const agentLabel = agentFlavor?.trim() || null
         const machineLabel = resolveSessionHeaderMachineLabel(props.session, machineLabelsById)
+        const projectPath = getSessionProjectPath(props.session.metadata)
+        const projectLabel = projectPath ? getSessionProjectLabel(projectPath) : null
         const modelLabel = getSessionModelLabel(props.session)
         const reasoningLabel = getShareTurnReasoningLabel(
             agentFlavor,
@@ -524,6 +615,9 @@ export function HappyThread(props: {
 
         return selectShareTurnMetadata(headerMetadata, {
             agent: agentLabel ? { text: agentLabel, flavor: agentFlavor } : undefined,
+            project: projectLabel ? {
+                text: `${headerMetadata.showLabels ? `${t('session.item.project')}: ` : ''}${projectLabel}`,
+            } : undefined,
             machine: machineLabel ? {
                 text: `${headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}${machineLabel}`,
             } : undefined,
@@ -560,6 +654,7 @@ export function HappyThread(props: {
     const viewportRef = useRef<HTMLDivElement | null>(null)
     const contentRef = useRef<HTMLDivElement | null>(null)
     const [pullToLoadState, setPullToLoadState] = useState<PullToLoadState>('idle')
+    const [showScrollToBottom, setShowScrollToBottom] = useState(false)
     const pullToLoadStateRef = useRef<PullToLoadState>('idle')
     const shareTurnIdRef = useRef(0)
     const topSentinelRef = useRef<HTMLDivElement | null>(null)
@@ -611,6 +706,10 @@ export function HappyThread(props: {
     const atBottomRef = useRef(true)
     const onViewModeChangeRef = useRef(props.onViewModeChange)
     const forceScrollTokenRef = useRef(props.forceScrollToken)
+    // Render-time mirror so apply-time boundary decisions can read the live
+    // outline state without a stale closure or an effect-delayed ref.
+    const outlineOpenRef = useRef(props.outlineOpen)
+    outlineOpenRef.current = props.outlineOpen
     const lastScrollTopRef = useRef(0)
     const sessionIdRef = useRef(props.sessionId)
     const initialScrollSessionRef = useRef<string | null>(null)
@@ -619,6 +718,12 @@ export function HappyThread(props: {
 
     // Smart scroll state: enabled only while the user is intentionally at the bottom.
     const autoScrollEnabledRef = useRef(true)
+    // Keep pagination refs current during render. Explicit navigation can
+    // continue in a microtask immediately after a layout effect settles a
+    // page load, before passive effects would otherwise update these refs.
+    hasMoreMessagesRef.current = props.hasMoreMessages
+    isLoadingMoreRef.current = props.isLoadingMoreMessages
+    onLoadMoreRef.current = props.onLoadMore
     useEffect(() => {
         onViewModeChangeRef.current = props.onViewModeChange
     }, [props.onViewModeChange])
@@ -678,6 +783,7 @@ export function HappyThread(props: {
         // old DOM after trimming. Only network/backoff work is cancellable.
         if (
             state.source === 'consumer'
+            || state.source === 'outline'
             || (state.phase !== 'loading' && state.phase !== 'backoff')
         ) {
             return
@@ -791,6 +897,7 @@ export function HappyThread(props: {
             const explicitUpwardIntent = needsCoverage && consumeExplicitUpwardIntent(intent)
 
             if (isInitialScrollSettling()) {
+                setShowScrollToBottom(false)
                 if (shouldCancelInitialScrollSettling(intent, hadExplicitUpwardIntent)) {
                     initialScrollDeadlineRef.current = 0
                     clearInitialScrollTimers()
@@ -812,6 +919,7 @@ export function HappyThread(props: {
 
             if (intent.isScrollingUp && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX) {
                 tailScrollInProgressRef.current = false
+                setShowScrollToBottom(false)
                 setAutoScrollMode(false)
                 setAtBottomMode(false)
                 return
@@ -819,6 +927,7 @@ export function HappyThread(props: {
 
             if (intent.isNearBottom) {
                 tailScrollInProgressRef.current = false
+                setShowScrollToBottom(false)
                 setAutoScrollMode(true)
                 setAtBottomMode(true)
                 return
@@ -829,9 +938,11 @@ export function HappyThread(props: {
             // must not be mistaken for ordinary history browsing. Keep tail
             // mode armed until the animation arrives or the user reverses it.
             if (tailScrollInProgressRef.current) {
+                setShowScrollToBottom(false)
                 return
             }
 
+            setShowScrollToBottom((wasVisible) => getScrollToBottomButtonVisibility(wasVisible, intent))
             setAutoScrollMode(false)
             setAtBottomMode(false)
         }
@@ -1036,9 +1147,23 @@ export function HappyThread(props: {
 
     const scrollToBottomInstant = useCallback(() => {
         const viewport = viewportRef.current
+        setShowScrollToBottom(false)
         if (viewport) {
             viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' })
             lastScrollTopRef.current = viewport.scrollTop
+        }
+    }, [])
+
+    const scrollToBottomSmooth = useCallback(() => {
+        const viewport = viewportRef.current
+        const content = contentRef.current
+        if (!viewport) {
+            return
+        }
+        if (content && typeof content.scrollIntoView === 'function') {
+            content.scrollIntoView({ block: 'end', behavior: 'smooth' })
+        } else {
+            viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
         }
     }, [])
 
@@ -1052,20 +1177,26 @@ export function HappyThread(props: {
     // Scroll to bottom handler for the indicator button
     const scrollToBottom = useCallback(() => {
         const viewport = viewportRef.current
+        setShowScrollToBottom(false)
         if (viewport) {
             tailScrollInProgressRef.current = true
-            viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+            // Match outline navigation's native smooth-scroll path. Keep
+            // instant tail-following disabled until the smooth animation
+            // reaches the bottom, otherwise a resize/state update can snap
+            // the viewport there before the animation is visible.
+            autoScrollEnabledRef.current = false
+            scrollToBottomSmooth()
             lastScrollTopRef.current = viewport.scrollTop
         }
-        autoScrollEnabledRef.current = true
         if (!atBottomRef.current) {
             atBottomRef.current = true
             onViewModeChangeRef.current('tail')
         }
-    }, [])
+    }, [scrollToBottomSmooth])
 
     // Reset state when session changes
     useLayoutEffect(() => {
+        setShowScrollToBottom(false)
         autoScrollEnabledRef.current = true
         tailScrollInProgressRef.current = false
         lastScrollTopRef.current = viewportRef.current?.scrollTop ?? 0
@@ -1212,7 +1343,11 @@ export function HappyThread(props: {
             }
         }
 
-        if (state.source !== 'consumer' && !needsViewportCoverage()) {
+        if (
+            state.source !== 'consumer'
+            && state.source !== 'outline'
+            && !needsViewportCoverage()
+        ) {
             finishStoppedAttempt(state, 'transient-stop')
             return
         }
@@ -1256,13 +1391,27 @@ export function HappyThread(props: {
                     ) {
                         return false
                     }
-                    if (current.source !== 'consumer' && !needsViewportCoverage()) {
+                    if (
+                        current.source !== 'consumer'
+                        && current.source !== 'outline'
+                        && !needsViewportCoverage()
+                    ) {
                         return false
                     }
                     pending.targetHistoryVersion = historyVersion
                     historyLoaderRef.current = { ...current, phase: 'awaiting-render' }
                     return true
-                })
+                }, state.source === 'outline'
+                    ? {
+                        // Only outline-driven loads hold the loaded-history
+                        // boundary, and only while the outline is still open at
+                        // APPLY time — a slow request that lands after the
+                        // outline closed must not leave the window unbounded.
+                        // Automatic coverage loads and tool-group hydration
+                        // (consumer) never hold it.
+                        shouldInstallBoundary: () => outlineOpenRef.current
+                    }
+                    : undefined)
             } catch (error) {
                 outcome = {
                     kind: 'failed',
@@ -1395,24 +1544,26 @@ export function HappyThread(props: {
         return requestOlder('consumer')
     }, [requestOlder])
 
+    const loadOlderFromOutline = useCallback((): Promise<OlderHistoryLoadResult> => {
+        return requestOlder('outline')
+    }, [requestOlder])
+
     const loadOlderForOutline = useCallback(async (): Promise<boolean> => {
         return await loadOlderFromConsumer() === 'loaded'
     }, [loadOlderFromConsumer])
 
-    const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
-        const target = await locateOutlineTargetMessage({
-            targetMessageId: item.targetMessageId,
-            findTarget: (anchorId) => document.getElementById(anchorId),
-            hasMoreMessages: () => hasMoreMessagesRef.current,
-            loadOlderPreservingScroll: loadOlderForOutline
-        })
-        if (target) {
-            target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-            autoScrollEnabledRef.current = false
-        }
-        props.onOutlineItemClick?.(item)
+    const handleOutlineClose = useCallback(() => {
+        outlineOpenRef.current = false
         props.onOutlineOpenChange(false)
-    }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
+        // Closing the outline while still at the tail ends the loaded-history
+        // browsing session: re-assert tail mode so the store releases the
+        // history boundary and the window compacts back to the bounded tail.
+        // Scrolling up afterwards re-fetches the older pages via the coverage
+        // loader, so the loaded range is never lost permanently.
+        if (atBottomRef.current) {
+            onViewModeChangeRef.current('tail')
+        }
+    }, [props.onOutlineOpenChange])
 
     useEffect(() => {
         if (
@@ -1451,8 +1602,12 @@ export function HappyThread(props: {
         const observer = new ResizeObserver(() => {
             // Message DOM can grow after messagesVersion commits (assistant-ui
             // updates its external runtime in an effect, then markdown/tool
-            // content may resize). Keep following while the user is at bottom.
-            if (
+            // content may resize). Keep a smooth tail jump aligned with the
+            // newest content until it reaches the bottom; otherwise the
+            // browser's original smooth-scroll target can become stale.
+            if (tailScrollInProgressRef.current && !pendingScrollRef.current) {
+                scrollToBottomSmooth()
+            } else if (
                 autoScrollEnabledRef.current
                 && atBottomRef.current
                 && !pendingScrollRef.current
@@ -1474,6 +1629,7 @@ export function HappyThread(props: {
         return () => observer.disconnect()
     }, [
         scrollToBottomInstant,
+        scrollToBottomSmooth,
         isInitialScrollSettling,
         needsViewportCoverage,
         scheduleCoverageAfterSettling
@@ -1532,6 +1688,34 @@ export function HappyThread(props: {
     useEffect(() => {
         isLoadingMoreRef.current = props.isLoadingMoreMessages
     }, [props.isLoadingMoreMessages])
+
+    const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        const target = await locateOutlineTargetMessage({
+            targetMessageId: item.targetMessageId,
+            findTarget: (anchorId) => document.getElementById(anchorId),
+            hasMoreMessages: () => hasMoreMessagesRef.current,
+            loadOlderPreservingScroll: loadOlderForOutline
+        })
+        if (!target) {
+            // The target could not be located; close through the release path
+            // so a held history boundary is released (the outline is gone).
+            handleOutlineClose()
+            return
+        }
+        // Navigating to an outline entry is an explicit history jump: enter
+        // history mode so the store's loaded-history protection (and its
+        // release on returning to the tail) follows the normal view-mode
+        // lifecycle. The browser clamps scrollIntoView to the live tail for
+        // newest entries, which would otherwise leave the store in tail mode
+        // with the boundary held and no release path.
+        atBottomRef.current = false
+        onViewModeChangeRef.current('history')
+        autoScrollEnabledRef.current = false
+        target.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        props.onOutlineItemClick?.(item)
+        props.onOutlineOpenChange(false)
+    }, [loadOlderForOutline, handleOutlineClose, props.onOutlineItemClick, props.onOutlineOpenChange])
+
 
     const showSkeleton = props.isSyncingTail && props.rawMessagesCount === 0
     const handleShareTurn = useCallback((
@@ -1682,23 +1866,26 @@ export function HappyThread(props: {
                     </div>
                 </ThreadPrimitive.Viewport>
                 <NewMessagesIndicator count={props.unseenCount} onClick={scrollToBottom} />
+                {shouldRenderScrollToBottomButton(showScrollToBottom, props.unseenCount) ? (
+                    <ScrollToBottomButton onClick={scrollToBottom} />
+                ) : null}
                 {props.outlineOpen ? (
                     <>
                         <button
                             type="button"
                             className="absolute inset-0 z-20 bg-black/20"
                             aria-label={t('session.outline.close')}
-                            onClick={() => props.onOutlineOpenChange(false)}
+                            onClick={handleOutlineClose}
                         />
                         <ConversationOutlinePanel
                             items={props.outlineItems}
                             hasMoreMessages={props.hasMoreMessages}
                             isLoadingMoreMessages={props.isLoadingMoreMessages}
                             onLoadMore={() => {
-                                void loadOlderFromConsumer()
+                                void loadOlderFromOutline()
                             }}
                             onSelect={handleOutlineSelect}
-                            onClose={() => props.onOutlineOpenChange(false)}
+                            onClose={handleOutlineClose}
                         />
                     </>
                 ) : null}
@@ -1709,6 +1896,7 @@ export function HappyThread(props: {
                     metadataItems={shareMetadataItems}
                     sourceSnapshots={shareTurn?.snapshots ?? []}
                     sourceContentWidth={shareTurn?.sourceContentWidth ?? null}
+                    getGeneratedMediaBlob={getGeneratedMediaBlob}
                     onClose={() => setShareTurn(null)}
                 />
             </ThreadPrimitive.Root>

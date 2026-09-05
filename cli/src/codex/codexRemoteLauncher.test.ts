@@ -8,6 +8,9 @@ const harness = vi.hoisted(() => ({
     registerRequestCalls: [] as string[],
     requestHandlers: new Map<string, (params: unknown) => Promise<unknown> | unknown>(),
     initializeCalls: [] as unknown[],
+    configReadCalls: [] as unknown[],
+    configReadResponse: { config: {} } as { config: Record<string, unknown> },
+    failConfigRead: false,
     setFeatureEnablementCalls: [] as unknown[],
     failSetFeatureEnablement: false,
     listCollaborationModeCalls: 0,
@@ -51,6 +54,11 @@ const harness = vi.hoisted(() => ({
     emitSafetyBuffering: false,
     safetyBufferingFasterModel: null as string | null,
     emitModelSafetyNotices: false,
+    transcriptPathByThreadId: new Map<string, string>(),
+    scannerStarts: [] as Array<{ transcriptPath: string | null; replayExistingHistory?: boolean; initialCursor?: number }>,
+    scannerCleanups: 0,
+    scannerEvents: [] as Array<(event: unknown) => void>,
+    scannerReplayOnCreate: [] as unknown[],
     startTurnMessages: [] as string[],
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
@@ -92,6 +100,10 @@ const harness = vi.hoisted(() => ({
     emitRunningChildTurnBeforeSuppressedParent: false,
     emitCompletedChildTurnBeforeSuppressedParent: false,
     emitTurnAbortedOnInterrupt: false,
+    emitLateUsageAfterClear: false,
+    emitAccountRateLimitsDuringChild: false,
+    emitLiveUsageThenDelayedTranscript: false,
+    emitAccountRateLimitsOnInitialize: false,
     bridgeOptions: [] as unknown[]
 }));
 
@@ -113,7 +125,25 @@ vi.mock('./codexAppServerClient', () => {
 
         async initialize(params: unknown): Promise<{ protocolVersion: number }> {
             harness.initializeCalls.push(params);
+            if (harness.emitAccountRateLimitsOnInitialize) {
+                const accountLimits = {
+                    rateLimits: {
+                        primary: { usedPercent: 12, windowMinutes: 300 },
+                        credits: { hasCredits: true, unlimited: false, balance: '50' }
+                    }
+                };
+                harness.notifications.push({ method: 'account/rateLimits/updated', params: accountLimits });
+                this.notificationHandler?.('account/rateLimits/updated', accountLimits);
+            }
             return { protocolVersion: 1 };
+        }
+
+        async readConfig(params: unknown): Promise<{ config: Record<string, unknown> }> {
+            harness.configReadCalls.push(params);
+            if (harness.failConfigRead) {
+                throw new Error('config/read unsupported');
+            }
+            return harness.configReadResponse;
         }
 
         setNotificationHandler(handler: ((method: string, params: unknown) => void) | null): void {
@@ -494,6 +524,35 @@ vi.mock('./codexAppServerClient', () => {
                     this.notificationHandler?.('thread/compacted', parentCompact);
                 }
 
+                if (harness.emitLiveUsageThenDelayedTranscript) {
+                    const accountLimits = {
+                        rateLimits: {
+                            primary: { usedPercent: 12, windowMinutes: 300 },
+                            credits: { hasCredits: true, unlimited: false, balance: '50' }
+                        }
+                    };
+                    harness.notifications.push({ method: 'account/rateLimits/updated', params: accountLimits });
+                    this.notificationHandler?.('account/rateLimits/updated', accountLimits);
+                    for (let attempt = 0; attempt < 40 && harness.scannerEvents.length === 0; attempt += 1) {
+                        await new Promise((resolve) => setTimeout(resolve, 25));
+                    }
+                    for (const onEvent of harness.scannerEvents) {
+                        onEvent({
+                            type: 'event_msg',
+                            payload: {
+                                type: 'token_count',
+                                info: {
+                                    total_token_usage: { total_tokens: 42000, input_tokens: 40000, output_tokens: 2000 },
+                                    model_context_window: 128000,
+                                    rate_limits: {
+                                        primary: { used_percent: 99, window_minutes: 300 }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+
                 if (harness.emitParentV2AgentTools) {
                     const v2Calls = [{
                         callId: 'v2-spawn',
@@ -717,6 +776,17 @@ vi.mock('./codexAppServerClient', () => {
                     };
                     harness.notifications.push({ method: 'thread/tokenUsage/updated', params: ambiguousUsage });
                     this.notificationHandler?.('thread/tokenUsage/updated', ambiguousUsage);
+                }
+
+                if (harness.emitAccountRateLimitsDuringChild) {
+                    const accountLimits = {
+                        rateLimits: {
+                            primary: { usedPercent: 100, windowMinutes: 300 },
+                            credits: { hasCredits: false, unlimited: false, balance: '0' }
+                        }
+                    };
+                    harness.notifications.push({ method: 'account/rateLimits/updated', params: accountLimits });
+                    this.notificationHandler?.('account/rateLimits/updated', accountLimits);
                 }
 
                 if (harness.emitChildGoalEvent) {
@@ -1093,6 +1163,70 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
     }
 }));
 
+vi.mock('@/modules/common/codexSessions', () => ({
+    findCodexSessionFile: (threadId: string) =>
+        harness.transcriptPathByThreadId.get(threadId) ?? `/tmp/${threadId}.jsonl`
+}));
+
+vi.mock('./utils/codexSessionScanner', () => ({
+    createCodexSessionScanner: async (opts: {
+        transcriptPath: string | null;
+        replayExistingHistory?: boolean;
+        initialCursor?: number;
+        onEvent: (event: unknown) => void;
+    }) => {
+        harness.scannerStarts.push({
+            transcriptPath: opts.transcriptPath,
+            replayExistingHistory: opts.replayExistingHistory,
+            initialCursor: opts.initialCursor
+        });
+        harness.scannerEvents.push(opts.onEvent);
+        return {
+            cleanup: async () => {
+                harness.scannerCleanups += 1;
+            },
+            setTranscriptPath: async () => {}
+        };
+    },
+    readLatestCodexUsageFromTail: async () => {
+        // Mirror coalesce-latest behavior for harness event fixtures (forward last-wins).
+        let latestTokens: unknown = null;
+        let latestRateLimits: unknown = null;
+        for (const event of harness.scannerReplayOnCreate as Array<Record<string, unknown>>) {
+            const payload = event.payload as Record<string, unknown> | undefined;
+            if (!payload || payload.type !== 'token_count') continue;
+            if (payload.scope_role === 'child' || payload.scopeRole === 'child') continue;
+            const info = (payload.info && typeof payload.info === 'object')
+                ? { ...(payload.info as Record<string, unknown>) }
+                : null;
+            if (!info) continue;
+            if (info.rate_limits === undefined && info.rateLimits === undefined) {
+                const rateLimits = payload.rate_limits ?? payload.rateLimits;
+                if (rateLimits !== undefined) info.rate_limits = rateLimits;
+            }
+            const message: Record<string, unknown> = { type: 'token_count', info };
+            if (typeof event.thread_id === 'string') message.thread_id = event.thread_id;
+            if (typeof event.threadId === 'string') message.threadId = event.threadId;
+            if (typeof payload.scope_role === 'string') message.scope_role = payload.scope_role;
+            if (typeof payload.scopeRole === 'string') message.scopeRole = payload.scopeRole;
+            const hasTokens = Boolean(
+                info.model_context_window ?? info.modelContextWindow
+                ?? info.total_token_usage ?? info.totalTokenUsage
+                ?? info.last_token_usage ?? info.lastTokenUsage
+            );
+            const hasRateLimits = 'rate_limits' in info || 'rateLimits' in info
+                || 'rate_limits' in payload || 'rateLimits' in payload;
+            if (hasTokens) latestTokens = message;
+            if (hasRateLimits) latestRateLimits = message;
+        }
+        if (latestTokens && latestRateLimits && latestTokens === latestRateLimits) {
+            return [latestTokens];
+        }
+        return [latestTokens, latestRateLimits].filter(Boolean);
+    }
+}));
+
+
 import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
 import { INDETERMINATE_SYMBOL } from './codexAppServerClient';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
@@ -1110,11 +1244,17 @@ function createMode(): EnhancedMode {
     };
 }
 
+type SessionStubOptions = {
+    deferMetadataUpdates?: boolean;
+};
+
 function createSessionStub(
     messages = ['hello from launcher test'],
     mode = createMode(),
     isolateMessages = false,
-    closeQueue = true
+    closeQueue = true,
+    initialMetadata: Record<string, unknown> = {},
+    options: SessionStubOptions = {}
 ) {
     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
     messages.forEach((message, index) => {
@@ -1133,6 +1273,7 @@ function createSessionStub(
     const sessionEvents: Array<{ type: string; [key: string]: unknown }> = [];
     const codexMessages: unknown[] = [];
     const summaryMessages: unknown[] = [];
+    const usagePayloads: unknown[] = [];
     const thinkingChanges: boolean[] = [];
     const foundSessionIds: string[] = [];
     const resetThreadCalls: string[] = [];
@@ -1145,6 +1286,16 @@ function createSessionStub(
         requests: {},
         completedRequests: {}
     };
+    let metadata = initialMetadata;
+    let pendingMetadata: Record<string, unknown> | null = null;
+    let resolveMetadataFlushStarted: (() => void) | null = null;
+    let releaseMetadataFlush: (() => void) | null = null;
+    const metadataFlushStarted = options.deferMetadataUpdates
+        ? new Promise<void>((resolve) => {
+            resolveMetadataFlushStarted = resolve;
+        })
+        : null;
+    const metadataUpdates: Record<string, unknown>[] = [];
 
     const rpcHandlers = new Map<string, (params: unknown) => unknown>();
     const client = {
@@ -1153,7 +1304,33 @@ function createSessionStub(
                 rpcHandlers.set(method, handler);
             }
         },
-        updateMetadata(_handler: (metadata: Record<string, unknown>) => Record<string, unknown>) {},
+        getMetadata() {
+            return metadata;
+        },
+        updateMetadata(handler: (metadata: Record<string, unknown>) => Record<string, unknown>) {
+            const updated = handler(pendingMetadata ?? metadata);
+            metadataUpdates.push(updated);
+            if (options.deferMetadataUpdates) {
+                pendingMetadata = updated;
+            } else {
+                metadata = updated;
+            }
+        },
+        async flushMetadata() {
+            if (!options.deferMetadataUpdates) {
+                return true;
+            }
+            resolveMetadataFlushStarted?.();
+            resolveMetadataFlushStarted = null;
+            await new Promise<void>((resolve) => {
+                releaseMetadataFlush = resolve;
+            });
+            if (pendingMetadata) {
+                metadata = pendingMetadata;
+                pendingMetadata = null;
+            }
+            return true;
+        },
         updateAgentState(handler: (state: FakeAgentState) => FakeAgentState) {
             agentState = handler(agentState);
         },
@@ -1211,6 +1388,26 @@ function createSessionStub(
         resetCodexThread() {
             resetThreadCalls.push(session.sessionId ?? 'none');
             session.sessionId = null;
+            usagePayloads.length = 0;
+            if (harness.emitLateUsageAfterClear) {
+                harness.scannerEvents[0]?.({
+                    type: 'event_msg',
+                    payload: {
+                        type: 'token_count',
+                        info: { total_token_usage: { total_tokens: 99999 }, model_context_window: 128000 }
+                    }
+                });
+                harness.dispatchNotification?.('codex/event/token_count', {
+                    msg: {
+                        type: 'token_count',
+                        thread_id: 'thread-1',
+                        info: {
+                            total_token_usage: { total_tokens: 88888 },
+                            model_context_window: 128000
+                        }
+                    }
+                });
+            }
         },
         sendAgentMessage(message: unknown) {
             client.sendAgentMessage(message);
@@ -1220,6 +1417,9 @@ function createSessionStub(
         },
         sendUserMessage(text: string) {
             client.sendUserMessage(text);
+        },
+        recordCodexUsage(payload: unknown) {
+            usagePayloads.push(payload);
         }
     };
 
@@ -1232,6 +1432,10 @@ function createSessionStub(
         foundSessionIds,
         resetThreadCalls,
         rpcHandlers,
+        getMetadata: () => metadata,
+        metadataUpdates,
+        metadataFlushStarted,
+        releaseMetadataFlush: () => releaseMetadataFlush?.(),
         emitMessagesConsumed: client.emitMessagesConsumed,
         emitSteerIndeterminate: client.emitSteerIndeterminate,
         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
@@ -1241,7 +1445,8 @@ function createSessionStub(
         getModelReasoningEffort: () => currentModelReasoningEffort,
         getCollaborationMode: () => currentCollaborationMode,
         collaborationModes,
-        getAgentState: () => agentState
+        getAgentState: () => agentState,
+        usagePayloads
     };
 }
 
@@ -1387,12 +1592,16 @@ describe('codexRemoteLauncher', () => {
         expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
         session.queue.close();
     });
+
     afterEach(() => {
         harness.notifications = [];
         harness.dispatchNotification = null;
         harness.registerRequestCalls = [];
         harness.requestHandlers = new Map();
         harness.initializeCalls = [];
+        harness.configReadCalls = [];
+        harness.configReadResponse = { config: {} };
+        harness.failConfigRead = false;
         harness.setFeatureEnablementCalls = [];
         harness.failSetFeatureEnablement = false;
         harness.listCollaborationModeCalls = 0;
@@ -1477,7 +1686,72 @@ describe('codexRemoteLauncher', () => {
         harness.emitRunningChildTurnBeforeSuppressedParent = false;
         harness.emitCompletedChildTurnBeforeSuppressedParent = false;
         harness.emitTurnAbortedOnInterrupt = false;
+        harness.emitLateUsageAfterClear = false;
+        harness.emitAccountRateLimitsDuringChild = false;
+        harness.emitLiveUsageThenDelayedTranscript = false;
+        harness.emitAccountRateLimitsOnInitialize = false;
         harness.bridgeOptions = [];
+        harness.transcriptPathByThreadId = new Map();
+        harness.scannerStarts = [];
+        harness.scannerCleanups = 0;
+        harness.scannerEvents = [];
+        harness.scannerReplayOnCreate = [];
+    });
+
+    it('clears stale history capabilities until a resumed native thread is ready', async () => {
+        const { session, getMetadata } = createSessionStub([], createMode(), false, true, {
+            capabilities: {
+                conversationHistory: {
+                    forkCurrent: true,
+                    forkAtMessage: true,
+                    rewindToMessage: true
+                },
+                otherCapability: true
+            }
+        });
+        session.sessionId = 'native-thread';
+
+        await codexRemoteLauncher(session as never);
+
+        expect(getMetadata()).toMatchObject({
+            capabilities: { otherCapability: true }
+        });
+        expect(getMetadata().capabilities).not.toHaveProperty('conversationHistory');
+    });
+
+    it('waits for stale history capability removal to persist before registering history RPC handlers', async () => {
+        const { session, getMetadata, rpcHandlers, metadataFlushStarted, releaseMetadataFlush } = createSessionStub(
+            [],
+            createMode(),
+            false,
+            true,
+            {
+                capabilities: {
+                    conversationHistory: {
+                        forkCurrent: true,
+                        forkAtMessage: true,
+                        rewindToMessage: true
+                    },
+                    otherCapability: true
+                }
+            },
+            { deferMetadataUpdates: true }
+        );
+        session.sessionId = 'native-thread';
+
+        const launcherPromise = codexRemoteLauncher(session as never);
+        await metadataFlushStarted!;
+
+        expect(getMetadata().capabilities).toHaveProperty('conversationHistory');
+        expect(rpcHandlers.has(RPC_METHODS.ForkConversation)).toBe(false);
+        expect(rpcHandlers.has(RPC_METHODS.RewindConversation)).toBe(false);
+
+        releaseMetadataFlush();
+        await launcherPromise;
+
+        expect(getMetadata().capabilities).not.toHaveProperty('conversationHistory');
+        expect(rpcHandlers.has(RPC_METHODS.ForkConversation)).toBe(true);
+        expect(rpcHandlers.has(RPC_METHODS.RewindConversation)).toBe(true);
     });
 
     it('finishes a turn and emits ready when task lifecycle events include turn_id', async () => {
@@ -1505,6 +1779,10 @@ describe('codexRemoteLauncher', () => {
                 experimentalApi: true
             }
         }]);
+        expect(harness.configReadCalls).toEqual([{
+            cwd: '/tmp/hapi-update',
+            includeLayers: false
+        }]);
         expect(harness.setFeatureEnablementCalls).toEqual([{ enablement: { goals: true } }]);
         expect(harness.notifications.map((entry) => entry.method)).toEqual([
             'turn/started',
@@ -1515,6 +1793,40 @@ describe('codexRemoteLauncher', () => {
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(thinkingChanges).toContain(true);
         expect(session.thinking).toBe(false);
+    });
+
+    it('forwards effective Codex context settings for fresh and resumed threads', async () => {
+        harness.configReadResponse = {
+            config: {
+                model_context_window: 400_000,
+                model_auto_compact_token_limit: 300_000
+            }
+        };
+
+        const fresh = createSessionStub();
+        await codexRemoteLauncher(fresh.session as never);
+        expect(harness.startThreadParams[0]?.config).toMatchObject({
+            model_context_window: 400_000,
+            model_auto_compact_token_limit: 300_000
+        });
+
+        harness.startThreadParams = [];
+        const resumed = createSessionStub();
+        resumed.session.sessionId = 'thread-existing';
+        await codexRemoteLauncher(resumed.session as never);
+        expect(harness.resumeThreadParams[0]?.config).toMatchObject({
+            model_context_window: 400_000,
+            model_auto_compact_token_limit: 300_000
+        });
+    });
+
+    it('keeps remote sessions working when config/read is unavailable', async () => {
+        harness.failConfigRead = true;
+        const { session } = createSessionStub();
+
+        await expect(codexRemoteLauncher(session as never)).resolves.toBe('exit');
+        expect(harness.startThreadParams[0]?.config ?? {}).not.toHaveProperty('model_context_window');
+        expect(harness.startThreadParams[0]?.config ?? {}).not.toHaveProperty('model_auto_compact_token_limit');
     });
 
     it('uses the native skill catalog for completion and structured turn input', async () => {
@@ -2962,6 +3274,7 @@ describe('codexRemoteLauncher', () => {
 
         expect(codexMessages).toContainEqual(expect.objectContaining({
             type: 'token_count',
+            flavor: 'codex',
             thread_id: 'thread-1',
             usageSchema: 'hapi.usage.v1',
             inputTokenSemantics: 'includes-cache',
@@ -3241,6 +3554,39 @@ describe('codexRemoteLauncher', () => {
         expect(session.thinking).toBe(false);
     });
 
+    it('keeps usage cleared after /clear when late scanner and app-server events arrive', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitLateUsageAfterClear = true;
+        harness.transcriptPathByThreadId.set('thread-1', '/tmp/codex-thread-1.jsonl');
+        harness.emitParentUsageEvents = true;
+        const { session, usagePayloads, resetThreadCalls } = createSessionStub(['first message', '/clear']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(resetThreadCalls).toEqual(['thread-1']);
+        expect(usagePayloads).toEqual([]);
+        expect(harness.scannerCleanups).toBeGreaterThanOrEqual(1);
+    });
+
+    it('records account-wide rate-limit updates while child agents are active', async () => {
+        harness.emitChildThreadEvents = true;
+        harness.emitAccountRateLimitsDuringChild = true;
+        const { session, usagePayloads } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(usagePayloads).toContainEqual(expect.objectContaining({
+            type: 'token_count',
+            usage_scope: 'account',
+            info: expect.objectContaining({
+                rate_limits: expect.objectContaining({
+                    primary: expect.objectContaining({ usedPercent: 100 })
+                })
+            })
+        }));
+    });
+
     it('interrupts active child agent turns before clearing codex thread state', async () => {
         harness.suppressTurnCompletion = true;
         harness.emitRunningChildTurnBeforeSuppressedParent = true;
@@ -3398,6 +3744,222 @@ describe('codexRemoteLauncher', () => {
         expect(sessionEvents).toContainEqual({
             type: 'message',
             message: '/compact does not accept arguments'
+        });
+    });
+
+    it('tails remote Codex transcript for usage without replaying transcript messages', async () => {
+        harness.transcriptPathByThreadId.set('thread-1', '/tmp/codex-thread-1.jsonl');
+        harness.scannerReplayOnCreate = [
+            {
+                type: 'event_msg',
+                payload: {
+                    type: 'token_count',
+                    info: {
+                        total_token_usage: { total_tokens: 42000 },
+                        model_context_window: 128000
+                    }
+                }
+            },
+            {
+                type: 'event_msg',
+                thread_id: 'child-thread',
+                payload: {
+                    type: 'token_count',
+                    scope_role: 'child',
+                    info: {
+                        total_token_usage: { total_tokens: 999 }
+                    }
+                }
+            },
+            {
+                type: 'event_msg',
+                payload: {
+                    type: 'agent_message',
+                    message: 'transcript duplicate'
+                }
+            }
+        ];
+        const { session, codexMessages, usagePayloads } = createSessionStub();
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.scannerStarts).toEqual([{
+            transcriptPath: '/tmp/codex-thread-1.jsonl',
+            replayExistingHistory: false,
+            initialCursor: 0
+        }]);
+        expect(usagePayloads).toHaveLength(1);
+        expect(usagePayloads[0]).toMatchObject({
+            type: 'token_count',
+            info: {
+                total_token_usage: { total_tokens: 42000 },
+                model_context_window: 128000
+            }
+        });
+
+        // Delayed events after the thread is gone must not resurrect usage.
+        harness.scannerEvents[0]?.({
+            type: 'event_msg',
+            payload: {
+                type: 'token_count',
+                info: { total_token_usage: { total_tokens: 99999 } }
+            }
+        });
+        expect(usagePayloads).toHaveLength(1);
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            message: 'transcript duplicate'
+        }));
+        expect(harness.scannerCleanups).toBe(1);
+    });
+
+    it('records only the latest token_count from initial transcript replay', async () => {
+        harness.transcriptPathByThreadId.set('thread-1', '/tmp/codex-thread-1.jsonl');
+        harness.scannerReplayOnCreate = [
+            {
+                type: 'event_msg',
+                payload: {
+                    type: 'token_count',
+                    info: { total_token_usage: { total_tokens: 1000 } }
+                }
+            },
+            {
+                type: 'event_msg',
+                payload: {
+                    type: 'token_count',
+                    info: { total_token_usage: { total_tokens: 42000 }, model_context_window: 128000 }
+                }
+            },
+            {
+                type: 'event_msg',
+                thread_id: 'child-thread',
+                payload: {
+                    type: 'token_count',
+                    scope_role: 'child',
+                    info: { total_token_usage: { total_tokens: 999 } }
+                }
+            }
+        ];
+        const { session, usagePayloads } = createSessionStub();
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(usagePayloads).toHaveLength(1);
+        expect(usagePayloads[0]).toMatchObject({
+            type: 'token_count',
+            info: {
+                total_token_usage: { total_tokens: 42000 },
+                model_context_window: 128000
+            }
+        });
+    });
+
+    it('keeps live app-server usage authoritative over delayed transcript events', async () => {
+        harness.transcriptPathByThreadId.set('thread-1', '/tmp/codex-thread-1.jsonl');
+        harness.emitLiveUsageThenDelayedTranscript = true;
+        const { session, usagePayloads } = createSessionStub();
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(usagePayloads).toContainEqual(expect.objectContaining({
+            type: 'token_count',
+            usage_scope: 'account',
+            info: expect.objectContaining({
+                rate_limits: expect.objectContaining({
+                    primary: expect.objectContaining({ usedPercent: 12 })
+                })
+            })
+        }));
+        // Account-only live snapshot must not block transcript context.
+        expect(usagePayloads).toContainEqual(expect.objectContaining({
+            type: 'token_count',
+            info: expect.objectContaining({
+                total_token_usage: expect.objectContaining({ total_tokens: 42000 }),
+                model_context_window: 128000
+            })
+        }));
+        expect(usagePayloads).not.toContainEqual(expect.objectContaining({
+            info: expect.objectContaining({
+                rate_limits: expect.objectContaining({
+                    primary: expect.objectContaining({ used_percent: 99 })
+                })
+            })
+        }));
+        const rateLimitWrites = usagePayloads.filter((payload) => {
+            if (!payload || typeof payload !== 'object') return false;
+            const info = (payload as { info?: { rate_limits?: unknown } }).info;
+            return Boolean(info && 'rate_limits' in info);
+        });
+        expect(rateLimitWrites.at(-1)).toMatchObject({
+            usage_scope: 'account',
+            info: {
+                rate_limits: {
+                    primary: { usedPercent: 12 }
+                }
+            }
+        });
+    });
+
+    it('keeps pre-thread account rate limits over stale transcript replay', async () => {
+        harness.transcriptPathByThreadId.set('thread-1', '/tmp/codex-thread-1.jsonl');
+        harness.emitAccountRateLimitsOnInitialize = true;
+        harness.scannerReplayOnCreate = [
+            {
+                type: 'event_msg',
+                payload: {
+                    type: 'token_count',
+                    info: {
+                        total_token_usage: { total_tokens: 42000 },
+                        model_context_window: 128000,
+                        rate_limits: {
+                            primary: { used_percent: 99, window_minutes: 300 }
+                        }
+                    }
+                }
+            }
+        ];
+        const { session, usagePayloads } = createSessionStub();
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(usagePayloads).toContainEqual(expect.objectContaining({
+            type: 'token_count',
+            usage_scope: 'account',
+            info: expect.objectContaining({
+                rate_limits: expect.objectContaining({
+                    primary: expect.objectContaining({ usedPercent: 12 })
+                })
+            })
+        }));
+        expect(usagePayloads).toContainEqual(expect.objectContaining({
+            type: 'token_count',
+            info: expect.objectContaining({
+                total_token_usage: expect.objectContaining({ total_tokens: 42000 }),
+                model_context_window: 128000
+            })
+        }));
+        expect(usagePayloads).not.toContainEqual(expect.objectContaining({
+            info: expect.objectContaining({
+                rate_limits: expect.objectContaining({
+                    primary: expect.objectContaining({ used_percent: 99 })
+                })
+            })
+        }));
+        const rateLimitWrites = usagePayloads.filter((payload) => {
+            if (!payload || typeof payload !== 'object') return false;
+            const info = (payload as { info?: { rate_limits?: unknown } }).info;
+            return Boolean(info && 'rate_limits' in info);
+        });
+        expect(rateLimitWrites.at(-1)).toMatchObject({
+            usage_scope: 'account',
+            info: {
+                rate_limits: {
+                    primary: { usedPercent: 12 }
+                }
+            }
         });
     });
 });

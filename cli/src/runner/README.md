@@ -66,15 +66,16 @@ Command: `hapi runner stop`
 
 Control Flow:
 1. `stopRunner()` in `controlClient.ts` reads runner.state.json
-2. Attempts graceful shutdown via HTTP POST to `/stop`
-3. Runner receives request, triggers shutdown with source `hapi-cli`
-4. `cleanupAndShutdown()` executes:
+2. Confirms the persisted PID is a HAPI runner; an unreadable identity fails closed without signalling or clearing state
+3. Attempts graceful shutdown via HTTP POST to `/stop`
+4. Runner receives request, triggers shutdown with source `hapi-cli`
+5. `cleanupAndShutdown()` executes:
    - Updates backend status to "shutting-down"
    - Closes WebSocket connection
    - Stops HTTP server
    - Deletes runner.state.json
    - Releases lock file
-5. If HTTP fails, falls back to `killProcess(pid, true)` (uses `taskkill /T /F` on Windows)
+6. If HTTP fails, falls back to `killProcess(pid, true)` (uses `taskkill /T /F` on Windows)
 
 ## 2. Multi-Agent Support
 
@@ -258,6 +259,7 @@ Graceful runner shutdown.
   - `spawn-happy-session` - spawn new session
   - `stop-session` - stop session by ID
   - `stop-runner` - request shutdown
+- `rpc-cancel` - cancel an in-flight `rpc-request` by request ID
 
 All data is plain JSON over TLS; authentication is `CLI_API_TOKEN` (no end-to-end encryption).
 

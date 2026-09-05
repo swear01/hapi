@@ -1,0 +1,422 @@
+From e3752b1252df56851e55d0ecd3ea6baa8b996ecc Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 29 Aug 2026 17:43:13 +0000
+Subject: [PATCH] carry: upstream PR #1616
+
+---
+ web/src/App.tsx                       |  19 +++
+ web/src/lib/notificationClick.test.ts | 172 ++++++++++++++++++++++++++
+ web/src/lib/notificationClick.ts      | 161 ++++++++++++++++++++++++
+ web/src/sw.ts                         |   5 +-
+ 4 files changed, 355 insertions(+), 2 deletions(-)
+ create mode 100644 web/src/lib/notificationClick.test.ts
+ create mode 100644 web/src/lib/notificationClick.ts
+
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 4c4df6815..eab63cc26 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -37,6 +37,7 @@ import { ToastContainer } from '@/components/ToastContainer'
+ import { PwaUpdateProvider } from '@/lib/pwa-update-context'
+ import { ToastProvider, useToast } from '@/lib/toast-context'
+ import { NamespaceLocaleSync } from '@/components/NamespaceLocaleSync'
++import { getNotificationClickHref, NOTIFICATION_CLICK_ACK_TYPE } from '@/lib/notificationClick'
+ import type { SyncEvent } from '@/types/api'
+ 
+ type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
+@@ -113,6 +114,24 @@ function AppInner() {
+         configureTelegramWebApp()
+     }, [])
+ 
++    useEffect(() => {
++        if (!('serviceWorker' in navigator)) {
++            return
++        }
++
++        const handleServiceWorkerMessage = (event: MessageEvent<unknown>) => {
++            const href = getNotificationClickHref(event.data, window.location.origin)
++            if (!href) return
++            router.history.push(href)
++            event.ports[0]?.postMessage({ type: NOTIFICATION_CLICK_ACK_TYPE })
++        }
++
++        navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage)
++        return () => {
++            navigator.serviceWorker.removeEventListener('message', handleServiceWorkerMessage)
++        }
++    }, [router])
++
+     // Track visual viewport height for mobile keyboard avoidance (see useViewportHeight.ts)
+     useViewportHeight()
+ 
+diff --git a/web/src/lib/notificationClick.test.ts b/web/src/lib/notificationClick.test.ts
+new file mode 100644
+index 000000000..1457dc0af
+--- /dev/null
++++ b/web/src/lib/notificationClick.test.ts
+@@ -0,0 +1,172 @@
++import { describe, expect, it, vi } from 'vitest'
++import {
++    focusOrOpenNotificationClient,
++    getNotificationClickHref,
++    NOTIFICATION_CLICK_ACK_TYPE,
++    NOTIFICATION_CLICK_MESSAGE_TYPE,
++    resolveNotificationTarget,
++    type NotificationClickClient,
++    type NotificationClickClients
++} from './notificationClick'
++
++const APP_SCOPE = 'https://hapi.test/'
++
++function createClient(
++    url: string,
++    overrides: Partial<NotificationClickClient> = {}
++): NotificationClickClient {
++    return {
++        url,
++        focused: false,
++        focus: vi.fn().mockResolvedValue(undefined),
++        navigate: vi.fn().mockResolvedValue(null),
++        ...overrides
++    }
++}
++
++function createClients(
++    windows: NotificationClickClient[],
++    opened: NotificationClickClient | null = null
++): NotificationClickClients {
++    return {
++        matchAll: vi.fn().mockResolvedValue(windows),
++        openWindow: vi.fn().mockResolvedValue(opened)
++    }
++}
++
++describe('focusOrOpenNotificationClient', () => {
++    it('sends the route to an existing HAPI window instead of opening another', async () => {
++        const existing = createClient('https://hapi.test/', {
++            postMessage: vi.fn((_message, transfer) => {
++                transfer[0] && (transfer[0] as MessagePort).postMessage({ type: NOTIFICATION_CLICK_ACK_TYPE })
++            })
++        })
++        const clients = createClients([existing])
++
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-1', APP_SCOPE)
++
++        expect(clients.matchAll).toHaveBeenCalledWith({ type: 'window', includeUncontrolled: true })
++        expect(existing.postMessage).toHaveBeenCalledWith(
++            {
++                type: NOTIFICATION_CLICK_MESSAGE_TYPE,
++                url: 'https://hapi.test/sessions/session-1'
++            },
++            expect.any(Array)
++        )
++        expect(existing.navigate).not.toHaveBeenCalled()
++        expect(existing.focus).toHaveBeenCalledOnce()
++        expect(clients.openWindow).not.toHaveBeenCalled()
++    })
++
++    it('delivers repeated notification clicks to the same existing window', async () => {
++        const existing = createClient('https://hapi.test/', {
++            postMessage: vi.fn((_message, transfer) => {
++                transfer[0] && (transfer[0] as MessagePort).postMessage({ type: NOTIFICATION_CLICK_ACK_TYPE })
++            })
++        })
++        const clients = createClients([existing])
++
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-1', APP_SCOPE)
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-2', APP_SCOPE)
++
++        expect(existing.postMessage).toHaveBeenCalledTimes(2)
++        expect(existing.navigate).not.toHaveBeenCalled()
++        expect(existing.focus).toHaveBeenCalledTimes(2)
++        expect(clients.openWindow).not.toHaveBeenCalled()
++    })
++
++    it('focuses an existing window already at the notification URL', async () => {
++        const existing = createClient('https://hapi.test/sessions/session-1')
++        const clients = createClients([existing])
++
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-1', APP_SCOPE)
++
++        expect(existing.focus).toHaveBeenCalledOnce()
++        expect(existing.navigate).not.toHaveBeenCalled()
++        expect(clients.openWindow).not.toHaveBeenCalled()
++    })
++
++    it('opens and focuses a new window when no HAPI window exists', async () => {
++        const opened = createClient('https://hapi.test/')
++        const clients = createClients([], opened)
++
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-1', APP_SCOPE)
++
++        expect(clients.openWindow).toHaveBeenCalledWith('https://hapi.test/sessions/session-1')
++        expect(opened.focus).toHaveBeenCalledOnce()
++    })
++
++    it('focuses the existing window even if navigation fails', async () => {
++        const existing = createClient('https://hapi.test/', {
++            navigate: vi.fn().mockRejectedValue(new Error('navigation failed'))
++        })
++        const clients = createClients([existing])
++
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-1', APP_SCOPE)
++
++        expect(existing.navigate).toHaveBeenCalledWith('https://hapi.test/sessions/session-1')
++        expect(existing.focus).toHaveBeenCalledOnce()
++        expect(clients.openWindow).not.toHaveBeenCalled()
++    })
++
++    it('falls back to navigation if the existing window cannot receive the route message', async () => {
++        const existing = createClient('https://hapi.test/', {
++            postMessage: vi.fn(() => {
++                throw new Error('message failed')
++            })
++        })
++        const clients = createClients([existing])
++
++        await focusOrOpenNotificationClient(clients, 'https://hapi.test/sessions/session-1', APP_SCOPE)
++
++        expect(existing.navigate).toHaveBeenCalledWith('https://hapi.test/sessions/session-1')
++        expect(existing.focus).toHaveBeenCalledOnce()
++        expect(clients.openWindow).not.toHaveBeenCalled()
++    })
++
++    it('does not reuse an uncontrolled same-origin window outside the app scope', async () => {
++        const unrelated = createClient('https://hapi.test/other/', {
++            focused: true,
++            postMessage: vi.fn()
++        })
++        const opened = createClient('https://hapi.test/app/')
++        const clients = createClients([unrelated], opened)
++
++        await focusOrOpenNotificationClient(
++            clients,
++            'https://hapi.test/app/sessions/session-1',
++            'https://hapi.test/app/'
++        )
++
++        expect(unrelated.postMessage).not.toHaveBeenCalled()
++        expect(unrelated.navigate).not.toHaveBeenCalled()
++        expect(unrelated.focus).not.toHaveBeenCalled()
++        expect(clients.openWindow).toHaveBeenCalledWith('https://hapi.test/app/sessions/session-1')
++        expect(opened.focus).toHaveBeenCalledOnce()
++    })
++})
++
++describe('getNotificationClickHref', () => {
++    it('converts a same-origin notification message into a router href', () => {
++        expect(getNotificationClickHref({
++            type: NOTIFICATION_CLICK_MESSAGE_TYPE,
++            url: 'https://hapi.test/sessions/session-1?tab=activity#latest'
++        }, 'https://hapi.test')).toBe('/sessions/session-1?tab=activity#latest')
++    })
++
++    it('ignores malformed and cross-origin messages', () => {
++        expect(getNotificationClickHref(null, 'https://hapi.test')).toBeNull()
++        expect(getNotificationClickHref({ type: 'OTHER', url: 'https://hapi.test/sessions/session-1' }, 'https://hapi.test')).toBeNull()
++        expect(getNotificationClickHref({
++            type: NOTIFICATION_CLICK_MESSAGE_TYPE,
++            url: 'https://attacker.test/sessions/session-1'
++        }, 'https://hapi.test')).toBeNull()
++    })
++})
++
++describe('resolveNotificationTarget', () => {
++    it('resolves root-relative routes inside a subpath service-worker scope', () => {
++        expect(resolveNotificationTarget('/sessions/session-1', 'https://hapi.test/app/'))
++            .toBe('https://hapi.test/app/sessions/session-1')
++    })
++})
+diff --git a/web/src/lib/notificationClick.ts b/web/src/lib/notificationClick.ts
+new file mode 100644
+index 000000000..16f6982fc
+--- /dev/null
++++ b/web/src/lib/notificationClick.ts
+@@ -0,0 +1,161 @@
++export const NOTIFICATION_CLICK_MESSAGE_TYPE = 'HAPI_NOTIFICATION_CLICK'
++export const NOTIFICATION_CLICK_ACK_TYPE = 'HAPI_NOTIFICATION_CLICK_HANDLED'
++
++export type NotificationClickMessage = {
++    type: typeof NOTIFICATION_CLICK_MESSAGE_TYPE
++    url: string
++}
++
++export type NotificationClickAck = {
++    type: typeof NOTIFICATION_CLICK_ACK_TYPE
++}
++
++export function resolveNotificationTarget(rawUrl: string | undefined, appScope: string): string {
++    const route = (rawUrl ?? '/').replace(/^\/+/, '')
++    return new URL(route, appScope).toString()
++}
++
++export function getNotificationClickHref(message: unknown, origin: string): string | null {
++    if (!message || typeof message !== 'object') {
++        return null
++    }
++
++    const candidate = message as { type?: unknown; url?: unknown }
++    if (candidate.type !== NOTIFICATION_CLICK_MESSAGE_TYPE || typeof candidate.url !== 'string') {
++        return null
++    }
++
++    let targetUrl: URL
++    try {
++        targetUrl = new URL(candidate.url, origin)
++    } catch {
++        return null
++    }
++    if (targetUrl.origin !== origin) {
++        return null
++    }
++
++    return `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`
++}
++
++export type NotificationClickClient = {
++    url: string
++    focused?: boolean
++    focus: () => Promise<unknown>
++    navigate: (url: string) => Promise<NotificationClickClient | null>
++    postMessage?: (message: NotificationClickMessage, transfer: Transferable[]) => void
++}
++
++export type NotificationClickClients = {
++    matchAll: (options: { type: 'window'; includeUncontrolled: true }) => Promise<readonly NotificationClickClient[]>
++    openWindow?: (url: string) => Promise<NotificationClickClient | null>
++}
++
++async function deliverNotificationClickMessage(
++    client: NotificationClickClient,
++    targetUrl: string
++): Promise<boolean> {
++    if (!client.postMessage) {
++        return false
++    }
++    const postMessage = (message: NotificationClickMessage, transfer: Transferable[]) => {
++        client.postMessage?.(message, transfer)
++    }
++
++    if (typeof MessageChannel === 'undefined') {
++        try {
++            postMessage({
++                type: NOTIFICATION_CLICK_MESSAGE_TYPE,
++                url: targetUrl
++            }, [])
++            return false
++        } catch {
++            return false
++        }
++    }
++
++    const channel = new MessageChannel()
++    return new Promise((resolve) => {
++        let settled = false
++        const timeoutId = setTimeout(() => finish(false), 1000)
++
++        const finish = (handled: boolean) => {
++            if (settled) return
++            settled = true
++            clearTimeout(timeoutId)
++            channel.port1.close()
++            resolve(handled)
++        }
++
++        channel.port1.onmessage = (event) => {
++            const data = event.data as { type?: unknown } | null
++            if (data?.type === NOTIFICATION_CLICK_ACK_TYPE) {
++                finish(true)
++            }
++        }
++        channel.port1.start()
++
++        try {
++            postMessage({
++                type: NOTIFICATION_CLICK_MESSAGE_TYPE,
++                url: targetUrl
++            }, [channel.port2])
++        } catch {
++            finish(false)
++        }
++    })
++}
++
++export async function focusOrOpenNotificationClient(
++    clients: NotificationClickClients,
++    targetUrl: string,
++    appScope: string
++): Promise<void> {
++    const windowClients = await clients.matchAll({
++        type: 'window',
++        includeUncontrolled: true
++    })
++    const scopeUrl = new URL(appScope)
++    const scopePath = scopeUrl.pathname.endsWith('/')
++        ? scopeUrl.pathname
++        : `${scopeUrl.pathname}/`
++    const targetOrigin = new URL(targetUrl).origin
++    const appClients = windowClients.filter((client) => {
++        try {
++            const clientUrl = new URL(client.url)
++            return clientUrl.origin === targetOrigin
++                && (clientUrl.pathname === scopeUrl.pathname || clientUrl.pathname.startsWith(scopePath))
++        } catch {
++            return false
++        }
++    })
++    const targetClient = appClients.find((client) => client.url === targetUrl)
++        ?? appClients.find((client) => client.focused)
++        ?? appClients[0]
++
++    if (targetClient) {
++        if (targetClient.url === targetUrl) {
++            await targetClient.focus()
++            return
++        }
++
++        // Keep the SPA's router in control of an already-open app window. Some
++        // installed browser runtimes resolve WindowClient.navigate() without
++        // updating the active SPA route on subsequent notification clicks.
++        if (await deliverNotificationClickMessage(targetClient, targetUrl)) {
++            await targetClient.focus()
++            return
++        }
++
++        try {
++            const navigatedClient = await targetClient.navigate(targetUrl)
++            await (navigatedClient ?? targetClient).focus()
++        } catch {
++            await targetClient.focus()
++        }
++        return
++    }
++
++    const openedClient = await clients.openWindow?.(targetUrl)
++    await openedClient?.focus()
++}
+diff --git a/web/src/sw.ts b/web/src/sw.ts
+index 4ed484791..1fd49dd3e 100644
+--- a/web/src/sw.ts
++++ b/web/src/sw.ts
+@@ -9,6 +9,7 @@ import {
+     putShareTransfer,
+ } from './lib/shareTransfer'
+ import { shareTargetPathname } from './lib/sharePath'
++import { focusOrOpenNotificationClient, resolveNotificationTarget } from './lib/notificationClick'
+ 
+ const sharePath = shareTargetPathname()
+ 
+@@ -136,8 +137,8 @@ self.addEventListener('push', (event) => {
+ self.addEventListener('notificationclick', (event) => {
+     event.notification.close()
+     const data = event.notification.data as { url?: string } | undefined
+-    const url = data?.url ?? '/'
+-    event.waitUntil(self.clients.openWindow(url))
++    const url = resolveNotificationTarget(data?.url, self.registration.scope)
++    event.waitUntil(focusOrOpenNotificationClient(self.clients, url, self.registration.scope))
+ })
+ 
+ // Web Share Target — manifest declares POST /share, Android Chrome posts a
+-- 
+2.43.0
+

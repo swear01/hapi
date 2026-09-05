@@ -8,6 +8,7 @@ import FilesPage from './files'
 const mocks = vi.hoisted(() => ({
     navigate: vi.fn(),
     fileSearch: vi.fn(),
+    sessionId: 'session-1',
     transferComposerDraftThenNavigate: vi.fn(async (
         _source: string,
         _target: string,
@@ -18,15 +19,13 @@ const mocks = vi.hoisted(() => ({
     sessionHeaderProps: null as null | {
         onSessionReopened?: (newSessionId: string) => void | Promise<void>
     },
-    search: {
-        tab: 'directories' as const,
-        query: '感',
-    },
+    gitError: null as string | null,
+    search: { tab: 'directories', query: '感' } as { tab?: 'changes' | 'directories'; query?: string },
 }))
 
 vi.mock('@tanstack/react-router', () => ({
     useNavigate: () => mocks.navigate,
-    useParams: () => ({ sessionId: 'session-1' }),
+    useParams: () => ({ sessionId: mocks.sessionId }),
     useSearch: () => mocks.search,
 }))
 
@@ -45,7 +44,7 @@ vi.mock('@/hooks/useAppGoBack', () => ({
 vi.mock('@/hooks/queries/useSession', () => ({
     useSession: () => ({
         session: {
-            id: 'session-1',
+            id: mocks.sessionId,
             metadata: { path: '/workspace/project' },
         },
     }),
@@ -54,7 +53,7 @@ vi.mock('@/hooks/queries/useSession', () => ({
 vi.mock('@/hooks/queries/useGitStatusFiles', () => ({
     useGitStatusFiles: () => ({
         status: null,
-        error: null,
+        error: mocks.gitError,
         isLoading: false,
         refetch: vi.fn(),
     }),
@@ -107,6 +106,9 @@ function renderFilesPage() {
 describe('FilesPage search navigation', () => {
     beforeEach(() => {
         vi.clearAllMocks()
+        mocks.sessionId = 'session-1'
+        mocks.gitError = null
+        mocks.search = { tab: 'directories', query: '感' }
         window.localStorage.clear()
         window.sessionStorage.clear()
     })
@@ -164,10 +166,64 @@ describe('FilesPage search navigation', () => {
     })
 })
 
+describe('FilesPage tab preference', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        mocks.sessionId = 'session-1'
+        mocks.sessionHeaderProps = null
+        mocks.search = {}
+        window.localStorage.clear()
+        window.sessionStorage.clear()
+    })
+
+    it('restores the globally remembered tab for a different session', () => {
+        const firstRender = renderFilesPage()
+
+        expect(screen.getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true')
+
+        fireEvent.click(screen.getByRole('tab', { name: 'Directories' }))
+        expect(window.localStorage.getItem('hapi-files-tab')).toBe('directories')
+        firstRender.unmount()
+
+        mocks.sessionId = 'session-2'
+        renderFilesPage()
+
+        expect(screen.getByRole('tab', { name: 'Directories' })).toHaveAttribute('aria-selected', 'true')
+    })
+
+    it('remembers Changes after the user switches back from Directories', () => {
+        window.localStorage.setItem('hapi-files-tab', 'directories')
+        const firstRender = renderFilesPage()
+
+        expect(screen.getByRole('tab', { name: 'Directories' })).toHaveAttribute('aria-selected', 'true')
+
+        fireEvent.click(screen.getByRole('tab', { name: 'Changes' }))
+        expect(window.localStorage.getItem('hapi-files-tab')).toBe('changes')
+        firstRender.unmount()
+
+        renderFilesPage()
+
+        expect(screen.getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true')
+    })
+
+    it('uses an explicit route tab before the stored browser preference', () => {
+        window.localStorage.setItem('hapi-files-tab', 'directories')
+        mocks.search = { tab: 'changes' }
+
+        renderFilesPage()
+
+        expect(screen.getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true')
+        expect(window.localStorage.getItem('hapi-files-tab')).toBe('changes')
+    })
+})
+
 describe('FilesPage reopen draft transfer', () => {
     beforeEach(() => {
         vi.clearAllMocks()
+        mocks.sessionId = 'session-1'
         mocks.sessionHeaderProps = null
+        mocks.gitError = null
+        mocks.search = { tab: 'directories', query: '感' }
         window.localStorage.clear()
         window.sessionStorage.clear()
     })
@@ -200,5 +256,37 @@ describe('FilesPage reopen draft transfer', () => {
         renderFilesPage()
         const secondScrollRegion = document.querySelector('[data-hapi-session-files-scroll="true"]') as HTMLElement
         expect(secondScrollRegion.scrollTop).toBe(87)
+    })
+})
+
+describe('FilesPage change errors', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        mocks.gitError = null
+        mocks.search.tab = 'changes'
+        mocks.search.query = undefined
+        window.localStorage.clear()
+        window.sessionStorage.clear()
+    })
+
+    it('collapses long Git status errors until clicked', () => {
+        const tail = 'FULL GIT STATUS ERROR TAIL'
+        const longError = `Command failed: git status --porcelain=v2 --branch --untracked-files=all ${'diagnostic '.repeat(30)}${tail}`
+        mocks.gitError = longError
+
+        renderFilesPage()
+
+        const errorToggle = screen.getByRole('button', { name: /Show full error/ })
+        expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
+        expect(errorToggle).toHaveTextContent('…')
+        expect(errorToggle).not.toHaveTextContent(tail)
+
+        fireEvent.click(errorToggle)
+        expect(errorToggle).toHaveAttribute('aria-expanded', 'true')
+        expect(errorToggle).toHaveTextContent(longError)
+
+        fireEvent.click(errorToggle)
+        expect(errorToggle).toHaveAttribute('aria-expanded', 'false')
+        expect(errorToggle).not.toHaveTextContent(tail)
     })
 })

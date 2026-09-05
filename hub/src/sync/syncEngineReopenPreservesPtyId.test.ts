@@ -1,5 +1,6 @@
-import { describe, expect, it, beforeEach } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import type { Session } from '@hapi/protocol/types'
+import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
@@ -28,6 +29,16 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
 
     const NAMESPACE = 'default'
 
+    /** Minimal MachineCache stand-in; must include expireInactive (SyncEngine's 5s timer). */
+    function fakeMachineCache() {
+        return {
+            getOnlineMachinesByNamespace: () => [
+                { id: 'machine-x', metadata: { host: 'localhost' } }
+            ],
+            expireInactive: () => {}
+        }
+    }
+
     function baseMetadata(overrides: Record<string, unknown> = {}): Record<string, unknown> {
         return {
             path: '/tmp/proj',
@@ -52,7 +63,13 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
         const cache = (engine as unknown as { sessionCache: import('./sessionCache').SessionCache }).sessionCache
         ;(engine as unknown as { machineCache: unknown }).machineCache = {
             getOnlineMachinesByNamespace: () => [
-                { id: 'machine-x', metadata: { host: 'localhost' } }
+                {
+                    id: 'machine-x',
+                    metadata: {
+                        host: 'localhost',
+                        capabilities: [MACHINE_CAPABILITIES.SessionControlSkill]
+                    }
+                }
             ],
             expireInactive: () => {}
         }
@@ -97,6 +114,10 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
         mintedNewId = undefined
         staleReadyPresentAtSpawn = false
         installFakeRunner()
+    })
+
+    afterEach(() => {
+        engine.stop()
     })
 
     it('clears stale readiness before spawning the same-id PTY replacement', async () => {
@@ -237,7 +258,10 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
 
         const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
         ;(restarted as any).machineCache = {
-            getOnlineMachinesByNamespace: () => [{ id: 'machine-x', metadata: { host: 'localhost' } }],
+            getOnlineMachinesByNamespace: () => [{
+                id: 'machine-x',
+                metadata: { host: 'localhost', capabilities: [MACHINE_CAPABILITIES.SessionControlSkill] }
+            }],
             expireInactive: () => {}
         }
         ;(restarted as any).rpcGateway.stopRunnerSession = async () => 'still_alive'
@@ -263,7 +287,10 @@ describe('SyncEngine reopen/resume PTY session id preservation', () => {
 
         const restarted = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
         ;(restarted as any).machineCache = {
-            getOnlineMachinesByNamespace: () => [{ id: 'machine-x', metadata: { host: 'localhost' } }],
+            getOnlineMachinesByNamespace: () => [{
+                id: 'machine-x',
+                metadata: { host: 'localhost', capabilities: [MACHINE_CAPABILITIES.SessionControlSkill] }
+            }],
             expireInactive: () => {}
         }
         ;(restarted as any).rpcGateway.stopRunnerSession = async () => 'already_gone'

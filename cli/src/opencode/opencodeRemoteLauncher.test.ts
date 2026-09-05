@@ -36,6 +36,9 @@ const harness = vi.hoisted(() => ({
     // not rpcHandlers.
     newSessionImpl: null as null | (() => Promise<string>),
     disconnectImpl: null as null | (() => Promise<void>),
+    // Captures each prompt() call's onUpdate callback so a test can drive
+    // turn messages and post-settlement stragglers deterministically.
+    promptOnUpdates: [] as Array<(message: unknown) => void>,
     permissionCancelError: null as Error | null,
     serverStopError: null as Error | null,
     eventStreamOptions: [] as Array<{
@@ -100,10 +103,13 @@ vi.mock('./utils/opencodeBackend', () => ({
                 harness.thoughtLevelOption = { ...harness.thoughtLevelOption, currentValue: value };
             }
         }),
-        prompt: vi.fn(async (_sessionId: string, content: unknown[]) => {
+        prompt: vi.fn(async (_sessionId: string, content: unknown[], onUpdate?: (message: unknown) => void) => {
             harness.promptContents.push(content);
             harness.events.push('prompt:start');
             harness.promptCount++;
+            if (onUpdate) {
+                harness.promptOnUpdates.push(onUpdate);
+            }
             if (harness.hangPrompt) {
                 await new Promise<void>((resolve) => {
                     harness.resolvePrompt = resolve;
@@ -264,13 +270,6 @@ function createMode(model?: string): OpencodeMode {
     };
 }
 
-function createPlanMode(model?: string): OpencodeMode {
-    return {
-        permissionMode: 'plan' as PermissionMode,
-        model
-    };
-}
-
 function createModeWithEffort(model: string | undefined, modelReasoningEffort: string | null): OpencodeMode {
     return {
         permissionMode: 'default' as PermissionMode,
@@ -307,6 +306,7 @@ function createSessionStub(
 
     const sessionEvents: Array<{ type: string; [key: string]: unknown }> = [];
     const sentAgentMessages: unknown[] = [];
+    const sentAgentMessageCalls: Array<{ message: unknown; createdAt: number | undefined; positionAt: number | undefined }> = [];
     const claudeSessionMessages: unknown[] = [];
     const rpcHandlers = new Map<string, (params: unknown) => unknown>();
     const setModelReasoningEffort = vi.fn();
@@ -353,8 +353,9 @@ function createSessionStub(
         onSessionFound(id: string) {
             session.sessionId = id;
         },
-        sendAgentMessage(message: unknown) {
+        sendAgentMessage(message: unknown, createdAt?: number, positionAt?: number) {
             sentAgentMessages.push(message);
+            sentAgentMessageCalls.push({ message, createdAt, positionAt });
         },
         sendSessionEvent(event: { type: string; [key: string]: unknown }) {
             client.sendSessionEvent(event);
@@ -362,7 +363,7 @@ function createSessionStub(
         sendUserMessage(_text: string) {}
     };
 
-    return { session, sessionEvents, sentAgentMessages, agentMessages: sentAgentMessages, claudeSessionMessages, rpcHandlers, setModelReasoningEffort, pushKeepAlive, emitMessagesConsumedCalls, thinkingChangeCalls };
+    return { session, sessionEvents, sentAgentMessages, sentAgentMessageCalls, agentMessages: sentAgentMessages, claudeSessionMessages, rpcHandlers, setModelReasoningEffort, pushKeepAlive, emitMessagesConsumedCalls, thinkingChangeCalls };
 }
 
 function createCompactMode(model?: string): OpencodeMode {
@@ -412,6 +413,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         harness.cancelPromptImpl = null;
         harness.newSessionImpl = null;
         harness.disconnectImpl = null;
+        harness.promptOnUpdates = [];
         harness.permissionCancelError = null;
         harness.serverStopError = null;
         harness.eventStreamOptions = [];
@@ -1617,7 +1619,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         ]);
     });
 
-    it('injects the skill lookup instruction only on the first prompt', async () => {
+    it('forwards user prompts without HAPI-owned prose', async () => {
         const { session } = createSessionStub([
             { message: 'first', mode: createMode() },
             { message: 'second', mode: createMode() }
@@ -1625,11 +1627,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
 
         await opencodeRemoteLauncher(session as never);
 
-        expect(JSON.stringify(harness.promptContents[0])).toContain('$name');
-        expect(JSON.stringify(harness.promptContents[0])).toContain('skill_lookup');
-        expect(JSON.stringify(harness.promptContents[0])).toContain('hapi_display_image');
-        expect(JSON.stringify(harness.promptContents[0])).not.toContain('hapi_change_title');
-        expect(JSON.stringify(harness.promptContents[1])).not.toContain('skill_lookup');
+        expect(harness.promptContents[0]).toEqual([{ type: 'text', text: 'first' }]);
+        expect(harness.promptContents[1]).toEqual([{ type: 'text', text: 'second' }]);
     });
 
     it('spawns the ACP backend with an explicit --port/--hostname from allocateFreePort', async () => {
@@ -1655,8 +1654,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         await opencodeRemoteLauncher(session as never);
 
         expect(harness.bridgeOptions).toEqual({
-            enableChangeTitle: false,
-            skillLookup: { workingDirectory: '/tmp/hapi-opencode-test', flavor: 'opencode' }
+            enableChangeTitle: false
         });
         expect(harness.refreshSessionInfoCalls).toEqual([
             { sessionId: 'acp-session-1', cwd: '/tmp/hapi-opencode-test' },
@@ -1860,20 +1858,6 @@ describe('opencodeRemoteLauncher inline model switch', () => {
                 && event.message.includes('Failed to switch reasoning effort')
         )).toBe(true);
         expect(harness.promptCount).toBe(1);
-    });
-
-    it('injects plan-mode instructions into plan turns', async () => {
-        const { session } = createSessionStub([
-            { message: 'design the fix', mode: createPlanMode() }
-        ]);
-
-        await opencodeRemoteLauncher(session as never);
-
-        const content = harness.promptContents[0] as Array<{ type: string; text: string }>;
-        expect(content[0]?.text).toContain('You are in plan mode');
-        expect(content[0]?.text).toContain('Do not execute tools');
-        expect(content[0]?.text).toContain('design the fix');
-        expect(content[0]?.text).not.toContain('hapi_change_title');
     });
 
     it('registers a listOpencodeModels RPC handler that returns the backend cache', async () => {
@@ -2280,5 +2264,48 @@ describe('selectAbortStatusMessage', () => {
         });
 
         expect(decision).toEqual({ message: 'Turn aborted', shouldClearThinking: true });
+    });
+
+    it('stamps every turn message with arrival time but anchors position to the turn origin', async () => {
+        // Between-turn drain stragglers arrive via the previous turn's
+        // onUpdate *after* prompt() settles; they must carry the turn's
+        // origin position anchor (so they sort before the next user message)
+        // while every message keeps its real arrival time as createdAt (so
+        // web tool durations don't collapse to 0). This drives the exact
+        // closure shape from runPromptLoop: turnPositionAt is captured on the
+        // turn's first onUpdate and reused for all subsequent messages.
+        let resolvePrompt: (() => void) | null = null;
+        harness.promptImpl = () => new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+        });
+        const { session, sentAgentMessageCalls } = createSessionStub([
+            { message: 'hello', mode: createMode() }
+        ]);
+
+        const launcherPromise = opencodeRemoteLauncher(session as never, {});
+        while (!harness.events.includes('prompt:start')) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        expect(harness.promptOnUpdates).toHaveLength(1);
+        const onUpdate = harness.promptOnUpdates[0];
+
+        // Live turn message: emitted while prompt() is active → real arrival
+        // time as createdAt, turn origin as positionAt.
+        onUpdate({ type: 'text', text: 'in-turn reply' });
+        const liveCall = sentAgentMessageCalls[sentAgentMessageCalls.length - 1];
+        expect(liveCall.createdAt).toEqual(expect.any(Number));
+        expect(liveCall.positionAt).toEqual(liveCall.createdAt);
+
+        // Straggler: emitted after prompt() settled → later real arrival time
+        // as createdAt, but the SAME turn origin as positionAt (the turn's
+        // first message time, captured before the live reply above).
+        resolvePrompt!();
+        await launcherPromise;
+        onUpdate({ type: 'text', text: 'straggler tail' });
+
+        const stragglerCall = sentAgentMessageCalls[sentAgentMessageCalls.length - 1];
+        expect(stragglerCall.message).toEqual(expect.objectContaining({ message: 'straggler tail' }));
+        expect(stragglerCall.createdAt).toEqual(expect.any(Number));
+        expect(stragglerCall.positionAt).toEqual(liveCall.positionAt);
     });
 });
