@@ -88,9 +88,9 @@ describe('spawnSessionWithRemit', () => {
         expect(result).toEqual({
             type: 'error',
             code: 'spawn_not_fresh',
-            message: 'Runner returned an unexpected session id; remit was not delivered',
-            childSessionId: SESSION_ID,
-            cleanedUp: true
+            message: 'Runner returned an unexpected session id; it was not stopped',
+            childSessionId: EXISTING_ID,
+            cleanedUp: false
         })
         expect(waitForSessionActive).not.toHaveBeenCalled()
         expect(waitForSessionReady).not.toHaveBeenCalled()

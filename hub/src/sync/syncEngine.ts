@@ -2094,8 +2094,9 @@ export class SyncEngine {
         }
 
         if (operation.state === 'cleanup-needed' || operation.state === 'failed') {
-            const cleanedUp = operation.cleanedUp === true
+            const reservedCleanedUp = operation.cleanedUp === true
                 || await this.cleanupSpawnedSession(machineId, namespace, sessionId)
+            const cleanedUp = reservedCleanedUp && !operation.orphanSessionId
             this.persistSpawnRemitOperation(sessionId, namespace, operation, {
                 ...operation,
                 state: 'failed',
@@ -2106,35 +2107,41 @@ export class SyncEngine {
                 type: 'error',
                 code: operation.code ?? 'spawn_failed',
                 message: operation.error ?? 'The previous spawn attempt failed',
-                childSessionId: sessionId,
+                childSessionId: operation.orphanSessionId ?? sessionId,
                 cleanedUp
             }
         }
 
-        const fail = async (code: string, message: string): Promise<SpawnSessionWithRemitResult> => {
+        const fail = async (
+            code: string,
+            message: string,
+            orphanSessionId?: string
+        ): Promise<SpawnSessionWithRemitResult> => {
             const cleanupOperation: SpawnRemitOperation = {
                 ...operation,
                 state: 'cleanup-needed',
                 updatedAt: Date.now(),
                 code,
                 error: message.slice(0, 500),
-                cleanedUp: false
+                cleanedUp: false,
+                orphanSessionId
             }
             if (!this.persistSpawnRemitOperation(sessionId, namespace, operation, cleanupOperation)) {
                 const current = this.getSessionByNamespace(sessionId, namespace)
                 if (current?.metadata?.spawnRemitOperation?.state === 'completed') {
                     return this.buildSpawnRemitSuccess(machineId, request, current)
                 }
-                return { type: 'error', code, message, childSessionId: sessionId, cleanedUp: false }
+                return { type: 'error', code, message, childSessionId: orphanSessionId ?? sessionId, cleanedUp: false }
             }
-            const cleanedUp = await this.cleanupSpawnedSession(machineId, namespace, sessionId)
+            const reservedCleanedUp = await this.cleanupSpawnedSession(machineId, namespace, sessionId)
+            const cleanedUp = reservedCleanedUp && !orphanSessionId
             this.persistSpawnRemitOperation(sessionId, namespace, cleanupOperation, {
                 ...cleanupOperation,
                 state: 'failed',
                 updatedAt: Date.now(),
                 cleanedUp
             })
-            return { type: 'error', code, message, childSessionId: sessionId, cleanedUp }
+            return { type: 'error', code, message, childSessionId: orphanSessionId ?? sessionId, cleanedUp }
         }
 
         if (child.metadata?.lifecycleState === 'archived') {
@@ -2170,7 +2177,11 @@ export class SyncEngine {
             }
             if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message)
             if (result.sessionId !== sessionId) {
-                return await fail('spawn_not_fresh', 'Runner returned an unexpected session id; remit was not delivered')
+                return await fail(
+                    'spawn_not_fresh',
+                    'Runner returned an unexpected session id; it was not stopped',
+                    result.sessionId
+                )
             }
         }
 
@@ -2269,7 +2280,8 @@ export class SyncEngine {
             if (current.state === next.state
                 && current.code === next.code
                 && current.error === next.error
-                && current.cleanedUp === next.cleanedUp) return true
+                && current.cleanedUp === next.cleanedUp
+                && current.orphanSessionId === next.orphanSessionId) return true
             if (current.state !== expected.state) return false
             const result = this.store.sessions.updateSessionMetadata(
                 sessionId,

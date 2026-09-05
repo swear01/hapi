@@ -42,7 +42,8 @@ export const SpawnRemitOperationSchema = z.object({
     updatedAt: z.number(),
     code: z.string().optional(),
     error: z.string().optional(),
-    cleanedUp: z.boolean().optional()
+    cleanedUp: z.boolean().optional(),
+    orphanSessionId: z.string().optional()
 })
 export type SpawnRemitOperation = z.infer<typeof SpawnRemitOperationSchema>
 

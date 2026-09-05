@@ -176,19 +176,20 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (!targetPath.isAbsolute(parsed.data.directory)) {
             return c.json({ error: 'directory must be an absolute path on the target machine' }, 400)
         }
+        const request = { ...parsed.data, directory: targetPath.resolve(parsed.data.directory) }
 
-        const flavor = parsed.data.agent ?? 'claude'
-        if (parsed.data.permissionMode && !isPermissionModeAllowedForFlavor(parsed.data.permissionMode, flavor)) {
+        const flavor = request.agent ?? 'claude'
+        if (request.permissionMode && !isPermissionModeAllowedForFlavor(request.permissionMode, flavor)) {
             return c.json({ error: `Invalid permission mode for ${flavor}` }, 400)
         }
-        if (parsed.data.yolo && !parsed.data.permissionMode && resolveHapiYoloPermissionMode(flavor) === null) {
+        if (request.yolo && !request.permissionMode && resolveHapiYoloPermissionMode(flavor) === null) {
             return c.json({ error: `Yolo mode is not supported by ${flavor}` }, 400)
         }
-        if ((flavor === 'agy' || flavor === 'dsh') && parsed.data.startingMode && parsed.data.startingMode !== 'remote') {
+        if ((flavor === 'agy' || flavor === 'dsh') && request.startingMode && request.startingMode !== 'remote') {
             return c.json({ error: `${flavor.toUpperCase()} only supports remote mode` }, 400)
         }
 
-        const result = await engine.spawnSessionWithRemit(machineId, c.get('namespace'), parsed.data)
+        const result = await engine.spawnSessionWithRemit(machineId, c.get('namespace'), request)
         return c.json(result, result.type === 'success' ? 200 : 502)
     })
 

@@ -160,11 +160,6 @@
                 "tone": "warning"
             },
             {
-                "label": "Plan Mode",
-                "mode": "plan",
-                "tone": "info"
-            },
-            {
                 "label": "Yolo",
                 "mode": "bypassPermissions",
                 "tone": "danger"

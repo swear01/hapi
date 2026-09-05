@@ -240,7 +240,7 @@ describe('machines routes', () => {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
-                directory: '/tmp/project',
+                directory: '/tmp/project/',
                 message: 'implement issue',
                 name: 'Worker',
                 agent: 'codex',
@@ -338,12 +338,16 @@ describe('machines routes', () => {
             method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, directory: '.\\project' })
         })
         const absolute = await app.request('/api/machines/machine-1/spawn-with-remit', {
-            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, directory: 'C:\\project' })
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, directory: 'C:\\project\\' })
         })
 
         expect(relative.status).toBe(400)
         expect(absolute.status).toBe(200)
-        expect(spawnSessionWithRemit).toHaveBeenCalledTimes(1)
+        expect(spawnSessionWithRemit).toHaveBeenCalledWith(
+            'machine-1',
+            'default',
+            expect.objectContaining({ directory: 'C:\\project' })
+        )
     })
 
     it('returns Codex models for an online machine', async () => {
