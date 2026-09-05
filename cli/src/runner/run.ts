@@ -25,7 +25,11 @@ import { startRunnerControlServer } from './controlServer';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
 import { validateWorkspaceDirectory } from './validateWorkspaceDirectory';
 import { join } from 'path';
-import { buildMachineMetadata } from '@/agent/sessionFactory';
+import {
+  buildMachineMetadata,
+  HAPI_RUNNER_SESSION_TYPE_ENV,
+  HAPI_RUNNER_WORKTREE_NAME_ENV
+} from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
 import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
@@ -528,6 +532,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       let directoryCreated = false;
       let spawnDirectory = directory;
       let worktreeInfo: WorktreeInfo | null = null;
+      let cursorNativeWorktree = false;
       let happyProcess: ReturnType<typeof spawnHappyCLI> | null = null;
 
       if (sessionType === 'simple') {
@@ -590,6 +595,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
               `[RUNNER RUN] Directory is already a linked git worktree; skipping Cursor --worktree (cwd=${directory})`
             );
           } else {
+            cursorNativeWorktree = true;
             logger.debug(`[RUNNER RUN] Cursor-native worktree requested (nameHint=${worktreeName ?? '(auto)'})`);
           }
         } else {
@@ -671,6 +677,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             HAPI_WORKTREE_CREATED_AT: String(worktreeInfo.createdAt)
           };
         }
+
+        const appliedWorktreeName = worktreeInfo?.name
+          ?? (cursorNativeWorktree ? worktreeName?.trim() || undefined : undefined);
+        extraEnv = {
+          ...extraEnv,
+          [HAPI_RUNNER_SESSION_TYPE_ENV]: sessionType,
+          [HAPI_RUNNER_WORKTREE_NAME_ENV]: appliedWorktreeName ?? ''
+        };
 
         const args = buildCliArgs(agent, options, yolo);
 

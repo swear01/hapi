@@ -60,7 +60,9 @@ import {
     bootstrapLazySession,
     bootstrapSession,
     buildMachineMetadata,
-    buildSessionMetadata
+    buildSessionMetadata,
+    HAPI_RUNNER_SESSION_TYPE_ENV,
+    HAPI_RUNNER_WORKTREE_NAME_ENV
 } from './sessionFactory'
 
 apiCreateMock.mockImplementation(async () => ({
@@ -270,6 +272,28 @@ describe('bootstrapExistingSession', () => {
         })
 
         expect(metadata.capabilities?.terminal).toBe(true)
+    })
+
+    it('reports runner-applied worktree selection in session metadata', () => {
+        process.env[HAPI_RUNNER_SESSION_TYPE_ENV] = 'worktree'
+        process.env[HAPI_RUNNER_WORKTREE_NAME_ENV] = 'feature-x'
+        try {
+            const metadata = buildSessionMetadata({
+                flavor: 'codex',
+                startedBy: 'runner',
+                workingDirectory: '/tmp/project',
+                machineId: 'machine-1',
+                now: 123
+            })
+
+            expect(metadata).toEqual(expect.objectContaining({
+                sessionType: 'worktree',
+                worktreeName: 'feature-x'
+            }))
+        } finally {
+            delete process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
+            delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
+        }
     })
 })
 

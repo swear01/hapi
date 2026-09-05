@@ -19,6 +19,9 @@ import { ensureHapiSessionControlSkill } from '@/modules/common/hapiSessionContr
 
 export { HAPI_SESSION_ID_ENV, exportHapiSessionEnv, exportHapiHubAuthEnv } from '@/agent/hapiSessionEnv'
 
+export const HAPI_RUNNER_SESSION_TYPE_ENV = 'HAPI_RUNNER_SESSION_TYPE'
+export const HAPI_RUNNER_WORKTREE_NAME_ENV = 'HAPI_RUNNER_WORKTREE_NAME'
+
 export type SessionStartedBy = 'runner' | 'terminal'
 
 export type SessionBootstrapOptions = {
@@ -88,6 +91,11 @@ export function buildSessionMetadata(options: {
 }): Metadata {
     const happyLibDir = runtimePath()
     const worktreeInfo = readWorktreeEnv()
+    const runnerSessionType = process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
+    const sessionType = runnerSessionType === 'simple' || runnerSessionType === 'worktree'
+        ? runnerSessionType
+        : undefined
+    const worktreeName = process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]?.trim() || worktreeInfo?.name
     const now = options.now ?? Date.now()
 
     return {
@@ -106,6 +114,8 @@ export function buildSessionMetadata(options: {
         lifecycleState: 'running',
         lifecycleStateSince: now,
         flavor: options.flavor,
+        sessionType,
+        worktreeName: sessionType === 'worktree' ? worktreeName : undefined,
         capabilities: {
             terminal: true
         },

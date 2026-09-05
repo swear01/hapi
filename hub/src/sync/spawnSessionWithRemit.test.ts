@@ -301,7 +301,9 @@ describe('spawnSessionWithRemit', () => {
         ['service tier', { ...REQUEST, serviceTier: 'fast' }, { serviceTier: 'standard' }, {}],
         ['collaboration mode', { ...REQUEST, collaborationMode: 'plan' }, { collaborationMode: 'default' }, {}],
         ['Copilot agent mode', { ...REQUEST, agent: 'copilot', copilotAgentMode: 'autopilot' }, { copilotAgentMode: 'interactive' }, {}],
-        ['starting mode', { ...REQUEST, startingMode: 'pty' }, {}, { startingMode: 'remote' }]
+        ['starting mode', { ...REQUEST, startingMode: 'pty' }, {}, { startingMode: 'remote' }],
+        ['session type', { ...REQUEST, sessionType: 'worktree' }, {}, { sessionType: 'simple' }],
+        ['worktree name', { ...REQUEST, sessionType: 'worktree', worktreeName: 'feature-x' }, {}, { worktreeName: 'other' }]
     ] as Array<[string, SpawnSessionWithRemitRequest, Record<string, unknown>, Record<string, unknown>]>)('cleans up when the selected %s does not match', async (_name, request, sessionOverrides, metadataOverrides) => {
         const cleanupSpawnedSession = mock(async () => true)
         const result = await callSpawn({
@@ -318,6 +320,8 @@ describe('spawnSessionWithRemit', () => {
                     path: '/tmp/project',
                     flavor: request.agent ?? 'claude',
                     startingMode: request.startingMode,
+                    sessionType: request.sessionType,
+                    worktreeName: request.worktreeName,
                     ...metadataOverrides
                 },
                 model: null,

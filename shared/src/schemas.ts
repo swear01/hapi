@@ -141,6 +141,8 @@ export const MetadataSchema = z.object({
     // Launch mode, surfaced so the web can show the agent-terminal toggle only
     // for PTY sessions (a 'remote'/SDK session has no agent PTY to view).
     startingMode: z.enum(['local', 'remote', 'pty']).nullish(),
+    sessionType: z.enum(['simple', 'worktree']).optional(),
+    worktreeName: z.string().optional(),
     capabilities: SessionCapabilitiesSchema.optional(),
     conversationHistoryPoints: z.record(z.string(), z.literal(true)).optional(),
     // Native locators for historical fork/rewind (e.g. Grok prompt indexes).

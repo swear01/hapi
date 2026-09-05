@@ -130,7 +130,7 @@ describe('peer lifecycle operations', () => {
                     }
                 }
                 if (url.endsWith(`/api/sessions/${SESSION_ID}`)) {
-                    return { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: false } } }
+                    return { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: true } } }
                 }
                 throw new Error(`unexpected GET ${url}`)
             }

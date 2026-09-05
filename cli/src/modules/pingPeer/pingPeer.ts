@@ -574,14 +574,21 @@ export type WaitPeerResult = {
     messages: InspectPeerMessage[]
 }
 
-function extractResultMessages(rows: unknown[], remitIndex: number): InspectPeerMessage[] {
+function extractResultMessages(rows: unknown[], remitIndex: number): {
+    messages: InspectPeerMessage[]
+    boundaryReached: boolean
+} {
     const result: InspectPeerMessage[] = []
+    let boundaryReached = false
     for (const row of rows.slice(remitIndex + 1)) {
         if (!isObject(row)) continue
         if (!isObject(row.content)) continue
         const role = typeof row.content.role === 'string' ? row.content.role : ''
         if (role === 'user') {
-            if (typeof row.invokedAt === 'number') break
+            if (typeof row.invokedAt === 'number') {
+                boundaryReached = true
+                break
+            }
             continue
         }
         if (role !== 'agent' && role !== 'assistant') continue
@@ -594,7 +601,7 @@ function extractResultMessages(rows: unknown[], remitIndex: number): InspectPeer
             createdAt: typeof row.createdAt === 'number' ? row.createdAt : null
         })
     }
-    return result
+    return { messages: result, boundaryReached }
 }
 
 async function getMessagesFromRemit(
@@ -662,8 +669,8 @@ export async function waitPeer(options: WaitPeerOptions): Promise<WaitPeerResult
         const live = await getSession(apiUrl, jwt, sessionId, http)
         const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http)
         if (result.found) {
-            const messages = extractResultMessages(result.rows, -1)
-            if (result.invoked && !live.thinking && messages.length > 0) {
+            const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
+            if (result.invoked && messages.length > 0 && (boundaryReached || !live.thinking)) {
                 return {
                     sessionId,
                     remitId,

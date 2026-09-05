@@ -2230,6 +2230,8 @@ export class SyncEngine {
             && (request.collaborationMode === undefined || child.collaborationMode === request.collaborationMode)
             && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
             && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
+            && (request.sessionType === undefined || childMetadata.sessionType === request.sessionType)
+            && (request.worktreeName === undefined || childMetadata.worktreeName === request.worktreeName)
         if (!selectionMatches) {
             return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
         }
