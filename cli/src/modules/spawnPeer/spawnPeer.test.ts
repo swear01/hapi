@@ -202,6 +202,29 @@ describe('spawnPeer', () => {
         expect(bodies[0]?.remitId).toBe('7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c')
     })
 
+    it('returns the generated remit id when both spawn responses are lost', async () => {
+        const bodies: Array<Record<string, unknown>> = []
+        const http = createHttpMock((url, body) => {
+            if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
+            bodies.push(body as Record<string, unknown>)
+            throw new Error('socket reset')
+        })
+
+        await expect(spawnPeer({
+            directory: '/runner/project',
+            message: 'work',
+            machineId: MACHINE_ID,
+            apiUrl: 'http://hub.test',
+            accessToken: 'token',
+            http: http as never
+        })).rejects.toMatchObject({
+            code: 'spawn_failed',
+            remitId: expect.stringMatching(/^[0-9a-f-]{36}$/)
+        })
+        expect(bodies).toHaveLength(2)
+        expect(bodies[1]?.remitId).toBe(bodies[0]?.remitId)
+    })
+
     it('fails closed when the hub reports an uncleaned child', async () => {
         const http = createHttpMock((url) => url.endsWith('/api/auth')
             ? { status: 200, data: { token: 'jwt' } }

@@ -115,6 +115,13 @@ describe('bootstrapExistingSession', () => {
         notifyRunnerSessionStartedMock.mockClear()
         readSettingsMock.mockReset()
         delete process.env[HAPI_SESSION_ID_ENV]
+        delete process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
+        delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
+    })
+
+    afterEach(() => {
+        delete process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
+        delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
     })
 
     it('fails before touching the hub when skill delivery cannot be verified', async () => {
@@ -162,6 +169,7 @@ describe('bootstrapExistingSession', () => {
     })
 
     it('preserves existing native resume metadata when reactivating a session', async () => {
+        process.env[HAPI_RUNNER_SESSION_TYPE_ENV] = 'simple'
         const session = createSession()
         const existingMetadata = session.metadata
         if (!existingMetadata) throw new Error('expected test session metadata')
@@ -190,6 +198,8 @@ describe('bootstrapExistingSession', () => {
                 text: 'resume me',
                 updatedAt: 100
             },
+            sessionType: 'worktree',
+            worktreeName: 'feature-x',
             tools: ['read_file'],
             slashCommands: ['/compact'],
             conversationHistoryPoints: { 'local-user-1': true },
@@ -236,6 +246,8 @@ describe('bootstrapExistingSession', () => {
                 text: 'resume me',
                 updatedAt: 100
             },
+            sessionType: 'worktree',
+            worktreeName: 'feature-x',
             tools: ['read_file'],
             slashCommands: ['/compact'],
             conversationHistoryPoints: { 'local-user-1': true },
@@ -250,6 +262,8 @@ describe('bootstrapExistingSession', () => {
         expect(updateHandler(session.metadata)).toEqual(expect.objectContaining({
             codexSessionId: 'codex-thread-1',
             grokSessionId: 'grok-thread-1',
+            sessionType: 'worktree',
+            worktreeName: 'feature-x',
             conversationHistoryEntryIds: { 'local-user-1': 'pi-entry-1' }
         }))
         expect(notifyRunnerSessionStartedMock).toHaveBeenCalledWith(
@@ -257,6 +271,8 @@ describe('bootstrapExistingSession', () => {
             expect.objectContaining({
                 codexSessionId: 'codex-thread-1',
                 grokSessionId: 'grok-thread-1',
+                sessionType: 'worktree',
+                worktreeName: 'feature-x',
                 conversationHistoryEntryIds: { 'local-user-1': 'pi-entry-1' }
             })
         )

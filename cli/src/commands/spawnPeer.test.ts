@@ -1,6 +1,30 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const { initializeTokenMock, spawnPeerMock } = vi.hoisted(() => ({
+    initializeTokenMock: vi.fn(async () => {}),
+    spawnPeerMock: vi.fn()
+}))
+
+vi.mock('@/modules/spawnPeer/spawnPeer', async () => {
+    const actual = await vi.importActual<typeof import('@/modules/spawnPeer/spawnPeer')>(
+        '@/modules/spawnPeer/spawnPeer'
+    )
+    return { ...actual, spawnPeer: spawnPeerMock }
+})
+
+vi.mock('@/ui/tokenInit', async () => {
+    const actual = await vi.importActual<typeof import('@/ui/tokenInit')>('@/ui/tokenInit')
+    return { ...actual, initializeToken: initializeTokenMock }
+})
+
 import { SpawnPeerError } from '@/modules/spawnPeer/spawnPeer'
-import { handleSpawnPeerCommand, parseSpawnPeerArgs } from './spawnPeer'
+import { handleSpawnPeerCommand, parseSpawnPeerArgs, spawnPeerCommand } from './spawnPeer'
+
+afterEach(() => {
+    initializeTokenMock.mockClear()
+    spawnPeerMock.mockReset()
+    vi.restoreAllMocks()
+})
 
 describe('parseSpawnPeerArgs', () => {
     it('parses --dir, --name, and positional message', () => {
@@ -76,5 +100,30 @@ describe('handleSpawnPeerCommand', () => {
             '--name', 'n'.repeat(256),
             'do the work'
         ])).rejects.toMatchObject({ code: 'bad_args' })
+    })
+
+    it('includes the retryable remit id in JSON after ambiguous transport failure', async () => {
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        spawnPeerMock.mockRejectedValueOnce(new SpawnPeerError('spawn_failed', 'socket reset', remitId))
+        const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+        vi.spyOn(process, 'exit').mockImplementation((code) => {
+            throw new Error(`process.exit:${code}`)
+        })
+
+        await expect(spawnPeerCommand.run({
+            args: [],
+            subcommand: 'spawn-peer',
+            commandArgs: [
+                '--json',
+                '--dir', '/tmp/project',
+                '--name', 'Worker',
+                'do the work'
+            ]
+        })).rejects.toThrow('process.exit:3')
+        expect(log).toHaveBeenCalledWith(JSON.stringify({
+            ok: false,
+            remitId,
+            error: { code: 'spawn_failed', message: 'socket reset' }
+        }))
     })
 })

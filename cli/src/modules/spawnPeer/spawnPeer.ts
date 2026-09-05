@@ -21,11 +21,13 @@ export type SpawnPeerErrorCode =
 
 export class SpawnPeerError extends Error {
     readonly code: SpawnPeerErrorCode
+    readonly remitId?: string
 
-    constructor(code: SpawnPeerErrorCode, message: string) {
+    constructor(code: SpawnPeerErrorCode, message: string, remitId?: string) {
         super(message)
         this.name = 'SpawnPeerError'
         this.code = code
+        this.remitId = remitId
     }
 }
 
@@ -192,13 +194,17 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
             break
         } catch (error) {
             if (attempt === 1) {
-                throw new SpawnPeerError('spawn_failed', error instanceof Error ? error.message : String(error))
+                throw new SpawnPeerError(
+                    'spawn_failed',
+                    error instanceof Error ? error.message : String(error),
+                    remitId
+                )
             }
             options.onProgress?.('spawn response lost; retrying the same remit')
         }
     }
 
-    if (!response) throw new SpawnPeerError('spawn_failed', 'Hub did not return a spawn response')
+    if (!response) throw new SpawnPeerError('spawn_failed', 'Hub did not return a spawn response', remitId)
     const data = response.data as {
         type?: string
         sessionId?: string

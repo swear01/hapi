@@ -330,7 +330,11 @@ export const spawnPeerCommand: CommandDefinition = {
         } catch (error) {
             if (error instanceof SpawnPeerError || error instanceof TokenInitializationError) {
                 const output = commandArgs.includes('--json')
-                    ? JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })
+                    ? JSON.stringify({
+                        ok: false,
+                        ...(error instanceof SpawnPeerError && error.remitId ? { remitId: error.remitId } : {}),
+                        error: { code: error.code, message: error.message }
+                    })
                     : `${chalk.red('hapi spawn-peer:')} ${error.message}`
                 commandArgs.includes('--json') ? console.log(output) : console.error(output)
                 process.exit(error instanceof TokenInitializationError ? 2 : exitCodeForSpawnPeerError(error))

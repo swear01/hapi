@@ -146,6 +146,8 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.piResumeAttempt !== undefined) preserved.piResumeAttempt = metadata.piResumeAttempt
     if (metadata.ptyResumeAttempt !== undefined) preserved.ptyResumeAttempt = metadata.ptyResumeAttempt
     if (metadata.preferredPermissionMode !== undefined) preserved.preferredPermissionMode = metadata.preferredPermissionMode
+    if (metadata.sessionType !== undefined) preserved.sessionType = metadata.sessionType
+    if (metadata.worktreeName !== undefined) preserved.worktreeName = metadata.worktreeName
     if (metadata.tools !== undefined) preserved.tools = metadata.tools
     if (metadata.slashCommands !== undefined) preserved.slashCommands = metadata.slashCommands
     if (metadata.worktree !== undefined) preserved.worktree = metadata.worktree
