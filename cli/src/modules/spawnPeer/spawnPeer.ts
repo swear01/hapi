@@ -140,6 +140,11 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
     if (options.permissionMode && !isPermissionModeAllowedForFlavor(options.permissionMode, agent)) {
         throw new SpawnPeerError('bad_args', `permission mode ${options.permissionMode} is not supported by ${agent}`)
     }
+    const usesModelReasoningEffort = agent === 'codex' || agent === 'opencode'
+    const usesEffort = agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'agy'
+    if (options.effort && !usesModelReasoningEffort && !usesEffort) {
+        throw new SpawnPeerError('bad_args', `effort is not supported by ${agent}`)
+    }
     const waitActiveSecs = options.waitActiveSecs ?? 60
     if (!Number.isFinite(waitActiveSecs) || waitActiveSecs <= 0 || waitActiveSecs > 300) {
         throw new SpawnPeerError('bad_args', 'waitActiveSecs must be between 1 and 300')
@@ -166,7 +171,11 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
         agent,
         ...(name ? { name } : {}),
         ...(options.model ? { model: options.model } : {}),
-        ...(options.effort ? { effort: options.effort } : {}),
+        ...(options.effort
+            ? usesModelReasoningEffort
+                ? { modelReasoningEffort: options.effort }
+                : { effort: options.effort }
+            : {}),
         ...(options.sessionType ? { sessionType: options.sessionType } : {}),
         ...(options.worktreeName ? { worktreeName: options.worktreeName } : {}),
         ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),

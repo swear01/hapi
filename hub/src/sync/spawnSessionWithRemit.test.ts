@@ -415,28 +415,35 @@ describe('stopSession', () => {
 
     it('reconciles an active row when its process is already gone', async () => {
         const handleSessionEnd = mock(() => {})
+        const stopRunnerSession = mock(async () => 'already_gone' as const)
         const result = await SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true }),
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1' } }),
             rpcGateway: {
-                stopSessionProcess: async () => { throw new RpcTargetMissingError('kill-session', 'handler-not-registered') }
+                stopSessionProcess: async () => { throw new RpcTargetMissingError('kill-session', 'handler-not-registered') },
+                stopRunnerSession
             },
             handleSessionEnd
         } as unknown as SyncEngine, SESSION_ID)
 
         expect(result).toEqual({ alreadyStopped: false })
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
         expect(handleSessionEnd).toHaveBeenCalledWith(expect.objectContaining({ sid: SESSION_ID, reason: 'error' }))
     })
 
-    it('waits for the CLI session-end event after a stop is accepted', async () => {
+    it('waits for both CLI session-end and runner-confirmed process exit', async () => {
         const handleSessionEnd = mock(() => {})
         let confirmInactive!: (inactive: boolean) => void
         const waitForSessionInactive = mock(async () => await new Promise<boolean>((resolve) => {
             confirmInactive = resolve
         }))
+        const stopRunnerSession = mock(async () => 'already_gone' as const)
         let settled = false
         const resultPromise = SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true }),
-            rpcGateway: { stopSessionProcess: async () => {} },
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1' } }),
+            rpcGateway: {
+                stopSessionProcess: async () => {},
+                stopRunnerSession
+            },
             handleSessionEnd,
             waitForSessionInactive
         } as unknown as SyncEngine, SESSION_ID)
@@ -444,11 +451,24 @@ describe('stopSession', () => {
 
         await Promise.resolve()
         expect(waitForSessionInactive).toHaveBeenCalledWith(SESSION_ID)
+        expect(stopRunnerSession).not.toHaveBeenCalled()
         expect(settled).toBe(false)
         confirmInactive(true)
 
         await expect(resultPromise).resolves.toEqual({ alreadyStopped: false })
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
         expect(handleSessionEnd).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when session-end arrives while the runner still sees a live process', async () => {
+        await expect(SyncEngine.prototype.stopSession.call({
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1' } }),
+            rpcGateway: {
+                stopSessionProcess: async () => {},
+                stopRunnerSession: async () => 'still_alive' as const
+            },
+            waitForSessionInactive: async () => true
+        } as unknown as SyncEngine, SESSION_ID)).rejects.toThrow(/still running/)
     })
 })
 

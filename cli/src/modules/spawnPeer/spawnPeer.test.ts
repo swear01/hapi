@@ -50,8 +50,8 @@ describe('spawnPeer', () => {
                         directory: '/runner/path',
                         agent: 'codex',
                         model: 'gpt-5',
-                        modelReasoningEffort: null,
-                        effort: 'high',
+                        modelReasoningEffort: 'high',
+                        effort: null,
                         permissionMode: 'safe-yolo'
                     }
                 }
@@ -79,7 +79,7 @@ describe('spawnPeer', () => {
             name: 'Worker',
             agent: 'codex',
             model: 'gpt-5',
-            effort: 'high',
+            modelReasoningEffort: 'high',
             permissionMode: 'safe-yolo',
             waitActiveSecs: 30
         })
@@ -95,6 +95,69 @@ describe('spawnPeer', () => {
         })
         expect(http.post).toHaveBeenCalledTimes(2)
     })
+
+    it.each([
+        ['opencode', 'modelReasoningEffort'],
+        ['claude', 'effort'],
+        ['grok', 'effort'],
+        ['pi', 'effort'],
+        ['agy', 'effort']
+    ] as const)('maps --effort to the %s runner field', async (agent, field) => {
+        let request: Record<string, unknown> | undefined
+        const http = createHttpMock((url, body) => {
+            if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
+            request = body as Record<string, unknown>
+            return {
+                status: 200,
+                data: {
+                    type: 'success',
+                    sessionId: SESSION_ID,
+                    remitId: request.remitId,
+                    session: {
+                        machineId: MACHINE_ID,
+                        directory: '/runner/path',
+                        agent,
+                        model: null,
+                        modelReasoningEffort: field === 'modelReasoningEffort' ? 'high' : null,
+                        effort: field === 'effort' ? 'high' : null,
+                        permissionMode: null
+                    }
+                }
+            }
+        })
+
+        await spawnPeer({
+            directory: '/runner/path',
+            message: 'implement issue',
+            agent,
+            effort: 'high',
+            machineId: MACHINE_ID,
+            apiUrl: 'http://hub.test',
+            accessToken: 'token',
+            http: http as never
+        })
+
+        expect(request?.[field]).toBe('high')
+        expect(request?.[field === 'effort' ? 'modelReasoningEffort' : 'effort']).toBeUndefined()
+    })
+
+    it.each(['cursor', 'dsh', 'copilot', 'kimi'] as const)(
+        'rejects --effort for unsupported %s sessions before authentication',
+        async (agent) => {
+            const http = createHttpMock(() => { throw new Error('must not call HTTP') })
+            await expect(spawnPeer({
+                directory: '/runner/path',
+                message: 'implement issue',
+                agent,
+                effort: 'high',
+                machineId: MACHINE_ID,
+                apiUrl: 'http://hub.test',
+                accessToken: 'token',
+                http: http as never
+            })).rejects.toMatchObject({ code: 'bad_args' })
+            expect(http.post).not.toHaveBeenCalled()
+        }
+    )
 
     it('retries an ambiguous transport failure with the same remit id', async () => {
         const bodies: Array<Record<string, unknown>> = []

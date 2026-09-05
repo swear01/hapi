@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -64,34 +64,53 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
     const skillRoot = nativeSkillRoot(flavor)
     const targetDir = join(skillRoot, HAPI_SESSION_CONTROL_SKILL_NAME)
     const targetPath = join(targetDir, 'SKILL.md')
+    const markerPath = join(targetDir, '.hapi-managed')
 
     await mkdir(skillRoot, { recursive: true, mode: 0o700 })
-    const targetDirStat = await lstat(targetDir).catch(() => null)
+    let targetDirStat = await lstat(targetDir).catch(() => null)
     if (targetDirStat?.isSymbolicLink()) {
-        const suffix = `${process.pid}.${randomUUID()}`
-        const temporaryDir = join(skillRoot, `.${HAPI_SESSION_CONTROL_SKILL_NAME}.${suffix}.tmp`)
-        const displacedPath = join(skillRoot, `.${HAPI_SESSION_CONTROL_SKILL_NAME}.${suffix}.old`)
-        await mkdir(temporaryDir, { mode: 0o700 })
+        throw new Error(`Refusing to replace user-managed skill directory symlink at ${targetDir}`)
+    }
+    if (targetDirStat && !targetDirStat.isDirectory()) {
+        throw new Error(`Refusing to replace user-managed skill path at ${targetDir}`)
+    }
+
+    let created = false
+    if (!targetDirStat) {
         try {
-            await writeFile(join(temporaryDir, 'SKILL.md'), source, { encoding: 'utf8', mode: 0o600 })
-            await rename(targetDir, displacedPath)
-            try {
-                await rename(temporaryDir, targetDir)
-            } catch (error) {
-                await rename(displacedPath, targetDir)
-                throw error
-            }
-            await unlink(displacedPath).catch(() => {})
-        } finally {
-            await rm(temporaryDir, { recursive: true, force: true })
+            await mkdir(targetDir, { mode: 0o700 })
+            created = true
+        } catch (error) {
+            targetDirStat = await lstat(targetDir).catch(() => null)
+            if (!targetDirStat?.isDirectory() || targetDirStat.isSymbolicLink()) throw error
         }
     }
 
-    await mkdir(targetDir, { recursive: true, mode: 0o700 })
+    const markerStat = await lstat(markerPath).catch(() => null)
+    if (markerStat?.isSymbolicLink() || (markerStat && !markerStat.isFile())) {
+        throw new Error(`Refusing invalid HAPI skill ownership marker at ${markerPath}`)
+    }
+    if (created) {
+        await writeFile(markerPath, HAPI_SESSION_CONTROL_SKILL_NAME, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    }
+    const managed = created || (
+        markerStat?.isFile()
+        && await readFile(markerPath, 'utf8').catch(() => null) === HAPI_SESSION_CONTROL_SKILL_NAME
+    )
+
     const targetStat = await lstat(targetPath).catch(() => null)
+    if (targetStat?.isSymbolicLink()) {
+        throw new Error(`Refusing to replace user-managed skill file symlink at ${targetPath}`)
+    }
+    if (targetStat && !targetStat.isFile()) {
+        throw new Error(`Refusing to replace user-managed skill path at ${targetPath}`)
+    }
     const installed = targetStat?.isFile() && !targetStat.isSymbolicLink()
         ? await readFile(targetPath, 'utf8').catch(() => null)
         : null
+    if (installed !== source && !managed) {
+        throw new Error(`Refusing to overwrite user-managed skill at ${targetPath}`)
+    }
     if (installed !== source) {
         const temporaryPath = join(targetDir, `.SKILL.md.${process.pid}.${randomUUID()}.tmp`)
         try {

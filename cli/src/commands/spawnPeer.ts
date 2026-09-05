@@ -48,7 +48,7 @@ ${chalk.bold('Options:')}
   --agent NAME            Agent flavor (default: claude)
   --machine ID            Exact runner machine id (default: this CLI's machine)
   --model ID              Runtime model id
-  --effort VALUE          Runtime reasoning effort
+  --effort VALUE          Effort for Claude/Grok/Pi/AGY or reasoning effort for Codex/OpenCode
   --session-type TYPE     simple | worktree (default: simple; worktree creates a new tree from PATH)
   --permission-mode MODE  Operator-visible mode for the new session (not cloned from parent)
   --wait SECONDS          Ready/verify timeout (default 60, or HAPI_WAIT_ACTIVE_SECS)

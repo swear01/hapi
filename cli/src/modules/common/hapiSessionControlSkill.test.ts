@@ -70,7 +70,27 @@ describe('canonical hapi-session-control delivery', () => {
         await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/shadowed/)
     })
 
-    it('replaces a managed symlink without overwriting its source', async () => {
+    it('updates only a HAPI-managed skill copy', async () => {
+        const target = await ensureHapiSessionControlSkill('codex', workingDirectory)
+        await writeFile(target, 'stale HAPI copy')
+
+        await ensureHapiSessionControlSkill('codex', workingDirectory)
+
+        expect(await readFile(target, 'utf8')).toContain('name: hapi-session-control')
+        expect(await readFile(join(target, '..', '.hapi-managed'), 'utf8')).toBe(HAPI_SESSION_CONTROL_SKILL_NAME)
+    })
+
+    it('rejects an unmanaged skill file without overwriting it', async () => {
+        const target = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
+        await mkdir(join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME), { recursive: true })
+        await writeFile(target, 'user-managed skill')
+
+        await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/user-managed/)
+
+        expect(await readFile(target, 'utf8')).toBe('user-managed skill')
+    })
+
+    it('rejects a skill file symlink without overwriting its source', async () => {
         const source = join(sandbox, 'managed-skill.md')
         const targetDir = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME)
         const target = join(targetDir, 'SKILL.md')
@@ -78,14 +98,13 @@ describe('canonical hapi-session-control delivery', () => {
         await writeFile(source, 'user-managed source')
         await symlink(source, target)
 
-        await ensureHapiSessionControlSkill('codex', workingDirectory)
+        await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/symlink/)
 
-        expect((await lstat(target)).isSymbolicLink()).toBe(false)
+        expect((await lstat(target)).isSymbolicLink()).toBe(true)
         expect(await readFile(source, 'utf8')).toBe('user-managed source')
-        expect(await readFile(target, 'utf8')).toContain('name: hapi-session-control')
     })
 
-    it('replaces a managed directory symlink without overwriting its source', async () => {
+    it('rejects a skill directory symlink without overwriting its source', async () => {
         const managedDir = join(sandbox, 'managed-skill')
         const targetDir = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME)
         await mkdir(managedDir, { recursive: true })
@@ -93,10 +112,9 @@ describe('canonical hapi-session-control delivery', () => {
         await mkdir(nativeSkillRoot('codex'), { recursive: true })
         await symlink(managedDir, targetDir)
 
-        await ensureHapiSessionControlSkill('codex', workingDirectory)
+        await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/symlink/)
 
-        expect((await lstat(targetDir)).isSymbolicLink()).toBe(false)
+        expect((await lstat(targetDir)).isSymbolicLink()).toBe(true)
         expect(await readFile(join(managedDir, 'SKILL.md'), 'utf8')).toBe('user-managed source')
-        expect(await readFile(join(targetDir, 'SKILL.md'), 'utf8')).toContain('name: hapi-session-control')
     })
 })

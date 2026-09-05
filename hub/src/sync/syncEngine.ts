@@ -1716,15 +1716,22 @@ export class SyncEngine {
     async stopSession(sessionId: string): Promise<{ alreadyStopped: boolean }> {
         const session = this.getSession(sessionId)
         if (!session?.active) return { alreadyStopped: true }
+        let inactive = false
         try {
             await this.rpcGateway.stopSessionProcess(sessionId)
+            inactive = await this.waitForSessionInactive(sessionId)
         } catch (error) {
             if (!(error instanceof RpcTargetMissingError)) throw error
-            this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
-            return { alreadyStopped: false }
         }
-        if (!await this.waitForSessionInactive(sessionId)) {
-            throw new Error('Timed out waiting for session process to stop')
+
+        const machineId = session.metadata?.machineId
+        if (!machineId) throw new Error('Cannot confirm session process exit without a machine id')
+        const status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
+        if (status === 'still_alive') {
+            throw new Error('Session process is still running')
+        }
+        if (!inactive && this.getSession(sessionId)?.active) {
+            this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
         }
         return { alreadyStopped: false }
     }
