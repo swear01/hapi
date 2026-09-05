@@ -27,11 +27,13 @@ export type PingPeerErrorCode =
 
 export class PingPeerError extends Error {
     readonly code: PingPeerErrorCode
+    readonly remitId?: string
 
-    constructor(code: PingPeerErrorCode, message: string) {
+    constructor(code: PingPeerErrorCode, message: string, remitId?: string) {
         super(message)
         this.name = 'PingPeerError'
         this.code = code
+        this.remitId = remitId
     }
 }
 
@@ -280,15 +282,21 @@ async function sendMessage(
     remitId: string,
     http: AxiosInstance
 ): Promise<void> {
-    const response = await http.post(
-        `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
-        { text: message, localId: remitId },
-        {
-            headers: authHeaders(jwt),
-            timeout: 30_000,
-            validateStatus: () => true
-        }
-    )
+    let response: AxiosResponse
+    try {
+        response = await http.post(
+            `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+            { text: message, localId: remitId },
+            {
+                headers: authHeaders(jwt),
+                timeout: 30_000,
+                validateStatus: () => true
+            }
+        )
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        throw new PingPeerError('send_failed', `send failed: ${detail}`, remitId)
+    }
     if (response.status >= 200 && response.status < 300 && response.data?.ok === true) {
         return
     }
@@ -297,7 +305,7 @@ async function sendMessage(
         : typeof response.data?.code === 'string'
             ? response.data.code
             : `HTTP ${response.status}`
-    throw new PingPeerError('send_failed', `send failed: ${detail}`)
+    throw new PingPeerError('send_failed', `send failed: ${detail}`, remitId)
 }
 
 const MAX_PEER_LABEL_CHARS = 255
@@ -332,6 +340,14 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
     const waitActiveSecs = options.waitActiveSecs ?? DEFAULT_WAIT_ACTIVE_SECS
     if (!Number.isFinite(waitActiveSecs) || waitActiveSecs <= 0 || waitActiveSecs > 300) {
         throw new PingPeerError('bad_args', 'waitActiveSecs must be between 1 and 300')
+    }
+    const providedRemitId = options.remitId?.trim()
+    if (options.remitId !== undefined && !providedRemitId) {
+        throw new PingPeerError('bad_args', 'an exact remit UUID is required')
+    }
+    const remitId = providedRemitId ?? randomUUID()
+    if (!EXACT_SESSION_ID_RE.test(remitId)) {
+        throw new PingPeerError('bad_args', 'an exact remit UUID is required')
     }
 
     const apiUrl = resolveApiUrl(options.apiUrl)
@@ -378,7 +394,6 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
     }
 
     onProgress?.(`sending message (${message.length} chars)...`)
-    const remitId = options.remitId ?? randomUUID()
     await sendMessage(apiUrl, jwt, matched.id, message, remitId, http)
 
     return {

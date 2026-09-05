@@ -159,7 +159,11 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
     const directory = options.machineId && machineId !== localMachineId
         ? rawDirectory
         : resolvePath(rawDirectory)
-    const remitId = options.remitId?.trim() || randomUUID()
+    const providedRemitId = options.remitId?.trim()
+    if (options.remitId !== undefined && !providedRemitId) {
+        throw new SpawnPeerError('bad_args', 'remitId must be an exact UUID')
+    }
+    const remitId = providedRemitId ?? randomUUID()
     if (!UUID_RE.test(remitId)) throw new SpawnPeerError('bad_args', 'remitId must be an exact UUID')
     const apiUrl = resolveApiUrl(options.apiUrl)
     const http = options.http ?? axios

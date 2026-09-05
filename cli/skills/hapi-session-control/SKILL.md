@@ -54,4 +54,6 @@ hapi archive-peer <exact-session-id> --json
 hapi delete-peer <exact-session-id> --json
 ```
 
+If `ping-peer` reports an ambiguous send failure, its JSON includes `remitId`. Retry only the identical message to the same exact session with `--remit-id <that-uuid>`.
+
 `abort-peer` cancels the current turn, `stop-peer` terminates the process without archiving, `archive-peer` terminates and archives, and `delete-peer` removes an inactive record. Stop and archive are idempotent.

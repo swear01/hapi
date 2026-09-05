@@ -82,6 +82,7 @@ describe('parseSpawnPeerArgs', () => {
     it('rejects unknown flags', () => {
         expect(() => parseSpawnPeerArgs(['--host', 'evil'])).toThrow(SpawnPeerError)
         expect(() => parseSpawnPeerArgs(['--wait', '--json'])).toThrow(SpawnPeerError)
+        expect(() => parseSpawnPeerArgs(['--remit-id='])).toThrow(SpawnPeerError)
     })
 
     it('rejects --session-type other than simple|worktree', () => {

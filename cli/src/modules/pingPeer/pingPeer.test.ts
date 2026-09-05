@@ -83,6 +83,37 @@ describe('peer lifecycle operations', () => {
         expect(http.get).not.toHaveBeenCalledWith('http://hub.test/api/sessions', expect.anything())
     })
 
+    it('returns the generated remit id when the message response is lost', async () => {
+        let sentRemitId: string | undefined
+        const http = createHttpMock({
+            post: (url, body) => {
+                const auth = authResponse(url)
+                if (auth) return auth
+                sentRemitId = (body as { localId?: string }).localId
+                throw new Error('socket reset')
+            },
+            get: () => ({
+                status: 200,
+                data: { session: { id: SESSION_ID, active: true, metadata: { name: 'Peer' } } }
+            })
+        })
+
+        try {
+            await pingPeer({
+                sessionId: SESSION_ID,
+                message: 'hello',
+                apiUrl: 'http://hub.test',
+                accessToken: 'token',
+                http: http as never
+            })
+            throw new Error('expected pingPeer to fail')
+        } catch (error) {
+            expect(error).toBeInstanceOf(PingPeerError)
+            expect(error).toMatchObject({ code: 'send_failed', remitId: sentRemitId })
+        }
+        expect(sentRemitId).toMatch(/^[0-9a-f-]{36}$/)
+    })
+
     it('inspects without resuming or listing sessions', async () => {
         const http = createHttpMock({
             post: (url) => authResponse(url) ?? Promise.reject(new Error(`unexpected POST ${url}`)),

@@ -4,7 +4,29 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+const { pingPeerMock, spawnPeerMock } = vi.hoisted(() => ({
+    pingPeerMock: vi.fn(),
+    spawnPeerMock: vi.fn()
+}))
+
+vi.mock('@/modules/pingPeer/pingPeer', async () => {
+    const actual = await vi.importActual<typeof import('@/modules/pingPeer/pingPeer')>(
+        '@/modules/pingPeer/pingPeer'
+    )
+    return { ...actual, pingPeer: pingPeerMock }
+})
+
+vi.mock('@/modules/spawnPeer/spawnPeer', async () => {
+    const actual = await vi.importActual<typeof import('@/modules/spawnPeer/spawnPeer')>(
+        '@/modules/spawnPeer/spawnPeer'
+    )
+    return { ...actual, spawnPeer: spawnPeerMock }
+})
+
 import type { ApiSessionClient } from '@/api/apiSession'
+import { PingPeerError } from '@/modules/pingPeer/pingPeer'
+import { SpawnPeerError } from '@/modules/spawnPeer/spawnPeer'
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from './startHappyServer'
 
 type ToolResult = {
@@ -21,6 +43,8 @@ describe('startHappyServer skill_lookup', () => {
     let sendAgentMessage: ReturnType<typeof vi.fn>
 
     beforeEach(async () => {
+        pingPeerMock.mockReset()
+        spawnPeerMock.mockReset()
         sandboxDir = await mkdtemp(join(tmpdir(), 'hapi-skill-mcp-'))
         workingDirectory = join(sandboxDir, 'repo')
         process.env.HOME = join(sandboxDir, 'home')
@@ -116,6 +140,41 @@ describe('startHappyServer skill_lookup', () => {
             'spawn_peer',
             'inspect_peer'
         ])
+    })
+
+    it('exposes and reuses the spawn remit after an ambiguous failure', async () => {
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        spawnPeerMock.mockRejectedValueOnce(new SpawnPeerError('spawn_failed', 'socket reset', remitId))
+        const mcp = await connect(false)
+
+        const result = await mcp.callTool({
+            name: 'spawn_peer',
+            arguments: {
+                directory: '/tmp/project',
+                message: 'work',
+                remitId
+            }
+        }) as ToolResult
+
+        expect(spawnPeerMock).toHaveBeenCalledWith(expect.objectContaining({ remitId }))
+        expect(result.isError).toBe(true)
+        expect(result.content?.[0]?.text).toContain(`retry spawn_peer with remitId=${remitId}`)
+    })
+
+    it('exposes and reuses the ping remit after an ambiguous failure', async () => {
+        const sessionId = '05d9f0f2-9273-4137-933c-07459a1146a2'
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        pingPeerMock.mockRejectedValueOnce(new PingPeerError('send_failed', 'send failed: socket reset', remitId))
+        const mcp = await connect(false)
+
+        const result = await mcp.callTool({
+            name: 'ping_peer',
+            arguments: { sessionId, message: 'hello', remitId }
+        }) as ToolResult
+
+        expect(pingPeerMock).toHaveBeenCalledWith(expect.objectContaining({ sessionId, remitId }))
+        expect(result.isError).toBe(true)
+        expect(result.content?.[0]?.text).toContain(`retry ping_peer with remitId=${remitId}`)
     })
 
     it('describes display_image as user output rather than image input', async () => {

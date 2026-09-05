@@ -10,6 +10,7 @@ type ParsedPingPeerArgs = {
     sessionId?: string
     message?: string
     messageFile?: string
+    remitId?: string
     waitActiveSecs?: number
 }
 
@@ -19,7 +20,7 @@ ${chalk.bold('hapi ping-peer')} - Send a message to one user-selected HAPI sessi
 
 ${chalk.bold('Usage:')}
   hapi ping-peer <exact-session-id> <message-text>
-  hapi ping-peer <exact-session-id> --message-file <path|-> [--json]
+  hapi ping-peer <exact-session-id> --message-file <path|-> [--remit-id UUID] [--json]
 
 The exact session UUID must come from the user. Prefixes are rejected. Inactive
 sessions are resumed before delivery. --json emits stable machine-readable output.
@@ -38,6 +39,14 @@ export function parsePingPeerArgs(args: string[]): ParsedPingPeerArgs {
             result.messageFile = value
         } else if (arg.startsWith('--message-file=')) {
             result.messageFile = arg.slice('--message-file='.length)
+        } else if (arg === '--remit-id') {
+            const value = args[++i]
+            if (!value || value.startsWith('-')) throw new PingPeerError('bad_args', '--remit-id requires a UUID')
+            result.remitId = value
+        } else if (arg.startsWith('--remit-id=')) {
+            const value = arg.slice('--remit-id='.length)
+            if (!value) throw new PingPeerError('bad_args', '--remit-id requires a UUID')
+            result.remitId = value
         } else if (arg === '--wait') {
             const value = args[++i]
             if (!value || value.startsWith('-')) throw new PingPeerError('bad_args', '--wait requires seconds')
@@ -96,6 +105,7 @@ export async function handlePingPeerCommand(args: string[]): Promise<void> {
     const result = await pingPeer({
         sessionId: parsed.sessionId,
         message,
+        remitId: parsed.remitId,
         waitActiveSecs,
         onProgress: parsed.json ? undefined : (line) => console.log(`hapi ping-peer: ${line}`)
     })
@@ -113,7 +123,11 @@ export const pingPeerCommand: CommandDefinition = {
         } catch (error) {
             if (error instanceof PingPeerError || error instanceof TokenInitializationError) {
                 const output = commandArgs.includes('--json')
-                    ? JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })
+                    ? JSON.stringify({
+                        ok: false,
+                        ...(error instanceof PingPeerError && error.remitId ? { remitId: error.remitId } : {}),
+                        error: { code: error.code, message: error.message }
+                    })
                     : `${chalk.red('hapi ping-peer:')} ${error.message}`
                 commandArgs.includes('--json') ? console.log(output) : console.error(output)
                 process.exit(error instanceof TokenInitializationError ? 2 : exitCodeForPingPeerError(error))

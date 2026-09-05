@@ -119,6 +119,7 @@ function createHapiMcpServer(
     const pingPeerInputSchema: z.ZodTypeAny = z.object({
         sessionId: z.string().uuid().describe(SESSION_ID_PARAM_DESCRIPTION),
         message: z.string().min(1).describe('Message text to deliver to the target session'),
+        remitId: z.string().uuid().optional().describe('Stable idempotency key for retries'),
     });
 
     const spawnPeerInputSchema: z.ZodTypeAny = z.object({
@@ -134,6 +135,7 @@ function createHapiMcpServer(
             .describe('Session directory mode'),
         permissionMode: PermissionModeSchema.optional()
             .describe('Permission mode for the new session.'),
+        remitId: z.string().uuid().optional().describe('Stable idempotency key for retries'),
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
@@ -312,18 +314,19 @@ function createHapiMcpServer(
         description: PING_PEER_TOOL_DESCRIPTION,
         title: 'Ping Peer Session',
         inputSchema: pingPeerInputSchema,
-    }, async (args: { sessionId: string; message: string }) => {
+    }, async (args: { sessionId: string; message: string; remitId?: string }) => {
         logger.debug('[hapiMCP] ping_peer:', args.sessionId);
         try {
             const result = await pingPeer({
                 sessionId: args.sessionId,
                 message: args.message,
+                remitId: args.remitId,
             });
             return {
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Delivered to ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
+                        text: `Delivered to ${result.sessionId} remit=${result.remitId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
                     },
                 ],
                 isError: false,
@@ -339,7 +342,9 @@ function createHapiMcpServer(
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Failed to ping peer: ${message}`,
+                        text: error instanceof PingPeerError && error.remitId
+                            ? `Failed to ping peer: ${message}; retry ping_peer with remitId=${error.remitId}`
+                            : `Failed to ping peer: ${message}`,
                     },
                 ],
                 isError: true,
@@ -361,6 +366,7 @@ function createHapiMcpServer(
         effort?: string
         sessionType?: 'simple' | 'worktree'
         permissionMode?: string
+        remitId?: string
     }) => {
         logger.debug('[hapiMCP] spawn_peer:', args.directory);
         try {
@@ -374,6 +380,7 @@ function createHapiMcpServer(
                 effort: args.effort,
                 sessionType: args.sessionType,
                 permissionMode: args.permissionMode as Parameters<typeof spawnPeer>[0]['permissionMode'],
+                remitId: args.remitId,
             });
             return {
                 content: [
@@ -395,7 +402,9 @@ function createHapiMcpServer(
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Failed to spawn peer: ${message}`,
+                        text: error instanceof SpawnPeerError && error.remitId
+                            ? `Failed to spawn peer: ${message}; retry spawn_peer with remitId=${error.remitId}`
+                            : `Failed to spawn peer: ${message}`,
                     },
                 ],
                 isError: true,

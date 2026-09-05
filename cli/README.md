@@ -41,7 +41,7 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, OpenCode, or DeepSeek Harness 
 - `hapi spawn-peer --dir PATH --name TITLE --message-file - --json` - Create a fresh session and atomically deliver its remit; failed delivery stops and archives the child. Automation may pass `--remit-id UUID` and reuse it only when retrying the same request. `--effort` supports Claude/Grok/Pi/AGY and maps to reasoning effort for Codex/OpenCode; unsupported flavors fail before spawning.
 - `hapi wait-peer <exact-session-id> --remit-id UUID --json` - Wait for that remit's result.
 - `hapi inspect-peer <exact-session-id> --json` - Read metadata and recent message text without resuming.
-- `hapi ping-peer <exact-session-id> --message-file - --json` - Resume if needed and message one explicitly selected session.
+- `hapi ping-peer <exact-session-id> --message-file - --json` - Resume if needed and message one explicitly selected session. After an ambiguous response failure, retry the identical message with the returned `remitId` via `--remit-id UUID`.
 - `hapi abort-peer <exact-session-id> --json` - Abort the current turn.
 - `hapi stop-peer <exact-session-id> --json` - Idempotently stop the session process without archiving.
 - `hapi archive-peer <exact-session-id> --json` - Idempotently stop and archive the session.

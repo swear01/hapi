@@ -159,7 +159,9 @@ export function parseSpawnPeerArgs(args: string[]): ParsedSpawnPeerArgs {
             continue
         }
         if (arg.startsWith('--remit-id=')) {
-            result.remitId = arg.slice('--remit-id='.length)
+            const value = arg.slice('--remit-id='.length)
+            if (!value) throw new SpawnPeerError('bad_args', '--remit-id requires a value')
+            result.remitId = value
             continue
         }
         if (arg === '--session-type') {
