@@ -580,7 +580,10 @@ function extractResultMessages(rows: unknown[], remitIndex: number): InspectPeer
         if (!isObject(row)) continue
         if (!isObject(row.content)) continue
         const role = typeof row.content.role === 'string' ? row.content.role : ''
-        if (role === 'user') break
+        if (role === 'user') {
+            if (typeof row.invokedAt === 'number') break
+            continue
+        }
         if (role !== 'agent' && role !== 'assistant') continue
         const text = extractAssistantPlainText(row.content.content)
         if (!text?.trim()) continue

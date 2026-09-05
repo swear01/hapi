@@ -2226,8 +2226,12 @@ export class SyncEngine {
             && (request.modelReasoningEffort === undefined || child.modelReasoningEffort === request.modelReasoningEffort)
             && (request.effort === undefined || child.effort === request.effort)
             && (expectedPermissionMode === undefined || child.permissionMode === expectedPermissionMode)
+            && (request.serviceTier === undefined || child.serviceTier === request.serviceTier)
+            && (request.collaborationMode === undefined || child.collaborationMode === request.collaborationMode)
+            && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
+            && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
         if (!selectionMatches) {
-            return await fail('spawn_selection_mismatch', 'New session did not apply the requested directory, agent, model, effort, or permission mode')
+            return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
         }
 
         try {

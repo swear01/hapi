@@ -297,6 +297,45 @@ describe('spawnSessionWithRemit', () => {
         expect(cleanupSpawnedSession).toHaveBeenCalledTimes(1)
     })
 
+    it.each([
+        ['service tier', { ...REQUEST, serviceTier: 'fast' }, { serviceTier: 'standard' }, {}],
+        ['collaboration mode', { ...REQUEST, collaborationMode: 'plan' }, { collaborationMode: 'default' }, {}],
+        ['Copilot agent mode', { ...REQUEST, agent: 'copilot', copilotAgentMode: 'autopilot' }, { copilotAgentMode: 'interactive' }, {}],
+        ['starting mode', { ...REQUEST, startingMode: 'pty' }, {}, { startingMode: 'remote' }]
+    ] as Array<[string, SpawnSessionWithRemitRequest, Record<string, unknown>, Record<string, unknown>]>)('cleans up when the selected %s does not match', async (_name, request, sessionOverrides, metadataOverrides) => {
+        const cleanupSpawnedSession = mock(async () => true)
+        const result = await callSpawn({
+            getSessions: () => [],
+            spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
+            waitForSessionActive: async () => true,
+            waitForSessionReady: async () => 'ready' as const,
+            getSessionByNamespace: () => ({
+                id: SESSION_ID,
+                namespace: 'default',
+                active: true,
+                metadata: {
+                    machineId: 'machine-1',
+                    path: '/tmp/project',
+                    flavor: request.agent ?? 'claude',
+                    startingMode: request.startingMode,
+                    ...metadataOverrides
+                },
+                model: null,
+                modelReasoningEffort: null,
+                effort: null,
+                permissionMode: undefined,
+                serviceTier: request.serviceTier,
+                collaborationMode: request.collaborationMode,
+                copilotAgentMode: request.copilotAgentMode,
+                ...sessionOverrides
+            }),
+            cleanupSpawnedSession
+        }, request)
+
+        expect(result).toMatchObject({ type: 'error', code: 'spawn_selection_mismatch', cleanedUp: true })
+        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(1)
+    })
+
     it('verifies the flavor-specific permission mode implied by yolo', async () => {
         const cleanupSpawnedSession = mock(async () => true)
         const result = await callSpawn({

@@ -121,8 +121,9 @@ describe('peer lifecycle operations', () => {
                         data: {
                             messages: [
                                 { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
+                                { id: 'queued', content: { role: 'user', content: { text: 'scheduled later' } } },
                                 { id: 'a1', createdAt: 2, content: { role: 'assistant', content: { type: 'codex', data: { type: 'message', message: 'done' } } } },
-                                { id: 'u2', createdAt: 3, content: { role: 'user', content: { text: 'later turn' } } },
+                                { id: 'u2', createdAt: 3, invokedAt: 3, content: { role: 'user', content: { text: 'later turn' } } },
                                 { id: 'a2', createdAt: 4, content: { role: 'assistant', content: { type: 'codex', data: { type: 'message', message: 'must not leak' } } } }
                             ]
                         }
