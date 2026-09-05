@@ -412,7 +412,7 @@ function createHapiMcpServer(
                     {
                         type: 'text' as const,
                         text: error instanceof SpawnPeerError && error.remitId
-                            ? `Failed to spawn peer: ${message}; retry spawn_peer with remitId=${error.remitId}`
+                            ? `Failed to spawn peer: ${message}; remitId=${error.remitId}`
                             : `Failed to spawn peer: ${message}`,
                     },
                 ],

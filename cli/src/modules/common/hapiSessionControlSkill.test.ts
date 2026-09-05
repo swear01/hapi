@@ -85,6 +85,13 @@ describe('canonical hapi-session-runtime delivery', () => {
         await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/shadowed/)
     })
 
+    it('refreshes the shared managed copy before verifying another runtime', async () => {
+        const shared = await ensureHapiSessionControlSkill('opencode', workingDirectory)
+        await writeFile(shared, 'stale managed OpenCode copy')
+        const native = await ensureHapiSessionControlSkill('codex', workingDirectory)
+        expect(await readFile(shared, 'utf8')).toBe(await readFile(native, 'utf8'))
+    })
+
     it('updates only a HAPI-managed skill copy', async () => {
         const target = await ensureHapiSessionControlSkill('codex', workingDirectory)
         await writeFile(target, 'stale HAPI copy')

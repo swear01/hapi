@@ -204,12 +204,12 @@ describe('SendMessageRequestSchema deliveryMode', () => {
 })
 
 describe('SpawnSessionWithRemitRequestSchema', () => {
-    it('preserves the machine-spawn resume guard in remit requests', () => {
+    it.each(['claude', 'codex'])('rejects resume IDs in fresh %s remit requests', (agent) => {
         expect(SpawnSessionWithRemitRequestSchema.safeParse({
             directory: '/tmp/project',
             message: 'work',
             remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c',
-            agent: 'claude',
+            agent,
             resumeSessionId: 'existing'
         }).success).toBe(false)
     })

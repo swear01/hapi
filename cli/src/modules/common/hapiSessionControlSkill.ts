@@ -63,6 +63,33 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
     })
     const canonical = parseCanonicalSkill(source)
     const skillRoot = nativeSkillRoot(flavor)
+    const sharedRoot = nativeSkillRoot('opencode')
+    for (const root of new Set([skillRoot, sharedRoot])) {
+        if (root !== skillRoot) {
+            const directory = join(root, HAPI_SESSION_CONTROL_SKILL_NAME)
+            const marker = join(directory, '.hapi-managed')
+            const dirStat = await lstat(directory).catch(() => null)
+            const markerStat = await lstat(marker).catch(() => null)
+            if (!dirStat?.isDirectory() || !markerStat?.isFile()
+                || await readFile(marker, 'utf8').catch(() => null) !== HAPI_SESSION_CONTROL_SKILL_NAME) continue
+        }
+        await installSkillCopy(root, source)
+    }
+    const targetPath = join(skillRoot, HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
+
+    const effective = await resolveSkill(HAPI_SESSION_CONTROL_SKILL_NAME, workingDirectory, { flavor })
+    if (
+        !effective
+        || canonical.description !== HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
+        || effective.description !== HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
+        || effective.body !== canonical.body
+    ) {
+        throw new Error(`Canonical ${HAPI_SESSION_CONTROL_SKILL_NAME} skill is shadowed or could not be verified`)
+    }
+    return targetPath
+}
+
+async function installSkillCopy(skillRoot: string, source: string): Promise<void> {
     const targetDir = join(skillRoot, HAPI_SESSION_CONTROL_SKILL_NAME)
     const targetPath = join(targetDir, 'SKILL.md')
     const markerPath = join(targetDir, '.hapi-managed')
@@ -117,15 +144,4 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
             }
         }
     })
-
-    const effective = await resolveSkill(HAPI_SESSION_CONTROL_SKILL_NAME, workingDirectory, { flavor })
-    if (
-        !effective
-        || canonical.description !== HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
-        || effective.description !== HAPI_SESSION_CONTROL_SKILL_DESCRIPTION
-        || effective.body !== canonical.body
-    ) {
-        throw new Error(`Canonical ${HAPI_SESSION_CONTROL_SKILL_NAME} skill is shadowed or could not be verified`)
-    }
-    return targetPath
 }

@@ -739,6 +739,7 @@ export const SpawnSessionRequestSchema = z.object({
 export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>
 
 export const SpawnSessionWithRemitRequestSchema = SpawnSessionRequestSchema.safeExtend({
+    resumeSessionId: z.never().optional(),
     directory: z.string().trim().min(1),
     message: z.string().refine((value) => value.trim().length > 0, {
         message: 'message must contain non-whitespace'

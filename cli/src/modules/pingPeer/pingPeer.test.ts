@@ -201,6 +201,29 @@ describe('peer lifecycle operations', () => {
         })).resolves.toMatchObject({ status: 'completed', text: 'done' })
     })
 
+    it('rechecks thinking after messages arrive before returning a remit result', async () => {
+        let thinking = false
+        let reads = 0
+        let time = 0
+        const http = createHttpMock({
+            post: (url) => authResponse(url)!,
+            get: (url) => {
+                if (url.endsWith(`/api/sessions/${SESSION_ID}`)) {
+                    return { status: 200, data: { session: { id: SESSION_ID, active: true, thinking } } }
+                }
+                reads += 1
+                thinking = reads === 1
+                return { status: 200, data: { messages: [
+                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
+                    { id: 'a1', content: { role: 'assistant', content: { type: 'codex', data: { type: 'message', message: thinking ? 'partial' : 'complete' } } } }
+                ] } }
+            }
+        })
+        const result = await waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep: async () => { time += 1000 } })
+        expect(result.text).toBe('complete')
+        expect(reads).toBe(2)
+    })
+
     it('finds an older remit and returns results across message pages', async () => {
         const http = createHttpMock({
             post: (url) => authResponse(url) ?? Promise.reject(new Error(`unexpected POST ${url}`)),

@@ -144,7 +144,7 @@ describe('startHappyServer skill_lookup', () => {
         ].sort())
     })
 
-    it('exposes and reuses the spawn remit after an ambiguous failure', async () => {
+    it('exposes the spawn remit after an ambiguous failure', async () => {
         const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
         spawnPeerMock.mockRejectedValueOnce(new SpawnPeerError('spawn_failed', 'socket reset', remitId))
         const mcp = await connect(false)
@@ -160,7 +160,17 @@ describe('startHappyServer skill_lookup', () => {
 
         expect(spawnPeerMock).toHaveBeenCalledWith(expect.objectContaining({ remitId }))
         expect(result.isError).toBe(true)
-        expect(result.content?.[0]?.text).toContain(`retry spawn_peer with remitId=${remitId}`)
+        expect(result.content?.[0]?.text).toContain(`remitId=${remitId}`)
+    })
+
+    it.each(['spawn_failed', 'remit_conflict'] as const)('does not advise same-remit retries for definitive %s', async (code) => {
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        spawnPeerMock.mockRejectedValueOnce(new SpawnPeerError(code, 'definitive failure', remitId))
+        const mcp = await connect(false)
+        const result = await mcp.callTool({ name: 'spawn_peer', arguments: { directory: '/tmp/project', message: 'work', remitId } }) as ToolResult
+        expect(result.isError).toBe(true)
+        expect(result.content?.[0]?.text).toContain(`remitId=${remitId}`)
+        expect(result.content?.[0]?.text).not.toContain('retry')
     })
 
     it('exposes and reuses the ping remit after an ambiguous failure', async () => {

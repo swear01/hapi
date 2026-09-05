@@ -686,8 +686,8 @@ export async function waitPeer(options: WaitPeerOptions): Promise<WaitPeerResult
     const deadline = now() + timeoutSecs * 1000
 
     while (now() <= deadline) {
-        const live = await getSession(apiUrl, jwt, sessionId, http)
         const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http)
+        const live = await getSession(apiUrl, jwt, sessionId, http)
         if (result.found) {
             const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
             if (result.invoked && messages.length > 0 && (boundaryReached || !live.thinking)) {

@@ -74,8 +74,18 @@ function isTunwgReady(runtimeRoot: string): boolean {
     return existsSync(tunwgPath);
 }
 
-function isCanonicalSkillReady(runtimeRoot: string): boolean {
-    return existsSync(join(runtimeRoot, 'skills', 'hapi-session-runtime', 'SKILL.md'));
+async function isCanonicalSkillReady(runtimeRoot: string, assets: EmbeddedAsset[]): Promise<boolean> {
+    const relativePath = 'skills/hapi-session-runtime/SKILL.md';
+    const asset = assets.find((entry) => entry.relativePath === relativePath);
+    if (!asset) return false;
+    try {
+        const source = bunRuntime
+            ? Buffer.from(await bunRuntime.file(asset.sourcePath).arrayBuffer())
+            : readFileSync(asset.sourcePath);
+        return readFileSync(join(runtimeRoot, relativePath)).equals(source);
+    } catch {
+        return false;
+    }
 }
 
 function ensureTunwgExecutable(runtimeRoot: string): void {
@@ -135,10 +145,10 @@ function unpackTools(runtimeRoot: string): void {
     }
 }
 
-function runtimeAssetsReady(runtimeRoot: string): boolean {
+async function runtimeAssetsReady(runtimeRoot: string, assets: EmbeddedAsset[]): Promise<boolean> {
     return areToolsUnpacked(join(runtimeRoot, 'tools', 'unpacked'))
         && isTunwgReady(runtimeRoot)
-        && isCanonicalSkillReady(runtimeRoot);
+        && await isCanonicalSkillReady(runtimeRoot, assets);
 }
 
 export async function ensureRuntimeAssets(): Promise<void> {
@@ -147,18 +157,17 @@ export async function ensureRuntimeAssets(): Promise<void> {
     }
 
     const { loadEmbeddedAssets } = await import('#embedded-assets');
+    const embeddedAssets = await loadEmbeddedAssets();
     const runtimeRoot = runtimePath();
     const markerPath = join(runtimeRoot, RUNTIME_MARKER);
     if (existsSync(markerPath)) {
         const markerVersion = readFileSync(markerPath, 'utf-8').trim();
-        if (markerVersion === packageJson.version && runtimeAssetsReady(runtimeRoot)) {
+        if (markerVersion === packageJson.version && await runtimeAssetsReady(runtimeRoot, embeddedAssets)) {
             return;
         }
     }
 
     ensureDirectory(runtimeRoot);
-
-    const embeddedAssets = await loadEmbeddedAssets();
 
     for (const asset of embeddedAssets) {
         const targetPath = join(runtimeRoot, asset.relativePath);
