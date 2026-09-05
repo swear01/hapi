@@ -238,6 +238,14 @@ function createWebApp(options: {
     const app = new Hono<WebAppEnv>()
 
     app.use('*', logger())
+    app.use('*', async (c, next) => {
+        await next()
+        if (!c.req.path.startsWith('/api') && c.res.headers.get('Content-Type')?.startsWith('text/html')) {
+            c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
+            c.header('CDN-Cache-Control', 'no-store')
+            c.header('Cloudflare-CDN-Cache-Control', 'no-store')
+        }
+    })
 
     const configuration = getConfiguration()
     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins

@@ -290,6 +290,25 @@ describe('peer lifecycle operations', () => {
         await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, timeoutSecs: 0.02 })).rejects.toMatchObject({ code: 'timeout' })
     })
 
+    it.each([false, true])('keeps results for remits acknowledged in a shared batch (later boundary=%s)', async (boundary) => {
+        let time = 0
+        const http = createHttpMock({
+            post: (url) => authResponse(url)!,
+            get: (url) => url.endsWith('/messages')
+                ? { status: 200, data: { messages: [
+                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
+                    { id: 'sibling', invokedAt: 1, content: { role: 'user', content: { text: 'same batch' } } },
+                    ...snapshots.input.messages,
+                    ...(boundary ? [
+                        { id: 'later', invokedAt: 2, content: { role: 'user', content: { text: 'next turn' } } },
+                        { ...snapshots.input.messages[1], content: { role: 'assistant', content: { type: 'codex', data: { type: 'message', message: 'must not leak' } } } }
+                    ] : [])
+                ] } }
+                : { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: boundary } } }
+        })
+        await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep: async () => { time += 1000 }, timeoutSecs: 2 })).resolves.toMatchObject({ status: 'completed', text: snapshots.expected.blocks[0].text })
+    })
+
     it('rechecks thinking after messages arrive before returning a remit result', async () => {
         let thinking = false
         let reads = 0

@@ -598,19 +598,19 @@ export type WaitPeerResult = {
     messages: InspectPeerMessage[]
 }
 
-function extractResultMessages(rows: unknown[], remitIndex: number): {
+function extractResultMessages(rows: unknown[], remitInvokedAt?: number): {
     messages: InspectPeerMessage[]
     boundaryReached: boolean
 } {
     const result: InspectPeerMessage[] = []
     const streams = new Map<string, number>()
     let boundaryReached = false
-    for (const row of rows.slice(remitIndex + 1)) {
+    for (const row of rows) {
         if (!isObject(row)) continue
         if (!isObject(row.content)) continue
         const role = typeof row.content.role === 'string' ? row.content.role : ''
         if (role === 'user') {
-            if (typeof row.invokedAt === 'number') {
+            if (typeof row.invokedAt === 'number' && typeof remitInvokedAt === 'number' && row.invokedAt > remitInvokedAt) {
                 boundaryReached = true
                 break
             }
@@ -645,7 +645,7 @@ async function getMessagesFromRemit(
     remitId: string,
     http: AxiosInstance,
     signal?: AbortSignal
-): Promise<{ found: boolean; invoked: boolean; rows: unknown[] }> {
+): Promise<{ found: boolean; invoked: boolean; invokedAt?: number; rows: unknown[] }> {
     let before: { at: number; seq: number } | null = null
     const newerPages: unknown[][] = []
     while (true) {
@@ -667,9 +667,11 @@ async function getMessagesFromRemit(
         const remitIndex = rows.findIndex((row) => isObject(row) && row.localId === remitId)
         if (remitIndex >= 0) {
             const remit = rows[remitIndex]
+            const invokedAt = isObject(remit) && typeof remit.invokedAt === 'number' ? remit.invokedAt : undefined
             return {
                 found: true,
-                invoked: isObject(remit) && typeof remit.invokedAt === 'number',
+                invoked: invokedAt !== undefined,
+                invokedAt,
                 rows: [...rows.slice(remitIndex + 1), ...newerPages.reverse().flat()]
             }
         }
@@ -707,7 +709,7 @@ export async function waitPeer(options: WaitPeerOptions): Promise<WaitPeerResult
             const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http, signal)
             const live = await getSession(apiUrl, jwt, sessionId, http, signal)
             if (result.found) {
-                const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
+                const { messages, boundaryReached } = extractResultMessages(result.rows, result.invokedAt)
                 if (result.invoked && messages.length > 0 && (boundaryReached || (live.active && !live.thinking))) {
                     return {
                         sessionId,

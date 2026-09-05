@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 06:16:00 +0800
+Subject: [PATCH] Restore app-shell cache policy and preserve shared remit batches
+
+diff --git a/cli/src/modules/pingPeer/pingPeer.test.ts b/cli/src/modules/pingPeer/pingPeer.test.ts
+index 87110fb8c52abc672c22a8e3890e8b74aaf6733c..e16ed17d5fa3e003bbde3e681f5113beba20d6d2 100644
+--- a/cli/src/modules/pingPeer/pingPeer.test.ts
++++ b/cli/src/modules/pingPeer/pingPeer.test.ts
+@@ -290,6 +290,25 @@ describe('peer lifecycle operations', () => {
+         await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, timeoutSecs: 0.02 })).rejects.toMatchObject({ code: 'timeout' })
+     })
+ 
++    it.each([false, true])('keeps results for remits acknowledged in a shared batch (later boundary=%s)', async (boundary) => {
++        let time = 0
++        const http = createHttpMock({
++            post: (url) => authResponse(url)!,
++            get: (url) => url.endsWith('/messages')
++                ? { status: 200, data: { messages: [
++                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
++                    { id: 'sibling', invokedAt: 1, content: { role: 'user', content: { text: 'same batch' } } },
++                    ...snapshots.input.messages,
++                    ...(boundary ? [
++                        { id: 'later', invokedAt: 2, content: { role: 'user', content: { text: 'next turn' } } },
++                        { ...snapshots.input.messages[1], content: { role: 'assistant', content: { type: 'codex', data: { type: 'message', message: 'must not leak' } } } }
++                    ] : [])
++                ] } }
++                : { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: boundary } } }
++        })
++        await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep: async () => { time += 1000 }, timeoutSecs: 2 })).resolves.toMatchObject({ status: 'completed', text: snapshots.expected.blocks[0].text })
++    })
++
+     it('rechecks thinking after messages arrive before returning a remit result', async () => {
+         let thinking = false
+         let reads = 0
+diff --git a/cli/src/modules/pingPeer/pingPeer.ts b/cli/src/modules/pingPeer/pingPeer.ts
+index fcef085456333653e2353f208cbe249656ccaa77..619a453defc4e0d09992437a3d47d1d88f4b6839 100644
+--- a/cli/src/modules/pingPeer/pingPeer.ts
++++ b/cli/src/modules/pingPeer/pingPeer.ts
+@@ -598,19 +598,19 @@ export type WaitPeerResult = {
+     messages: InspectPeerMessage[]
+ }
+ 
+-function extractResultMessages(rows: unknown[], remitIndex: number): {
++function extractResultMessages(rows: unknown[], remitInvokedAt?: number): {
+     messages: InspectPeerMessage[]
+     boundaryReached: boolean
+ } {
+     const result: InspectPeerMessage[] = []
+     const streams = new Map<string, number>()
+     let boundaryReached = false
+-    for (const row of rows.slice(remitIndex + 1)) {
++    for (const row of rows) {
+         if (!isObject(row)) continue
+         if (!isObject(row.content)) continue
+         const role = typeof row.content.role === 'string' ? row.content.role : ''
+         if (role === 'user') {
+-            if (typeof row.invokedAt === 'number') {
++            if (typeof row.invokedAt === 'number' && typeof remitInvokedAt === 'number' && row.invokedAt > remitInvokedAt) {
+                 boundaryReached = true
+                 break
+             }
+@@ -645,7 +645,7 @@ async function getMessagesFromRemit(
+     remitId: string,
+     http: AxiosInstance,
+     signal?: AbortSignal
+-): Promise<{ found: boolean; invoked: boolean; rows: unknown[] }> {
++): Promise<{ found: boolean; invoked: boolean; invokedAt?: number; rows: unknown[] }> {
+     let before: { at: number; seq: number } | null = null
+     const newerPages: unknown[][] = []
+     while (true) {
+@@ -667,9 +667,11 @@ async function getMessagesFromRemit(
+         const remitIndex = rows.findIndex((row) => isObject(row) && row.localId === remitId)
+         if (remitIndex >= 0) {
+             const remit = rows[remitIndex]
++            const invokedAt = isObject(remit) && typeof remit.invokedAt === 'number' ? remit.invokedAt : undefined
+             return {
+                 found: true,
+-                invoked: isObject(remit) && typeof remit.invokedAt === 'number',
++                invoked: invokedAt !== undefined,
++                invokedAt,
+                 rows: [...rows.slice(remitIndex + 1), ...newerPages.reverse().flat()]
+             }
+         }
+@@ -707,7 +709,7 @@ export async function waitPeer(options: WaitPeerOptions): Promise<WaitPeerResult
+             const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http, signal)
+             const live = await getSession(apiUrl, jwt, sessionId, http, signal)
+             if (result.found) {
+-                const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
++                const { messages, boundaryReached } = extractResultMessages(result.rows, result.invokedAt)
+                 if (result.invoked && messages.length > 0 && (boundaryReached || (live.active && !live.thinking))) {
+                     return {
+                         sessionId,
+diff --git a/hub/src/web/appShellCache.test.ts b/hub/src/web/appShellCache.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd7c6c524cd19d6705e661a6ae0a84a585f1bc42
+--- /dev/null
++++ b/hub/src/web/appShellCache.test.ts
+@@ -0,0 +1,60 @@
++import { expect, it } from 'bun:test'
++import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join, resolve } from 'node:path'
++
++it('never caches HTML app shells while preserving API and asset cache policy', async () => {
++    const root = await mkdtemp(join(tmpdir(), 'hapi-shell-cache-'))
++    await mkdir(join(root, 'hub'))
++    await mkdir(join(root, 'web', 'dist', 'assets'), { recursive: true })
++    await writeFile(join(root, 'web', 'dist', 'index.html'), '<html>test app shell</html>')
++    await writeFile(join(root, 'web', 'dist', 'assets', 'app.js'), 'void 0')
++    const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
++    const port = probe.port
++    probe.stop(true)
++    const base = `http://127.0.0.1:${port}`
++    const child = Bun.spawn([process.execPath, resolve(import.meta.dir, '../index.ts')], {
++        cwd: join(root, 'hub'),
++        env: {
++            PATH: process.env.PATH,
++            HOME: root,
++            HAPI_HOME: root,
++            DB_PATH: join(root, 'hapi.db'),
++            CLI_API_TOKEN: 'isolated-app-shell-test',
++            HAPI_LISTEN_HOST: '127.0.0.1',
++            HAPI_LISTEN_PORT: String(port),
++            HAPI_PUBLIC_URL: base,
++            TELEGRAM_NOTIFICATION: 'false',
++            SERVERCHAN_NOTIFICATION: 'false'
++        },
++        stdout: 'ignore',
++        stderr: 'ignore'
++    })
++    try {
++        const deadline = Date.now() + 3000
++        while (Date.now() < deadline) {
++            if (await fetch(`${base}/health`).then((r) => r.ok).catch(() => false)) break
++            await Bun.sleep(25)
++        }
++        for (const path of ['/', '/index.html', '/sessions/example']) {
++            for (const method of ['GET', 'HEAD']) {
++                const response = await fetch(`${base}${path}`, { method })
++                expect(response.status).toBe(200)
++                expect(response.headers.get('Cache-Control')).toContain('no-store')
++                expect(response.headers.get('CDN-Cache-Control')).toBe('no-store')
++                expect(response.headers.get('Cloudflare-CDN-Cache-Control')).toBe('no-store')
++            }
++        }
++        for (const path of ['/health', '/assets/app.js']) {
++            const response = await fetch(`${base}${path}`)
++            expect(response.status).toBe(200)
++            expect(response.headers.get('Cache-Control') ?? '').not.toContain('no-store')
++        }
++    } finally {
++        child.kill('SIGTERM')
++        await Promise.race([child.exited, Bun.sleep(1000)])
++        if (child.exitCode === null) child.kill('SIGKILL')
++        await child.exited
++        await rm(root, { recursive: true, force: true })
++    }
++})
+diff --git a/hub/src/web/server.ts b/hub/src/web/server.ts
+index 72e0a641540c0c5e4e12fd90852aa04ffbb60e11..8dc41417b742ff805ae0ef51f907ce5dd0d68669 100644
+--- a/hub/src/web/server.ts
++++ b/hub/src/web/server.ts
+@@ -238,6 +238,14 @@ function createWebApp(options: {
+     const app = new Hono<WebAppEnv>()
+ 
+     app.use('*', logger())
++    app.use('*', async (c, next) => {
++        await next()
++        if (!c.req.path.startsWith('/api') && c.res.headers.get('Content-Type')?.startsWith('text/html')) {
++            c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
++            c.header('CDN-Cache-Control', 'no-store')
++            c.header('Cloudflare-CDN-Cache-Control', 'no-store')
++        }
++    })
+ 
+     const configuration = getConfiguration()
+     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins
