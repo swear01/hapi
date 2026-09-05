@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 05:10:00 +0800
+Subject: [PATCH] Finalize unspawned reservations and reconcile result snapshots
+
+diff --git a/cli/src/modules/pingPeer/pingPeer.test.ts b/cli/src/modules/pingPeer/pingPeer.test.ts
+index 75ba14dd6666485a25bb93296d767b1b1f5a50c4..785bc834ac5b96887d67a7b00d279fd86de81b5d 100644
+--- a/cli/src/modules/pingPeer/pingPeer.test.ts
++++ b/cli/src/modules/pingPeer/pingPeer.test.ts
+@@ -1,3 +1,4 @@
++import snapshots from '../../../../shared/fixtures/chat/codex-message-stream-snapshot.json'
+ import { describe, expect, it, vi } from 'vitest'
+ import {
+     PingPeerError,
+@@ -201,6 +202,21 @@ describe('peer lifecycle operations', () => {
+         })).resolves.toMatchObject({ status: 'completed', text: 'done' })
+     })
+ 
++    it('keeps only the final cumulative Codex snapshot for each stream', async () => {
++        const http = createHttpMock({
++            post: (url) => authResponse(url)!,
++            get: (url) => url.endsWith('/messages')
++                ? { status: 200, data: { messages: [
++                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
++                    ...snapshots.input.messages
++                ] } }
++                : { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: false } } }
++        })
++        const result = await waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never })
++        expect(result.text).toBe(snapshots.expected.blocks[0].text)
++        expect(result.messages).toHaveLength(1)
++    })
++
+     it('rechecks thinking after messages arrive before returning a remit result', async () => {
+         let thinking = false
+         let reads = 0
+diff --git a/cli/src/modules/pingPeer/pingPeer.ts b/cli/src/modules/pingPeer/pingPeer.ts
+index 17805b01c733a80ea5ce0556e905e7ad7e6cfc3e..b5e7e65234c7072b2a9a7b8cfe0a67d441fc5f9b 100644
+--- a/cli/src/modules/pingPeer/pingPeer.ts
++++ b/cli/src/modules/pingPeer/pingPeer.ts
+@@ -599,6 +599,7 @@ function extractResultMessages(rows: unknown[], remitIndex: number): {
+     boundaryReached: boolean
+ } {
+     const result: InspectPeerMessage[] = []
++    const streams = new Map<string, number>()
+     let boundaryReached = false
+     for (const row of rows.slice(remitIndex + 1)) {
+         if (!isObject(row)) continue
+@@ -614,6 +615,15 @@ function extractResultMessages(rows: unknown[], remitIndex: number): {
+         if (role !== 'agent' && role !== 'assistant') continue
+         const text = extractAssistantPlainText(row.content.content)
+         if (!text?.trim()) continue
++        const content = row.content.content
++        const streamId = isObject(content) && content.type === 'codex' && isObject(content.data)
++            && typeof content.data.id === 'string' && content.data.id ? content.data.id : null
++        const previous = streamId ? streams.get(streamId) : undefined
++        if (previous !== undefined) {
++            result[previous].text = text.trim()
++            continue
++        }
++        if (streamId) streams.set(streamId, result.length)
+         result.push({
+             id: typeof row.id === 'string' ? row.id : '',
+             role,
+diff --git a/hub/src/sync/rpcGateway.test.ts b/hub/src/sync/rpcGateway.test.ts
+index fef3cb37a08944c397e5464914b955d7ea6e04d6..a6c31a8812b00764f10accd0e91d1b4278483f0b 100644
+--- a/hub/src/sync/rpcGateway.test.ts
++++ b/hub/src/sync/rpcGateway.test.ts
+@@ -172,6 +172,7 @@ describe('RpcGateway no-target diagnostics (tiann/hapi#916)', () => {
+         } as unknown as RpcRegistry
+         const gateway = new RpcGateway(io, rpcRegistry)
+ 
++        expect(await gateway.spawnSession('machine-1', '/tmp/project')).toMatchObject({ type: 'error', dispatched: false })
+         const error = await gateway.killSession('session-1').catch((e: unknown) => e)
+         expect(error).toBeInstanceOf(RpcTargetMissingError)
+         expect((error as RpcTargetMissingError).code).toBe('handler-not-registered')
+@@ -192,6 +193,7 @@ describe('RpcGateway no-target diagnostics (tiann/hapi#916)', () => {
+         } as unknown as RpcRegistry
+         const gateway = new RpcGateway(io, rpcRegistry)
+ 
++        expect(await gateway.spawnSession('machine-1', '/tmp/project')).toMatchObject({ type: 'error', dispatched: false })
+         const error = await gateway.killSession('session-1').catch((e: unknown) => e)
+         expect(error).toBeInstanceOf(RpcTargetMissingError)
+         expect((error as RpcTargetMissingError).code).toBe('socket-disconnected')
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index e6479404375541a40d524c6801138f0d0e89cc85..f1efe1f73fb0a62a986631d8b2f304232f7398b0 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -213,6 +213,7 @@ export class RpcGateway {
+             message: string
+             code?: 'agent_unavailable' | 'outside_workspace_roots'
+             agent?: AgentFlavor
++            dispatched?: false
+         }
+     > {
+         try {
+@@ -278,7 +279,11 @@ export class RpcGateway {
+                 })()
+             return { type: 'error', message: `Unexpected spawn result: ${details}` }
+         } catch (error) {
+-            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
++            return {
++                type: 'error',
++                message: error instanceof Error ? error.message : String(error),
++                ...(error instanceof RpcTargetMissingError ? { dispatched: false as const } : {})
++            }
+         }
+     }
+ 
+diff --git a/hub/src/sync/spawnSessionWithRemit.test.ts b/hub/src/sync/spawnSessionWithRemit.test.ts
+index c7bf19c03d1c595079f2f2ae23af43687ca73f47..f48411955ad03ff7a3f5c0fdf53c96180cf23891 100644
+--- a/hub/src/sync/spawnSessionWithRemit.test.ts
++++ b/hub/src/sync/spawnSessionWithRemit.test.ts
+@@ -97,6 +97,34 @@ async function callReconcile(operation: SpawnRemitOperation, harness: Record<str
+ }
+ 
+ describe('spawnSessionWithRemit', () => {
++    it.each([true, false])('only finalizes a fresh unspawned reservation (fresh=%s)', async (fresh) => {
++        const cleanupSpawnedSession = mock(async () => false)
++        const markSessionArchivedFromHub = mock(() => {})
++        const result = await callSpawn({
++            ...(fresh ? { getOrCreateSession: (_tag: string, metadata: unknown) => ({ id: SESSION_ID, active: false, metadata }) } : {}),
++            spawnSession: async () => ({ type: 'error', message: 'Runner disconnected', dispatched: false }),
++            sessionCache: { markSessionArchivedFromHub },
++            cleanupSpawnedSession
++        })
++        expect(result).toMatchObject({ type: 'error', code: 'spawn_failed', cleanedUp: fresh })
++        expect(markSessionArchivedFromHub).toHaveBeenCalledTimes(fresh ? 1 : 0)
++        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(fresh ? 0 : 1)
++    })
++
++    it('requires runner cleanup when a fresh spawn has an ambiguous outcome', async () => {
++        const cleanupSpawnedSession = mock(async () => false)
++        const markSessionArchivedFromHub = mock(() => {})
++        const result = await callSpawn({
++            getOrCreateSession: (_tag: string, metadata: unknown) => ({ id: SESSION_ID, active: false, metadata }),
++            spawnSession: async () => ({ type: 'error', message: 'RPC timed out' }),
++            sessionCache: { markSessionArchivedFromHub },
++            cleanupSpawnedSession
++        })
++        expect(result).toMatchObject({ type: 'error', cleanedUp: false })
++        expect(markSessionArchivedFromHub).not.toHaveBeenCalled()
++        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(1)
++    })
++
+     it('waits for configured keepalive fields after the child first becomes active', async () => {
+         const request: SpawnSessionWithRemitRequest = {
+             ...REQUEST,
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index fdedd9da4cc00d3dd4296d05b1add756702488c8..e9e65253f3205d45207b6c21d9a8974ae4386e69 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -2654,6 +2654,7 @@ export class SyncEngine {
+     ): Promise<SpawnSessionWithRemitResult> {
+         const requestHash = hashSpawnRemitRequest(machineId, request)
+         const initialOperation: SpawnRemitOperation = {
++            reservationId: randomUUID(),
+             remitId: request.remitId,
+             requestHash,
+             machineId,
+@@ -2718,15 +2719,25 @@ export class SyncEngine {
+         const fail = async (
+             code: string,
+             message: string,
+-            orphanSessionId?: string
++            orphanSessionId?: string,
++            unspawned = false
+         ): Promise<SpawnSessionWithRemitResult> => {
++            let cleanedUp = false
++            if (unspawned && operation.reservationId === initialOperation.reservationId) {
++                try {
++                    this.sessionCache.markSessionArchivedFromHub(sessionId, 'Spawn request was not dispatched')
++                    cleanedUp = true
++                } catch {
++                    // Leave failed persistence eligible for normal cleanup reconciliation.
++                }
++            }
+             const cleanupOperation: SpawnRemitOperation = {
+                 ...operation,
+                 state: 'cleanup-needed',
+                 updatedAt: Date.now(),
+                 code,
+                 error: message.slice(0, 500),
+-                cleanedUp: false,
++                cleanedUp,
+                 orphanSessionId
+             }
+             if (!this.persistSpawnRemitOperation(sessionId, namespace, operation, cleanupOperation)) {
+@@ -2770,7 +2781,7 @@ export class SyncEngine {
+                     error instanceof Error ? error.message : 'Runner failed to create a session'
+                 )
+             }
+-            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message)
++            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message, undefined, result.dispatched === false)
+             if (result.sessionId !== sessionId) {
+                 return await fail(
+                     'spawn_not_fresh',
+diff --git a/shared/src/schemas.ts b/shared/src/schemas.ts
+index 496ef78c5f23aec73d307e0887cb96056518d5ae..b98b2cf47a2bab7e9342fd1ea0d772cc853125d5 100644
+--- a/shared/src/schemas.ts
++++ b/shared/src/schemas.ts
+@@ -35,6 +35,7 @@ export const OpencodeClearOperationSchema = z.object({
+ export type OpencodeClearOperation = z.infer<typeof OpencodeClearOperationSchema>
+ 
+ export const SpawnRemitOperationSchema = z.object({
++    reservationId: z.string().uuid().optional(),
+     remitId: z.string().uuid(),
+     requestHash: z.string().length(64),
+     machineId: z.string(),

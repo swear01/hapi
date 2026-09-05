@@ -2654,6 +2654,7 @@ export class SyncEngine {
     ): Promise<SpawnSessionWithRemitResult> {
         const requestHash = hashSpawnRemitRequest(machineId, request)
         const initialOperation: SpawnRemitOperation = {
+            reservationId: randomUUID(),
             remitId: request.remitId,
             requestHash,
             machineId,
@@ -2718,15 +2719,25 @@ export class SyncEngine {
         const fail = async (
             code: string,
             message: string,
-            orphanSessionId?: string
+            orphanSessionId?: string,
+            unspawned = false
         ): Promise<SpawnSessionWithRemitResult> => {
+            let cleanedUp = false
+            if (unspawned && operation.reservationId === initialOperation.reservationId) {
+                try {
+                    this.sessionCache.markSessionArchivedFromHub(sessionId, 'Spawn request was not dispatched')
+                    cleanedUp = true
+                } catch {
+                    // Leave failed persistence eligible for normal cleanup reconciliation.
+                }
+            }
             const cleanupOperation: SpawnRemitOperation = {
                 ...operation,
                 state: 'cleanup-needed',
                 updatedAt: Date.now(),
                 code,
                 error: message.slice(0, 500),
-                cleanedUp: false,
+                cleanedUp,
                 orphanSessionId
             }
             if (!this.persistSpawnRemitOperation(sessionId, namespace, operation, cleanupOperation)) {
@@ -2770,7 +2781,7 @@ export class SyncEngine {
                     error instanceof Error ? error.message : 'Runner failed to create a session'
                 )
             }
-            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message)
+            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message, undefined, result.dispatched === false)
             if (result.sessionId !== sessionId) {
                 return await fail(
                     'spawn_not_fresh',

@@ -97,6 +97,34 @@ async function callReconcile(operation: SpawnRemitOperation, harness: Record<str
 }
 
 describe('spawnSessionWithRemit', () => {
+    it.each([true, false])('only finalizes a fresh unspawned reservation (fresh=%s)', async (fresh) => {
+        const cleanupSpawnedSession = mock(async () => false)
+        const markSessionArchivedFromHub = mock(() => {})
+        const result = await callSpawn({
+            ...(fresh ? { getOrCreateSession: (_tag: string, metadata: unknown) => ({ id: SESSION_ID, active: false, metadata }) } : {}),
+            spawnSession: async () => ({ type: 'error', message: 'Runner disconnected', dispatched: false }),
+            sessionCache: { markSessionArchivedFromHub },
+            cleanupSpawnedSession
+        })
+        expect(result).toMatchObject({ type: 'error', code: 'spawn_failed', cleanedUp: fresh })
+        expect(markSessionArchivedFromHub).toHaveBeenCalledTimes(fresh ? 1 : 0)
+        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(fresh ? 0 : 1)
+    })
+
+    it('requires runner cleanup when a fresh spawn has an ambiguous outcome', async () => {
+        const cleanupSpawnedSession = mock(async () => false)
+        const markSessionArchivedFromHub = mock(() => {})
+        const result = await callSpawn({
+            getOrCreateSession: (_tag: string, metadata: unknown) => ({ id: SESSION_ID, active: false, metadata }),
+            spawnSession: async () => ({ type: 'error', message: 'RPC timed out' }),
+            sessionCache: { markSessionArchivedFromHub },
+            cleanupSpawnedSession
+        })
+        expect(result).toMatchObject({ type: 'error', cleanedUp: false })
+        expect(markSessionArchivedFromHub).not.toHaveBeenCalled()
+        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(1)
+    })
+
     it('waits for configured keepalive fields after the child first becomes active', async () => {
         const request: SpawnSessionWithRemitRequest = {
             ...REQUEST,

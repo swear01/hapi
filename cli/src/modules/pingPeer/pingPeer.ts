@@ -599,6 +599,7 @@ function extractResultMessages(rows: unknown[], remitIndex: number): {
     boundaryReached: boolean
 } {
     const result: InspectPeerMessage[] = []
+    const streams = new Map<string, number>()
     let boundaryReached = false
     for (const row of rows.slice(remitIndex + 1)) {
         if (!isObject(row)) continue
@@ -614,6 +615,15 @@ function extractResultMessages(rows: unknown[], remitIndex: number): {
         if (role !== 'agent' && role !== 'assistant') continue
         const text = extractAssistantPlainText(row.content.content)
         if (!text?.trim()) continue
+        const content = row.content.content
+        const streamId = isObject(content) && content.type === 'codex' && isObject(content.data)
+            && typeof content.data.id === 'string' && content.data.id ? content.data.id : null
+        const previous = streamId ? streams.get(streamId) : undefined
+        if (previous !== undefined) {
+            result[previous].text = text.trim()
+            continue
+        }
+        if (streamId) streams.set(streamId, result.length)
         result.push({
             id: typeof row.id === 'string' ? row.id : '',
             role,

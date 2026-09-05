@@ -213,6 +213,7 @@ export class RpcGateway {
             message: string
             code?: 'agent_unavailable' | 'outside_workspace_roots'
             agent?: AgentFlavor
+            dispatched?: false
         }
     > {
         try {
@@ -278,7 +279,11 @@ export class RpcGateway {
                 })()
             return { type: 'error', message: `Unexpected spawn result: ${details}` }
         } catch (error) {
-            return { type: 'error', message: error instanceof Error ? error.message : String(error) }
+            return {
+                type: 'error',
+                message: error instanceof Error ? error.message : String(error),
+                ...(error instanceof RpcTargetMissingError ? { dispatched: false as const } : {})
+            }
         }
     }
 

@@ -172,6 +172,7 @@ describe('RpcGateway no-target diagnostics (tiann/hapi#916)', () => {
         } as unknown as RpcRegistry
         const gateway = new RpcGateway(io, rpcRegistry)
 
+        expect(await gateway.spawnSession('machine-1', '/tmp/project')).toMatchObject({ type: 'error', dispatched: false })
         const error = await gateway.killSession('session-1').catch((e: unknown) => e)
         expect(error).toBeInstanceOf(RpcTargetMissingError)
         expect((error as RpcTargetMissingError).code).toBe('handler-not-registered')
@@ -192,6 +193,7 @@ describe('RpcGateway no-target diagnostics (tiann/hapi#916)', () => {
         } as unknown as RpcRegistry
         const gateway = new RpcGateway(io, rpcRegistry)
 
+        expect(await gateway.spawnSession('machine-1', '/tmp/project')).toMatchObject({ type: 'error', dispatched: false })
         const error = await gateway.killSession('session-1').catch((e: unknown) => e)
         expect(error).toBeInstanceOf(RpcTargetMissingError)
         expect((error as RpcTargetMissingError).code).toBe('socket-disconnected')

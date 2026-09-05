@@ -35,6 +35,7 @@ export const OpencodeClearOperationSchema = z.object({
 export type OpencodeClearOperation = z.infer<typeof OpencodeClearOperationSchema>
 
 export const SpawnRemitOperationSchema = z.object({
+    reservationId: z.string().uuid().optional(),
     remitId: z.string().uuid(),
     requestHash: z.string().length(64),
     machineId: z.string(),

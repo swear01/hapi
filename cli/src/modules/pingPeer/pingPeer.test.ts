@@ -1,3 +1,4 @@
+import snapshots from '../../../../shared/fixtures/chat/codex-message-stream-snapshot.json'
 import { describe, expect, it, vi } from 'vitest'
 import {
     PingPeerError,
@@ -199,6 +200,21 @@ describe('peer lifecycle operations', () => {
             accessToken: 'token',
             http: http as never
         })).resolves.toMatchObject({ status: 'completed', text: 'done' })
+    })
+
+    it('keeps only the final cumulative Codex snapshot for each stream', async () => {
+        const http = createHttpMock({
+            post: (url) => authResponse(url)!,
+            get: (url) => url.endsWith('/messages')
+                ? { status: 200, data: { messages: [
+                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
+                    ...snapshots.input.messages
+                ] } }
+                : { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: false } } }
+        })
+        const result = await waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never })
+        expect(result.text).toBe(snapshots.expected.blocks[0].text)
+        expect(result.messages).toHaveLength(1)
     })
 
     it('rechecks thinking after messages arrive before returning a remit result', async () => {
