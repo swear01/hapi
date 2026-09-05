@@ -177,6 +177,25 @@ describe('startHappyServer skill_lookup', () => {
         expect(result.content?.[0]?.text).toContain(`retry ping_peer with remitId=${remitId}`)
     })
 
+    it('does not suggest retrying a deterministic ping remit conflict', async () => {
+        const sessionId = '05d9f0f2-9273-4137-933c-07459a1146a2'
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        pingPeerMock.mockRejectedValueOnce(new PingPeerError(
+            'remit_conflict',
+            'localId is already bound to a different message payload',
+            remitId
+        ))
+        const mcp = await connect(false)
+
+        const result = await mcp.callTool({
+            name: 'ping_peer',
+            arguments: { sessionId, message: 'different', remitId }
+        }) as ToolResult
+
+        expect(result.isError).toBe(true)
+        expect(result.content?.[0]?.text).not.toContain('retry ping_peer')
+    })
+
     it('describes display_image as user output rather than image input', async () => {
         const mcp = await connect(false)
         const tools = await mcp.listTools()

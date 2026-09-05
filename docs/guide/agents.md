@@ -197,11 +197,10 @@ Sessions created from a HAPI runner start in remote mode automatically. Terminal
 
 ### Permission modes
 
-Grok exposes four permission modes:
+Grok exposes three permission modes:
 
 - `default` — tool requests are shown in HAPI for approval or denial.
 - `auto` — Grok's own Auto mode: HAPI forwards Grok's `/auto` command to the session. Auto depends on account and CLI-build availability — if Grok does not advertise the `/auto` command, HAPI falls back to `default` and posts a notice in the session.
-- `plan` — HAPI asks Grok to plan only and rejects tool execution requests.
 - `bypassPermissions` — tool requests are automatically approved for the session (`--yolo` shortcut).
 
 Use `bypassPermissions` only in a trusted workspace.

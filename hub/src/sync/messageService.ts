@@ -21,6 +21,8 @@ import { EventPublisher } from './eventPublisher'
 type StoredMessageForDelivery = ReturnType<Store['messages']['getMessages']>[number]
 type MessagePosition = { at: number; seq: number }
 
+export class MessageLocalIdConflictError extends Error {}
+
 function messagePosition(message: StoredMessageForDelivery): MessagePosition {
     return {
         at: message.invokedAt ?? message.createdAt,
@@ -901,7 +903,9 @@ export class MessageService {
             if (storedContent?.type !== 'text'
                 || storedContent.text !== payload.text
                 || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])) {
-                throw new Error('sendMessage: localId is already bound to a different message payload')
+                throw new MessageLocalIdConflictError(
+                    'localId is already bound to a different message payload'
+                )
             }
         }
         // A duplicate localId is an idempotent retry, not proof that the

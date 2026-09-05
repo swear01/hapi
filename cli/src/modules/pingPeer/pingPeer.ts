@@ -20,6 +20,7 @@ export type PingPeerErrorCode =
     | 'auth_failed'
     | 'not_found'
     | 'resume_failed'
+    | 'remit_conflict'
     | 'timeout'
     | 'send_failed'
     | 'session_ended'
@@ -305,6 +306,9 @@ async function sendMessage(
         : typeof response.data?.code === 'string'
             ? response.data.code
             : `HTTP ${response.status}`
+    if (response.status === 409 && response.data?.code === 'local_id_conflict') {
+        throw new PingPeerError('remit_conflict', `send failed: ${detail}`, remitId)
+    }
     throw new PingPeerError('send_failed', `send failed: ${detail}`, remitId)
 }
 
@@ -409,6 +413,7 @@ export function exitCodeForPingPeerError(error: PingPeerError): number {
         case 'bad_args':
         case 'auth_failed':
         case 'not_found':
+        case 'remit_conflict':
             return 2
         case 'resume_failed':
             return 3

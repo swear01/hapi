@@ -342,7 +342,9 @@ function createHapiMcpServer(
                 content: [
                     {
                         type: 'text' as const,
-                        text: error instanceof PingPeerError && error.remitId
+                        text: error instanceof PingPeerError
+                            && error.remitId
+                            && error.code !== 'remit_conflict'
                             ? `Failed to ping peer: ${message}; retry ping_peer with remitId=${error.remitId}`
                             : `Failed to ping peer: ${message}`,
                     },

@@ -114,6 +114,31 @@ describe('peer lifecycle operations', () => {
         expect(sentRemitId).toMatch(/^[0-9a-f-]{36}$/)
     })
 
+    it('reports a reused remit with a different payload as a deterministic conflict', async () => {
+        const http = createHttpMock({
+            post: (url) => authResponse(url) ?? {
+                status: 409,
+                data: {
+                    error: 'localId is already bound to a different message payload',
+                    code: 'local_id_conflict'
+                }
+            },
+            get: () => ({
+                status: 200,
+                data: { session: { id: SESSION_ID, active: true, metadata: { name: 'Peer' } } }
+            })
+        })
+
+        await expect(pingPeer({
+            sessionId: SESSION_ID,
+            message: 'different',
+            remitId: REMIT_ID,
+            apiUrl: 'http://hub.test',
+            accessToken: 'token',
+            http: http as never
+        })).rejects.toMatchObject({ code: 'remit_conflict', remitId: REMIT_ID })
+    })
+
     it('inspects without resuming or listing sessions', async () => {
         const http = createHttpMock({
             post: (url) => authResponse(url) ?? Promise.reject(new Error(`unexpected POST ${url}`)),
@@ -241,6 +266,7 @@ describe('peer lifecycle operations', () => {
 
     it('uses stable nonzero exit codes', () => {
         expect(exitCodeForPingPeerError(new PingPeerError('bad_args', 'x'))).toBe(2)
+        expect(exitCodeForPingPeerError(new PingPeerError('remit_conflict', 'x'))).toBe(2)
         expect(exitCodeForPingPeerError(new PingPeerError('resume_failed', 'x'))).toBe(3)
         expect(exitCodeForPingPeerError(new PingPeerError('timeout', 'x'))).toBe(4)
     })

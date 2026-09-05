@@ -974,16 +974,45 @@ export class SyncEngine {
     private async reconcileSpawnRemitCleanups(): Promise<void> {
         const tasks: Promise<unknown>[] = []
         for (const session of this.sessionCache.getSessions()) {
-            const operation = session.metadata?.spawnRemitOperation
+            let operation = session.metadata?.spawnRemitOperation
             if (!operation) continue
+            const tailKey = `${session.namespace}:${operation.remitId}`
+            if (this.spawnRemitTails.has(tailKey)) continue
+
+            if (operation.state === 'pending') {
+                if (this.isSpawnRemitStored(session.id, operation.remitId)) {
+                    this.persistSpawnRemitOperation(session.id, session.namespace, operation, {
+                        ...operation,
+                        state: 'completed',
+                        updatedAt: Date.now(),
+                        code: undefined,
+                        error: undefined,
+                        cleanedUp: undefined
+                    })
+                    continue
+                }
+                const cleanupOperation: SpawnRemitOperation = {
+                    ...operation,
+                    state: 'cleanup-needed',
+                    updatedAt: Date.now(),
+                    code: 'spawn_interrupted',
+                    error: 'Hub restarted before remit delivery completed',
+                    cleanedUp: false
+                }
+                if (!this.persistSpawnRemitOperation(
+                    session.id,
+                    session.namespace,
+                    operation,
+                    cleanupOperation
+                )) continue
+                operation = cleanupOperation
+            }
             const retryableFailure = operation.state === 'failed'
                 && operation.cleanedUp !== true
                 && !operation.orphanSessionId
             if (operation.state !== 'cleanup-needed' && !retryableFailure) continue
             if (!this.getMachineByNamespace(operation.machineId, session.namespace)?.active) continue
 
-            const tailKey = `${session.namespace}:${operation.remitId}`
-            if (this.spawnRemitTails.has(tailKey)) continue
             const task = this.finishSpawnRemitCleanup(session.id, session.namespace, operation)
             this.spawnRemitTails.set(tailKey, { requestHash: operation.requestHash, task })
             tasks.push(task.finally(() => {
@@ -1738,17 +1767,20 @@ export class SyncEngine {
 
     async stopSession(sessionId: string): Promise<{ alreadyStopped: boolean }> {
         const session = this.getSession(sessionId)
-        if (!session?.active) return { alreadyStopped: true }
-        let inactive = false
-        try {
-            await this.rpcGateway.stopSessionProcess(sessionId)
-            inactive = await this.waitForSessionInactive(sessionId)
-        } catch (error) {
-            if (!(error instanceof RpcTargetMissingError)) throw error
-        }
-
+        if (!session) return { alreadyStopped: true }
         const runnerBacked = session.metadata?.startedBy === 'runner'
             || session.metadata?.startedFromRunner === true
+        if (!session.active && !runnerBacked) return { alreadyStopped: true }
+
+        let inactive = !session.active
+        if (session.active) {
+            try {
+                await this.rpcGateway.stopSessionProcess(sessionId)
+                inactive = await this.waitForSessionInactive(sessionId)
+            } catch (error) {
+                if (!(error instanceof RpcTargetMissingError)) throw error
+            }
+        }
         if (inactive && !runnerBacked) return { alreadyStopped: false }
 
         const machineId = session.metadata?.machineId
@@ -1760,7 +1792,7 @@ export class SyncEngine {
         if (!inactive && this.getSession(sessionId)?.active) {
             this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
         }
-        return { alreadyStopped: false }
+        return { alreadyStopped: !session.active && status === 'already_gone' }
     }
 
     /**
@@ -2124,13 +2156,7 @@ export class SyncEngine {
             }
         }
 
-        const remitStored = (): boolean => {
-            const stored = this.getQueuedState(sessionId, [request.remitId])
-            return stored.queuedLocalIds.includes(request.remitId)
-                || stored.indeterminateLocalIds?.includes(request.remitId) === true
-                || stored.invokedLocalMessages.some((message) => message.localId === request.remitId)
-        }
-        if (operation.state === 'completed' || remitStored()) {
+        if (operation.state === 'completed' || this.isSpawnRemitStored(sessionId, request.remitId)) {
             this.persistSpawnRemitOperation(sessionId, namespace, operation, {
                 ...operation,
                 state: 'completed',
@@ -2277,7 +2303,9 @@ export class SyncEngine {
                 localId: request.remitId,
                 sentFrom: 'webapp'
             })
-            if (!remitStored()) throw new Error('Remit was not stored with its correlation id')
+            if (!this.isSpawnRemitStored(sessionId, request.remitId)) {
+                throw new Error('Remit was not stored with its correlation id')
+            }
         } catch (error) {
             return await fail(
                 'remit_delivery_failed',
@@ -2315,6 +2343,13 @@ export class SyncEngine {
             childSessionId: operation.orphanSessionId ?? sessionId,
             cleanedUp
         }
+    }
+
+    private isSpawnRemitStored(sessionId: string, remitId: string): boolean {
+        const stored = this.getQueuedState(sessionId, [remitId])
+        return stored.queuedLocalIds.includes(remitId)
+            || stored.indeterminateLocalIds?.includes(remitId) === true
+            || stored.invokedLocalMessages.some((message) => message.localId === remitId)
     }
 
     private buildSpawnRemitSuccess(

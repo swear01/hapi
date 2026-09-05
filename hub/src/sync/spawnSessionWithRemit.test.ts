@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createHash } from 'node:crypto'
 import type { SpawnSessionWithRemitRequest } from '@hapi/protocol/apiTypes'
+import type { SpawnRemitOperation } from '@hapi/protocol/schemas'
 import { SyncEngine } from './syncEngine'
 import { RpcTargetMissingError } from './rpcGateway'
 
@@ -45,6 +46,9 @@ function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRe
         getOrCreateSession: () => reserved,
         getQueuedState: () => ({ queuedLocalIds: [], invokedLocalMessages: [] }),
         persistSpawnRemitOperation: () => true,
+        isSpawnRemitStored: (SyncEngine.prototype as unknown as {
+            isSpawnRemitStored: (sessionId: string, remitId: string) => boolean
+        }).isSpawnRemitStored,
         finishSpawnRemitCleanup: (SyncEngine.prototype as unknown as {
             finishSpawnRemitCleanup: SyncEngine['spawnSessionWithRemit']
         }).finishSpawnRemitCleanup,
@@ -59,6 +63,36 @@ function hashRequest(request: SpawnSessionWithRemitRequest): string {
     return createHash('sha256')
         .update(JSON.stringify(['machine-1', ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
         .digest('hex')
+}
+
+async function callReconcile(operation: SpawnRemitOperation, harness: Record<string, unknown>): Promise<Map<string, unknown>> {
+    const reconcile = (SyncEngine.prototype as unknown as {
+        reconcileSpawnRemitCleanups: () => Promise<void>
+    }).reconcileSpawnRemitCleanups
+    const taskMap = new Map<string, unknown>()
+    await reconcile.call({
+        sessionCache: {
+            getSessions: () => [{
+                id: SESSION_ID,
+                namespace: 'default',
+                metadata: { spawnRemitOperation: operation }
+            }]
+        },
+        getMachineByNamespace: () => ({ active: true }),
+        spawnRemitTails: taskMap,
+        isSpawnRemitStored: (SyncEngine.prototype as unknown as {
+            isSpawnRemitStored: (sessionId: string, remitId: string) => boolean
+        }).isSpawnRemitStored,
+        finishSpawnRemitCleanup: (SyncEngine.prototype as unknown as {
+            finishSpawnRemitCleanup: (
+                sessionId: string,
+                namespace: string,
+                operation: SpawnRemitOperation
+            ) => Promise<unknown>
+        }).finishSpawnRemitCleanup,
+        ...harness
+    } as unknown as SyncEngine)
+    return taskMap
 }
 
 describe('spawnSessionWithRemit', () => {
@@ -262,31 +296,10 @@ describe('spawnSessionWithRemit', () => {
         }
         const cleanupSpawnedSession = mock(async () => true)
         const persistSpawnRemitOperation = mock(() => true)
-        const reconcile = (SyncEngine.prototype as unknown as {
-            reconcileSpawnRemitCleanups: () => Promise<void>
-        }).reconcileSpawnRemitCleanups
-        const taskMap = new Map()
-
-        await reconcile.call({
-            sessionCache: {
-                getSessions: () => [{
-                    id: SESSION_ID,
-                    namespace: 'default',
-                    metadata: { spawnRemitOperation: operation }
-                }]
-            },
-            getMachineByNamespace: () => ({ active: true }),
-            spawnRemitTails: taskMap,
-            finishSpawnRemitCleanup: (SyncEngine.prototype as unknown as {
-                finishSpawnRemitCleanup: (
-                    sessionId: string,
-                    namespace: string,
-                    operation: unknown
-                ) => Promise<unknown>
-            }).finishSpawnRemitCleanup,
+        const taskMap = await callReconcile(operation, {
             cleanupSpawnedSession,
             persistSpawnRemitOperation
-        } as unknown as SyncEngine)
+        })
 
         expect(cleanupSpawnedSession).toHaveBeenCalledWith('machine-1', 'default', SESSION_ID)
         expect(persistSpawnRemitOperation).toHaveBeenCalledWith(
@@ -296,6 +309,66 @@ describe('spawnSessionWithRemit', () => {
             expect.objectContaining({ state: 'failed', cleanedUp: true })
         )
         expect(taskMap.size).toBe(0)
+    })
+
+    it('marks a pending spawn completed after restart when its remit is stored', async () => {
+        const operation: SpawnRemitOperation = {
+            remitId: REQUEST.remitId,
+            requestHash: hashRequest(REQUEST),
+            machineId: 'machine-1',
+            state: 'pending',
+            updatedAt: 1
+        }
+        const cleanupSpawnedSession = mock(async () => true)
+        const persistSpawnRemitOperation = mock(() => true)
+
+        await callReconcile(operation, {
+            getQueuedState: () => ({ queuedLocalIds: [REQUEST.remitId], invokedLocalMessages: [] }),
+            cleanupSpawnedSession,
+            persistSpawnRemitOperation
+        })
+
+        expect(persistSpawnRemitOperation).toHaveBeenCalledWith(
+            SESSION_ID,
+            'default',
+            operation,
+            expect.objectContaining({ state: 'completed' })
+        )
+        expect(cleanupSpawnedSession).not.toHaveBeenCalled()
+    })
+
+    it('cleans up a pending spawn after restart when its remit was not stored', async () => {
+        const operation: SpawnRemitOperation = {
+            remitId: REQUEST.remitId,
+            requestHash: hashRequest(REQUEST),
+            machineId: 'machine-1',
+            state: 'pending',
+            updatedAt: 1
+        }
+        const cleanupSpawnedSession = mock(async () => true)
+        const persistSpawnRemitOperation = mock(() => true)
+
+        await callReconcile(operation, {
+            getQueuedState: () => ({ queuedLocalIds: [], invokedLocalMessages: [] }),
+            cleanupSpawnedSession,
+            persistSpawnRemitOperation
+        })
+
+        expect(persistSpawnRemitOperation).toHaveBeenNthCalledWith(
+            1,
+            SESSION_ID,
+            'default',
+            operation,
+            expect.objectContaining({ state: 'cleanup-needed', code: 'spawn_interrupted' })
+        )
+        expect(persistSpawnRemitOperation).toHaveBeenNthCalledWith(
+            2,
+            SESSION_ID,
+            'default',
+            expect.objectContaining({ state: 'cleanup-needed' }),
+            expect.objectContaining({ state: 'failed', cleanedUp: true })
+        )
+        expect(cleanupSpawnedSession).toHaveBeenCalledWith('machine-1', 'default', SESSION_ID)
     })
 
     it('renames and delivers the remit only after the fresh child identity matches', async () => {
@@ -611,6 +684,23 @@ describe('stopSession', () => {
 
         expect(result).toEqual({ alreadyStopped: true })
         expect(killSession).not.toHaveBeenCalled()
+    })
+
+    it('stops a live runner process even when its Hub lease already expired', async () => {
+        const stopSessionProcess = mock(async () => {})
+        const stopRunnerSession = mock(async () => 'stopped' as const)
+        const result = await SyncEngine.prototype.stopSession.call({
+            getSession: () => ({
+                id: SESSION_ID,
+                active: false,
+                metadata: { machineId: 'machine-1', startedFromRunner: true }
+            }),
+            rpcGateway: { stopSessionProcess, stopRunnerSession }
+        } as unknown as SyncEngine, SESSION_ID)
+
+        expect(result).toEqual({ alreadyStopped: false })
+        expect(stopSessionProcess).not.toHaveBeenCalled()
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
     })
 
     it('reconciles an active row when its process is already gone', async () => {
