@@ -172,11 +172,11 @@ describe('buildCliArgs', () => {
         expect(args).not.toContain('--hapi-session-id')
     })
 
-    it('passes --existing-session-id for cursor resume when sessionId is set (#991)', () => {
+    it('passes --existing-session-id for cursor resume (#991)', () => {
         const args = buildCliArgs('cursor', {
             directory: '/tmp',
             resumeSessionId: 'cursor-csid-1',
-            sessionId: 'hapi-session-991',
+            existingSessionId: 'hapi-session-991',
         })
         expect(args).toContain('--existing-session-id')
         expect(args).toContain('hapi-session-991')

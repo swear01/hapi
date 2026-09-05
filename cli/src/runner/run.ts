@@ -1540,7 +1540,7 @@ export function buildCliArgs(
   }
   const startingMode = options.startingMode || 'remote';
   args.push('--hapi-starting-mode', startingMode, '--started-by', 'runner');
-  const existingSessionId = options.existingSessionId ?? options.sessionId;
+  const existingSessionId = options.existingSessionId;
   if (existingSessionId) {
     args.push('--existing-session-id', existingSessionId);
   }
