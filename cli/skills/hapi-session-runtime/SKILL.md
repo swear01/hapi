@@ -23,7 +23,7 @@ hapi machines --json
 hapi spawn-peer --dir <path> --name <title> --agent <flavor> --message-file - --json
 ```
 
-`machines` returns exact machine IDs and their advertised workspace roots. Pass the remit on stdin. Use `--machine <exact-machine-id>` only when the user selected another runner. Optional runtime selectors are `--model`, `--effort`, `--permission-mode`, and `--session-type`. `--effort` supports Claude, Grok, Pi, and AGY effort plus Codex and OpenCode reasoning effort; omit it for other flavors.
+`machines` returns exact machine IDs and their advertised workspace roots. Pass the remit on stdin. Use `--machine <exact-machine-id>` only when the user selected another runner. Optional runtime selectors are `--model`, `--effort`, `--permission-mode`, and `--session-type`. `--effort` supports Claude, Grok, Pi, AGY, Kimi, and Copilot effort plus Codex and OpenCode reasoning effort; omit it for other flavors.
 
 For caller-managed retry after an ambiguous transport failure, add `--remit-id <new-uuid>` to the first call and reuse that UUID only with the identical spawn request. The CLI also retries one ambiguous response internally with the same remit ID.
 

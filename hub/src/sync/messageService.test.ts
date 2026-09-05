@@ -1290,6 +1290,22 @@ describe('MessageService.sendMessage deliveryMode', () => {
         })
     })
 
+    it('does not redeliver an invoked remit after a service restart', async () => {
+        const store = makeStore()
+        const session = makeSession(store, 'invoked-remit-retry')
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+        const payload = { text: 'execute once', localId: 'completed-remit' }
+        const original = await service.sendMessage(session.id, payload)
+        store.messages.markMessagesInvoked(session.id, [payload.localId], Date.now())
+        const restarted = new MessageService(store, io, makePublisher() as any)
+
+        expect(await restarted.sendMessage(session.id, payload)).toEqual(original)
+        expect(cliEmitted).toHaveLength(1)
+        await expect(restarted.sendMessage(session.id, { ...payload, text: 'different' }))
+            .rejects.toThrow(/localId is already bound/)
+    })
+
     it('rejects a duplicate localId bound to a different message payload', async () => {
         const store = makeStore()
         const session = makeSession(store, 'duplicate-payload')

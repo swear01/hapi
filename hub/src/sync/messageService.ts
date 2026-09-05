@@ -894,6 +894,9 @@ export class MessageService {
                     'localId is already bound to a different message payload'
                 )
             }
+            if (msg.invokedAt !== null) {
+                return { actualSessionId, createdAt: msg.createdAt }
+            }
         }
         // A duplicate localId is an idempotent retry, not proof that the
         // original Pi turn still exists. Its stored row may retain steer

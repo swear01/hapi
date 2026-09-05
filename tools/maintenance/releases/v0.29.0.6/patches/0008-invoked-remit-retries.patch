@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 04:40:00 +0800
+Subject: [PATCH] Suppress invoked remit redelivery and align effort guidance
+
+diff --git a/cli/README.md b/cli/README.md
+index 8f766869a23127ecfbfef324e77885458b758c0e..fc3d275b72bd3c78d83037952d1de4b27ccd3011 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -38,7 +38,7 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, OpenCode, or DeepSeek Harness
+   DSH is remote-only and its ACP server must be configured separately.
+ - `hapi resume [sessionId]` - List resumable sessions for this machine or resume one locally.
+ - `hapi machines [--machine ID] --json` - List or exactly resolve runner machine IDs and advertised workspace roots.
+-- `hapi spawn-peer --dir PATH --name TITLE --message-file - --json` - Create a fresh session and atomically deliver its remit; failed delivery stops and archives the child. Automation may pass `--remit-id UUID` and reuse it only when retrying the same request. `--effort` supports Claude/Grok/Pi/AGY and maps to reasoning effort for Codex/OpenCode; unsupported flavors fail before spawning.
++- `hapi spawn-peer --dir PATH --name TITLE --message-file - --json` - Create a fresh session and atomically deliver its remit; failed delivery stops and archives the child. Automation may pass `--remit-id UUID` and reuse it only when retrying the same request. `--effort` supports Claude/Grok/Pi/AGY/Kimi/Copilot and maps to reasoning effort for Codex/OpenCode; unsupported flavors fail before spawning.
+ - `hapi wait-peer <exact-session-id> --remit-id UUID --json` - Wait for that remit's result.
+ - `hapi inspect-peer <exact-session-id> --json` - Read metadata and recent message text without resuming.
+ - `hapi ping-peer <exact-session-id> --message-file - --json` - Resume if needed and message one explicitly selected session. After an ambiguous response failure, retry the identical message with the returned `remitId` via `--remit-id UUID`.
+diff --git a/cli/skills/hapi-session-runtime/SKILL.md b/cli/skills/hapi-session-runtime/SKILL.md
+index c4bb650f3843d554e53510e133cecf1e4a3c7f0e..f3b7a86445039bb9d2c32772183b25fb1b79e29c 100644
+--- a/cli/skills/hapi-session-runtime/SKILL.md
++++ b/cli/skills/hapi-session-runtime/SKILL.md
+@@ -23,7 +23,7 @@ hapi machines --json
+ hapi spawn-peer --dir <path> --name <title> --agent <flavor> --message-file - --json
+ ```
+ 
+-`machines` returns exact machine IDs and their advertised workspace roots. Pass the remit on stdin. Use `--machine <exact-machine-id>` only when the user selected another runner. Optional runtime selectors are `--model`, `--effort`, `--permission-mode`, and `--session-type`. `--effort` supports Claude, Grok, Pi, and AGY effort plus Codex and OpenCode reasoning effort; omit it for other flavors.
++`machines` returns exact machine IDs and their advertised workspace roots. Pass the remit on stdin. Use `--machine <exact-machine-id>` only when the user selected another runner. Optional runtime selectors are `--model`, `--effort`, `--permission-mode`, and `--session-type`. `--effort` supports Claude, Grok, Pi, AGY, Kimi, and Copilot effort plus Codex and OpenCode reasoning effort; omit it for other flavors.
+ 
+ For caller-managed retry after an ambiguous transport failure, add `--remit-id <new-uuid>` to the first call and reuse that UUID only with the identical spawn request. The CLI also retries one ambiguous response internally with the same remit ID.
+ 
+diff --git a/cli/src/commands/spawnPeer.ts b/cli/src/commands/spawnPeer.ts
+index b95503be49c2bee8a1bc12bc544aa6dfbb9d9cd3..56def68996dbf6096f1685029fcb297e5ad97af0 100644
+--- a/cli/src/commands/spawnPeer.ts
++++ b/cli/src/commands/spawnPeer.ts
+@@ -48,7 +48,7 @@ ${chalk.bold('Options:')}
+   --agent NAME            Agent flavor (default: claude)
+   --machine ID            Exact runner machine id (default: this CLI's machine)
+   --model ID              Runtime model id
+-  --effort VALUE          Effort for Claude/Grok/Pi/AGY or reasoning effort for Codex/OpenCode
++  --effort VALUE          Effort for Claude/Grok/Pi/AGY/Kimi/Copilot or reasoning effort for Codex/OpenCode
+   --session-type TYPE     simple | worktree (default: simple; worktree creates a new tree from PATH)
+   --permission-mode MODE  Operator-visible mode for the new session (not cloned from parent)
+   --wait SECONDS          Ready/verify timeout (default 60, or HAPI_WAIT_ACTIVE_SECS)
+diff --git a/hub/src/sync/messageService.test.ts b/hub/src/sync/messageService.test.ts
+index 3cf7d54ddb86435f3f2f5dd2e1716571798f3df2..711dd6a9de34fe5ef010477648faf8758272e939 100644
+--- a/hub/src/sync/messageService.test.ts
++++ b/hub/src/sync/messageService.test.ts
+@@ -1290,6 +1290,22 @@ describe('MessageService.sendMessage deliveryMode', () => {
+         })
+     })
+ 
++    it('does not redeliver an invoked remit after a service restart', async () => {
++        const store = makeStore()
++        const session = makeSession(store, 'invoked-remit-retry')
++        const { io, cliEmitted } = makeTrackingIo()
++        const service = new MessageService(store, io, makePublisher() as any)
++        const payload = { text: 'execute once', localId: 'completed-remit' }
++        const original = await service.sendMessage(session.id, payload)
++        store.messages.markMessagesInvoked(session.id, [payload.localId], Date.now())
++        const restarted = new MessageService(store, io, makePublisher() as any)
++
++        expect(await restarted.sendMessage(session.id, payload)).toEqual(original)
++        expect(cliEmitted).toHaveLength(1)
++        await expect(restarted.sendMessage(session.id, { ...payload, text: 'different' }))
++            .rejects.toThrow(/localId is already bound/)
++    })
++
+     it('rejects a duplicate localId bound to a different message payload', async () => {
+         const store = makeStore()
+         const session = makeSession(store, 'duplicate-payload')
+diff --git a/hub/src/sync/messageService.ts b/hub/src/sync/messageService.ts
+index 8d18161618ded4b3be785c18118b6861cfddb719..17b491a519fc91110e1a2a771f2d1c293c7b3274 100644
+--- a/hub/src/sync/messageService.ts
++++ b/hub/src/sync/messageService.ts
+@@ -894,6 +894,9 @@ export class MessageService {
+                     'localId is already bound to a different message payload'
+                 )
+             }
++            if (msg.invokedAt !== null) {
++                return { actualSessionId, createdAt: msg.createdAt }
++            }
+         }
+         // A duplicate localId is an idempotent retry, not proof that the
+         // original Pi turn still exists. Its stored row may retain steer
