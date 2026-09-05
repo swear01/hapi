@@ -190,7 +190,7 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         const result = await engine.spawnSessionWithRemit(machineId, c.get('namespace'), request)
-        return c.json(result, result.type === 'success' ? 200 : 502)
+        return c.json(result, result.type === 'success' ? 200 : result.code === 'remit_conflict' ? 409 : 502)
     })
 
     app.get('/machines/:id/agent-availability', async (c) => {

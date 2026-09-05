@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 05:30:00 +0800
+Subject: [PATCH] Return conflict status for reused spawn remit IDs
+
+diff --git a/docs/api/client-contract/rest.md b/docs/api/client-contract/rest.md
+index 4f0a67b908dca2d127bac4dd5cc7e44550eefd8a..a2203228d5775240e948ccfeb14c57e1d5776660 100644
+--- a/docs/api/client-contract/rest.md
++++ b/docs/api/client-contract/rest.md
+@@ -120,7 +120,7 @@ Source: `hub/src/web/routes/machines.ts`; schemas `SpawnSessionRequestSchema`, `
+ | `PATCH /api/machines/:id` | `{displayName}` (trimmed; ≤ 64 chars; empty clears back to hostname) | `{ok: true}` |
+ | `GET /api/machines/:id/agent-availability` | — | `{agents: {agent, available, reason?: 'not_found'\|'invalid_configuration'}[]}`; 409 `runner_upgrade_required` on old runners |
+ | `POST /api/machines/:id/spawn` | `{directory, agent?, model?, effort?, modelReasoningEffort?, yolo?, permissionMode?, sessionType?: 'simple'\|'worktree', worktreeName?, serviceTier?, collaborationMode?, copilotAgentMode?, startingMode?: 'remote'\|'pty'}` | `{type: 'success', sessionId}` \| `{type: 'error', message, code?, agent?}` (agy/dsh accept only `remote`) |
+-| `POST /api/machines/:id/spawn-with-remit` | Spawn fields plus required `{message, remitId}`, optional `{name, waitActiveSecs}` | `{type: 'success', sessionId, remitId, name, session: {machineId, directory, agent, model, modelReasoningEffort, effort, permissionMode}}`; failures are HTTP 502 with `{type: 'error', code, message, childSessionId?, cleanedUp?}` |
++| `POST /api/machines/:id/spawn-with-remit` | Spawn fields plus required `{message, remitId}`, optional `{name, waitActiveSecs}` | `{type: 'success', sessionId, remitId, name, session: {machineId, directory, agent, model, modelReasoningEffort, effort, permissionMode}}`; remit conflicts are HTTP 409 (`code: 'remit_conflict'`), other failures HTTP 502, with `{type: 'error', code, message, childSessionId?, cleanedUp?}` |
+ | `POST /api/machines/:id/list-directory` | `{path, includeHidden?}` | `{success, entries?: (DirectoryEntry & {isGitRepo?})[], error?}` |
+ | `POST /api/machines/:id/paths/exists` | `{paths: string[]}` (≤ 1000) | `{exists: Record<string, boolean>, outsideWorkspaceRoots?: string[]}` |
+ | `POST /api/machines/:id/restart-runner` | `{}` | `{message}`; errors carry `code: 'machine_not_found' \| 'machine_offline'` |
+diff --git a/hub/src/web/routes/machines.test.ts b/hub/src/web/routes/machines.test.ts
+index 7c18fa184bb7c0572ca06db0a0a05543df7db23f..23cff6530768a98db6ee174a4316da7c887a051d 100644
+--- a/hub/src/web/routes/machines.test.ts
++++ b/hub/src/web/routes/machines.test.ts
+@@ -264,6 +264,25 @@ describe('machines routes', () => {
+         })
+     })
+ 
++    it.each([['remit_conflict', 409], ['spawn_timeout', 502]] as const)('maps %s to HTTP %s for atomic spawn', async (code, expectedStatus) => {
++        const machine = createMachine()
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            spawnSessionWithRemit: async () => ({ type: 'error' as const, code, message: 'spawn failed' })
++        } as Partial<SyncEngine>
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++        const response = await app.request('/api/machines/machine-1/spawn-with-remit', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ directory: '/tmp/project', message: 'task', remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c' })
++        })
++        expect(response.status).toBe(expectedStatus)
++        expect(await response.json()).toEqual({ type: 'error', code, message: 'spawn failed' })
++    })
++
+     it('rejects a blank remit or invalid flavor permission before spawn', async () => {
+         const machine = createMachine()
+         const spawnSessionWithRemit = async () => { throw new Error('must not spawn') }
+diff --git a/hub/src/web/routes/machines.ts b/hub/src/web/routes/machines.ts
+index dd36e52f85eefd91e9c964f649148d642bf19098..27f2ac12aa58a33db8ffcbaf2cde92475423fbf2 100644
+--- a/hub/src/web/routes/machines.ts
++++ b/hub/src/web/routes/machines.ts
+@@ -190,7 +190,7 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         }
+ 
+         const result = await engine.spawnSessionWithRemit(machineId, c.get('namespace'), request)
+-        return c.json(result, result.type === 'success' ? 200 : 502)
++        return c.json(result, result.type === 'success' ? 200 : result.code === 'remit_conflict' ? 409 : 502)
+     })
+ 
+     app.get('/machines/:id/agent-availability', async (c) => {

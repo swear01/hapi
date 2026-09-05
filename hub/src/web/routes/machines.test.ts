@@ -264,6 +264,25 @@ describe('machines routes', () => {
         })
     })
 
+    it.each([['remit_conflict', 409], ['spawn_timeout', 502]] as const)('maps %s to HTTP %s for atomic spawn', async (code, expectedStatus) => {
+        const machine = createMachine()
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            spawnSessionWithRemit: async () => ({ type: 'error' as const, code, message: 'spawn failed' })
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+        const response = await app.request('/api/machines/machine-1/spawn-with-remit', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ directory: '/tmp/project', message: 'task', remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c' })
+        })
+        expect(response.status).toBe(expectedStatus)
+        expect(await response.json()).toEqual({ type: 'error', code, message: 'spawn failed' })
+    })
+
     it('rejects a blank remit or invalid flavor permission before spawn', async () => {
         const machine = createMachine()
         const spawnSessionWithRemit = async () => { throw new Error('must not spawn') }
