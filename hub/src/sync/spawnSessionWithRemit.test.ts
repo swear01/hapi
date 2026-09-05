@@ -244,6 +244,53 @@ describe('spawnSessionWithRemit', () => {
         })
     })
 
+    it('accepts a runner-normalized worktree root and name hint', async () => {
+        const request = {
+            ...REQUEST,
+            directory: '/tmp/project/packages/app',
+            sessionType: 'worktree' as const,
+            worktreeName: 'Feature X'
+        }
+        let delivered = false
+        const cleanupSpawnedSession = mock(async () => true)
+        const child = {
+            id: SESSION_ID,
+            namespace: 'default',
+            active: true,
+            metadata: {
+                machineId: 'machine-1',
+                path: '/tmp/project-worktrees/feature-x-a1b2',
+                flavor: 'codex',
+                sessionType: 'worktree' as const,
+                worktreeName: 'feature-x-a1b2',
+                worktree: {
+                    basePath: '/tmp/project',
+                    branch: 'hapi-feature-x-a1b2',
+                    name: 'feature-x-a1b2',
+                    worktreePath: '/tmp/project-worktrees/feature-x-a1b2'
+                }
+            },
+            model: null,
+            modelReasoningEffort: null,
+            effort: null,
+            permissionMode: undefined
+        }
+
+        const result = await callSpawn({
+            getSessions: () => [],
+            spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
+            waitForSessionActive: async () => true,
+            getSessionByNamespace: () => child,
+            renameSession: async () => {},
+            sendMessage: async () => { delivered = true },
+            getQueuedState: () => ({ queuedLocalIds: delivered ? [request.remitId] : [], invokedLocalMessages: [] }),
+            cleanupSpawnedSession
+        }, request)
+
+        expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
+        expect(cleanupSpawnedSession).not.toHaveBeenCalled()
+    })
+
     it('cleans up without delivering when the fresh child ends before ready', async () => {
         const cleanupSpawnedSession = mock(async () => true)
         const sendMessage = mock(async () => {})
@@ -353,8 +400,7 @@ describe('spawnSessionWithRemit', () => {
         ['collaboration mode', { ...REQUEST, collaborationMode: 'plan' }, { collaborationMode: 'default' }, {}],
         ['Copilot agent mode', { ...REQUEST, agent: 'copilot', copilotAgentMode: 'autopilot' }, { copilotAgentMode: 'interactive' }, {}],
         ['starting mode', { ...REQUEST, startingMode: 'pty' }, {}, { startingMode: 'remote' }],
-        ['session type', { ...REQUEST, sessionType: 'worktree' }, {}, { sessionType: 'simple' }],
-        ['worktree name', { ...REQUEST, sessionType: 'worktree', worktreeName: 'feature-x' }, {}, { worktreeName: 'other' }]
+        ['session type', { ...REQUEST, sessionType: 'worktree' }, {}, { sessionType: 'simple' }]
     ] as Array<[string, SpawnSessionWithRemitRequest, Record<string, unknown>, Record<string, unknown>]>)('cleans up when the selected %s does not match', async (_name, request, sessionOverrides, metadataOverrides) => {
         const cleanupSpawnedSession = mock(async () => true)
         const result = await callSpawn({
@@ -488,7 +534,7 @@ describe('stopSession', () => {
         const stopRunnerSession = mock(async () => 'already_gone' as const)
         let settled = false
         const resultPromise = SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1' } }),
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', startedBy: 'runner' } }),
             rpcGateway: {
                 stopSessionProcess: async () => {},
                 stopRunnerSession
@@ -509,9 +555,24 @@ describe('stopSession', () => {
         expect(handleSessionEnd).not.toHaveBeenCalled()
     })
 
+    it('does not require a runner RPC after a terminal session reports inactive', async () => {
+        const stopRunnerSession = mock(async () => { throw new RpcTargetMissingError('stop-session', 'socket-disconnected') })
+        const result = await SyncEngine.prototype.stopSession.call({
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { startedBy: 'terminal' } }),
+            rpcGateway: {
+                stopSessionProcess: async () => {},
+                stopRunnerSession
+            },
+            waitForSessionInactive: async () => true
+        } as unknown as SyncEngine, SESSION_ID)
+
+        expect(result).toEqual({ alreadyStopped: false })
+        expect(stopRunnerSession).not.toHaveBeenCalled()
+    })
+
     it('fails closed when session-end arrives while the runner still sees a live process', async () => {
         await expect(SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1' } }),
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', startedFromRunner: true } }),
             rpcGateway: {
                 stopSessionProcess: async () => {},
                 stopRunnerSession: async () => 'still_alive' as const

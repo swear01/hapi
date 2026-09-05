@@ -1724,6 +1724,10 @@ export class SyncEngine {
             if (!(error instanceof RpcTargetMissingError)) throw error
         }
 
+        const runnerBacked = session.metadata?.startedBy === 'runner'
+            || session.metadata?.startedFromRunner === true
+        if (inactive && !runnerBacked) return { alreadyStopped: false }
+
         const machineId = session.metadata?.machineId
         if (!machineId) throw new Error('Cannot confirm session process exit without a machine id')
         const status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
@@ -2246,7 +2250,11 @@ export class SyncEngine {
         const expectedPermissionMode = request.permissionMode
             ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
         const directoryMatches = childMetadata.path === request.directory
-            || (request.sessionType === 'worktree' && childMetadata.worktree?.basePath === request.directory)
+            || (
+                request.sessionType === 'worktree'
+                && childMetadata.sessionType === 'worktree'
+                && Boolean(childMetadata.worktree?.basePath)
+            )
         const selectionMatches = childMetadata.flavor === expectedAgent
             && directoryMatches
             && (request.model === undefined || child.model === request.model)
@@ -2258,7 +2266,6 @@ export class SyncEngine {
             && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
             && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
             && (request.sessionType === undefined || childMetadata.sessionType === request.sessionType)
-            && (request.worktreeName === undefined || childMetadata.worktreeName === request.worktreeName)
         if (!selectionMatches) {
             return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
         }

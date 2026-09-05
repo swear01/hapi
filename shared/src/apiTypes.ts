@@ -626,7 +626,9 @@ export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>
 
 export const SpawnSessionWithRemitRequestSchema = SpawnSessionRequestSchema.extend({
     directory: z.string().trim().min(1),
-    message: z.string().trim().min(1),
+    message: z.string().refine((value) => value.trim().length > 0, {
+        message: 'message must contain non-whitespace'
+    }),
     remitId: z.string().uuid(),
     name: z.string().trim().min(1).max(SESSION_NAME_MAX_LENGTH).optional(),
     waitActiveSecs: z.number().positive().max(300).optional()
