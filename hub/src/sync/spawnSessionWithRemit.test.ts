@@ -12,7 +12,8 @@ const REQUEST: SpawnSessionWithRemitRequest = {
     message: 'implement issue',
     agent: 'codex',
     remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c',
-    name: 'Worker'
+    name: 'Worker',
+    waitActiveSecs: 0.05
 }
 
 function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRemitRequest = REQUEST) {
@@ -96,6 +97,65 @@ async function callReconcile(operation: SpawnRemitOperation, harness: Record<str
 }
 
 describe('spawnSessionWithRemit', () => {
+    it('waits for configured keepalive fields after the child first becomes active', async () => {
+        const request: SpawnSessionWithRemitRequest = {
+            ...REQUEST,
+            permissionMode: 'safe-yolo',
+            serviceTier: 'fast',
+            collaborationMode: 'plan',
+            startingMode: 'remote',
+            waitActiveSecs: 1
+        }
+        let configured = false
+        let delivered = false
+        const cleanupSpawnedSession = mock(async () => true)
+        const timer = setTimeout(() => { configured = true }, 25)
+        try {
+            const result = await callSpawn({
+                spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
+                waitForSessionActive: async () => true,
+                getSessionByNamespace: () => ({
+                    id: SESSION_ID,
+                    namespace: 'default',
+                    active: true,
+                    metadata: {
+                        machineId: 'machine-1', path: REQUEST.directory, flavor: 'codex',
+                        startingMode: configured ? 'remote' : undefined
+                    },
+                    permissionMode: configured ? 'safe-yolo' : undefined,
+                    serviceTier: configured ? 'fast' : undefined,
+                    collaborationMode: configured ? 'plan' : undefined
+                }),
+                renameSession: async () => {},
+                sendMessage: async () => { expect(configured).toBe(true); delivered = true },
+                getQueuedState: () => ({ queuedLocalIds: delivered ? [request.remitId] : [], invokedLocalMessages: [] }),
+                cleanupSpawnedSession
+            }, request)
+            expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
+            expect(cleanupSpawnedSession).not.toHaveBeenCalled()
+        } finally {
+            clearTimeout(timer)
+        }
+    })
+
+    it('cleans up an unapplied runtime selection when the readiness deadline expires', async () => {
+        const cleanupSpawnedSession = mock(async () => true)
+        const sendMessage = mock(async () => {})
+        const result = await callSpawn({
+            spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
+            waitForSessionActive: async () => true,
+            getSessionByNamespace: () => ({
+                id: SESSION_ID, namespace: 'default', active: true,
+                metadata: { machineId: 'machine-1', path: REQUEST.directory, flavor: 'codex' }
+            }),
+            cleanupSpawnedSession,
+            sendMessage
+        }, { ...REQUEST, permissionMode: 'safe-yolo', waitActiveSecs: 0.01 })
+        expect(result).toMatchObject({ type: 'error', code: 'spawn_selection_mismatch', cleanedUp: true })
+        expect(sendMessage).not.toHaveBeenCalled()
+        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(1)
+    })
+
     it('coalesces concurrent retries for the same remit', async () => {
         let finish!: (result: { type: 'error'; code: string; message: string }) => void
         const resultPromise = new Promise<{ type: 'error'; code: string; message: string }>((resolve) => { finish = resolve })
@@ -422,10 +482,18 @@ describe('spawnSessionWithRemit', () => {
         })
     })
 
-    it('accepts a runner-normalized worktree root and name hint', async () => {
+    it.each([
+        ['/tmp/project/packages/app', '/tmp/project', true],
+        ['C:\\Project\\packages\\app', 'c:\\project', true],
+        ['/tmp/project', '/other/project', false],
+        ['/tmp/project', 'project', false],
+        ['/tmp/project-other', '/tmp/project', false],
+        ['/tmp/project/../other', '/tmp/project', false],
+        ['D:\\project', 'C:\\project', false],
+    ])('validates runner-normalized worktree root %s within %s', async (directory, basePath, accepted) => {
         const request = {
             ...REQUEST,
-            directory: '/tmp/project/packages/app',
+            directory,
             sessionType: 'worktree' as const,
             worktreeName: 'Feature X'
         }
@@ -442,7 +510,7 @@ describe('spawnSessionWithRemit', () => {
                 sessionType: 'worktree' as const,
                 worktreeName: 'feature-x-a1b2',
                 worktree: {
-                    basePath: '/tmp/project',
+                    basePath,
                     branch: 'hapi-feature-x-a1b2',
                     name: 'feature-x-a1b2',
                     worktreePath: '/tmp/project-worktrees/feature-x-a1b2'
@@ -465,8 +533,11 @@ describe('spawnSessionWithRemit', () => {
             cleanupSpawnedSession
         }, request)
 
-        expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
-        expect(cleanupSpawnedSession).not.toHaveBeenCalled()
+        expect(result).toMatchObject(accepted
+            ? { type: 'success', sessionId: SESSION_ID }
+            : { type: 'error', code: 'spawn_selection_mismatch' })
+        expect(delivered).toBe(accepted)
+        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(accepted ? 0 : 1)
     })
 
     it('cleans up without delivering when the fresh child ends before ready', async () => {

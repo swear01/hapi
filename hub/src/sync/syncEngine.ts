@@ -26,6 +26,7 @@ import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMe
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
 import { createHash, randomUUID } from 'node:crypto'
+import { posix, win32 } from 'node:path'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
@@ -2809,33 +2810,49 @@ export class SyncEngine {
             )
         }
 
-        const matchedChild = this.getSessionByNamespace(sessionId, namespace)
-        const childMetadata = matchedChild?.metadata
-        if (!matchedChild || !childMetadata || childMetadata.machineId !== machineId) {
-            return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
-        }
-        child = matchedChild
         const expectedPermissionMode = request.permissionMode
             ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
-        const directoryMatches = childMetadata.path === request.directory
-            || (
-                request.sessionType === 'worktree'
-                && childMetadata.sessionType === 'worktree'
-                && Boolean(childMetadata.worktree?.basePath)
-            )
-        const selectionMatches = childMetadata.flavor === expectedAgent
-            && directoryMatches
-            && (request.model === undefined || child.model === request.model)
-            && (request.modelReasoningEffort === undefined || child.modelReasoningEffort === request.modelReasoningEffort)
-            && (request.effort === undefined || child.effort === request.effort)
-            && (expectedPermissionMode === undefined || child.permissionMode === expectedPermissionMode)
-            && (request.serviceTier === undefined || child.serviceTier === request.serviceTier)
-            && (request.collaborationMode === undefined || child.collaborationMode === request.collaborationMode)
-            && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
-            && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
-            && (request.sessionType === undefined || childMetadata.sessionType === request.sessionType)
-        if (!selectionMatches) {
-            return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
+        while (true) {
+            const matchedChild = this.getSessionByNamespace(sessionId, namespace)
+            const childMetadata = matchedChild?.metadata
+            if (!matchedChild || !childMetadata || childMetadata.machineId !== machineId) {
+                return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
+            }
+            if (!matchedChild.active) {
+                return await fail('spawn_ended', 'New session ended before applying the requested runtime selection')
+            }
+            child = matchedChild
+            const basePath = childMetadata.worktree?.basePath
+            const pathApi = /^[a-z]:[\\/]|^\\\\/i.test(request.directory) ? win32 : posix
+            const relativeDirectory = basePath && pathApi.isAbsolute(basePath)
+                ? pathApi.relative(basePath, request.directory)
+                : null
+            const directoryMatches = childMetadata.path === request.directory
+                || (
+                    request.sessionType === 'worktree'
+                    && childMetadata.sessionType === 'worktree'
+                    && relativeDirectory !== null
+                    && relativeDirectory !== '..'
+                    && !relativeDirectory.startsWith(`..${pathApi.sep}`)
+                    && !pathApi.isAbsolute(relativeDirectory)
+                )
+            const selectionMatches = childMetadata.flavor === expectedAgent
+                && directoryMatches
+                && (request.model === undefined || child.model === request.model)
+                && (request.modelReasoningEffort === undefined || child.modelReasoningEffort === request.modelReasoningEffort)
+                && (request.effort === undefined || child.effort === request.effort)
+                && (expectedPermissionMode === undefined || child.permissionMode === expectedPermissionMode)
+                && (request.serviceTier === undefined || child.serviceTier === request.serviceTier)
+                && (request.collaborationMode === undefined || child.collaborationMode === request.collaborationMode)
+                && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
+                && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
+                && (request.sessionType === undefined || childMetadata.sessionType === request.sessionType)
+            if (selectionMatches) break
+            const remaining = waitDeadline - Date.now()
+            if (remaining <= 0) {
+                return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
+            }
+            await new Promise((resolve) => setTimeout(resolve, Math.min(250, remaining)))
         }
 
         try {

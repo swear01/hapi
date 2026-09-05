@@ -250,6 +250,18 @@ describe('spawnPeer', () => {
         })).rejects.toMatchObject({ code: 'cleanup_failed', remitId })
     })
 
+    it('preserves deterministic remit conflicts in JSON error results', async () => {
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        const http = createHttpMock((url) => url.endsWith('/api/auth')
+            ? { status: 200, data: { token: 'jwt' } }
+            : { status: 409, data: { type: 'error', code: 'remit_conflict', message: 'already bound' } })
+        await expect(spawnPeer({
+            directory: '/runner/project', message: 'different work', machineId: MACHINE_ID,
+            apiUrl: 'http://hub.test', accessToken: 'token', remitId, http: http as never
+        })).rejects.toMatchObject({ code: 'remit_conflict', remitId })
+        expect(http.post).toHaveBeenCalledTimes(2)
+    })
+
     it('uses stable exit codes', () => {
         expect(exitCodeForSpawnPeerError(new SpawnPeerError('bad_args', 'x'))).toBe(2)
         expect(exitCodeForSpawnPeerError(new SpawnPeerError('spawn_failed', 'x'))).toBe(3)

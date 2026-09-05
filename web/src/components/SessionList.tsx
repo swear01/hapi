@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { SessionListScrollAnchor } from './SessionListScrollAnchor'
 import type { SessionSummary } from '@/types/api'
 import { isWildcardSearch, matchesSearchQuery } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
@@ -1232,6 +1233,7 @@ function SessionItem(props: {
                         title: sessionName || s.id.slice(0, 8),
                     }))
                 }}
+                data-session-scroll-anchor
                 className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
                 style={{ WebkitTouchCallout: 'none' }}
                 aria-current={selected ? 'page' : undefined}
@@ -1810,8 +1812,8 @@ export function SessionList(props: {
             ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
             : group.displayName
         return (
+            <div key={group.key} data-session-scroll-anchor>
             <ProjectGroupHeader
-                key={group.key}
                 group={group}
                 actionSessions={actionGroupsByKey.get(group.key) ?? []}
                 groupTitle={groupTitle}
@@ -1821,6 +1823,7 @@ export function SessionList(props: {
                 onNewSessionInDirectory={onNewSessionInDirectory}
                 api={api}
             />
+            </div>
         )
     }
 
@@ -1846,7 +1849,7 @@ export function SessionList(props: {
             ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
             : group.displayName
         return (
-            <div key={group.key}>
+            <div key={group.key} data-session-scroll-anchor>
                 <ProjectGroupHeader
                     group={group}
                     actionSessions={actionGroupsByKey.get(group.key) ?? []}
@@ -2198,7 +2201,7 @@ export function SessionList(props: {
                 </div>
             ) : null}
             <div ref={scrollContainerRef} className="app-scroll-y session-list-scrollbar-left min-h-0 flex-1">
-            <div className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
+            <SessionListScrollAnchor sessions={props.sessions} className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
                 {props.sessions.length === 0 && !props.isLoading ? (
                     <SessionsEmptyState
                         onNewSession={props.onNewSession}
@@ -2278,7 +2281,7 @@ export function SessionList(props: {
                 })}
                 {groups.map(renderDirectoryGroup)}
                 {actionOnlyGroups.map(renderActionOnlyGroupHeader)}
-            </div>
+            </SessionListScrollAnchor>
             </div>
             </div>
             <ConfirmDialog

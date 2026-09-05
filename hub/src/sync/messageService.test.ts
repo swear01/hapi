@@ -1306,6 +1306,34 @@ describe('MessageService.sendMessage deliveryMode', () => {
         expect(store.messages.getUninvokedLocalMessages(session.id)).toHaveLength(1)
     })
 
+    it('rejects reusing a scheduled localId for immediate delivery', async () => {
+        const store = makeStore()
+        const session = makeSession(store, 'duplicate-schedule')
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+        const scheduledAt = Date.now() + 60_000
+        await service.sendMessage(session.id, { text: 'work', localId: 'same-id', scheduledAt })
+        await expect(service.sendMessage(session.id, {
+            text: 'work', localId: 'same-id'
+        })).rejects.toThrow(/localId is already bound/)
+        expect(cliEmitted).toHaveLength(0)
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]?.scheduledAt).toBe(scheduledAt)
+    })
+
+    it('rejects changing a queued localId into a native steer', async () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession(
+            'duplicate-queue-to-steer', { path: '/tmp/project', host: 'localhost', flavor: 'pi' }, null, 'default'
+        )
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+        await service.sendMessage(session.id, { text: 'work', localId: 'same-id', deliveryMode: 'queue' })
+        await expect(service.sendMessage(session.id, {
+            text: 'work', localId: 'same-id', deliveryMode: 'steer'
+        })).rejects.toThrow(/localId is already bound/)
+        expect(cliEmitted).toHaveLength(1)
+    })
+
     it('downgrades a legacy persisted steer through the mature scheduled scan', () => {
         const store = makeStore()
         const session = store.sessions.getOrCreateSession(

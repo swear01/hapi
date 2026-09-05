@@ -881,9 +881,15 @@ export class MessageService {
             const storedContent = isObject(msg.content) && isObject(msg.content.content)
                 ? msg.content.content
                 : null
+            const storedDeliveryMode = isObject(msg.content) && isObject(msg.content.meta)
+                ? msg.content.meta.deliveryMode
+                : undefined
+            // Deferred steer retries may downgrade to queue, never upgrade a queued message to steer.
             if (storedContent?.type !== 'text'
                 || storedContent.text !== payload.text
-                || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])) {
+                || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])
+                || msg.scheduledAt !== (payload.scheduledAt ?? null)
+                || (deliveryMode === 'steer' && storedDeliveryMode !== 'steer')) {
                 throw new MessageLocalIdConflictError(
                     'localId is already bound to a different message payload'
                 )

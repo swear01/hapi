@@ -1,4 +1,5 @@
 upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1776	swear01	20594f7115b16908ceb8ca70d9fede12630e3353	carry	ready	clear	clean	20594f7115b16908ceb8ca70d9fede12630e3353	proportional	accepted-change	Personal sidebar viewport fix; latest-head CI and HAPI Bot clean; retain maintained drag and project actions.
 pr-1774	matyasrathonyi	1008e1bbbc48926d74648928712f1b6d13600dad	defer	ready	clear	clean	1008e1bbbc48926d74648928712f1b6d13600dad	proportional	review	Documentation introduces paid vendor recommendation; wait for maintainer editorial acceptance.
 pr-1773	techotaku39	0438118b0d7a6d0ca8922b6c4f10805e117229d5	carry	ready	clear	clean	0438118b0d7a6d0ca8922b6c4f10805e117229d5	proportional	accepted-change	Focused current-device bulk read action reuses read stores, confirms mutation, covers hidden duplicate IDs and excludes empty stubs.
 pr-1772	techotaku39	6c5753be294fde3ae33144828829e0786aac3134	defer	ready	clear	clean	6c5753be294fde3ae33144828829e0786aac3134	review-large	review	34-file filter/menu/API expansion changes existing navigation; wait for official acceptance of combined-filter UX.

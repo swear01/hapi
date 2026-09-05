@@ -17,6 +17,7 @@ export type SpawnPeerErrorCode =
     | 'bad_args'
     | 'auth_failed'
     | 'spawn_failed'
+    | 'remit_conflict'
     | 'cleanup_failed'
 
 export class SpawnPeerError extends Error {
@@ -229,6 +230,9 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
                 `${detail}; child ${data.childSessionId} may still be running`,
                 data.remitId ?? remitId
             )
+        }
+        if (data?.code === 'remit_conflict') {
+            throw new SpawnPeerError('remit_conflict', detail, remitId)
         }
         throw new SpawnPeerError('spawn_failed', detail)
     }

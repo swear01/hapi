@@ -1,0 +1,635 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 03:30:00 +0800
+Subject: [PATCH] Preserve readiness retry contracts and sidebar viewport
+
+diff --git a/.github/release-notes/v0.29.0.6.md b/.github/release-notes/v0.29.0.6.md
+index a21aa0689ab7b28790fc312f21bb771dadbd49bf..bd2460e9c2d382a305ec8fc024aa5c4396702b56 100644
+--- a/.github/release-notes/v0.29.0.6.md
++++ b/.github/release-notes/v0.29.0.6.md
+@@ -28,3 +28,5 @@ Personal carries are included under the existing operator policy. #1771 spans 15
+ ## Distribution
+ 
+ Standalone four-part maintenance release, with signed macOS CLI archives, Linux and Windows CLI archives, Windows/macOS desktop bundles, and `checksums.txt`. Optional platform packages remain on official `0.29.0`. The implicit standalone upgrade channel remains off; Windows uses the explicit verified hub-artifact rollout.
++
++- Preserve the sidebar viewport across background pin and activity updates (#1776), including collapsed projects.
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 0faea04d9826d8b2829f337abe7b0cbdae01e568..b708f78112e4df58f5bd69d633398fa341618204 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -13,7 +13,7 @@ jobs:
+             - run: bun install --frozen-lockfile
+             - run: bun typecheck
+             - run: bunx playwright install --with-deps chromium
+-            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts share-turn.spec.ts session-sidebar-toggle.spec.ts
++            - run: bun run test:e2e -- terminal-wrap-fidelity.spec.ts composer-copy.spec.ts session-list-scroll.spec.ts share-turn.spec.ts session-sidebar-toggle.spec.ts
+             - run: bun run test
+ 
+     # Serial runner-integration suite: starts real detached runner/session
+diff --git a/cli/skills/hapi-session-runtime/SKILL.md b/cli/skills/hapi-session-runtime/SKILL.md
+index bc8ee00ff7f97b0a7ad1d61a4c55b23a93e2b881..c4bb650f3843d554e53510e133cecf1e4a3c7f0e 100644
+--- a/cli/skills/hapi-session-runtime/SKILL.md
++++ b/cli/skills/hapi-session-runtime/SKILL.md
+@@ -27,6 +27,8 @@ hapi spawn-peer --dir <path> --name <title> --agent <flavor> --message-file - --
+ 
+ For caller-managed retry after an ambiguous transport failure, add `--remit-id <new-uuid>` to the first call and reuse that UUID only with the identical spawn request. The CLI also retries one ambiguous response internally with the same remit ID.
+ 
++`remit_conflict` means the UUID is already bound to a different request. Retry the original request with that UUID, or use a new UUID for different work.
++
+ The successful JSON contains `sessionId` and `remitId`. Wait for that remit's result:
+ 
+ ```sh
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.test.ts b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+index 350b6e28808afe66ab2c04f95eb050a0fe3d9cba..65c8d30a69d1d26047efe5dac3de938b0c4e7456 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.test.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+@@ -250,6 +250,18 @@ describe('spawnPeer', () => {
+         })).rejects.toMatchObject({ code: 'cleanup_failed', remitId })
+     })
+ 
++    it('preserves deterministic remit conflicts in JSON error results', async () => {
++        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
++        const http = createHttpMock((url) => url.endsWith('/api/auth')
++            ? { status: 200, data: { token: 'jwt' } }
++            : { status: 409, data: { type: 'error', code: 'remit_conflict', message: 'already bound' } })
++        await expect(spawnPeer({
++            directory: '/runner/project', message: 'different work', machineId: MACHINE_ID,
++            apiUrl: 'http://hub.test', accessToken: 'token', remitId, http: http as never
++        })).rejects.toMatchObject({ code: 'remit_conflict', remitId })
++        expect(http.post).toHaveBeenCalledTimes(2)
++    })
++
+     it('uses stable exit codes', () => {
+         expect(exitCodeForSpawnPeerError(new SpawnPeerError('bad_args', 'x'))).toBe(2)
+         expect(exitCodeForSpawnPeerError(new SpawnPeerError('spawn_failed', 'x'))).toBe(3)
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.ts b/cli/src/modules/spawnPeer/spawnPeer.ts
+index e90037cf3f8fe142bf9d3c24d321bbc7bfd47475..62e9c840d176ee8e23af9cece45ae76f719f1a9f 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.ts
+@@ -17,6 +17,7 @@ export type SpawnPeerErrorCode =
+     | 'bad_args'
+     | 'auth_failed'
+     | 'spawn_failed'
++    | 'remit_conflict'
+     | 'cleanup_failed'
+ 
+ export class SpawnPeerError extends Error {
+@@ -230,6 +231,9 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
+                 data.remitId ?? remitId
+             )
+         }
++        if (data?.code === 'remit_conflict') {
++            throw new SpawnPeerError('remit_conflict', detail, remitId)
++        }
+         throw new SpawnPeerError('spawn_failed', detail)
+     }
+     if (data.remitId !== remitId) {
+diff --git a/e2e/session-list-scroll.spec.ts b/e2e/session-list-scroll.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8779f1f37888ed64e2934e2a1d14ae76dfcfe268
+--- /dev/null
++++ b/e2e/session-list-scroll.spec.ts
+@@ -0,0 +1,84 @@
++import { expect, test } from '@playwright/test'
++
++for (const nativeAnchoring of [true, false]) {
++    test.describe(`native scroll anchoring: ${nativeAnchoring}`, () => {
++        test.beforeEach(async ({ page }) => {
++            if (!nativeAnchoring) {
++                await page.addInitScript(() => {
++                    const style = document.createElement('style')
++                    style.textContent = '* { overflow-anchor: none !important; }'
++                    document.addEventListener('DOMContentLoaded', () => document.head.append(style))
++                })
++            }
++        })
++
++        test('keeps the visible session in place across background pin and activity changes', async ({ page }) => {
++            await page.goto('/e2e-fixtures/session-list-scroll-fixture.html')
++            const row = page.getByRole('button', { name: /^Session 20 / })
++            await row.waitFor()
++            await row.evaluate(element => element.scrollIntoView({ block: 'center' }))
++            const before = (await row.boundingBox())!.y
++            for (const patch of [
++                { pinned: false, active: true, thinking: true },
++                { thinking: false },
++                { active: false },
++                { globalPinned: true },
++                { globalPinned: false, pinned: true },
++            ]) {
++                await page.evaluate(patch => window.updateSession('session-0', patch), patch)
++                await page.waitForTimeout(350) // Include directory collapse transitions and native anchoring.
++                expect(Math.abs((await row.boundingBox())!.y - before)).toBeLessThan(2)
++            }
++        })
++
++        test('keeps a neighboring row in place when the first visible project moves to pinned', async ({ page }) => {
++            await page.goto('/e2e-fixtures/session-list-scroll-fixture.html')
++            const row = page.getByRole('button', { name: /^Session 20 / })
++            await row.waitFor()
++            await page.locator('[title="/project-19"]').evaluate(element => element.scrollIntoView({ block: 'start' }))
++            const before = (await row.boundingBox())!.y
++            await page.evaluate(() => window.updateSession('session-19', { pinned: false, active: true, thinking: true }))
++            await page.waitForTimeout(350)
++            expect(Math.abs((await row.boundingBox())!.y - before)).toBeLessThan(2)
++        })
++
++        test('does not follow a visible project when unpinning moves it to the bottom', async ({ page }) => {
++            await page.goto('/e2e-fixtures/session-list-scroll-fixture.html')
++            const row = page.getByRole('button', { name: /^Session 20 / })
++            await row.waitFor()
++            await page.locator('[title="/project-19"]').evaluate(element => element.scrollIntoView({ block: 'start' }))
++            const before = (await row.boundingBox())!.y
++            await page.evaluate(() => window.updateSession('session-19', { pinned: false }))
++            await page.waitForTimeout(350)
++            expect(Math.abs((await row.boundingBox())!.y - before)).toBeLessThan(2)
++        })
++
++        test('preserves the viewport when a project automatically collapses after unpinning', async ({ page }) => {
++            await page.goto('/e2e-fixtures/session-list-scroll-fixture.html?mixed')
++            const row = page.getByRole('button', { name: /^Session 20 / })
++            await row.waitFor()
++            await row.evaluate(element => element.scrollIntoView({ block: 'center' }))
++            const before = (await row.boundingBox())!.y
++            await page.evaluate(() => window.updateSession('session-0', { pinned: false }))
++            await page.waitForTimeout(350)
++            expect(Math.abs((await row.boundingBox())!.y - before)).toBeLessThan(2)
++        })
++
++        test('preserves collapsed project headers and respects subsequent user scrolling', async ({ page }) => {
++            await page.goto('/e2e-fixtures/session-list-scroll-fixture.html?collapsed')
++            const header = page.locator('[title="/project-20"]')
++            await header.waitFor()
++            await header.evaluate(element => element.scrollIntoView({ block: 'center' }))
++            const before = (await header.boundingBox())!.y
++            await page.evaluate(() => window.updateSession('session-0', { globalPinned: true }))
++            await page.waitForTimeout(350)
++            expect(Math.abs((await header.boundingBox())!.y - before)).toBeLessThan(2)
++            const scroller = page.locator('.session-list-scrollbar-left')
++            await scroller.evaluate(element => { element.scrollTop = 0 })
++            await page.evaluate(() => window.updateSession('session-1', { globalPinned: true }))
++            await page.waitForTimeout(350)
++            expect(await scroller.evaluate(element => element.scrollTop)).toBe(0)
++        })
++
++    })
++}
+diff --git a/hub/src/sync/messageService.test.ts b/hub/src/sync/messageService.test.ts
+index d2a074ca7204344d9a836538c417f1d555525c24..3cf7d54ddb86435f3f2f5dd2e1716571798f3df2 100644
+--- a/hub/src/sync/messageService.test.ts
++++ b/hub/src/sync/messageService.test.ts
+@@ -1306,6 +1306,34 @@ describe('MessageService.sendMessage deliveryMode', () => {
+         expect(store.messages.getUninvokedLocalMessages(session.id)).toHaveLength(1)
+     })
+ 
++    it('rejects reusing a scheduled localId for immediate delivery', async () => {
++        const store = makeStore()
++        const session = makeSession(store, 'duplicate-schedule')
++        const { io, cliEmitted } = makeTrackingIo()
++        const service = new MessageService(store, io, makePublisher() as any)
++        const scheduledAt = Date.now() + 60_000
++        await service.sendMessage(session.id, { text: 'work', localId: 'same-id', scheduledAt })
++        await expect(service.sendMessage(session.id, {
++            text: 'work', localId: 'same-id'
++        })).rejects.toThrow(/localId is already bound/)
++        expect(cliEmitted).toHaveLength(0)
++        expect(store.messages.getUninvokedLocalMessages(session.id)[0]?.scheduledAt).toBe(scheduledAt)
++    })
++
++    it('rejects changing a queued localId into a native steer', async () => {
++        const store = makeStore()
++        const session = store.sessions.getOrCreateSession(
++            'duplicate-queue-to-steer', { path: '/tmp/project', host: 'localhost', flavor: 'pi' }, null, 'default'
++        )
++        const { io, cliEmitted } = makeTrackingIo()
++        const service = new MessageService(store, io, makePublisher() as any)
++        await service.sendMessage(session.id, { text: 'work', localId: 'same-id', deliveryMode: 'queue' })
++        await expect(service.sendMessage(session.id, {
++            text: 'work', localId: 'same-id', deliveryMode: 'steer'
++        })).rejects.toThrow(/localId is already bound/)
++        expect(cliEmitted).toHaveLength(1)
++    })
++
+     it('downgrades a legacy persisted steer through the mature scheduled scan', () => {
+         const store = makeStore()
+         const session = store.sessions.getOrCreateSession(
+diff --git a/hub/src/sync/messageService.ts b/hub/src/sync/messageService.ts
+index 90e29ebfb3e2185c4ddc500a344598e7d92fd55d..8d18161618ded4b3be785c18118b6861cfddb719 100644
+--- a/hub/src/sync/messageService.ts
++++ b/hub/src/sync/messageService.ts
+@@ -881,9 +881,15 @@ export class MessageService {
+             const storedContent = isObject(msg.content) && isObject(msg.content.content)
+                 ? msg.content.content
+                 : null
++            const storedDeliveryMode = isObject(msg.content) && isObject(msg.content.meta)
++                ? msg.content.meta.deliveryMode
++                : undefined
++            // Deferred steer retries may downgrade to queue, never upgrade a queued message to steer.
+             if (storedContent?.type !== 'text'
+                 || storedContent.text !== payload.text
+-                || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])) {
++                || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])
++                || msg.scheduledAt !== (payload.scheduledAt ?? null)
++                || (deliveryMode === 'steer' && storedDeliveryMode !== 'steer')) {
+                 throw new MessageLocalIdConflictError(
+                     'localId is already bound to a different message payload'
+                 )
+diff --git a/hub/src/sync/spawnSessionWithRemit.test.ts b/hub/src/sync/spawnSessionWithRemit.test.ts
+index 838c8c5109c3ea73509d3941f8ae517c8c75a266..c7bf19c03d1c595079f2f2ae23af43687ca73f47 100644
+--- a/hub/src/sync/spawnSessionWithRemit.test.ts
++++ b/hub/src/sync/spawnSessionWithRemit.test.ts
+@@ -12,7 +12,8 @@ const REQUEST: SpawnSessionWithRemitRequest = {
+     message: 'implement issue',
+     agent: 'codex',
+     remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c',
+-    name: 'Worker'
++    name: 'Worker',
++    waitActiveSecs: 0.05
+ }
+ 
+ function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRemitRequest = REQUEST) {
+@@ -96,6 +97,65 @@ async function callReconcile(operation: SpawnRemitOperation, harness: Record<str
+ }
+ 
+ describe('spawnSessionWithRemit', () => {
++    it('waits for configured keepalive fields after the child first becomes active', async () => {
++        const request: SpawnSessionWithRemitRequest = {
++            ...REQUEST,
++            permissionMode: 'safe-yolo',
++            serviceTier: 'fast',
++            collaborationMode: 'plan',
++            startingMode: 'remote',
++            waitActiveSecs: 1
++        }
++        let configured = false
++        let delivered = false
++        const cleanupSpawnedSession = mock(async () => true)
++        const timer = setTimeout(() => { configured = true }, 25)
++        try {
++            const result = await callSpawn({
++                spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
++                waitForSessionActive: async () => true,
++                getSessionByNamespace: () => ({
++                    id: SESSION_ID,
++                    namespace: 'default',
++                    active: true,
++                    metadata: {
++                        machineId: 'machine-1', path: REQUEST.directory, flavor: 'codex',
++                        startingMode: configured ? 'remote' : undefined
++                    },
++                    permissionMode: configured ? 'safe-yolo' : undefined,
++                    serviceTier: configured ? 'fast' : undefined,
++                    collaborationMode: configured ? 'plan' : undefined
++                }),
++                renameSession: async () => {},
++                sendMessage: async () => { expect(configured).toBe(true); delivered = true },
++                getQueuedState: () => ({ queuedLocalIds: delivered ? [request.remitId] : [], invokedLocalMessages: [] }),
++                cleanupSpawnedSession
++            }, request)
++            expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
++            expect(cleanupSpawnedSession).not.toHaveBeenCalled()
++        } finally {
++            clearTimeout(timer)
++        }
++    })
++
++    it('cleans up an unapplied runtime selection when the readiness deadline expires', async () => {
++        const cleanupSpawnedSession = mock(async () => true)
++        const sendMessage = mock(async () => {})
++        const result = await callSpawn({
++            spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
++            waitForSessionActive: async () => true,
++            getSessionByNamespace: () => ({
++                id: SESSION_ID, namespace: 'default', active: true,
++                metadata: { machineId: 'machine-1', path: REQUEST.directory, flavor: 'codex' }
++            }),
++            cleanupSpawnedSession,
++            sendMessage
++        }, { ...REQUEST, permissionMode: 'safe-yolo', waitActiveSecs: 0.01 })
++        expect(result).toMatchObject({ type: 'error', code: 'spawn_selection_mismatch', cleanedUp: true })
++        expect(sendMessage).not.toHaveBeenCalled()
++        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(1)
++    })
++
+     it('coalesces concurrent retries for the same remit', async () => {
+         let finish!: (result: { type: 'error'; code: string; message: string }) => void
+         const resultPromise = new Promise<{ type: 'error'; code: string; message: string }>((resolve) => { finish = resolve })
+@@ -422,10 +482,18 @@ describe('spawnSessionWithRemit', () => {
+         })
+     })
+ 
+-    it('accepts a runner-normalized worktree root and name hint', async () => {
++    it.each([
++        ['/tmp/project/packages/app', '/tmp/project', true],
++        ['C:\\Project\\packages\\app', 'c:\\project', true],
++        ['/tmp/project', '/other/project', false],
++        ['/tmp/project', 'project', false],
++        ['/tmp/project-other', '/tmp/project', false],
++        ['/tmp/project/../other', '/tmp/project', false],
++        ['D:\\project', 'C:\\project', false],
++    ])('validates runner-normalized worktree root %s within %s', async (directory, basePath, accepted) => {
+         const request = {
+             ...REQUEST,
+-            directory: '/tmp/project/packages/app',
++            directory,
+             sessionType: 'worktree' as const,
+             worktreeName: 'Feature X'
+         }
+@@ -442,7 +510,7 @@ describe('spawnSessionWithRemit', () => {
+                 sessionType: 'worktree' as const,
+                 worktreeName: 'feature-x-a1b2',
+                 worktree: {
+-                    basePath: '/tmp/project',
++                    basePath,
+                     branch: 'hapi-feature-x-a1b2',
+                     name: 'feature-x-a1b2',
+                     worktreePath: '/tmp/project-worktrees/feature-x-a1b2'
+@@ -465,8 +533,11 @@ describe('spawnSessionWithRemit', () => {
+             cleanupSpawnedSession
+         }, request)
+ 
+-        expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
+-        expect(cleanupSpawnedSession).not.toHaveBeenCalled()
++        expect(result).toMatchObject(accepted
++            ? { type: 'success', sessionId: SESSION_ID }
++            : { type: 'error', code: 'spawn_selection_mismatch' })
++        expect(delivered).toBe(accepted)
++        expect(cleanupSpawnedSession).toHaveBeenCalledTimes(accepted ? 0 : 1)
+     })
+ 
+     it('cleans up without delivering when the fresh child ends before ready', async () => {
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index 19d17b5e75e0538659d9b48a5490e6a58b36da79..fdedd9da4cc00d3dd4296d05b1add756702488c8 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -26,6 +26,7 @@ import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMe
+ import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
+ import type { Server } from 'socket.io'
+ import { createHash, randomUUID } from 'node:crypto'
++import { posix, win32 } from 'node:path'
+ import type { Store, CancelQueuedMessageResult } from '../store'
+ import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
+ import type { RpcRegistry } from '../socket/rpcRegistry'
+@@ -2809,33 +2810,49 @@ export class SyncEngine {
+             )
+         }
+ 
+-        const matchedChild = this.getSessionByNamespace(sessionId, namespace)
+-        const childMetadata = matchedChild?.metadata
+-        if (!matchedChild || !childMetadata || childMetadata.machineId !== machineId) {
+-            return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
+-        }
+-        child = matchedChild
+         const expectedPermissionMode = request.permissionMode
+             ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
+-        const directoryMatches = childMetadata.path === request.directory
+-            || (
+-                request.sessionType === 'worktree'
+-                && childMetadata.sessionType === 'worktree'
+-                && Boolean(childMetadata.worktree?.basePath)
+-            )
+-        const selectionMatches = childMetadata.flavor === expectedAgent
+-            && directoryMatches
+-            && (request.model === undefined || child.model === request.model)
+-            && (request.modelReasoningEffort === undefined || child.modelReasoningEffort === request.modelReasoningEffort)
+-            && (request.effort === undefined || child.effort === request.effort)
+-            && (expectedPermissionMode === undefined || child.permissionMode === expectedPermissionMode)
+-            && (request.serviceTier === undefined || child.serviceTier === request.serviceTier)
+-            && (request.collaborationMode === undefined || child.collaborationMode === request.collaborationMode)
+-            && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
+-            && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
+-            && (request.sessionType === undefined || childMetadata.sessionType === request.sessionType)
+-        if (!selectionMatches) {
+-            return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
++        while (true) {
++            const matchedChild = this.getSessionByNamespace(sessionId, namespace)
++            const childMetadata = matchedChild?.metadata
++            if (!matchedChild || !childMetadata || childMetadata.machineId !== machineId) {
++                return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
++            }
++            if (!matchedChild.active) {
++                return await fail('spawn_ended', 'New session ended before applying the requested runtime selection')
++            }
++            child = matchedChild
++            const basePath = childMetadata.worktree?.basePath
++            const pathApi = /^[a-z]:[\\/]|^\\\\/i.test(request.directory) ? win32 : posix
++            const relativeDirectory = basePath && pathApi.isAbsolute(basePath)
++                ? pathApi.relative(basePath, request.directory)
++                : null
++            const directoryMatches = childMetadata.path === request.directory
++                || (
++                    request.sessionType === 'worktree'
++                    && childMetadata.sessionType === 'worktree'
++                    && relativeDirectory !== null
++                    && relativeDirectory !== '..'
++                    && !relativeDirectory.startsWith(`..${pathApi.sep}`)
++                    && !pathApi.isAbsolute(relativeDirectory)
++                )
++            const selectionMatches = childMetadata.flavor === expectedAgent
++                && directoryMatches
++                && (request.model === undefined || child.model === request.model)
++                && (request.modelReasoningEffort === undefined || child.modelReasoningEffort === request.modelReasoningEffort)
++                && (request.effort === undefined || child.effort === request.effort)
++                && (expectedPermissionMode === undefined || child.permissionMode === expectedPermissionMode)
++                && (request.serviceTier === undefined || child.serviceTier === request.serviceTier)
++                && (request.collaborationMode === undefined || child.collaborationMode === request.collaborationMode)
++                && (request.copilotAgentMode === undefined || child.copilotAgentMode === request.copilotAgentMode)
++                && (request.startingMode === undefined || childMetadata.startingMode === request.startingMode)
++                && (request.sessionType === undefined || childMetadata.sessionType === request.sessionType)
++            if (selectionMatches) break
++            const remaining = waitDeadline - Date.now()
++            if (remaining <= 0) {
++                return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
++            }
++            await new Promise((resolve) => setTimeout(resolve, Math.min(250, remaining)))
+         }
+ 
+         try {
+diff --git a/web/e2e-fixtures/session-list-scroll-fixture.html b/web/e2e-fixtures/session-list-scroll-fixture.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..17046b6075c274f4e58bfddadcd7db088d54515d
+--- /dev/null
++++ b/web/e2e-fixtures/session-list-scroll-fixture.html
+@@ -0,0 +1,5 @@
++<!doctype html>
++<html lang="en">
++<head><meta charset="UTF-8" /><title>Session list scroll fixture</title></head>
++<body><div id="root"></div><script type="module" src="./session-list-scroll-fixture.tsx"></script></body>
++</html>
+diff --git a/web/e2e-fixtures/session-list-scroll-fixture.tsx b/web/e2e-fixtures/session-list-scroll-fixture.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f6e93c369ba01f66047fa418b856c4e20881326
+--- /dev/null
++++ b/web/e2e-fixtures/session-list-scroll-fixture.tsx
+@@ -0,0 +1,45 @@
++import React, { useState } from 'react'
++import { createRoot } from 'react-dom/client'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { SessionList } from '../src/components/SessionList'
++import { I18nProvider } from '../src/lib/i18n-context'
++import { ToastProvider } from '../src/lib/toast-context'
++import type { SessionSummary } from '../src/types/api'
++import '../src/index.css'
++
++localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++const initialSessions: SessionSummary[] = Array.from({ length: 40 }, (_, index) => ({
++    id: `session-${index}`, active: false, thinking: false, activeAt: 0,
++    updatedAt: 1000 - index, metadataVersion: 0, agentStateVersion: 0,
++    todosUpdatedAt: 0, todoProgress: null, pendingRequestsCount: 0,
++    pendingRequestKinds: [], pendingRequests: [], backgroundTaskCount: 0,
++    futureScheduledMessageCount: 0, nextScheduledAt: null, model: null, effort: null,
++    pinned: !new URLSearchParams(location.search).has('collapsed'),
++    metadata: { path: `/project-${index}`, name: `Session ${index}`, flavor: 'codex' },
++}))
++
++if (new URLSearchParams(location.search).has('mixed')) {
++    initialSessions.push({ ...initialSessions[0], id: 'companion', pinned: false })
++}
++
++declare global {
++    interface Window {
++        updateSession: (id: string, patch: Partial<SessionSummary>) => void
++    }
++}
++
++function Fixture() {
++    const [sessions, setSessions] = useState(initialSessions)
++    window.updateSession = (id, patch) => setSessions(previous => previous.map(session =>
++        session.id === id ? { ...session, ...patch } : session))
++    return <div style={{ width: 360, height: 600, display: 'flex', flexDirection: 'column' }}>
++        <SessionList sessions={sessions} onSelect={() => {}} onNewSession={() => {}}
++            isLoading={false} renderHeader={false} api={null} />
++    </div>
++}
++
++createRoot(document.getElementById('root')!).render(
++    <React.StrictMode><QueryClientProvider client={new QueryClient()}>
++        <ToastProvider><I18nProvider><Fixture /></I18nProvider></ToastProvider>
++    </QueryClientProvider></React.StrictMode>,
++)
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index cc18206c67b050b009c705e608af27b33fea5b7d..5e07beb3f89e2a941af770bca09bd99ec518e271 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useMemo, useRef, useState } from 'react'
++import { SessionListScrollAnchor } from './SessionListScrollAnchor'
+ import type { SessionSummary } from '@/types/api'
+ import { isWildcardSearch, matchesSearchQuery } from '@hapi/protocol'
+ import type { ApiClient } from '@/api/client'
+@@ -1232,6 +1233,7 @@ function SessionItem(props: {
+                         title: sessionName || s.id.slice(0, 8),
+                     }))
+                 }}
++                data-session-scroll-anchor
+                 className={`session-list-item group/session-row flex w-full flex-col gap-1 py-2 pl-2.5 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                 style={{ WebkitTouchCallout: 'none' }}
+                 aria-current={selected ? 'page' : undefined}
+@@ -1810,8 +1812,8 @@ export function SessionList(props: {
+             ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
+             : group.displayName
+         return (
++            <div key={group.key} data-session-scroll-anchor>
+             <ProjectGroupHeader
+-                key={group.key}
+                 group={group}
+                 actionSessions={actionGroupsByKey.get(group.key) ?? []}
+                 groupTitle={groupTitle}
+@@ -1821,6 +1823,7 @@ export function SessionList(props: {
+                 onNewSessionInDirectory={onNewSessionInDirectory}
+                 api={api}
+             />
++            </div>
+         )
+     }
+ 
+@@ -1846,7 +1849,7 @@ export function SessionList(props: {
+             ? `${group.displayName} · ${resolveMachineLabel(group.machineId)}`
+             : group.displayName
+         return (
+-            <div key={group.key}>
++            <div key={group.key} data-session-scroll-anchor>
+                 <ProjectGroupHeader
+                     group={group}
+                     actionSessions={actionGroupsByKey.get(group.key) ?? []}
+@@ -2198,7 +2201,7 @@ export function SessionList(props: {
+                 </div>
+             ) : null}
+             <div ref={scrollContainerRef} className="app-scroll-y session-list-scrollbar-left min-h-0 flex-1">
+-            <div className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
++            <SessionListScrollAnchor sessions={props.sessions} className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
+                 {props.sessions.length === 0 && !props.isLoading ? (
+                     <SessionsEmptyState
+                         onNewSession={props.onNewSession}
+@@ -2278,7 +2281,7 @@ export function SessionList(props: {
+                 })}
+                 {groups.map(renderDirectoryGroup)}
+                 {actionOnlyGroups.map(renderActionOnlyGroupHeader)}
+-            </div>
++            </SessionListScrollAnchor>
+             </div>
+             </div>
+             <ConfirmDialog
+diff --git a/web/src/components/SessionListScrollAnchor.tsx b/web/src/components/SessionListScrollAnchor.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f081b7156648fa556f111c7a193c51ab2b78dcb
+--- /dev/null
++++ b/web/src/components/SessionListScrollAnchor.tsx
+@@ -0,0 +1,57 @@
++import { Component, createRef, type ReactNode } from 'react'
++import type { SessionSummary } from '@/types/api'
++
++type Props = { children: ReactNode; className: string; sessions: SessionSummary[] }
++type Snapshot = { scrollTop: number; anchors: { element: HTMLElement; top: number }[] }
++
++/** Read the old DOM at commit time, before rows move between pinned sections. */
++export class SessionListScrollAnchor extends Component<Props, object, Snapshot | null> {
++    private contentRef = createRef<HTMLDivElement>()
++
++    getSnapshotBeforeUpdate(previousProps: Props): Snapshot | null {
++        if (previousProps.sessions === this.props.sessions) return null
++        const content = this.contentRef.current
++        const container = content?.parentElement
++        if (!content || !container || container.scrollTop <= 0) return null
++        const viewport = container.getBoundingClientRect()
++        const anchors: Snapshot['anchors'] = []
++        for (const element of content.querySelectorAll<HTMLElement>('[data-session-scroll-anchor]')) {
++            if (element.closest('.collapsible-panel:not([data-open])')) continue
++            const rect = element.getBoundingClientRect()
++            if (rect.top >= viewport.bottom) break
++            // A project's box can span the whole viewport; only anchor its visible header.
++            const isRow = element.classList.contains('session-list-item')
++            if (rect.height > 0 && rect.bottom > viewport.top && (isRow || rect.top >= viewport.top)) {
++                anchors.push({ element, top: rect.top - viewport.top })
++            }
++        }
++        return { scrollTop: container.scrollTop, anchors }
++    }
++
++    componentDidUpdate(_previousProps: Props, _previousState: object, snapshot: Snapshot | null) {
++        const content = this.contentRef.current
++        const container = content?.parentElement
++        if (!content || !container || !snapshot) return
++        const viewportTop = container.getBoundingClientRect().top
++        // Prefer the least-reordered survivor, not a project that was just sent to
++        // the top/bottom. Compare content offsets so native scroll anchoring cannot
++        // make that moved project look stationary.
++        const candidates = snapshot.anchors
++            .filter(({ element }) => content.contains(element)
++                && !element.closest('.collapsible-panel:not([data-open])'))
++            .map(anchor => ({ ...anchor, rect: anchor.element.getBoundingClientRect() }))
++            .filter(({ rect }) => rect.height > 0)
++            .map(anchor => ({
++                ...anchor,
++                shift: anchor.rect.top - viewportTop + container.scrollTop - anchor.top - snapshot.scrollTop,
++            }))
++            .sort((a, b) => Math.abs(a.shift) - Math.abs(b.shift))
++        const anchor = candidates[0]
++        const scrollTop = anchor ? snapshot.scrollTop + anchor.shift : snapshot.scrollTop
++        if (Math.abs(container.scrollTop - scrollTop) > 0.5) container.scrollTop = scrollTop
++    }
++
++    render() {
++        return <div ref={this.contentRef} className={this.props.className}>{this.props.children}</div>
++    }
++}
