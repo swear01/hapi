@@ -1,9 +1,11 @@
 import { describe, expect, it, mock } from 'bun:test'
+import { createHash } from 'node:crypto'
 import type { SpawnSessionWithRemitRequest } from '@hapi/protocol/apiTypes'
 import { SyncEngine } from './syncEngine'
 import { RpcTargetMissingError } from './rpcGateway'
 
 const SESSION_ID = '05d9f0f2-9273-4137-933c-07459a1146a2'
+const EXISTING_ID = '6acb2b8a-1334-4955-b0c6-86f5a22656d2'
 const REQUEST: SpawnSessionWithRemitRequest = {
     directory: '/tmp/project',
     message: 'implement issue',
@@ -13,18 +15,70 @@ const REQUEST: SpawnSessionWithRemitRequest = {
 }
 
 function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRemitRequest = REQUEST) {
-    return SyncEngine.prototype.spawnSessionWithRemit.call(harness as unknown as SyncEngine, 'machine-1', 'default', request)
+    const requestHash = createHash('sha256')
+        .update(JSON.stringify(['machine-1', ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
+        .digest('hex')
+    const reserved = {
+        id: SESSION_ID,
+        namespace: 'default',
+        active: false,
+        metadata: {
+            machineId: 'machine-1',
+            path: '/tmp/project',
+            flavor: 'codex',
+            spawnRemitOperation: {
+                remitId: request.remitId,
+                requestHash,
+                machineId: 'machine-1',
+                state: 'pending',
+                updatedAt: 1
+            }
+        },
+        model: null,
+        modelReasoningEffort: null,
+        effort: null,
+        permissionMode: undefined
+    }
+    return SyncEngine.prototype.spawnSessionWithRemit.call({
+        spawnRemitTails: new Map(),
+        spawnSessionWithRemitOnce: (SyncEngine.prototype as unknown as {
+            spawnSessionWithRemitOnce: SyncEngine['spawnSessionWithRemit']
+        }).spawnSessionWithRemitOnce,
+        getOrCreateSession: () => reserved,
+        getQueuedState: () => ({ queuedLocalIds: [], invokedLocalMessages: [] }),
+        persistSpawnRemitOperation: () => true,
+        buildSpawnRemitSuccess: (SyncEngine.prototype as unknown as {
+            buildSpawnRemitSuccess: SyncEngine['spawnSessionWithRemit']
+        }).buildSpawnRemitSuccess,
+        ...harness
+    } as unknown as SyncEngine, 'machine-1', 'default', request)
 }
 
 describe('spawnSessionWithRemit', () => {
-    it('never waits for, cleans up, or messages a returned pre-existing id', async () => {
+    it('coalesces concurrent retries for the same remit', async () => {
+        let finish!: (result: { type: 'error'; code: string; message: string }) => void
+        const resultPromise = new Promise<{ type: 'error'; code: string; message: string }>((resolve) => { finish = resolve })
+        const spawnSessionWithRemitOnce = mock(async () => await resultPromise)
+        const harness = { spawnRemitTails: new Map(), spawnSessionWithRemitOnce } as unknown as SyncEngine
+
+        const first = SyncEngine.prototype.spawnSessionWithRemit.call(harness, 'machine-1', 'default', REQUEST)
+        const retry = SyncEngine.prototype.spawnSessionWithRemit.call(harness, 'machine-1', 'default', REQUEST)
+        finish({ type: 'error', code: 'spawn_timeout', message: 'timeout' })
+
+        await expect(Promise.all([first, retry])).resolves.toEqual([
+            { type: 'error', code: 'spawn_timeout', message: 'timeout' },
+            { type: 'error', code: 'spawn_timeout', message: 'timeout' }
+        ])
+        expect(spawnSessionWithRemitOnce).toHaveBeenCalledTimes(1)
+    })
+
+    it('never waits for, cleans up, or messages an unexpected returned id', async () => {
         const waitForSessionActive = mock(async () => true)
         const waitForSessionReady = mock(async () => 'ready' as const)
         const cleanupSpawnedSession = mock(async () => true)
         const sendMessage = mock(async () => {})
         const result = await callSpawn({
-            getSessions: () => [{ id: SESSION_ID, namespace: 'other' }],
-            spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
+            spawnSession: async () => ({ type: 'success', sessionId: EXISTING_ID }),
             waitForSessionActive,
             waitForSessionReady,
             cleanupSpawnedSession,
@@ -34,11 +88,52 @@ describe('spawnSessionWithRemit', () => {
         expect(result).toEqual({
             type: 'error',
             code: 'spawn_not_fresh',
-            message: 'Runner returned an existing session id; remit was not delivered'
+            message: 'Runner returned an unexpected session id; remit was not delivered',
+            childSessionId: SESSION_ID,
+            cleanedUp: true
         })
         expect(waitForSessionActive).not.toHaveBeenCalled()
         expect(waitForSessionReady).not.toHaveBeenCalled()
-        expect(cleanupSpawnedSession).not.toHaveBeenCalled()
+        expect(cleanupSpawnedSession).toHaveBeenCalledWith('machine-1', 'default', SESSION_ID)
+        expect(cleanupSpawnedSession).not.toHaveBeenCalledWith('machine-1', 'default', EXISTING_ID)
+        expect(sendMessage).not.toHaveBeenCalled()
+    })
+
+    it('returns the same child without spawning or redelivering after a lost success response', async () => {
+        const spawnSession = mock(async () => ({ type: 'success' as const, sessionId: SESSION_ID }))
+        const sendMessage = mock(async () => {})
+        const requestHash = createHash('sha256')
+            .update(JSON.stringify(['machine-1', ...Object.entries(REQUEST).sort(([a], [b]) => a.localeCompare(b))]))
+            .digest('hex')
+        const result = await callSpawn({
+            getOrCreateSession: () => ({
+                id: SESSION_ID,
+                namespace: 'default',
+                active: true,
+                metadata: {
+                    machineId: 'machine-1',
+                    path: '/tmp/project',
+                    flavor: 'codex',
+                    name: 'Worker',
+                    spawnRemitOperation: {
+                        remitId: REQUEST.remitId,
+                        requestHash,
+                        machineId: 'machine-1',
+                        state: 'completed',
+                        updatedAt: 2
+                    }
+                },
+                model: null,
+                modelReasoningEffort: null,
+                effort: null,
+                permissionMode: undefined
+            }),
+            spawnSession,
+            sendMessage
+        })
+
+        expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID, remitId: REQUEST.remitId })
+        expect(spawnSession).not.toHaveBeenCalled()
         expect(sendMessage).not.toHaveBeenCalled()
     })
 
@@ -54,7 +149,8 @@ describe('spawnSessionWithRemit', () => {
             permissionMode: undefined
         }
         const renameSession = mock(async () => {})
-        const sendMessage = mock(async () => {})
+        let delivered = false
+        const sendMessage = mock(async () => { delivered = true })
         const result = await callSpawn({
             getSessions: () => [],
             spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
@@ -63,7 +159,7 @@ describe('spawnSessionWithRemit', () => {
             getSessionByNamespace: () => child,
             renameSession,
             sendMessage,
-            getQueuedState: () => ({ queuedLocalIds: [REQUEST.remitId], invokedLocalMessages: [] }),
+            getQueuedState: () => ({ queuedLocalIds: delivered ? [REQUEST.remitId] : [], invokedLocalMessages: [] }),
             cleanupSpawnedSession: mock(async () => true)
         })
 

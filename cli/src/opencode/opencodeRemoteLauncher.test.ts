@@ -264,13 +264,6 @@ function createMode(model?: string): OpencodeMode {
     };
 }
 
-function createPlanMode(model?: string): OpencodeMode {
-    return {
-        permissionMode: 'plan' as PermissionMode,
-        model
-    };
-}
-
 function createModeWithEffort(model: string | undefined, modelReasoningEffort: string | null): OpencodeMode {
     return {
         permissionMode: 'default' as PermissionMode,
@@ -1856,17 +1849,6 @@ describe('opencodeRemoteLauncher inline model switch', () => {
                 && event.message.includes('Failed to switch reasoning effort')
         )).toBe(true);
         expect(harness.promptCount).toBe(1);
-    });
-
-    it('forwards plan-mode prompts unchanged while permissions enforce plan mode', async () => {
-        const { session } = createSessionStub([
-            { message: 'design the fix', mode: createPlanMode() }
-        ]);
-
-        await opencodeRemoteLauncher(session as never);
-
-        const content = harness.promptContents[0] as Array<{ type: string; text: string }>;
-        expect(content).toEqual([{ type: 'text', text: 'design the fix' }]);
     });
 
     it('registers a listOpencodeModels RPC handler that returns the backend cache', async () => {

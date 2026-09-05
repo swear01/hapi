@@ -17,7 +17,7 @@ import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import type { HapiSessionExportResult } from '@hapi/protocol/sessionExport'
 import type { RpcRegistry } from '../socket/rpcRegistry'
@@ -135,6 +135,8 @@ export type SpawnSessionWithRemitResult =
     }
     | { type: 'error'; message: string; code?: string; childSessionId?: string; cleanedUp?: boolean }
 
+type SpawnRemitOperation = NonNullable<NonNullable<Session['metadata']>['spawnRemitOperation']>
+
 export type CursorChatStoreStatusResult =
     | { type: 'success'; status: CursorChatStoreStatus }
     | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'resume_unavailable' | 'no_machine_online' | 'probe_failed' }
@@ -212,6 +214,8 @@ export class SyncEngine {
     private readonly scratchlistUploadTails = new Map<string, Promise<unknown>>()
     /** Coalesce duplicate clear requests so retries cannot spawn two fresh sessions. */
     private readonly opencodeClearTails = new Map<string, Promise<ClearOpencodeSessionResult>>()
+    /** Coalesce concurrent retries while durable remit state covers restarts and later retries. */
+    private readonly spawnRemitTails = new Map<string, Promise<SpawnSessionWithRemitResult>>()
     /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
     private readonly historyActionsInFlight = new Set<string>()
     /**
@@ -2004,48 +2008,170 @@ export class SyncEngine {
         namespace: string,
         request: SpawnSessionWithRemitRequest
     ): Promise<SpawnSessionWithRemitResult> {
-        const existingIds = new Set(this.getSessions().map((session) => session.id))
-        let result: Awaited<ReturnType<SyncEngine['spawnSession']>>
+        const tailKey = `${namespace}:${request.remitId}`
+        const existing = this.spawnRemitTails.get(tailKey)
+        if (existing) return await existing
+
+        const task = this.spawnSessionWithRemitOnce(machineId, namespace, request)
+        this.spawnRemitTails.set(tailKey, task)
         try {
-            result = await this.spawnSession(
-                machineId,
-                request.directory,
-                request.agent,
+            return await task
+        } finally {
+            if (this.spawnRemitTails.get(tailKey) === task) this.spawnRemitTails.delete(tailKey)
+        }
+    }
+
+    private async spawnSessionWithRemitOnce(
+        machineId: string,
+        namespace: string,
+        request: SpawnSessionWithRemitRequest
+    ): Promise<SpawnSessionWithRemitResult> {
+        const requestHash = createHash('sha256')
+            .update(JSON.stringify([machineId, ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
+            .digest('hex')
+        const initialOperation: SpawnRemitOperation = {
+            remitId: request.remitId,
+            requestHash,
+            machineId,
+            state: 'pending',
+            updatedAt: Date.now()
+        }
+        let child: Session
+        try {
+            child = this.getOrCreateSession(
+                `spawn-with-remit:${request.remitId}`,
+                {
+                    path: request.directory,
+                    host: machineId,
+                    machineId,
+                    flavor: request.agent ?? 'claude',
+                    startedFromRunner: true,
+                    startedBy: 'runner',
+                    spawnRemitOperation: initialOperation
+                },
+                null,
+                namespace,
                 request.model,
-                request.modelReasoningEffort,
-                request.yolo,
-                request.sessionType,
-                request.worktreeName,
-                undefined,
                 request.effort,
-                request.permissionMode,
-                request.serviceTier,
-                undefined,
-                request.collaborationMode,
-                request.copilotAgentMode,
-                request.startingMode
+                request.modelReasoningEffort
             )
         } catch (error) {
             return {
                 type: 'error',
                 code: 'spawn_failed',
-                message: error instanceof Error ? error.message : 'Runner failed to create a session'
+                message: error instanceof Error ? error.message : 'Could not reserve a fresh session'
             }
         }
-        if (result.type === 'error') return result
 
-        const sessionId = result.sessionId
-        if (existingIds.has(sessionId)) {
+        const sessionId = child.id
+        const operation = child.metadata?.spawnRemitOperation
+        if (operation?.remitId !== request.remitId
+            || operation.requestHash !== requestHash
+            || operation.machineId !== machineId) {
             return {
                 type: 'error',
-                code: 'spawn_not_fresh',
-                message: 'Runner returned an existing session id; remit was not delivered'
+                code: 'remit_conflict',
+                message: 'This remit id is already bound to a different spawn request'
+            }
+        }
+
+        const remitStored = (): boolean => {
+            const stored = this.getQueuedState(sessionId, [request.remitId])
+            return stored.queuedLocalIds.includes(request.remitId)
+                || stored.indeterminateLocalIds?.includes(request.remitId) === true
+                || stored.invokedLocalMessages.some((message) => message.localId === request.remitId)
+        }
+        if (operation.state === 'completed' || remitStored()) {
+            this.persistSpawnRemitOperation(sessionId, namespace, operation, {
+                ...operation,
+                state: 'completed',
+                updatedAt: Date.now(),
+                code: undefined,
+                error: undefined,
+                cleanedUp: undefined
+            })
+            return this.buildSpawnRemitSuccess(machineId, request, child)
+        }
+
+        if (operation.state === 'cleanup-needed' || operation.state === 'failed') {
+            const cleanedUp = operation.cleanedUp === true
+                || await this.cleanupSpawnedSession(machineId, namespace, sessionId)
+            this.persistSpawnRemitOperation(sessionId, namespace, operation, {
+                ...operation,
+                state: 'failed',
+                updatedAt: Date.now(),
+                cleanedUp
+            })
+            return {
+                type: 'error',
+                code: operation.code ?? 'spawn_failed',
+                message: operation.error ?? 'The previous spawn attempt failed',
+                childSessionId: sessionId,
+                cleanedUp
             }
         }
 
         const fail = async (code: string, message: string): Promise<SpawnSessionWithRemitResult> => {
+            const cleanupOperation: SpawnRemitOperation = {
+                ...operation,
+                state: 'cleanup-needed',
+                updatedAt: Date.now(),
+                code,
+                error: message.slice(0, 500),
+                cleanedUp: false
+            }
+            if (!this.persistSpawnRemitOperation(sessionId, namespace, operation, cleanupOperation)) {
+                const current = this.getSessionByNamespace(sessionId, namespace)
+                if (current?.metadata?.spawnRemitOperation?.state === 'completed') {
+                    return this.buildSpawnRemitSuccess(machineId, request, current)
+                }
+                return { type: 'error', code, message, childSessionId: sessionId, cleanedUp: false }
+            }
             const cleanedUp = await this.cleanupSpawnedSession(machineId, namespace, sessionId)
+            this.persistSpawnRemitOperation(sessionId, namespace, cleanupOperation, {
+                ...cleanupOperation,
+                state: 'failed',
+                updatedAt: Date.now(),
+                cleanedUp
+            })
             return { type: 'error', code, message, childSessionId: sessionId, cleanedUp }
+        }
+
+        if (child.metadata?.lifecycleState === 'archived') {
+            return await fail('spawn_failed', 'The previous spawn attempt was already cleaned up')
+        }
+
+        if (!child.active) {
+            let result: Awaited<ReturnType<SyncEngine['spawnSession']>>
+            try {
+                result = await this.spawnSession(
+                    machineId,
+                    request.directory,
+                    request.agent,
+                    request.model,
+                    request.modelReasoningEffort,
+                    request.yolo,
+                    request.sessionType,
+                    request.worktreeName,
+                    undefined,
+                    request.effort,
+                    request.permissionMode,
+                    request.serviceTier,
+                    sessionId,
+                    request.collaborationMode,
+                    request.copilotAgentMode,
+                    request.startingMode
+                )
+            } catch (error) {
+                return await fail(
+                    'spawn_failed',
+                    error instanceof Error ? error.message : 'Runner failed to create a session'
+                )
+            }
+            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message)
+            if (result.sessionId !== sessionId) {
+                return await fail('spawn_not_fresh', 'Runner returned an unexpected session id; remit was not delivered')
+            }
         }
 
         const waitDeadline = Date.now() + (request.waitActiveSecs ?? 60) * 1000
@@ -2059,11 +2185,12 @@ export class SyncEngine {
             )
         }
 
-        const child = this.getSessionByNamespace(sessionId, namespace)
-        if (!child || child.metadata?.machineId !== machineId) {
+        const matchedChild = this.getSessionByNamespace(sessionId, namespace)
+        const childMetadata = matchedChild?.metadata
+        if (!matchedChild || !childMetadata || childMetadata.machineId !== machineId) {
             return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
         }
-        const childMetadata = child.metadata
+        child = matchedChild
         const expectedAgent = request.agent ?? 'claude'
         const expectedPermissionMode = request.permissionMode
             ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
@@ -2086,11 +2213,7 @@ export class SyncEngine {
                 localId: request.remitId,
                 sentFrom: 'webapp'
             })
-            const stored = this.getQueuedState(sessionId, [request.remitId])
-            const remitStored = stored.queuedLocalIds.includes(request.remitId)
-                || stored.indeterminateLocalIds?.includes(request.remitId) === true
-                || stored.invokedLocalMessages.some((message) => message.localId === request.remitId)
-            if (!remitStored) throw new Error('Remit was not stored with its correlation id')
+            if (!remitStored()) throw new Error('Remit was not stored with its correlation id')
         } catch (error) {
             return await fail(
                 'remit_delivery_failed',
@@ -2099,21 +2222,70 @@ export class SyncEngine {
         }
 
         const current = this.getSessionByNamespace(sessionId, namespace) ?? child
+        this.persistSpawnRemitOperation(sessionId, namespace, operation, {
+            ...operation,
+            state: 'completed',
+            updatedAt: Date.now()
+        })
+        return this.buildSpawnRemitSuccess(machineId, request, current)
+    }
+
+    private buildSpawnRemitSuccess(
+        machineId: string,
+        request: SpawnSessionWithRemitRequest,
+        session: Session
+    ): SpawnSessionWithRemitResult {
         return {
             type: 'success',
-            sessionId,
+            sessionId: session.id,
             remitId: request.remitId,
-            name: current.metadata?.name?.trim() || sessionId.slice(0, 8),
+            name: session.metadata?.name?.trim() || session.id.slice(0, 8),
             session: {
                 machineId,
-                directory: current.metadata?.path ?? request.directory,
-                agent: expectedAgent,
-                model: current.model,
-                modelReasoningEffort: current.modelReasoningEffort,
-                effort: current.effort,
-                permissionMode: current.permissionMode ?? null
+                directory: session.metadata?.path ?? request.directory,
+                agent: request.agent ?? 'claude',
+                model: session.model,
+                modelReasoningEffort: session.modelReasoningEffort,
+                effort: session.effort,
+                permissionMode: session.permissionMode ?? null
             }
         }
+    }
+
+    private persistSpawnRemitOperation(
+        sessionId: string,
+        namespace: string,
+        expected: SpawnRemitOperation,
+        next: SpawnRemitOperation
+    ): boolean {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const latest = this.sessionCache.getSessionByNamespace(sessionId, namespace)
+                ?? this.sessionCache.refreshSession(sessionId)
+            if (!latest?.metadata) return false
+            const current = latest.metadata.spawnRemitOperation
+            if (current?.remitId !== expected.remitId
+                || current.requestHash !== expected.requestHash
+                || current.machineId !== expected.machineId) return false
+            if (current.state === next.state
+                && current.code === next.code
+                && current.error === next.error
+                && current.cleanedUp === next.cleanedUp) return true
+            if (current.state !== expected.state) return false
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                { ...latest.metadata, spawnRemitOperation: next },
+                latest.metadataVersion,
+                namespace,
+                { touchUpdatedAt: false }
+            )
+            if (result.result === 'success') {
+                this.sessionCache.refreshSession(sessionId)
+                return true
+            }
+            if (result.result !== 'version-mismatch') return false
+            this.sessionCache.refreshSession(sessionId)
+        }
+        return false
     }
 
     private async cleanupSpawnedSession(machineId: string, namespace: string, sessionId: string): Promise<boolean> {

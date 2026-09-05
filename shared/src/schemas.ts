@@ -34,6 +34,18 @@ export const OpencodeClearOperationSchema = z.object({
 })
 export type OpencodeClearOperation = z.infer<typeof OpencodeClearOperationSchema>
 
+export const SpawnRemitOperationSchema = z.object({
+    remitId: z.string().uuid(),
+    requestHash: z.string().length(64),
+    machineId: z.string(),
+    state: z.enum(['pending', 'cleanup-needed', 'failed', 'completed']),
+    updatedAt: z.number(),
+    code: z.string().optional(),
+    error: z.string().optional(),
+    cleanedUp: z.boolean().optional()
+})
+export type SpawnRemitOperation = z.infer<typeof SpawnRemitOperationSchema>
+
 const SessionCapabilitiesSchema = z.object({
     terminal: z.boolean().optional(),
     conversationHistory: ConversationHistoryCapabilitiesSchema.optional()
@@ -120,6 +132,8 @@ export const MetadataSchema = z.object({
     supersededBySessionId: z.string().optional(),
     // Durable in-progress state for runner-backed OpenCode /clear.
     opencodeClearOperation: OpencodeClearOperationSchema.optional(),
+    // Hub-owned idempotency state for atomic runner spawn + remit delivery.
+    spawnRemitOperation: SpawnRemitOperationSchema.optional(),
     preferredPermissionMode: PermissionModeSchema.optional(),
     preferredCopilotAgentMode: CopilotAgentModeSchema.optional(),
     flavor: z.string().nullish(),

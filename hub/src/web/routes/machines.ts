@@ -10,6 +10,7 @@ import {
     resolveHapiYoloPermissionMode
 } from '@hapi/protocol'
 import { Hono } from 'hono'
+import { posix, win32 } from 'node:path'
 import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
 import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
@@ -171,6 +172,10 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const body = await c.req.json().catch(() => null)
         const parsed = SpawnSessionWithRemitRequestSchema.safeParse(body)
         if (!parsed.success) return c.json({ error: 'Invalid body', issues: parsed.error.flatten() }, 400)
+        const targetPath = machine.metadata?.platform === 'win32' ? win32 : posix
+        if (!targetPath.isAbsolute(parsed.data.directory)) {
+            return c.json({ error: 'directory must be an absolute path on the target machine' }, 400)
+        }
 
         const flavor = parsed.data.agent ?? 'claude'
         if (parsed.data.permissionMode && !isPermissionModeAllowedForFlavor(parsed.data.permissionMode, flavor)) {

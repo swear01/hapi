@@ -41,6 +41,7 @@ export type SpawnPeerOptions = {
     permissionMode?: PermissionMode
     machineId?: string
     waitActiveSecs?: number
+    remitId?: string
     apiUrl?: string
     accessToken?: string
     http?: AxiosInstance
@@ -76,6 +77,7 @@ export type MachineTarget = {
 
 const AUTH_RECOVERY_HINT =
     'Set HAPI_API_URL and CLI_API_TOKEN, or run `hapi auth login`.'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function resolveApiUrl(apiUrl?: string): string {
     const value = (apiUrl ?? configuration.apiUrl).trim().replace(/\/+$/, '')
@@ -150,35 +152,44 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
     const directory = options.machineId && machineId !== localMachineId
         ? rawDirectory
         : resolvePath(rawDirectory)
-    const remitId = randomUUID()
+    const remitId = options.remitId?.trim() || randomUUID()
+    if (!UUID_RE.test(remitId)) throw new SpawnPeerError('bad_args', 'remitId must be an exact UUID')
     const apiUrl = resolveApiUrl(options.apiUrl)
     const http = options.http ?? axios
     const jwt = await exchangeJwt(apiUrl, resolveAccessToken(options.accessToken), http)
 
     options.onProgress?.(`spawning ${agent} on ${machineId}`)
+    const body = {
+        directory,
+        message,
+        remitId,
+        agent,
+        ...(name ? { name } : {}),
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.effort ? { effort: options.effort } : {}),
+        ...(options.sessionType ? { sessionType: options.sessionType } : {}),
+        ...(options.worktreeName ? { worktreeName: options.worktreeName } : {}),
+        ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+        waitActiveSecs
+    }
     let response
-    try {
-        response = await http.post(
-            `${apiUrl}/api/machines/${encodeURIComponent(machineId)}/spawn-with-remit`,
-            {
-                directory,
-                message,
-                remitId,
-                agent,
-                ...(name ? { name } : {}),
-                ...(options.model ? { model: options.model } : {}),
-                ...(options.effort ? { effort: options.effort } : {}),
-                ...(options.sessionType ? { sessionType: options.sessionType } : {}),
-                ...(options.worktreeName ? { worktreeName: options.worktreeName } : {}),
-                ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
-                waitActiveSecs
-            },
-            { headers: headers(jwt), timeout: (waitActiveSecs + 30) * 1000, validateStatus: () => true }
-        )
-    } catch (error) {
-        throw new SpawnPeerError('spawn_failed', error instanceof Error ? error.message : String(error))
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            response = await http.post(
+                `${apiUrl}/api/machines/${encodeURIComponent(machineId)}/spawn-with-remit`,
+                body,
+                { headers: headers(jwt), timeout: (waitActiveSecs + 30) * 1000, validateStatus: () => true }
+            )
+            break
+        } catch (error) {
+            if (attempt === 1) {
+                throw new SpawnPeerError('spawn_failed', error instanceof Error ? error.message : String(error))
+            }
+            options.onProgress?.('spawn response lost; retrying the same remit')
+        }
     }
 
+    if (!response) throw new SpawnPeerError('spawn_failed', 'Hub did not return a spawn response')
     const data = response.data as {
         type?: string
         sessionId?: string

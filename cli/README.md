@@ -38,7 +38,7 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, OpenCode, or DeepSeek Harness 
   DSH is remote-only and its ACP server must be configured separately.
 - `hapi resume [sessionId]` - List resumable sessions for this machine or resume one locally.
 - `hapi machines [--machine ID] --json` - List or exactly resolve runner machine IDs and advertised workspace roots.
-- `hapi spawn-peer --dir PATH --name TITLE --message-file - --json` - Create a fresh session and atomically deliver its remit; failed delivery stops and archives the child.
+- `hapi spawn-peer --dir PATH --name TITLE --message-file - --json` - Create a fresh session and atomically deliver its remit; failed delivery stops and archives the child. Automation may pass `--remit-id UUID` and reuse it only when retrying the same request.
 - `hapi wait-peer <exact-session-id> --remit-id UUID --json` - Wait for that remit's result.
 - `hapi inspect-peer <exact-session-id> --json` - Read metadata and recent message text without resuming.
 - `hapi ping-peer <exact-session-id> --message-file - --json` - Resume if needed and message one explicitly selected session.

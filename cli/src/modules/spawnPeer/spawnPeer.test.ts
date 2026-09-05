@@ -47,7 +47,7 @@ describe('spawnPeer', () => {
                     name: 'Worker',
                     session: {
                         machineId: MACHINE_ID,
-                        directory: './runner/path',
+                        directory: '/runner/path',
                         agent: 'codex',
                         model: 'gpt-5',
                         modelReasoningEffort: null,
@@ -59,7 +59,7 @@ describe('spawnPeer', () => {
         })
 
         const result = await spawnPeer({
-            directory: './runner/path',
+            directory: '/runner/path',
             message: 'implement issue',
             name: 'Worker',
             agent: 'codex',
@@ -74,7 +74,7 @@ describe('spawnPeer', () => {
         })
 
         expect(request).toMatchObject({
-            directory: './runner/path',
+            directory: '/runner/path',
             message: 'implement issue',
             name: 'Worker',
             agent: 'codex',
@@ -89,11 +89,54 @@ describe('spawnPeer', () => {
             remitId: request?.remitId,
             machineId: MACHINE_ID,
             agent: 'codex',
-            directory: './runner/path',
+            directory: '/runner/path',
             name: 'Worker',
             session: expect.objectContaining({ machineId: MACHINE_ID, agent: 'codex' })
         })
         expect(http.post).toHaveBeenCalledTimes(2)
+    })
+
+    it('retries an ambiguous transport failure with the same remit id', async () => {
+        const bodies: Array<Record<string, unknown>> = []
+        let spawnAttempts = 0
+        const http = createHttpMock((url, body) => {
+            if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
+            bodies.push(body as Record<string, unknown>)
+            spawnAttempts += 1
+            if (spawnAttempts === 1) throw new Error('socket reset')
+            return {
+                status: 200,
+                data: {
+                    type: 'success',
+                    sessionId: SESSION_ID,
+                    remitId: bodies[0]?.remitId,
+                    name: 'Worker',
+                    session: {
+                        machineId: MACHINE_ID,
+                        directory: '/runner/project',
+                        agent: 'codex',
+                        model: null,
+                        modelReasoningEffort: null,
+                        effort: null,
+                        permissionMode: null
+                    }
+                }
+            }
+        })
+
+        await expect(spawnPeer({
+            directory: '/runner/project',
+            message: 'work',
+            agent: 'codex',
+            remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c',
+            machineId: MACHINE_ID,
+            apiUrl: 'http://hub.test',
+            accessToken: 'token',
+            http: http as never
+        })).resolves.toMatchObject({ sessionId: SESSION_ID })
+        expect(bodies).toHaveLength(2)
+        expect(bodies[1]).toEqual(bodies[0])
+        expect(bodies[0]?.remitId).toBe('7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c')
     })
 
     it('fails closed when the hub reports an uncleaned child', async () => {

@@ -981,7 +981,7 @@ describe('sessions routes', () => {
         expect(response.status).toBe(400)
     })
 
-    it('rejects OpenCode plan mode changes for local sessions', async () => {
+    it('rejects OpenCode plan mode changes', async () => {
         const session = createSession({
             metadata: { path: '/tmp/project', host: 'localhost', flavor: 'opencode' },
             agentState: {
@@ -998,30 +998,11 @@ describe('sessions routes', () => {
             body: JSON.stringify({ mode: 'plan' })
         })
 
-        expect(response.status).toBe(409)
+        expect(response.status).toBe(400)
         expect(await response.json()).toEqual({
-            error: 'OpenCode plan mode is only supported for remote sessions'
+            error: 'Invalid permission mode for session flavor'
         })
         expect(applySessionConfigCalls).toEqual([])
-    })
-
-    it('applies OpenCode plan mode changes for remote sessions', async () => {
-        const session = createSession({
-            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'opencode' }
-        })
-        const { app, applySessionConfigCalls } = createApp(session)
-
-        const response = await app.request('/api/sessions/session-1/permission-mode', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ mode: 'plan' })
-        })
-
-        expect(response.status).toBe(200)
-        expect(await response.json()).toEqual({ ok: true })
-        expect(applySessionConfigCalls).toEqual([
-            ['session-1', { permissionMode: 'plan' }]
-        ])
     })
 
     it('applies permission mode changes for inactive sessions', async () => {

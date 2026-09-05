@@ -25,6 +25,8 @@ hapi spawn-peer --dir <path> --name <title> --agent <flavor> --message-file - --
 
 `machines` returns exact machine IDs and their advertised workspace roots. Pass the remit on stdin. Use `--machine <exact-machine-id>` only when the user selected another runner. Optional runtime selectors are `--model`, `--effort`, `--permission-mode`, and `--session-type`.
 
+For caller-managed retry after an ambiguous transport failure, add `--remit-id <new-uuid>` to the first call and reuse that UUID only with the identical spawn request. The CLI also retries one ambiguous response internally with the same remit ID.
+
 The successful JSON contains `sessionId` and `remitId`. Wait for that remit's result:
 
 ```sh

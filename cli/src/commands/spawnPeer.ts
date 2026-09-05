@@ -25,6 +25,7 @@ type ParsedSpawnPeerArgs = {
     sessionType?: 'simple' | 'worktree'
     permissionMode?: PermissionMode
     waitActiveSecs?: number
+    remitId?: string
 }
 
 function showHelp(): void {
@@ -51,6 +52,7 @@ ${chalk.bold('Options:')}
   --session-type TYPE     simple | worktree (default: simple; worktree creates a new tree from PATH)
   --permission-mode MODE  Operator-visible mode for the new session (not cloned from parent)
   --wait SECONDS          Ready/verify timeout (default 60, or HAPI_WAIT_ACTIVE_SECS)
+  --remit-id UUID         Stable idempotency key for caller-managed retries
   --json                  Stable JSON output; progress is suppressed
 
 ${chalk.bold('Env:')}
@@ -135,12 +137,13 @@ export function parseSpawnPeerArgs(args: string[]): ParsedSpawnPeerArgs {
             result.agent = parseAgent(arg.slice('--agent='.length))
             continue
         }
-        if (arg === '--machine' || arg === '--model' || arg === '--effort') {
+        if (arg === '--machine' || arg === '--model' || arg === '--effort' || arg === '--remit-id') {
             const value = args[++i]
             if (!value || value.startsWith('-')) throw new SpawnPeerError('bad_args', `${arg} requires a value`)
             if (arg === '--machine') result.machineId = value
             if (arg === '--model') result.model = value
             if (arg === '--effort') result.effort = value
+            if (arg === '--remit-id') result.remitId = value
             continue
         }
         if (arg.startsWith('--machine=')) {
@@ -153,6 +156,10 @@ export function parseSpawnPeerArgs(args: string[]): ParsedSpawnPeerArgs {
         }
         if (arg.startsWith('--effort=')) {
             result.effort = arg.slice('--effort='.length)
+            continue
+        }
+        if (arg.startsWith('--remit-id=')) {
+            result.remitId = arg.slice('--remit-id='.length)
             continue
         }
         if (arg === '--session-type') {
@@ -305,6 +312,7 @@ export async function handleSpawnPeerCommand(args: string[]): Promise<void> {
         sessionType: parsed.sessionType,
         permissionMode: parsed.permissionMode,
         waitActiveSecs,
+        remitId: parsed.remitId,
         onProgress: parsed.json ? undefined : (line) => console.log(`hapi spawn-peer: ${line}`)
     })
 

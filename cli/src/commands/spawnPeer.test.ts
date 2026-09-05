@@ -40,12 +40,14 @@ describe('parseSpawnPeerArgs', () => {
     it('parses automation options', () => {
         expect(parseSpawnPeerArgs([
             '--json', '--dir=/remote/repo', '--name=Peer', '--machine=runner-2',
-            '--model=gpt-5', '--effort=high', 'work'
+            '--model=gpt-5', '--effort=high',
+            '--remit-id=7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c', 'work'
         ])).toMatchObject({
             json: true,
             machineId: 'runner-2',
             model: 'gpt-5',
-            effort: 'high'
+            effort: 'high',
+            remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
         })
     })
 

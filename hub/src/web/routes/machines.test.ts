@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, mock } from 'bun:test'
 import { Hono } from 'hono'
 import type { Machine, SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
@@ -292,6 +292,58 @@ describe('machines routes', () => {
         expect(blank.status).toBe(400)
         expect(invalidMode.status).toBe(400)
         expect(ignoredYolo.status).toBe(400)
+    })
+
+    it('requires an absolute directory using the target runner platform', async () => {
+        const machine = createMachine({
+            metadata: {
+                host: 'windows-runner',
+                platform: 'win32',
+                happyCliVersion: '1.0.0',
+                capabilities: [
+                    MACHINE_CAPABILITIES.AgentAvailability,
+                    MACHINE_CAPABILITIES.SessionControlSkill
+                ]
+            }
+        })
+        const spawnSessionWithRemit = mock(async (_machineId: string, _namespace: string, request: { directory: string; remitId: string }) => ({
+            type: 'success' as const,
+            sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2',
+            remitId: request.remitId,
+            name: 'Worker',
+            session: {
+                machineId: 'machine-1',
+                directory: request.directory,
+                agent: 'claude' as const,
+                model: null,
+                modelReasoningEffort: null,
+                effort: null,
+                permissionMode: null
+            }
+        }))
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            spawnSessionWithRemit
+        } as unknown as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+        const body = {
+            message: 'work',
+            remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        }
+
+        const relative = await app.request('/api/machines/machine-1/spawn-with-remit', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, directory: '.\\project' })
+        })
+        const absolute = await app.request('/api/machines/machine-1/spawn-with-remit', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, directory: 'C:\\project' })
+        })
+
+        expect(relative.status).toBe(400)
+        expect(absolute.status).toBe(200)
+        expect(spawnSessionWithRemit).toHaveBeenCalledTimes(1)
     })
 
     it('returns Codex models for an online machine', async () => {
