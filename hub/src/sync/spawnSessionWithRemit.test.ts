@@ -62,9 +62,16 @@ describe('spawnSessionWithRemit', () => {
         const harness = { spawnRemitTails: new Map(), spawnSessionWithRemitOnce } as unknown as SyncEngine
 
         const first = SyncEngine.prototype.spawnSessionWithRemit.call(harness, 'machine-1', 'default', REQUEST)
+        const conflict = await SyncEngine.prototype.spawnSessionWithRemit.call(
+            harness,
+            'machine-1',
+            'default',
+            { ...REQUEST, message: 'different work' }
+        )
         const retry = SyncEngine.prototype.spawnSessionWithRemit.call(harness, 'machine-1', 'default', REQUEST)
         finish({ type: 'error', code: 'spawn_timeout', message: 'timeout' })
 
+        expect(conflict).toMatchObject({ type: 'error', code: 'remit_conflict' })
         await expect(Promise.all([first, retry])).resolves.toEqual([
             { type: 'error', code: 'spawn_timeout', message: 'timeout' },
             { type: 'error', code: 'spawn_timeout', message: 'timeout' }

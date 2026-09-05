@@ -1540,24 +1540,9 @@ export function buildCliArgs(
   }
   const startingMode = options.startingMode || 'remote';
   args.push('--hapi-starting-mode', startingMode, '--started-by', 'runner');
-  // Codex, Cursor ACP, OpenCode, Pi native resume, and Claude message-level
-  // forks reuse the original HAPI row via --existing-session-id.
-  if (agent === 'codex' || agent === 'cursor' || agent === 'pi'
-      || agent === 'opencode'
-      || agent === 'agy'
-      || agent === 'dsh'
-      || (agentCommand === 'claude' && options.forkSession)) {
-    const existingSessionId = options.existingSessionId ?? options.sessionId;
-    if (existingSessionId) {
-      args.push('--existing-session-id', existingSessionId);
-    }
-  }
-  // Grok fork children also bind the pending HAPI session id.
-  if (agent === 'grok') {
-    const existingSessionId = options.existingSessionId ?? options.sessionId;
-    if (existingSessionId && !args.includes('--existing-session-id')) {
-      args.push('--existing-session-id', existingSessionId);
-    }
+  const existingSessionId = options.existingSessionId ?? options.sessionId;
+  if (existingSessionId) {
+    args.push('--existing-session-id', existingSessionId);
   }
   if (options.model) {
     args.push('--model', options.model);

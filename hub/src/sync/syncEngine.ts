@@ -137,6 +137,12 @@ export type SpawnSessionWithRemitResult =
 
 type SpawnRemitOperation = NonNullable<NonNullable<Session['metadata']>['spawnRemitOperation']>
 
+function hashSpawnRemitRequest(machineId: string, request: SpawnSessionWithRemitRequest): string {
+    return createHash('sha256')
+        .update(JSON.stringify([machineId, ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
+        .digest('hex')
+}
+
 export type CursorChatStoreStatusResult =
     | { type: 'success'; status: CursorChatStoreStatus }
     | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'resume_unavailable' | 'no_machine_online' | 'probe_failed' }
@@ -215,7 +221,10 @@ export class SyncEngine {
     /** Coalesce duplicate clear requests so retries cannot spawn two fresh sessions. */
     private readonly opencodeClearTails = new Map<string, Promise<ClearOpencodeSessionResult>>()
     /** Coalesce concurrent retries while durable remit state covers restarts and later retries. */
-    private readonly spawnRemitTails = new Map<string, Promise<SpawnSessionWithRemitResult>>()
+    private readonly spawnRemitTails = new Map<string, {
+        requestHash: string
+        task: Promise<SpawnSessionWithRemitResult>
+    }>()
     /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
     private readonly historyActionsInFlight = new Set<string>()
     /**
@@ -2009,15 +2018,21 @@ export class SyncEngine {
         request: SpawnSessionWithRemitRequest
     ): Promise<SpawnSessionWithRemitResult> {
         const tailKey = `${namespace}:${request.remitId}`
+        const requestHash = hashSpawnRemitRequest(machineId, request)
         const existing = this.spawnRemitTails.get(tailKey)
-        if (existing) return await existing
+        if (existing) {
+            if (existing.requestHash !== requestHash) {
+                return { type: 'error', code: 'remit_conflict', message: 'This remit id is already bound to a different spawn request' }
+            }
+            return await existing.task
+        }
 
         const task = this.spawnSessionWithRemitOnce(machineId, namespace, request)
-        this.spawnRemitTails.set(tailKey, task)
+        this.spawnRemitTails.set(tailKey, { requestHash, task })
         try {
             return await task
         } finally {
-            if (this.spawnRemitTails.get(tailKey) === task) this.spawnRemitTails.delete(tailKey)
+            if (this.spawnRemitTails.get(tailKey)?.task === task) this.spawnRemitTails.delete(tailKey)
         }
     }
 
@@ -2026,9 +2041,7 @@ export class SyncEngine {
         namespace: string,
         request: SpawnSessionWithRemitRequest
     ): Promise<SpawnSessionWithRemitResult> {
-        const requestHash = createHash('sha256')
-            .update(JSON.stringify([machineId, ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
-            .digest('hex')
+        const requestHash = hashSpawnRemitRequest(machineId, request)
         const initialOperation: SpawnRemitOperation = {
             remitId: request.remitId,
             requestHash,
