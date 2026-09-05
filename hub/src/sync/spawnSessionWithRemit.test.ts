@@ -110,6 +110,59 @@ describe('spawnSessionWithRemit', () => {
         expect(sendMessage).not.toHaveBeenCalled()
     })
 
+    it('returns the original preflight error after archiving a no-child reservation', async () => {
+        const requestHash = hashRequest(REQUEST)
+        const child = {
+            id: SESSION_ID,
+            namespace: 'default',
+            active: false,
+            metadata: {
+                machineId: 'machine-1',
+                path: '/tmp/project',
+                flavor: 'codex',
+                spawnRemitOperation: {
+                    remitId: REQUEST.remitId,
+                    requestHash,
+                    machineId: 'machine-1',
+                    state: 'pending' as const,
+                    updatedAt: 1
+                }
+            },
+            model: null,
+            modelReasoningEffort: null,
+            effort: null,
+            permissionMode: undefined
+        }
+        const stopRunnerSession = mock(async () => 'already_gone' as const)
+        const markSessionArchivedFromHub = mock(() => {})
+
+        const result = await callSpawn({
+            getOrCreateSession: () => child,
+            getSessionByNamespace: () => child,
+            spawnSession: async () => ({
+                type: 'error',
+                code: 'agent_unavailable',
+                message: 'Codex is unavailable'
+            }),
+            cleanupSpawnedSession: (SyncEngine.prototype as unknown as {
+                cleanupSpawnedSession: (machineId: string, namespace: string, sessionId: string) => Promise<boolean>
+            }).cleanupSpawnedSession,
+            rpcGateway: { stopRunnerSession },
+            handleSessionEnd: mock(() => {}),
+            sessionCache: { markSessionArchivedFromHub }
+        })
+
+        expect(result).toEqual({
+            type: 'error',
+            code: 'agent_unavailable',
+            message: 'Codex is unavailable',
+            childSessionId: SESSION_ID,
+            cleanedUp: true
+        })
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
+        expect(markSessionArchivedFromHub).toHaveBeenCalledWith(SESSION_ID, 'Failed atomic spawn-with-remit')
+    })
+
     it('returns the same child without spawning or redelivering after a lost success response', async () => {
         const spawnSession = mock(async () => ({ type: 'success' as const, sessionId: SESSION_ID }))
         const sendMessage = mock(async () => {})
