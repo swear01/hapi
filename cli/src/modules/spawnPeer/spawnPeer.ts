@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { resolve as resolvePath } from 'node:path'
 import axios, { type AxiosInstance } from 'axios'
-import { SESSION_NAME_MAX_LENGTH } from '@hapi/protocol'
+import { SESSION_NAME_MAX_LENGTH, supportsEffort } from '@hapi/protocol'
 import {
     CREATABLE_AGENT_FLAVORS,
     isPermissionModeAllowedForFlavor,
@@ -144,7 +144,7 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
         throw new SpawnPeerError('bad_args', `permission mode ${options.permissionMode} is not supported by ${agent}`)
     }
     const usesModelReasoningEffort = agent === 'codex' || agent === 'opencode'
-    const usesEffort = agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'agy'
+    const usesEffort = supportsEffort(agent)
     if (options.effort && !usesModelReasoningEffort && !usesEffort) {
         throw new SpawnPeerError('bad_args', `effort is not supported by ${agent}`)
     }
@@ -234,10 +234,13 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
         if (data?.code === 'remit_conflict') {
             throw new SpawnPeerError('remit_conflict', detail, remitId)
         }
-        throw new SpawnPeerError('spawn_failed', detail)
+        const ambiguity = response.status >= 500 && data?.type !== 'error'
+            ? '; spawn outcome is unknown; retry the identical request with this remitId'
+            : ''
+        throw new SpawnPeerError('spawn_failed', detail + ambiguity, remitId)
     }
     if (data.remitId !== remitId) {
-        throw new SpawnPeerError('spawn_failed', 'Hub returned a mismatched remit id')
+        throw new SpawnPeerError('spawn_failed', 'Hub returned a mismatched remit id', remitId)
     }
 
     return {

@@ -101,7 +101,9 @@ describe('spawnPeer', () => {
         ['claude', 'effort'],
         ['grok', 'effort'],
         ['pi', 'effort'],
-        ['agy', 'effort']
+        ['agy', 'effort'],
+        ['kimi', 'effort'],
+        ['copilot', 'effort']
     ] as const)('maps --effort to the %s runner field', async (agent, field) => {
         let request: Record<string, unknown> | undefined
         const http = createHttpMock((url, body) => {
@@ -141,7 +143,7 @@ describe('spawnPeer', () => {
         expect(request?.[field === 'effort' ? 'modelReasoningEffort' : 'effort']).toBeUndefined()
     })
 
-    it.each(['cursor', 'dsh', 'copilot', 'kimi'] as const)(
+    it.each(['cursor', 'dsh'] as const)(
         'rejects --effort for unsupported %s sessions before authentication',
         async (agent) => {
             const http = createHttpMock(() => { throw new Error('must not call HTTP') })
@@ -223,6 +225,22 @@ describe('spawnPeer', () => {
         })
         expect(bodies).toHaveLength(2)
         expect(bodies[1]?.remitId).toBe(bodies[0]?.remitId)
+    })
+
+    it.each([502, 504])('preserves the generated remit id after intermediary HTTP %s', async (status) => {
+        let request: Record<string, unknown> | undefined
+        const http = createHttpMock((url, body) => {
+            if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
+            request = body as Record<string, unknown>
+            return { status, data: '<html>gateway failure</html>' }
+        })
+        const error = await spawnPeer({
+            directory: '/runner/project', message: 'work', machineId: MACHINE_ID,
+            apiUrl: 'http://hub.test', accessToken: 'token', http: http as never
+        }).catch(error => error)
+        expect(error).toMatchObject({ code: 'spawn_failed', remitId: request?.remitId })
+        expect(error.message).toContain('outcome is unknown')
+        expect(http.post).toHaveBeenCalledTimes(2)
     })
 
     it('fails closed when the hub reports an uncleaned child', async () => {

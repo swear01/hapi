@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 04:00:00 +0800
+Subject: [PATCH] Preserve ambiguous spawn correlation and shared effort support
+
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.test.ts b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+index 65c8d30a69d1d26047efe5dac3de938b0c4e7456..5cfd9c330a9e3126d6ab9a1f0b59a834015cc208 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.test.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.test.ts
+@@ -101,7 +101,9 @@ describe('spawnPeer', () => {
+         ['claude', 'effort'],
+         ['grok', 'effort'],
+         ['pi', 'effort'],
+-        ['agy', 'effort']
++        ['agy', 'effort'],
++        ['kimi', 'effort'],
++        ['copilot', 'effort']
+     ] as const)('maps --effort to the %s runner field', async (agent, field) => {
+         let request: Record<string, unknown> | undefined
+         const http = createHttpMock((url, body) => {
+@@ -141,7 +143,7 @@ describe('spawnPeer', () => {
+         expect(request?.[field === 'effort' ? 'modelReasoningEffort' : 'effort']).toBeUndefined()
+     })
+ 
+-    it.each(['cursor', 'dsh', 'copilot', 'kimi'] as const)(
++    it.each(['cursor', 'dsh'] as const)(
+         'rejects --effort for unsupported %s sessions before authentication',
+         async (agent) => {
+             const http = createHttpMock(() => { throw new Error('must not call HTTP') })
+@@ -225,6 +227,22 @@ describe('spawnPeer', () => {
+         expect(bodies[1]?.remitId).toBe(bodies[0]?.remitId)
+     })
+ 
++    it.each([502, 504])('preserves the generated remit id after intermediary HTTP %s', async (status) => {
++        let request: Record<string, unknown> | undefined
++        const http = createHttpMock((url, body) => {
++            if (url.endsWith('/api/auth')) return { status: 200, data: { token: 'jwt' } }
++            request = body as Record<string, unknown>
++            return { status, data: '<html>gateway failure</html>' }
++        })
++        const error = await spawnPeer({
++            directory: '/runner/project', message: 'work', machineId: MACHINE_ID,
++            apiUrl: 'http://hub.test', accessToken: 'token', http: http as never
++        }).catch(error => error)
++        expect(error).toMatchObject({ code: 'spawn_failed', remitId: request?.remitId })
++        expect(error.message).toContain('outcome is unknown')
++        expect(http.post).toHaveBeenCalledTimes(2)
++    })
++
+     it('fails closed when the hub reports an uncleaned child', async () => {
+         const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+         const http = createHttpMock((url) => url.endsWith('/api/auth')
+diff --git a/cli/src/modules/spawnPeer/spawnPeer.ts b/cli/src/modules/spawnPeer/spawnPeer.ts
+index 62e9c840d176ee8e23af9cece45ae76f719f1a9f..3294a7c03a44bf2224c3bb799235f3e8350f6569 100644
+--- a/cli/src/modules/spawnPeer/spawnPeer.ts
++++ b/cli/src/modules/spawnPeer/spawnPeer.ts
+@@ -1,7 +1,7 @@
+ import { randomUUID } from 'node:crypto'
+ import { resolve as resolvePath } from 'node:path'
+ import axios, { type AxiosInstance } from 'axios'
+-import { SESSION_NAME_MAX_LENGTH } from '@hapi/protocol'
++import { SESSION_NAME_MAX_LENGTH, supportsEffort } from '@hapi/protocol'
+ import {
+     CREATABLE_AGENT_FLAVORS,
+     isPermissionModeAllowedForFlavor,
+@@ -144,7 +144,7 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
+         throw new SpawnPeerError('bad_args', `permission mode ${options.permissionMode} is not supported by ${agent}`)
+     }
+     const usesModelReasoningEffort = agent === 'codex' || agent === 'opencode'
+-    const usesEffort = agent === 'claude' || agent === 'grok' || agent === 'pi' || agent === 'agy'
++    const usesEffort = supportsEffort(agent)
+     if (options.effort && !usesModelReasoningEffort && !usesEffort) {
+         throw new SpawnPeerError('bad_args', `effort is not supported by ${agent}`)
+     }
+@@ -234,10 +234,13 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
+         if (data?.code === 'remit_conflict') {
+             throw new SpawnPeerError('remit_conflict', detail, remitId)
+         }
+-        throw new SpawnPeerError('spawn_failed', detail)
++        const ambiguity = response.status >= 500 && data?.type !== 'error'
++            ? '; spawn outcome is unknown; retry the identical request with this remitId'
++            : ''
++        throw new SpawnPeerError('spawn_failed', detail + ambiguity, remitId)
+     }
+     if (data.remitId !== remitId) {
+-        throw new SpawnPeerError('spawn_failed', 'Hub returned a mismatched remit id')
++        throw new SpawnPeerError('spawn_failed', 'Hub returned a mismatched remit id', remitId)
+     }
+ 
+     return {
