@@ -124,6 +124,22 @@ describe('SessionList mark all as read', () => {
         expect(screen.queryByRole('dialog')).toBeNull()
     })
 
+    it('keeps confirmation open and reports a failed local write', async () => {
+        localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ unread: 1000 }))
+        renderSessionList([makeSession({ id: 'unread', updatedAt: 2000, metadata: { path: '/work/unread', name: 'Unread' } })])
+        fireEvent.click(screen.getByRole('button', { name: 'Mark all as read (1)' }))
+        const storage = Object.hasOwn(window.localStorage, 'setItem') ? window.localStorage : Object.getPrototypeOf(window.localStorage) as Storage
+        const setItem = vi.spyOn(storage, 'setItem').mockImplementation(() => { throw new Error('Storage unavailable') })
+        try {
+            fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+            await waitFor(() => expect(screen.getByText(/Could not save read status/)).toBeTruthy())
+            expect(screen.getByRole('dialog')).toBeTruthy()
+            expect(JSON.parse(localStorage.getItem('hapi.sessionLastSeen.v1')!)).toEqual({ unread: 1000 })
+        } finally {
+            setItem.mockRestore()
+        }
+    })
+
     it('leaves unread state unchanged when the confirmation is cancelled', () => {
         localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ unread: 1000 }))
         renderSessionList([

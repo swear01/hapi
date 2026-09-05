@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 06:00:00 +0800
+Subject: [PATCH] Preserve remit failure and storage error boundaries
+
+diff --git a/cli/src/modules/pingPeer/pingPeer.test.ts b/cli/src/modules/pingPeer/pingPeer.test.ts
+index 785bc834ac5b96887d67a7b00d279fd86de81b5d..87110fb8c52abc672c22a8e3890e8b74aaf6733c 100644
+--- a/cli/src/modules/pingPeer/pingPeer.test.ts
++++ b/cli/src/modules/pingPeer/pingPeer.test.ts
+@@ -1,3 +1,4 @@
++import { AxiosError } from 'axios'
+ import snapshots from '../../../../shared/fixtures/chat/codex-message-stream-snapshot.json'
+ import { describe, expect, it, vi } from 'vitest'
+ import {
+@@ -17,7 +18,7 @@ type MockResponse = { status: number; data: unknown }
+ 
+ function createHttpMock(handlers: {
+     post?: (url: string, body?: unknown) => MockResponse | Promise<MockResponse>
+-    get?: (url: string, config?: { params?: Record<string, unknown> }) => MockResponse | Promise<MockResponse>
++    get?: (url: string, config?: { params?: Record<string, unknown>; signal?: AbortSignal }) => MockResponse | Promise<MockResponse>
+     delete?: (url: string) => MockResponse | Promise<MockResponse>
+ }) {
+     return {
+@@ -25,7 +26,7 @@ function createHttpMock(handlers: {
+             if (!handlers.post) throw new Error(`unexpected POST ${url}`)
+             return handlers.post(url, body)
+         }),
+-        get: vi.fn(async (url: string, config?: { params?: Record<string, unknown> }) => {
++        get: vi.fn(async (url: string, config?: { params?: Record<string, unknown>; signal?: AbortSignal }) => {
+             if (!handlers.get) throw new Error(`unexpected GET ${url}`)
+             return handlers.get(url, config)
+         }),
+@@ -217,6 +218,78 @@ describe('peer lifecycle operations', () => {
+         expect(result.messages).toHaveLength(1)
+     })
+ 
++    it.each([false, true])('requires a durable boundary for an inactive remit (boundary=%s)', async (boundary) => {
++        const http = createHttpMock({
++            post: (url) => authResponse(url)!,
++            get: (url) => url.endsWith('/messages')
++                ? { status: 200, data: { messages: [
++                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
++                    snapshots.input.messages[0],
++                    ...(boundary ? [{ id: 'u2', invokedAt: 2, content: { role: 'user', content: { text: 'next turn' } } }] : [])
++                ] } }
++                : { status: 200, data: { session: { id: SESSION_ID, active: false, thinking: false } } }
++        })
++        const result = waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never })
++        if (boundary) await expect(result).resolves.toMatchObject({ status: 'completed' })
++        else await expect(result).rejects.toMatchObject({ code: 'session_ended' })
++    })
++
++    it.each(['messages', 'session'])('retries transient %s polling failures but rejects deterministic errors', async (endpoint) => {
++        for (const failure of [503, 'timeout', 401, 404] as const) {
++            let failed = false
++            let time = 0
++            const sleep = vi.fn(async () => { time += 1000 })
++            const http = createHttpMock({
++                post: (url) => authResponse(url)!,
++                get: (url) => {
++                    if (!failed && (url.endsWith('/messages') === (endpoint === 'messages'))) {
++                        failed = true
++                        if (failure === 'timeout') throw new AxiosError('timeout', 'ECONNABORTED')
++                        return { status: failure, data: {} }
++                    }
++                    return url.endsWith('/messages')
++                        ? { status: 200, data: { messages: [
++                            { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
++                            ...snapshots.input.messages
++                        ] } }
++                        : { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: false } } }
++                }
++            })
++            const result = waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep, timeoutSecs: 3 })
++            if (failure === 503 || failure === 'timeout') {
++                await expect(result).resolves.toMatchObject({ text: snapshots.expected.blocks[0].text })
++                expect(sleep).toHaveBeenCalledTimes(1)
++            } else {
++                await expect(result).rejects.toMatchObject({ code: 'not_found' })
++                expect(sleep).not.toHaveBeenCalled()
++            }
++        }
++    })
++
++    it('stops transient retries at the original deadline', async () => {
++        let time = 0
++        const http = createHttpMock({ post: (url) => authResponse(url)!, get: () => ({ status: 502, data: {} }) })
++        await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep: async () => { time += 1000 }, timeoutSecs: 2 })).rejects.toMatchObject({ code: 'timeout' })
++        expect(time).toBe(2000)
++    })
++
++    it.each(['messages', 'session'])('cancels an outstanding %s request at the remit deadline', async (endpoint) => {
++        const http = createHttpMock({
++            post: (url) => authResponse(url)!,
++            get: (url, config) => {
++                if (url.endsWith('/messages') !== (endpoint === 'messages')) return { status: 200, data: { messages: [] } }
++                const signal = config?.signal
++                if (!signal) throw new Error('Missing polling deadline')
++                return new Promise((_resolve, reject) => {
++                    const abort = () => reject(new AxiosError('deadline', 'ERR_CANCELED'))
++                    if (signal.aborted) abort()
++                    else signal.addEventListener('abort', abort, { once: true })
++                })
++            }
++        })
++        await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, timeoutSecs: 0.02 })).rejects.toMatchObject({ code: 'timeout' })
++    })
++
+     it('rechecks thinking after messages arrive before returning a remit result', async () => {
+         let thinking = false
+         let reads = 0
+diff --git a/cli/src/modules/pingPeer/pingPeer.ts b/cli/src/modules/pingPeer/pingPeer.ts
+index b5e7e65234c7072b2a9a7b8cfe0a67d441fc5f9b..fcef085456333653e2353f208cbe249656ccaa77 100644
+--- a/cli/src/modules/pingPeer/pingPeer.ts
++++ b/cli/src/modules/pingPeer/pingPeer.ts
+@@ -29,12 +29,14 @@ export type PingPeerErrorCode =
+ export class PingPeerError extends Error {
+     readonly code: PingPeerErrorCode
+     readonly remitId?: string
++    readonly httpStatus?: number
+ 
+-    constructor(code: PingPeerErrorCode, message: string, remitId?: string) {
++    constructor(code: PingPeerErrorCode, message: string, remitId?: string, httpStatus?: number) {
+         super(message)
+         this.name = 'PingPeerError'
+         this.code = code
+         this.remitId = remitId
++        this.httpStatus = httpStatus
+     }
+ }
+ 
+@@ -174,13 +176,15 @@ async function getSession(
+     apiUrl: string,
+     jwt: string,
+     sessionId: string,
+-    http: AxiosInstance
++    http: AxiosInstance,
++    signal?: AbortSignal
+ ): Promise<PingPeerSessionSummary> {
+     const response = await http.get(
+         `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}`,
+         {
+             headers: authHeaders(jwt),
+             timeout: 10_000,
++            signal,
+             validateStatus: () => true
+         }
+     )
+@@ -188,7 +192,7 @@ async function getSession(
+         const detail = typeof response.data?.error === 'string'
+             ? response.data.error
+             : `HTTP ${response.status}`
+-        throw new PingPeerError('not_found', `failed to load session ${sessionId} (${detail})`)
++        throw new PingPeerError('not_found', `failed to load session ${sessionId} (${detail})`, undefined, response.status)
+     }
+     return response.data.session as PingPeerSessionSummary
+ }
+@@ -639,7 +643,8 @@ async function getMessagesFromRemit(
+     jwt: string,
+     sessionId: string,
+     remitId: string,
+-    http: AxiosInstance
++    http: AxiosInstance,
++    signal?: AbortSignal
+ ): Promise<{ found: boolean; invoked: boolean; rows: unknown[] }> {
+     let before: { at: number; seq: number } | null = null
+     const newerPages: unknown[][] = []
+@@ -651,10 +656,11 @@ async function getMessagesFromRemit(
+                 ...(before ? { beforeAt: before.at, beforeSeq: before.seq } : {})
+             },
+             timeout: 20_000,
++            signal,
+             validateStatus: () => true
+         })
+         if (response.status < 200 || response.status >= 300) {
+-            throw new PingPeerError('not_found', `failed to load messages for ${sessionId}`)
++            throw new PingPeerError('not_found', `failed to load messages for ${sessionId}`, undefined, response.status)
+         }
+         const data = isObject(response.data) ? response.data : null
+         const rows = Array.isArray(data?.messages) ? data.messages as unknown[] : []
+@@ -694,30 +700,38 @@ export async function waitPeer(options: WaitPeerOptions): Promise<WaitPeerResult
+     const sleep = options.sleep ?? defaultSleep
+     const now = options.now ?? Date.now
+     const deadline = now() + timeoutSecs * 1000
++    const signal = AbortSignal.timeout(Math.max(1, Math.ceil(timeoutSecs * 1000)))
+ 
+     while (now() <= deadline) {
+-        const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http)
+-        const live = await getSession(apiUrl, jwt, sessionId, http)
+-        if (result.found) {
+-            const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
+-            if (result.invoked && messages.length > 0 && (boundaryReached || !live.thinking)) {
+-                return {
+-                    sessionId,
+-                    remitId,
+-                    status: 'completed',
+-                    active: live.active,
+-                    text: messages.map((message) => message.text).join('\n\n'),
+-                    messages
++        try {
++            const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http, signal)
++            const live = await getSession(apiUrl, jwt, sessionId, http, signal)
++            if (result.found) {
++                const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
++                if (result.invoked && messages.length > 0 && (boundaryReached || (live.active && !live.thinking))) {
++                    return {
++                        sessionId,
++                        remitId,
++                        status: 'completed',
++                        active: live.active,
++                        text: messages.map((message) => message.text).join('\n\n'),
++                        messages
++                    }
+                 }
++                if (result.invoked && !live.active) {
++                    throw new PingPeerError('session_ended', `session ${sessionId} ended before producing a result`)
++                }
++            } else if (!live.active) {
++                throw new PingPeerError('session_ended', `session ${sessionId} ended before accepting remit ${remitId}`)
+             }
+-            if (result.invoked && !live.active) {
+-                throw new PingPeerError('session_ended', `session ${sessionId} ended before producing a result`)
+-            }
+-        } else if (!live.active) {
+-            throw new PingPeerError('session_ended', `session ${sessionId} ended before accepting remit ${remitId}`)
++        } catch (error) {
++            if (signal.aborted) break
++            const status = error instanceof PingPeerError ? error.httpStatus
++                : axios.isAxiosError(error) ? error.response?.status : undefined
++            if (!((status ?? 0) >= 500 || (axios.isAxiosError(error) && !error.response))) throw error
+         }
+         if (now() >= deadline) break
+-        await sleep(1_000)
++        await sleep(Math.min(1_000, Math.max(0, deadline - now())))
+     }
+     throw new PingPeerError('timeout', `timed out waiting for remit ${remitId}`)
+ }
+diff --git a/web/src/components/SessionList.mark-all-read.test.tsx b/web/src/components/SessionList.mark-all-read.test.tsx
+index 465770b9d479bae3d602184b24439a0f53d3b976..f4d983cab83ecfd50073c2fc89407bbcc9908fc2 100644
+--- a/web/src/components/SessionList.mark-all-read.test.tsx
++++ b/web/src/components/SessionList.mark-all-read.test.tsx
+@@ -124,6 +124,22 @@ describe('SessionList mark all as read', () => {
+         expect(screen.queryByRole('dialog')).toBeNull()
+     })
+ 
++    it('keeps confirmation open and reports a failed local write', async () => {
++        localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ unread: 1000 }))
++        renderSessionList([makeSession({ id: 'unread', updatedAt: 2000, metadata: { path: '/work/unread', name: 'Unread' } })])
++        fireEvent.click(screen.getByRole('button', { name: 'Mark all as read (1)' }))
++        const storage = Object.hasOwn(window.localStorage, 'setItem') ? window.localStorage : Object.getPrototypeOf(window.localStorage) as Storage
++        const setItem = vi.spyOn(storage, 'setItem').mockImplementation(() => { throw new Error('Storage unavailable') })
++        try {
++            fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
++            await waitFor(() => expect(screen.getByText(/Could not save read status/)).toBeTruthy())
++            expect(screen.getByRole('dialog')).toBeTruthy()
++            expect(JSON.parse(localStorage.getItem('hapi.sessionLastSeen.v1')!)).toEqual({ unread: 1000 })
++        } finally {
++            setItem.mockRestore()
++        }
++    })
++
+     it('leaves unread state unchanged when the confirmation is cancelled', () => {
+         localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ unread: 1000 }))
+         renderSessionList([
+diff --git a/web/src/lib/sessionLastSeen.test.ts b/web/src/lib/sessionLastSeen.test.ts
+index cbe44cd7c78498c60a1c0b8f2c1242e119ce2ce8..d185fbb907e75fc43fb0e4018b3e3ad2df087a08 100644
+--- a/web/src/lib/sessionLastSeen.test.ts
++++ b/web/src/lib/sessionLastSeen.test.ts
+@@ -13,6 +13,10 @@ import {
+     useSessionLastSeenVersion,
+ } from './sessionLastSeen'
+ 
++function storageWriteTarget(): Storage {
++    return Object.hasOwn(window.localStorage, 'setItem') ? window.localStorage : Object.getPrototypeOf(window.localStorage)
++}
++
+ function SessionLastSeenVersionProbe() {
+     const version = useSessionLastSeenVersion()
+     return createElement('output', { 'data-testid': 'last-seen-version' }, version)
+@@ -81,6 +85,33 @@ describe('sessionLastSeen', () => {
+         expect(getSessionLastSeenSnapshot()).toEqual({ 'session-a': 1000 })
+     })
+ 
++    it.each(['hapi.sessionLastSeen.v1', 'hapi.sessionManualUnread.v1'])('reports failure if the changed %s store cannot be saved', (key) => {
++        markSessionUnread('session-a', 1000)
++        const original = window.localStorage.setItem
++        const setItem = vi.spyOn(storageWriteTarget(), 'setItem').mockImplementation(function (this: Storage, name, value) {
++            if (name === key) throw new Error('Storage unavailable')
++            original.call(this, name, value)
++        })
++        try {
++            expect(() => markAllSessionsSeen([{ id: 'session-a', updatedAt: 1000 }])).toThrow('Could not save read status')
++            expect(getUnreadSessionCount([{ id: 'session-a', updatedAt: 1000 }])).toBe(1)
++        } finally {
++            setItem.mockRestore()
++        }
++    })
++
++    it('does not announce success when the watermark write fails and the other store is unchanged', () => {
++        const view = render(createElement(SessionLastSeenVersionProbe))
++        const initialVersion = view.getByTestId('last-seen-version').textContent
++        const setItem = vi.spyOn(storageWriteTarget(), 'setItem').mockImplementation(() => { throw new Error('Storage unavailable') })
++        try {
++            act(() => { expect(() => markAllSessionsSeen([{ id: 'session-a', updatedAt: 1000 }])).toThrow('Could not save read status') })
++            expect(view.getByTestId('last-seen-version').textContent).toBe(initialVersion)
++        } finally {
++            setItem.mockRestore()
++        }
++    })
++
+     it('does not move the watermark backwards', () => {
+         markSessionSeen('session-a', 5000)
+         markSessionSeen('session-a', 2000)
+@@ -182,7 +213,7 @@ describe('sessionLastSeen', () => {
+     })
+ 
+     it('ignores localStorage write failures', () => {
+-        const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
++        const setItem = vi.spyOn(storageWriteTarget(), 'setItem').mockImplementation(() => {
+             throw new Error('quota exceeded')
+         })
+ 
+diff --git a/web/src/lib/sessionLastSeen.ts b/web/src/lib/sessionLastSeen.ts
+index bebd150e071bb013f3b2b1f13504e892d08b39b3..675496ba377da785748aedab6bcdac41213e703f 100644
+--- a/web/src/lib/sessionLastSeen.ts
++++ b/web/src/lib/sessionLastSeen.ts
+@@ -232,9 +232,12 @@ export function markAllSessionsSeen(sessions: Iterable<SessionReadStateInput>):
+ 
+     const seenWritten = !seenChanged || writeStore(store)
+     const manualUnreadWritten = !manualUnreadChanged || writeManualUnreadStore(manualUnreadStore)
+-    if (seenWritten || manualUnreadWritten) {
++    if ((seenChanged && seenWritten) || (manualUnreadChanged && manualUnreadWritten)) {
+         notifyStoreChanged()
+     }
++    if (!seenWritten || !manualUnreadWritten) {
++        throw new Error('Could not save read status on this device. Check browser storage and try again.')
++    }
+     return count
+ }
+ 

@@ -13,6 +13,10 @@ import {
     useSessionLastSeenVersion,
 } from './sessionLastSeen'
 
+function storageWriteTarget(): Storage {
+    return Object.hasOwn(window.localStorage, 'setItem') ? window.localStorage : Object.getPrototypeOf(window.localStorage)
+}
+
 function SessionLastSeenVersionProbe() {
     const version = useSessionLastSeenVersion()
     return createElement('output', { 'data-testid': 'last-seen-version' }, version)
@@ -79,6 +83,33 @@ describe('sessionLastSeen', () => {
 
         expect(markAllSessionsSeen([{ id: 'session-a', updatedAt: 1000 }])).toBe(0)
         expect(getSessionLastSeenSnapshot()).toEqual({ 'session-a': 1000 })
+    })
+
+    it.each(['hapi.sessionLastSeen.v1', 'hapi.sessionManualUnread.v1'])('reports failure if the changed %s store cannot be saved', (key) => {
+        markSessionUnread('session-a', 1000)
+        const original = window.localStorage.setItem
+        const setItem = vi.spyOn(storageWriteTarget(), 'setItem').mockImplementation(function (this: Storage, name, value) {
+            if (name === key) throw new Error('Storage unavailable')
+            original.call(this, name, value)
+        })
+        try {
+            expect(() => markAllSessionsSeen([{ id: 'session-a', updatedAt: 1000 }])).toThrow('Could not save read status')
+            expect(getUnreadSessionCount([{ id: 'session-a', updatedAt: 1000 }])).toBe(1)
+        } finally {
+            setItem.mockRestore()
+        }
+    })
+
+    it('does not announce success when the watermark write fails and the other store is unchanged', () => {
+        const view = render(createElement(SessionLastSeenVersionProbe))
+        const initialVersion = view.getByTestId('last-seen-version').textContent
+        const setItem = vi.spyOn(storageWriteTarget(), 'setItem').mockImplementation(() => { throw new Error('Storage unavailable') })
+        try {
+            act(() => { expect(() => markAllSessionsSeen([{ id: 'session-a', updatedAt: 1000 }])).toThrow('Could not save read status') })
+            expect(view.getByTestId('last-seen-version').textContent).toBe(initialVersion)
+        } finally {
+            setItem.mockRestore()
+        }
     })
 
     it('does not move the watermark backwards', () => {
@@ -182,7 +213,7 @@ describe('sessionLastSeen', () => {
     })
 
     it('ignores localStorage write failures', () => {
-        const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        const setItem = vi.spyOn(storageWriteTarget(), 'setItem').mockImplementation(() => {
             throw new Error('quota exceeded')
         })
 

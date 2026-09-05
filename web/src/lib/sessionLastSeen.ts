@@ -232,8 +232,11 @@ export function markAllSessionsSeen(sessions: Iterable<SessionReadStateInput>): 
 
     const seenWritten = !seenChanged || writeStore(store)
     const manualUnreadWritten = !manualUnreadChanged || writeManualUnreadStore(manualUnreadStore)
-    if (seenWritten || manualUnreadWritten) {
+    if ((seenChanged && seenWritten) || (manualUnreadChanged && manualUnreadWritten)) {
         notifyStoreChanged()
+    }
+    if (!seenWritten || !manualUnreadWritten) {
+        throw new Error('Could not save read status on this device. Check browser storage and try again.')
     }
     return count
 }

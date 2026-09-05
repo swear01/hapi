@@ -29,12 +29,14 @@ export type PingPeerErrorCode =
 export class PingPeerError extends Error {
     readonly code: PingPeerErrorCode
     readonly remitId?: string
+    readonly httpStatus?: number
 
-    constructor(code: PingPeerErrorCode, message: string, remitId?: string) {
+    constructor(code: PingPeerErrorCode, message: string, remitId?: string, httpStatus?: number) {
         super(message)
         this.name = 'PingPeerError'
         this.code = code
         this.remitId = remitId
+        this.httpStatus = httpStatus
     }
 }
 
@@ -174,13 +176,15 @@ async function getSession(
     apiUrl: string,
     jwt: string,
     sessionId: string,
-    http: AxiosInstance
+    http: AxiosInstance,
+    signal?: AbortSignal
 ): Promise<PingPeerSessionSummary> {
     const response = await http.get(
         `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}`,
         {
             headers: authHeaders(jwt),
             timeout: 10_000,
+            signal,
             validateStatus: () => true
         }
     )
@@ -188,7 +192,7 @@ async function getSession(
         const detail = typeof response.data?.error === 'string'
             ? response.data.error
             : `HTTP ${response.status}`
-        throw new PingPeerError('not_found', `failed to load session ${sessionId} (${detail})`)
+        throw new PingPeerError('not_found', `failed to load session ${sessionId} (${detail})`, undefined, response.status)
     }
     return response.data.session as PingPeerSessionSummary
 }
@@ -639,7 +643,8 @@ async function getMessagesFromRemit(
     jwt: string,
     sessionId: string,
     remitId: string,
-    http: AxiosInstance
+    http: AxiosInstance,
+    signal?: AbortSignal
 ): Promise<{ found: boolean; invoked: boolean; rows: unknown[] }> {
     let before: { at: number; seq: number } | null = null
     const newerPages: unknown[][] = []
@@ -651,10 +656,11 @@ async function getMessagesFromRemit(
                 ...(before ? { beforeAt: before.at, beforeSeq: before.seq } : {})
             },
             timeout: 20_000,
+            signal,
             validateStatus: () => true
         })
         if (response.status < 200 || response.status >= 300) {
-            throw new PingPeerError('not_found', `failed to load messages for ${sessionId}`)
+            throw new PingPeerError('not_found', `failed to load messages for ${sessionId}`, undefined, response.status)
         }
         const data = isObject(response.data) ? response.data : null
         const rows = Array.isArray(data?.messages) ? data.messages as unknown[] : []
@@ -694,30 +700,38 @@ export async function waitPeer(options: WaitPeerOptions): Promise<WaitPeerResult
     const sleep = options.sleep ?? defaultSleep
     const now = options.now ?? Date.now
     const deadline = now() + timeoutSecs * 1000
+    const signal = AbortSignal.timeout(Math.max(1, Math.ceil(timeoutSecs * 1000)))
 
     while (now() <= deadline) {
-        const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http)
-        const live = await getSession(apiUrl, jwt, sessionId, http)
-        if (result.found) {
-            const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
-            if (result.invoked && messages.length > 0 && (boundaryReached || !live.thinking)) {
-                return {
-                    sessionId,
-                    remitId,
-                    status: 'completed',
-                    active: live.active,
-                    text: messages.map((message) => message.text).join('\n\n'),
-                    messages
+        try {
+            const result = await getMessagesFromRemit(apiUrl, jwt, sessionId, remitId, http, signal)
+            const live = await getSession(apiUrl, jwt, sessionId, http, signal)
+            if (result.found) {
+                const { messages, boundaryReached } = extractResultMessages(result.rows, -1)
+                if (result.invoked && messages.length > 0 && (boundaryReached || (live.active && !live.thinking))) {
+                    return {
+                        sessionId,
+                        remitId,
+                        status: 'completed',
+                        active: live.active,
+                        text: messages.map((message) => message.text).join('\n\n'),
+                        messages
+                    }
                 }
+                if (result.invoked && !live.active) {
+                    throw new PingPeerError('session_ended', `session ${sessionId} ended before producing a result`)
+                }
+            } else if (!live.active) {
+                throw new PingPeerError('session_ended', `session ${sessionId} ended before accepting remit ${remitId}`)
             }
-            if (result.invoked && !live.active) {
-                throw new PingPeerError('session_ended', `session ${sessionId} ended before producing a result`)
-            }
-        } else if (!live.active) {
-            throw new PingPeerError('session_ended', `session ${sessionId} ended before accepting remit ${remitId}`)
+        } catch (error) {
+            if (signal.aborted) break
+            const status = error instanceof PingPeerError ? error.httpStatus
+                : axios.isAxiosError(error) ? error.response?.status : undefined
+            if (!((status ?? 0) >= 500 || (axios.isAxiosError(error) && !error.response))) throw error
         }
         if (now() >= deadline) break
-        await sleep(1_000)
+        await sleep(Math.min(1_000, Math.max(0, deadline - now())))
     }
     throw new PingPeerError('timeout', `timed out waiting for remit ${remitId}`)
 }

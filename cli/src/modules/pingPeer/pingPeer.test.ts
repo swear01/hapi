@@ -1,3 +1,4 @@
+import { AxiosError } from 'axios'
 import snapshots from '../../../../shared/fixtures/chat/codex-message-stream-snapshot.json'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -17,7 +18,7 @@ type MockResponse = { status: number; data: unknown }
 
 function createHttpMock(handlers: {
     post?: (url: string, body?: unknown) => MockResponse | Promise<MockResponse>
-    get?: (url: string, config?: { params?: Record<string, unknown> }) => MockResponse | Promise<MockResponse>
+    get?: (url: string, config?: { params?: Record<string, unknown>; signal?: AbortSignal }) => MockResponse | Promise<MockResponse>
     delete?: (url: string) => MockResponse | Promise<MockResponse>
 }) {
     return {
@@ -25,7 +26,7 @@ function createHttpMock(handlers: {
             if (!handlers.post) throw new Error(`unexpected POST ${url}`)
             return handlers.post(url, body)
         }),
-        get: vi.fn(async (url: string, config?: { params?: Record<string, unknown> }) => {
+        get: vi.fn(async (url: string, config?: { params?: Record<string, unknown>; signal?: AbortSignal }) => {
             if (!handlers.get) throw new Error(`unexpected GET ${url}`)
             return handlers.get(url, config)
         }),
@@ -215,6 +216,78 @@ describe('peer lifecycle operations', () => {
         const result = await waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never })
         expect(result.text).toBe(snapshots.expected.blocks[0].text)
         expect(result.messages).toHaveLength(1)
+    })
+
+    it.each([false, true])('requires a durable boundary for an inactive remit (boundary=%s)', async (boundary) => {
+        const http = createHttpMock({
+            post: (url) => authResponse(url)!,
+            get: (url) => url.endsWith('/messages')
+                ? { status: 200, data: { messages: [
+                    { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
+                    snapshots.input.messages[0],
+                    ...(boundary ? [{ id: 'u2', invokedAt: 2, content: { role: 'user', content: { text: 'next turn' } } }] : [])
+                ] } }
+                : { status: 200, data: { session: { id: SESSION_ID, active: false, thinking: false } } }
+        })
+        const result = waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never })
+        if (boundary) await expect(result).resolves.toMatchObject({ status: 'completed' })
+        else await expect(result).rejects.toMatchObject({ code: 'session_ended' })
+    })
+
+    it.each(['messages', 'session'])('retries transient %s polling failures but rejects deterministic errors', async (endpoint) => {
+        for (const failure of [503, 'timeout', 401, 404] as const) {
+            let failed = false
+            let time = 0
+            const sleep = vi.fn(async () => { time += 1000 })
+            const http = createHttpMock({
+                post: (url) => authResponse(url)!,
+                get: (url) => {
+                    if (!failed && (url.endsWith('/messages') === (endpoint === 'messages'))) {
+                        failed = true
+                        if (failure === 'timeout') throw new AxiosError('timeout', 'ECONNABORTED')
+                        return { status: failure, data: {} }
+                    }
+                    return url.endsWith('/messages')
+                        ? { status: 200, data: { messages: [
+                            { id: 'u1', localId: REMIT_ID, invokedAt: 1, content: { role: 'user', content: { text: 'task' } } },
+                            ...snapshots.input.messages
+                        ] } }
+                        : { status: 200, data: { session: { id: SESSION_ID, active: true, thinking: false } } }
+                }
+            })
+            const result = waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep, timeoutSecs: 3 })
+            if (failure === 503 || failure === 'timeout') {
+                await expect(result).resolves.toMatchObject({ text: snapshots.expected.blocks[0].text })
+                expect(sleep).toHaveBeenCalledTimes(1)
+            } else {
+                await expect(result).rejects.toMatchObject({ code: 'not_found' })
+                expect(sleep).not.toHaveBeenCalled()
+            }
+        }
+    })
+
+    it('stops transient retries at the original deadline', async () => {
+        let time = 0
+        const http = createHttpMock({ post: (url) => authResponse(url)!, get: () => ({ status: 502, data: {} }) })
+        await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, now: () => time, sleep: async () => { time += 1000 }, timeoutSecs: 2 })).rejects.toMatchObject({ code: 'timeout' })
+        expect(time).toBe(2000)
+    })
+
+    it.each(['messages', 'session'])('cancels an outstanding %s request at the remit deadline', async (endpoint) => {
+        const http = createHttpMock({
+            post: (url) => authResponse(url)!,
+            get: (url, config) => {
+                if (url.endsWith('/messages') !== (endpoint === 'messages')) return { status: 200, data: { messages: [] } }
+                const signal = config?.signal
+                if (!signal) throw new Error('Missing polling deadline')
+                return new Promise((_resolve, reject) => {
+                    const abort = () => reject(new AxiosError('deadline', 'ERR_CANCELED'))
+                    if (signal.aborted) abort()
+                    else signal.addEventListener('abort', abort, { once: true })
+                })
+            }
+        })
+        await expect(waitPeer({ sessionId: SESSION_ID, remitId: REMIT_ID, apiUrl: 'http://hub.test', accessToken: 'token', http: http as never, timeoutSecs: 0.02 })).rejects.toMatchObject({ code: 'timeout' })
     })
 
     it('rechecks thinking after messages arrive before returning a remit result', async () => {
