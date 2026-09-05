@@ -15,9 +15,7 @@ const REQUEST: SpawnSessionWithRemitRequest = {
 }
 
 function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRemitRequest = REQUEST) {
-    const requestHash = createHash('sha256')
-        .update(JSON.stringify(['machine-1', ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
-        .digest('hex')
+    const requestHash = hashRequest(request)
     const reserved = {
         id: SESSION_ID,
         namespace: 'default',
@@ -52,6 +50,12 @@ function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRe
         }).buildSpawnRemitSuccess,
         ...harness
     } as unknown as SyncEngine, 'machine-1', 'default', request)
+}
+
+function hashRequest(request: SpawnSessionWithRemitRequest): string {
+    return createHash('sha256')
+        .update(JSON.stringify(['machine-1', ...Object.entries(request).sort(([a], [b]) => a.localeCompare(b))]))
+        .digest('hex')
 }
 
 describe('spawnSessionWithRemit', () => {
@@ -109,9 +113,7 @@ describe('spawnSessionWithRemit', () => {
     it('returns the same child without spawning or redelivering after a lost success response', async () => {
         const spawnSession = mock(async () => ({ type: 'success' as const, sessionId: SESSION_ID }))
         const sendMessage = mock(async () => {})
-        const requestHash = createHash('sha256')
-            .update(JSON.stringify(['machine-1', ...Object.entries(REQUEST).sort(([a], [b]) => a.localeCompare(b))]))
-            .digest('hex')
+        const requestHash = hashRequest(REQUEST)
         const result = await callSpawn({
             getOrCreateSession: () => ({
                 id: SESSION_ID,
@@ -142,6 +144,53 @@ describe('spawnSessionWithRemit', () => {
         expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID, remitId: REQUEST.remitId })
         expect(spawnSession).not.toHaveBeenCalled()
         expect(sendMessage).not.toHaveBeenCalled()
+    })
+
+    it.each([
+        ['cursor', { cursorSessionId: 'cursor-native', cursorSessionProtocol: 'acp' }],
+        ['pi', { piSessionId: 'pi-native' }]
+    ] as const)('recovers a pending ready %s child after a Hub restart', async (agent, nativeMetadata) => {
+        const request = { ...REQUEST, agent, waitActiveSecs: 0.001 }
+        let delivered = false
+        const cleanupSpawnedSession = mock(async () => true)
+        const child = {
+            id: SESSION_ID,
+            namespace: 'default',
+            active: true,
+            metadata: {
+                machineId: 'machine-1',
+                path: '/tmp/project',
+                flavor: agent,
+                ...nativeMetadata,
+                spawnRemitOperation: {
+                    remitId: request.remitId,
+                    requestHash: hashRequest(request),
+                    machineId: 'machine-1',
+                    state: 'pending',
+                    updatedAt: 1
+                }
+            },
+            model: null,
+            modelReasoningEffort: null,
+            effort: null,
+            permissionMode: undefined
+        }
+
+        const result = await callSpawn({
+            getOrCreateSession: () => child,
+            getSession: () => child,
+            getSessionByNamespace: () => child,
+            sessionReadyIds: new Set(),
+            waitForSessionActive: async () => true,
+            waitForSessionReady: SyncEngine.prototype.waitForSessionReady,
+            renameSession: async () => {},
+            sendMessage: async () => { delivered = true },
+            getQueuedState: () => ({ queuedLocalIds: delivered ? [request.remitId] : [], invokedLocalMessages: [] }),
+            cleanupSpawnedSession
+        }, request)
+
+        expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
+        expect(cleanupSpawnedSession).not.toHaveBeenCalled()
     })
 
     it('renames and delivers the remit only after the fresh child identity matches', async () => {

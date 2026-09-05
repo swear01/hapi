@@ -80,6 +80,16 @@ describe('canonical hapi-session-control delivery', () => {
         expect(await readFile(join(target, '..', '.hapi-managed'), 'utf8')).toBe(HAPI_SESSION_CONTROL_SKILL_NAME)
     })
 
+    it('serializes concurrent first-time installs through the shared cross-process lock', async () => {
+        const [first, second] = await Promise.all([
+            ensureHapiSessionControlSkill('codex', workingDirectory),
+            ensureHapiSessionControlSkill('codex', workingDirectory)
+        ])
+
+        expect(second).toBe(first)
+        expect(await readFile(first, 'utf8')).toContain('name: hapi-session-control')
+    })
+
     it('rejects an unmanaged skill file without overwriting it', async () => {
         const target = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
         await mkdir(join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME), { recursive: true })

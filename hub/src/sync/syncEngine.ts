@@ -2215,8 +2215,20 @@ export class SyncEngine {
         // AGY emits session-ready after its first prompt creates a conversation,
         // so waiting for it here would deadlock the initial remit.
         const requiresReadySignal = expectedAgent === 'pi' || expectedAgent === 'cursor'
+        const hasDurableReady = (): boolean => {
+            const metadata = this.getSessionByNamespace(sessionId, namespace)?.metadata
+            return expectedAgent === 'cursor'
+                ? Boolean(metadata?.cursorSessionId)
+                : expectedAgent === 'pi'
+                    ? Boolean(metadata?.piSessionId)
+                    : true
+        }
         const ready = requiresReadySignal
-            ? await this.waitForSessionReady(sessionId, Math.max(1, waitDeadline - Date.now())).catch(() => 'timeout' as const)
+            ? await this.waitForSessionReady(
+                sessionId,
+                Math.max(1, waitDeadline - Date.now()),
+                hasDurableReady
+            ).catch(() => 'timeout' as const)
             : 'ready'
         if (ready !== 'ready') {
             return await fail(
@@ -4221,15 +4233,19 @@ export class SyncEngine {
         return false
     }
 
-    async waitForSessionReady(sessionId: string, timeoutMs: number = 60_000): Promise<'ready' | 'ended' | 'timeout'> {
+    async waitForSessionReady(
+        sessionId: string,
+        timeoutMs: number = 60_000,
+        hasDurableReady?: () => boolean
+    ): Promise<'ready' | 'ended' | 'timeout'> {
         const start = Date.now()
         while (Date.now() - start < timeoutMs) {
-            if (this.sessionReadyIds.has(sessionId)) {
-                return 'ready'
-            }
             const session = this.getSession(sessionId)
             if (!session?.active) {
                 return 'ended'
+            }
+            if (this.sessionReadyIds.has(sessionId) || hasDurableReady?.()) {
+                return 'ready'
             }
             await new Promise((resolve) => setTimeout(resolve, 250))
         }
