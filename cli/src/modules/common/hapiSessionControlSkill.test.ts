@@ -105,6 +105,28 @@ describe('canonical hapi-session-runtime delivery', () => {
         expect(await readFile(first, 'utf8')).toContain('name: hapi-session-runtime')
     })
 
+    it('recovers an empty directory left by an interrupted first install', async () => {
+        const targetDir = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME)
+        await mkdir(targetDir, { recursive: true })
+
+        const target = await ensureHapiSessionControlSkill('codex', workingDirectory)
+
+        expect(await readFile(join(targetDir, '.hapi-managed'), 'utf8')).toBe(HAPI_SESSION_CONTROL_SKILL_NAME)
+        await writeFile(target, 'stale HAPI copy')
+        await ensureHapiSessionControlSkill('codex', workingDirectory)
+        expect(await readFile(target, 'utf8')).toContain('name: hapi-session-runtime')
+    })
+
+    it('preserves a nonempty unmanaged directory without a skill file', async () => {
+        const targetDir = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME)
+        await mkdir(targetDir, { recursive: true })
+        await writeFile(join(targetDir, 'notes.txt'), 'user notes')
+
+        await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/user-managed/)
+        expect(await readFile(join(targetDir, 'notes.txt'), 'utf8')).toBe('user notes')
+        await expect(lstat(join(targetDir, '.hapi-managed'))).rejects.toMatchObject({ code: 'ENOENT' })
+    })
+
     it('rejects an unmanaged skill file without overwriting it', async () => {
         const target = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
         await mkdir(join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME), { recursive: true })

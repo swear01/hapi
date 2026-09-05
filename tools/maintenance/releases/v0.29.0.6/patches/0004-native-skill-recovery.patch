@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 06 Sep 2026 02:10:28 +0800
+Subject: [PATCH] fix(cli): recover interrupted native skill installation
+
+---
+diff --git a/cli/src/modules/common/hapiSessionControlSkill.test.ts b/cli/src/modules/common/hapiSessionControlSkill.test.ts
+index 071050bc6dc23019f388358fe3fa18a8d02ef670..3411a04e880275ab77a383db62042b5c4b2156f2 100644
+--- a/cli/src/modules/common/hapiSessionControlSkill.test.ts
++++ b/cli/src/modules/common/hapiSessionControlSkill.test.ts
+@@ -105,6 +105,28 @@ describe('canonical hapi-session-runtime delivery', () => {
+         expect(await readFile(first, 'utf8')).toContain('name: hapi-session-runtime')
+     })
+ 
++    it('recovers an empty directory left by an interrupted first install', async () => {
++        const targetDir = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME)
++        await mkdir(targetDir, { recursive: true })
++
++        const target = await ensureHapiSessionControlSkill('codex', workingDirectory)
++
++        expect(await readFile(join(targetDir, '.hapi-managed'), 'utf8')).toBe(HAPI_SESSION_CONTROL_SKILL_NAME)
++        await writeFile(target, 'stale HAPI copy')
++        await ensureHapiSessionControlSkill('codex', workingDirectory)
++        expect(await readFile(target, 'utf8')).toContain('name: hapi-session-runtime')
++    })
++
++    it('preserves a nonempty unmanaged directory without a skill file', async () => {
++        const targetDir = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME)
++        await mkdir(targetDir, { recursive: true })
++        await writeFile(join(targetDir, 'notes.txt'), 'user notes')
++
++        await expect(ensureHapiSessionControlSkill('codex', workingDirectory)).rejects.toThrow(/user-managed/)
++        expect(await readFile(join(targetDir, 'notes.txt'), 'utf8')).toBe('user notes')
++        await expect(lstat(join(targetDir, '.hapi-managed'))).rejects.toMatchObject({ code: 'ENOENT' })
++    })
++
+     it('rejects an unmanaged skill file without overwriting it', async () => {
+         const target = join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME, 'SKILL.md')
+         await mkdir(join(nativeSkillRoot('codex'), HAPI_SESSION_CONTROL_SKILL_NAME), { recursive: true })
+diff --git a/cli/src/modules/common/hapiSessionControlSkill.ts b/cli/src/modules/common/hapiSessionControlSkill.ts
+index 07406ef3579809acc3973f67033b452e7f1ab44e..cf4083a1062ea084a973218e0a748d93a9797e60 100644
+--- a/cli/src/modules/common/hapiSessionControlSkill.ts
++++ b/cli/src/modules/common/hapiSessionControlSkill.ts
+@@ -1,4 +1,4 @@
+-import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
++import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+ import { randomUUID } from 'node:crypto'
+ import { homedir } from 'node:os'
+ import { join } from 'node:path'
+@@ -77,8 +77,8 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
+             throw new Error(`Refusing to replace user-managed skill path at ${targetDir}`)
+         }
+ 
+-        const created = !targetDirStat
+-        if (created) {
++        const claimable = !targetDirStat || (await readdir(targetDir)).length === 0
++        if (!targetDirStat) {
+             await mkdir(targetDir, { mode: 0o700 })
+         }
+ 
+@@ -86,10 +86,10 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
+         if (markerStat?.isSymbolicLink() || (markerStat && !markerStat.isFile())) {
+             throw new Error(`Refusing invalid HAPI skill ownership marker at ${markerPath}`)
+         }
+-        if (created) {
++        if (claimable) {
+             await writeFile(markerPath, HAPI_SESSION_CONTROL_SKILL_NAME, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+         }
+-        const managed = created || (
++        const managed = claimable || (
+             markerStat?.isFile()
+             && await readFile(markerPath, 'utf8').catch(() => null) === HAPI_SESSION_CONTROL_SKILL_NAME
+         )

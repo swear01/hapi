@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -77,8 +77,8 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
             throw new Error(`Refusing to replace user-managed skill path at ${targetDir}`)
         }
 
-        const created = !targetDirStat
-        if (created) {
+        const claimable = !targetDirStat || (await readdir(targetDir)).length === 0
+        if (!targetDirStat) {
             await mkdir(targetDir, { mode: 0o700 })
         }
 
@@ -86,10 +86,10 @@ export async function ensureHapiSessionControlSkill(flavor: string, workingDirec
         if (markerStat?.isSymbolicLink() || (markerStat && !markerStat.isFile())) {
             throw new Error(`Refusing invalid HAPI skill ownership marker at ${markerPath}`)
         }
-        if (created) {
+        if (claimable) {
             await writeFile(markerPath, HAPI_SESSION_CONTROL_SKILL_NAME, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
         }
-        const managed = created || (
+        const managed = claimable || (
             markerStat?.isFile()
             && await readFile(markerPath, 'utf8').catch(() => null) === HAPI_SESSION_CONTROL_SKILL_NAME
         )
