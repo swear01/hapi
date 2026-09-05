@@ -1716,14 +1716,16 @@ export class SyncEngine {
     async stopSession(sessionId: string): Promise<{ alreadyStopped: boolean }> {
         const session = this.getSession(sessionId)
         if (!session?.active) return { alreadyStopped: true }
-        let reason: SessionEndReason | undefined
         try {
             await this.rpcGateway.stopSessionProcess(sessionId)
         } catch (error) {
             if (!(error instanceof RpcTargetMissingError)) throw error
-            reason = 'error'
+            this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
+            return { alreadyStopped: false }
         }
-        this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason })
+        if (!await this.waitForSessionInactive(sessionId)) {
+            throw new Error('Timed out waiting for session process to stop')
+        }
         return { alreadyStopped: false }
     }
 
@@ -2201,7 +2203,14 @@ export class SyncEngine {
         const waitDeadline = Date.now() + (request.waitActiveSecs ?? 60) * 1000
         const active = await this.waitForSessionActive(sessionId, Math.max(1, waitDeadline - Date.now())).catch(() => false)
         if (!active) return await fail('spawn_timeout', 'New session did not become active')
-        const ready = await this.waitForSessionReady(sessionId, Math.max(1, waitDeadline - Date.now())).catch(() => 'timeout' as const)
+        const expectedAgent = request.agent ?? 'claude'
+        // Only these fresh runtimes have a pre-remit native readiness fence.
+        // AGY emits session-ready after its first prompt creates a conversation,
+        // so waiting for it here would deadlock the initial remit.
+        const requiresReadySignal = expectedAgent === 'pi' || expectedAgent === 'cursor'
+        const ready = requiresReadySignal
+            ? await this.waitForSessionReady(sessionId, Math.max(1, waitDeadline - Date.now())).catch(() => 'timeout' as const)
+            : 'ready'
         if (ready !== 'ready') {
             return await fail(
                 ready === 'ended' ? 'spawn_ended' : 'spawn_timeout',
@@ -2215,7 +2224,6 @@ export class SyncEngine {
             return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
         }
         child = matchedChild
-        const expectedAgent = request.agent ?? 'claude'
         const expectedPermissionMode = request.permissionMode
             ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
         const directoryMatches = childMetadata.path === request.directory

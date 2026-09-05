@@ -156,13 +156,14 @@ describe('spawnSessionWithRemit', () => {
             permissionMode: undefined
         }
         const renameSession = mock(async () => {})
+        const waitForSessionReady = mock(async () => 'timeout' as const)
         let delivered = false
         const sendMessage = mock(async () => { delivered = true })
         const result = await callSpawn({
             getSessions: () => [],
             spawnSession: async () => ({ type: 'success', sessionId: SESSION_ID }),
             waitForSessionActive: async () => true,
-            waitForSessionReady: async () => 'ready' as const,
+            waitForSessionReady,
             getSessionByNamespace: () => child,
             renameSession,
             sendMessage,
@@ -186,6 +187,7 @@ describe('spawnSessionWithRemit', () => {
             }
         })
         expect(renameSession).toHaveBeenCalledWith(SESSION_ID, 'Worker')
+        expect(waitForSessionReady).not.toHaveBeenCalled()
         expect(sendMessage).toHaveBeenCalledWith(SESSION_ID, {
             text: 'implement issue',
             localId: REQUEST.remitId,
@@ -203,7 +205,7 @@ describe('spawnSessionWithRemit', () => {
             waitForSessionReady: async () => 'ended' as const,
             cleanupSpawnedSession,
             sendMessage
-        })
+        }, { ...REQUEST, agent: 'cursor' })
 
         expect(result).toMatchObject({ type: 'error', code: 'spawn_ended', cleanedUp: true })
         expect(sendMessage).not.toHaveBeenCalled()
@@ -425,16 +427,28 @@ describe('stopSession', () => {
         expect(handleSessionEnd).toHaveBeenCalledWith(expect.objectContaining({ sid: SESSION_ID, reason: 'error' }))
     })
 
-    it('marks an accepted stop inactive at the Hub boundary', async () => {
+    it('waits for the CLI session-end event after a stop is accepted', async () => {
         const handleSessionEnd = mock(() => {})
-        const result = await SyncEngine.prototype.stopSession.call({
+        let confirmInactive!: (inactive: boolean) => void
+        const waitForSessionInactive = mock(async () => await new Promise<boolean>((resolve) => {
+            confirmInactive = resolve
+        }))
+        let settled = false
+        const resultPromise = SyncEngine.prototype.stopSession.call({
             getSession: () => ({ id: SESSION_ID, active: true }),
             rpcGateway: { stopSessionProcess: async () => {} },
-            handleSessionEnd
+            handleSessionEnd,
+            waitForSessionInactive
         } as unknown as SyncEngine, SESSION_ID)
+        void resultPromise.then(() => { settled = true })
 
-        expect(result).toEqual({ alreadyStopped: false })
-        expect(handleSessionEnd).toHaveBeenCalledWith(expect.objectContaining({ sid: SESSION_ID }))
+        await Promise.resolve()
+        expect(waitForSessionInactive).toHaveBeenCalledWith(SESSION_ID)
+        expect(settled).toBe(false)
+        confirmInactive(true)
+
+        await expect(resultPromise).resolves.toEqual({ alreadyStopped: false })
+        expect(handleSessionEnd).not.toHaveBeenCalled()
     })
 })
 
