@@ -894,6 +894,16 @@ export class MessageService {
         )
         const actualSessionId = inserted.sessionId
         const msg = inserted.message
+        if (!inserted.inserted) {
+            const storedContent = isObject(msg.content) && isObject(msg.content.content)
+                ? msg.content.content
+                : null
+            if (storedContent?.type !== 'text'
+                || storedContent.text !== payload.text
+                || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])) {
+                throw new Error('sendMessage: localId is already bound to a different message payload')
+            }
+        }
         // A duplicate localId is an idempotent retry, not proof that the
         // original Pi turn still exists. Its stored row may retain steer
         // provenance from a POST whose response was lost, so deliver the

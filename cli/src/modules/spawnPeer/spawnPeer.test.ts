@@ -226,6 +226,7 @@ describe('spawnPeer', () => {
     })
 
     it('fails closed when the hub reports an uncleaned child', async () => {
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
         const http = createHttpMock((url) => url.endsWith('/api/auth')
             ? { status: 200, data: { token: 'jwt' } }
             : {
@@ -244,8 +245,9 @@ describe('spawnPeer', () => {
             machineId: MACHINE_ID,
             apiUrl: 'http://hub.test',
             accessToken: 'token',
+            remitId,
             http: http as never
-        })).rejects.toMatchObject({ code: 'cleanup_failed' })
+        })).rejects.toMatchObject({ code: 'cleanup_failed', remitId })
     })
 
     it('uses stable exit codes', () => {

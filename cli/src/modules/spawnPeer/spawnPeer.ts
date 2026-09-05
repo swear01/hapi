@@ -224,7 +224,11 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
     if (response.status < 200 || response.status >= 300 || data?.type !== 'success' || !data.sessionId || !data.session) {
         const detail = data?.message || data?.error || `HTTP ${response.status}`
         if (data?.childSessionId && data.cleanedUp !== true) {
-            throw new SpawnPeerError('cleanup_failed', `${detail}; child ${data.childSessionId} may still be running`)
+            throw new SpawnPeerError(
+                'cleanup_failed',
+                `${detail}; child ${data.childSessionId} may still be running`,
+                data.remitId ?? remitId
+            )
         }
         throw new SpawnPeerError('spawn_failed', detail)
     }

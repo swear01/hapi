@@ -968,6 +968,29 @@ export class SyncEngine {
         // but shares its 5s cadence (avoids a second timer).
         this.messageService.releaseMatureScheduledMessages(Date.now(), this.historyActionsInFlight)
         void this.reconcileOpenCodeClears()
+        void this.reconcileSpawnRemitCleanups()
+    }
+
+    private async reconcileSpawnRemitCleanups(): Promise<void> {
+        const tasks: Promise<unknown>[] = []
+        for (const session of this.sessionCache.getSessions()) {
+            const operation = session.metadata?.spawnRemitOperation
+            if (!operation) continue
+            const retryableFailure = operation.state === 'failed'
+                && operation.cleanedUp !== true
+                && !operation.orphanSessionId
+            if (operation.state !== 'cleanup-needed' && !retryableFailure) continue
+            if (!this.getMachineByNamespace(operation.machineId, session.namespace)?.active) continue
+
+            const tailKey = `${session.namespace}:${operation.remitId}`
+            if (this.spawnRemitTails.has(tailKey)) continue
+            const task = this.finishSpawnRemitCleanup(session.id, session.namespace, operation)
+            this.spawnRemitTails.set(tailKey, { requestHash: operation.requestHash, task })
+            tasks.push(task.finally(() => {
+                if (this.spawnRemitTails.get(tailKey)?.task === task) this.spawnRemitTails.delete(tailKey)
+            }))
+        }
+        await Promise.all(tasks)
     }
 
     private async reconcileOpenCodeClears(): Promise<void> {
@@ -2120,22 +2143,7 @@ export class SyncEngine {
         }
 
         if (operation.state === 'cleanup-needed' || operation.state === 'failed') {
-            const reservedCleanedUp = operation.cleanedUp === true
-                || await this.cleanupSpawnedSession(machineId, namespace, sessionId)
-            const cleanedUp = reservedCleanedUp && !operation.orphanSessionId
-            this.persistSpawnRemitOperation(sessionId, namespace, operation, {
-                ...operation,
-                state: 'failed',
-                updatedAt: Date.now(),
-                cleanedUp
-            })
-            return {
-                type: 'error',
-                code: operation.code ?? 'spawn_failed',
-                message: operation.error ?? 'The previous spawn attempt failed',
-                childSessionId: operation.orphanSessionId ?? sessionId,
-                cleanedUp
-            }
+            return await this.finishSpawnRemitCleanup(sessionId, namespace, operation)
         }
 
         const fail = async (
@@ -2159,15 +2167,7 @@ export class SyncEngine {
                 }
                 return { type: 'error', code, message, childSessionId: orphanSessionId ?? sessionId, cleanedUp: false }
             }
-            const reservedCleanedUp = await this.cleanupSpawnedSession(machineId, namespace, sessionId)
-            const cleanedUp = reservedCleanedUp && !orphanSessionId
-            this.persistSpawnRemitOperation(sessionId, namespace, cleanupOperation, {
-                ...cleanupOperation,
-                state: 'failed',
-                updatedAt: Date.now(),
-                cleanedUp
-            })
-            return { type: 'error', code, message, childSessionId: orphanSessionId ?? sessionId, cleanedUp }
+            return await this.finishSpawnRemitCleanup(sessionId, namespace, cleanupOperation)
         }
 
         if (child.metadata?.lifecycleState === 'archived') {
@@ -2292,6 +2292,29 @@ export class SyncEngine {
             updatedAt: Date.now()
         })
         return this.buildSpawnRemitSuccess(machineId, request, current)
+    }
+
+    private async finishSpawnRemitCleanup(
+        sessionId: string,
+        namespace: string,
+        operation: SpawnRemitOperation
+    ): Promise<SpawnSessionWithRemitResult> {
+        const reservedCleanedUp = operation.cleanedUp === true
+            || await this.cleanupSpawnedSession(operation.machineId, namespace, sessionId)
+        const cleanedUp = reservedCleanedUp && !operation.orphanSessionId
+        this.persistSpawnRemitOperation(sessionId, namespace, operation, {
+            ...operation,
+            state: 'failed',
+            updatedAt: Date.now(),
+            cleanedUp
+        })
+        return {
+            type: 'error',
+            code: operation.code ?? 'spawn_failed',
+            message: operation.error ?? 'The previous spawn attempt failed',
+            childSessionId: operation.orphanSessionId ?? sessionId,
+            cleanedUp
+        }
     }
 
     private buildSpawnRemitSuccess(

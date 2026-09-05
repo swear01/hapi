@@ -45,6 +45,9 @@ function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRe
         getOrCreateSession: () => reserved,
         getQueuedState: () => ({ queuedLocalIds: [], invokedLocalMessages: [] }),
         persistSpawnRemitOperation: () => true,
+        finishSpawnRemitCleanup: (SyncEngine.prototype as unknown as {
+            finishSpawnRemitCleanup: SyncEngine['spawnSessionWithRemit']
+        }).finishSpawnRemitCleanup,
         buildSpawnRemitSuccess: (SyncEngine.prototype as unknown as {
             buildSpawnRemitSuccess: SyncEngine['spawnSessionWithRemit']
         }).buildSpawnRemitSuccess,
@@ -244,6 +247,55 @@ describe('spawnSessionWithRemit', () => {
 
         expect(result).toMatchObject({ type: 'success', sessionId: SESSION_ID })
         expect(cleanupSpawnedSession).not.toHaveBeenCalled()
+    })
+
+    it('reconciles persisted cleanup after a Hub restart', async () => {
+        const operation = {
+            remitId: REQUEST.remitId,
+            requestHash: hashRequest(REQUEST),
+            machineId: 'machine-1',
+            state: 'cleanup-needed' as const,
+            updatedAt: 1,
+            code: 'remit_delivery_failed',
+            error: 'delivery failed',
+            cleanedUp: false
+        }
+        const cleanupSpawnedSession = mock(async () => true)
+        const persistSpawnRemitOperation = mock(() => true)
+        const reconcile = (SyncEngine.prototype as unknown as {
+            reconcileSpawnRemitCleanups: () => Promise<void>
+        }).reconcileSpawnRemitCleanups
+        const taskMap = new Map()
+
+        await reconcile.call({
+            sessionCache: {
+                getSessions: () => [{
+                    id: SESSION_ID,
+                    namespace: 'default',
+                    metadata: { spawnRemitOperation: operation }
+                }]
+            },
+            getMachineByNamespace: () => ({ active: true }),
+            spawnRemitTails: taskMap,
+            finishSpawnRemitCleanup: (SyncEngine.prototype as unknown as {
+                finishSpawnRemitCleanup: (
+                    sessionId: string,
+                    namespace: string,
+                    operation: unknown
+                ) => Promise<unknown>
+            }).finishSpawnRemitCleanup,
+            cleanupSpawnedSession,
+            persistSpawnRemitOperation
+        } as unknown as SyncEngine)
+
+        expect(cleanupSpawnedSession).toHaveBeenCalledWith('machine-1', 'default', SESSION_ID)
+        expect(persistSpawnRemitOperation).toHaveBeenCalledWith(
+            SESSION_ID,
+            'default',
+            operation,
+            expect.objectContaining({ state: 'failed', cleanedUp: true })
+        )
+        expect(taskMap.size).toBe(0)
     })
 
     it('renames and delivers the remit only after the fresh child identity matches', async () => {

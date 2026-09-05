@@ -173,4 +173,31 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
         ])
     })
 
+    it('accepts and forwards retry ids for peer mutations', async () => {
+        await runHappyMcpStdioBridge([
+            '--url',
+            'http://127.0.0.1:43006',
+            '--tools',
+            'ping_peer,spawn_peer'
+        ])
+
+        const remitId = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
+        const pingArgs = {
+            sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2',
+            message: 'status',
+            remitId
+        }
+        const spawnArgs = { directory: '/tmp/project', message: 'work', remitId }
+        const schemaFor = (name: string) => harness.configs.get(name)?.inputSchema as {
+            safeParse: (value: unknown) => { success: boolean }
+        }
+
+        expect(schemaFor('ping_peer').safeParse(pingArgs).success).toBe(true)
+        expect(schemaFor('spawn_peer').safeParse(spawnArgs).success).toBe(true)
+        await harness.tools.get('ping_peer')?.(pingArgs)
+        await harness.tools.get('spawn_peer')?.(spawnArgs)
+        expect(harness.callTool).toHaveBeenCalledWith({ name: 'ping_peer', arguments: pingArgs })
+        expect(harness.callTool).toHaveBeenCalledWith({ name: 'spawn_peer', arguments: spawnArgs })
+    })
+
 })

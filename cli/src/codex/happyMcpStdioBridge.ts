@@ -206,6 +206,7 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
     const pingPeerInputSchema: z.ZodTypeAny = z.object({
       sessionId: z.string().uuid().describe(SESSION_ID_PARAM_DESCRIPTION),
       message: z.string().min(1).describe('Message text to deliver to the target session'),
+      remitId: z.string().uuid().optional().describe('Stable retry id; reuse only for the same target and message'),
     });
 
     if (toolNames.has('ping_peer')) {
@@ -246,6 +247,7 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
         .describe('Session directory mode'),
       permissionMode: PermissionModeSchema.optional()
         .describe('Permission mode for the new session.'),
+      remitId: z.string().uuid().optional().describe('Stable retry id; reuse only for the same spawn request'),
     });
 
     if (toolNames.has('spawn_peer')) {
