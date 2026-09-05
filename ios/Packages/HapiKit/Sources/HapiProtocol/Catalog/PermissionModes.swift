@@ -94,7 +94,7 @@ extension AgentFlavor {
         case .grok:
             return [.default, .auto, .plan, .bypassPermissions]
         case .opencode:
-            return [.default, .plan, .yolo]
+            return [.default, .yolo]
         case .dsh:
             return []
         case .agy:
