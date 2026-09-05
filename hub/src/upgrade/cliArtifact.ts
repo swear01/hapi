@@ -269,6 +269,7 @@ export function __resetArtifactFingerprintCacheForTests(): void {
 function listArtifactInputFiles(monorepoRoot: string): string[] {
     const treeRoots = [
         join(monorepoRoot, 'cli', 'src'),
+        join(monorepoRoot, 'cli', 'skills'),
         join(monorepoRoot, 'hub', 'src'),
         join(monorepoRoot, 'shared', 'src'),
         join(monorepoRoot, 'cli', 'tools'),

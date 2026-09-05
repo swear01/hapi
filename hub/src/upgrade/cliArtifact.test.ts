@@ -292,6 +292,21 @@ describe('fingerprintArtifactInputs / isArtifactCacheFresh', () => {
         }
     })
 
+    it('changes when the bundled native skill changes at the same version', () => {
+        const root = mkdtempSync(join(tmpdir(), 'hapi-artifact-skill-fp-'))
+        try {
+            const skillDir = join(root, 'cli', 'skills', 'hapi-session-runtime')
+            mkdirSync(skillDir, { recursive: true })
+            const skillPath = join(skillDir, 'SKILL.md')
+            writeFileSync(skillPath, 'first bundled skill')
+            const before = fingerprintArtifactInputs(root)
+            writeFileSync(skillPath, 'updated bundled skill')
+            expect(fingerprintArtifactInputs(root)).not.toBe(before)
+        } finally {
+            rmSync(root, { recursive: true, force: true })
+        }
+    })
+
     it('changes when cli bunfig.toml changes at the same package version', () => {
         const root = mkdtempSync(join(tmpdir(), 'hapi-artifact-bunfig-fp-'))
         try {
