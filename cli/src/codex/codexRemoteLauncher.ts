@@ -18,6 +18,7 @@ import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import {
     buildThreadStartParams,
+    withoutCodexModelOverrides,
     buildTurnStartParams,
     type CodexContextManagementConfig
 } from './utils/appServerConfig';
@@ -32,6 +33,7 @@ import {
     type RemoteLauncherExitReason
 } from '@/modules/common/remote/RemoteLauncherBase';
 import { CodexConversationHistory } from './conversationHistory';
+import { LunaReserve } from './utils/lunaReserve';
 
 
 
@@ -351,6 +353,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             onSwitchToLocal: () => this.handleSwitchFromUi()
         });
     }
+
+    private lunaReserve: LunaReserve | null = null;
+    private usageTimer: ReturnType<typeof setInterval> | null = null;
 
     protected async runMainLoop(): Promise<void> {
         const session = this.session;
@@ -2903,7 +2908,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             const isThreadStatusFailure = msgType === 'task_failed' && msg.terminal_source === 'thread_status';
             const error = msgType === 'task_failed' ? asString(msg.error) : null;
             const explicitlyNonRetryable = msgType === 'task_failed'
-                && (msg.retryable === false || isPolicyBlockedCodexFailure(msg, error));
+                && (msg.retryable === false || isPolicyBlockedCodexFailure(msg, error)
+                    || msg.codex_error_info === 'usageLimitExceeded' || this.lunaReserve?.blocksReplay() === true);
 
             if (deferredThreadStatusFailure && isTerminalEvent && !isThreadStatusFailure) {
                 const sameThread = !eventThreadId || eventThreadId === deferredThreadStatusFailure.threadId;
@@ -3484,7 +3490,37 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         };
 
+        const reserve = new LunaReserve(appServerClient, (model, effort, serviceTier) => {
+            session.setModel(model);
+            session.setModelReasoningEffort(effort);
+            if (serviceTier !== undefined) session.setServiceTier(serviceTier);
+            session.pushKeepAlive();
+        }, (codexUsage) => {
+            session.client.updateAgentState(state => ({ ...state, codexUsage }));
+        }, message => session.sendSessionEvent({ type: 'message', message }));
+        this.lunaReserve = reserve;
+        const currentMode = (): EnhancedMode => ({
+            permissionMode: 'default',
+            model: session.getModel() ?? undefined,
+            modelReasoningEffort: session.getModelReasoningEffort() ?? undefined,
+            collaborationMode: session.getCollaborationMode() ?? 'default',
+            serviceTier: session.getServiceTier()
+        });
+        const refreshUsage = () => reserve.refresh(currentMode(), () => !turnInFlight && !this.shouldExit);
+
         appServerClient.setNotificationHandler((method, params) => {
+            if (method === 'account/rateLimits/updated' || method === 'account/updated') {
+                reserve.invalidate();
+                void refreshUsage();
+            }
+            if (method === 'thread/settings/updated') {
+                const record = asRecord(params);
+                const threadId = asString(record?.threadId);
+                if (threadId) reserve.onSettings(threadId, record?.threadSettings);
+            }
+            if (method === 'error' || method === 'turn/completed') {
+                reserve.invalidate();
+            }
             if (method === 'skills/changed') {
                 void refreshNativeSkills(true).catch((error) => {
                     logger.debug(`[Codex] failed to refresh skills: ${errorMessage(error)}`);
@@ -3513,6 +3549,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         logger.debug('[Codex] Failed to handle app-server event:', error instanceof Error ? error.message : String(error));
                     });
                 }
+            }
+            if (method === 'error' || method === 'turn/completed') {
+                void (codexEventQueue ?? Promise.resolve()).then(refreshUsage);
             }
         });
 
@@ -3569,6 +3608,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 experimentalApi: true
             }
         });
+
+        await reserve.initialize();
+        this.usageTimer = setInterval(() => { void refreshUsage(); }, 60_000);
+        this.usageTimer.unref();
 
         let contextManagementConfig: CodexContextManagementConfig | undefined;
         try {
@@ -3752,7 +3795,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             try {
                 const resumeResponse = await appServerClient.resumeThread({
                     threadId: resumeCandidate,
-                    ...threadParams
+                    ...withoutCodexModelOverrides(threadParams)
                 }, {
                     signal: this.abortController.signal
                 });
@@ -3760,6 +3803,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const resumeThread = resumeRecord ? asRecord(resumeRecord.thread) : null;
                 const threadId = asString(resumeThread?.id) ?? resumeCandidate;
                 applyResolvedModel(resumeRecord?.model);
+                reserve.attach(threadId, resumeResponse);
                 this.currentThreadId = threadId;
                 this.conversationHistory.setThreadId(threadId);
                 void this.conversationHistory.probeCapabilities().catch(() => {});
@@ -3817,7 +3861,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 try {
                     const resumeResponse = await appServerClient.resumeThread({
                         threadId: resumeCandidate,
-                        ...threadParams
+                        ...withoutCodexModelOverrides(threadParams)
                     }, {
                         signal: this.abortController.signal
                     });
@@ -3825,6 +3869,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     const resumeThread = resumeRecord ? asRecord(resumeRecord.thread) : null;
                     const threadId = asString(resumeThread?.id) ?? resumeCandidate;
                     applyResolvedModel(resumeRecord?.model);
+                    reserve.attach(threadId, resumeResponse);
                     this.currentThreadId = threadId;
                     this.conversationHistory.setThreadId(threadId);
                     void this.conversationHistory.probeCapabilities().catch(() => {});
@@ -3856,6 +3901,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const thread = threadRecord ? asRecord(threadRecord.thread) : null;
                 const threadId = asString(thread?.id);
                 applyResolvedModel(threadRecord?.model);
+                if (threadId) reserve.attach(threadId, threadResponse);
                 if (!threadId) {
                     throw new Error('app-server thread/start did not return thread.id');
                 }
@@ -4111,13 +4157,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                             const response = shouldForkImportedSource
                                 ? await appServerClient.forkThread({
                                     threadId: resumeCandidate,
-                                    ...threadParams
+                                    ...withoutCodexModelOverrides(threadParams)
                                 }, {
                                     signal: this.abortController.signal
                                 })
                                 : await appServerClient.resumeThread({
                                     threadId: resumeCandidate,
-                                    ...threadParams
+                                    ...withoutCodexModelOverrides(threadParams)
                                 }, {
                                     signal: this.abortController.signal
                                 });
@@ -4125,6 +4171,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                             const responseThread = responseRecord ? asRecord(responseRecord.thread) : null;
                             threadId = asString(responseThread?.id) ?? resumeCandidate;
                             applyResolvedModel(responseRecord?.model);
+                            if (threadId) reserve.attach(threadId, response, shouldForkImportedSource ? resumeCandidate : undefined);
                             logger.debug(shouldForkImportedSource
                                 ? `[Codex] Forked imported app-server thread ${resumeCandidate} -> ${threadId}`
                                 : `[Codex] Resumed app-server thread ${threadId}`);
@@ -4150,6 +4197,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         const thread = threadRecord ? asRecord(threadRecord.thread) : null;
                         threadId = asString(thread?.id);
                         applyResolvedModel(threadRecord?.model);
+                        if (threadId) reserve.attach(threadId, threadResponse);
                         if (!threadId) {
                             throw new Error('app-server thread/start did not return thread.id');
                         }
@@ -4173,13 +4221,16 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     }
                 }
 
+                await refreshUsage();
                 setTurnInFlight(true);
                 this.conversationHistory.setBusy(true);
                 allowAnonymousTerminalEvent = false;
-                const mode = {
+                const mode = reserve.turnMode({
                     ...message.mode,
-                    model: session.getModel() ?? message.mode.model
-                };
+                    model: session.getModel() ?? message.mode.model,
+                    modelReasoningEffort: session.getModelReasoningEffort() ?? undefined,
+                    serviceTier: session.getServiceTier() ?? message.mode.serviceTier
+                });
                 usageModel = typeof mode.model === 'string' && mode.model.trim()
                     ? mode.model.trim()
                     : null;
@@ -4317,6 +4368,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
+        if (this.usageTimer) clearInterval(this.usageTimer);
+        this.usageTimer = null;
+        this.lunaReserve?.dispose();
+        this.lunaReserve = null;
         this.appServerClient.setTransportAbandonedHandler(null);
         this.appServerClient.setStderrHandler(null);
         try {
