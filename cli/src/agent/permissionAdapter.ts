@@ -6,6 +6,7 @@ import { deriveToolName } from '@/agent/utils';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import {
     resolveToolAutoApprovalDecision,
+    preservePermissionInput,
     type AutoApprovalDecision
 } from '@/modules/common/permission/BasePermissionHandler';
 
@@ -19,7 +20,7 @@ function deriveToolInput(request: PermissionRequest): unknown {
     if (request.rawInput !== undefined) {
         return request.rawInput;
     }
-    return request.rawOutput;
+    return preservePermissionInput(request.rawOutput);
 }
 
 function pickOptionId(
@@ -158,7 +159,6 @@ export class PermissionAdapter {
         if (decision === 'abort') {
             await this.backend.cancelPrompt(pending.sessionId);
             await this.backend.respondToPermission(pending.sessionId, pending, { outcome: 'cancelled' });
-            await this.cancelAll('User aborted');
         } else if (outcome) {
             await this.backend.respondToPermission(pending.sessionId, pending, outcome);
         }

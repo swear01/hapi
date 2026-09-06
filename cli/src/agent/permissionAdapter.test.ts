@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiSessionClient } from '@/api/apiSession';
+import { AgentStateSchema } from '@/api/types';
 import type { AgentBackend, PermissionRequest, PermissionResponse } from './types';
 import { PermissionAdapter } from './permissionAdapter';
 
@@ -305,6 +306,59 @@ describe('PermissionAdapter', () => {
                 status: 'approved',
                 decision: 'approved'
             }
+        });
+    });
+
+    it('preserves unavailable input through pending and completed JSON state', async () => {
+        const harness = createHarness();
+
+        harness.emitPermissionRequest(buildRequest({
+            id: 'perm-no-input',
+            rawInput: undefined,
+            rawOutput: undefined
+        }));
+
+        const pending = JSON.parse(JSON.stringify(harness.getAgentState()));
+        expect(AgentStateSchema.parse(pending).requests?.['perm-no-input'].arguments).toBeNull();
+
+        await harness.rpcHandlers.get('permission')?.({
+            id: 'perm-no-input',
+            approved: false,
+            decision: 'denied'
+        });
+
+        const completed = AgentStateSchema.parse(JSON.parse(JSON.stringify(harness.getAgentState())));
+        expect(completed.requests).toEqual({});
+        expect(completed.completedRequests?.['perm-no-input'].arguments).toBeNull();
+    });
+
+    it('keeps concurrent requests visible and resolves only the selected request', async () => {
+        const harness = createHarness();
+        harness.emitPermissionRequest(buildRequest({ id: 'perm-a', rawInput: undefined }));
+        harness.emitPermissionRequest(buildRequest({ id: 'perm-b', rawInput: { path: 'other.txt' } }));
+
+        await harness.rpcHandlers.get('permission')?.({ id: 'perm-a', approved: true, decision: 'approved' });
+
+        expect(harness.getAgentState().requests).toEqual({
+            'perm-b': expect.objectContaining({ arguments: { path: 'other.txt' } })
+        });
+        expect(harness.getAgentState().completedRequests).toHaveProperty('perm-a');
+        expect(harness.getAgentState().completedRequests).not.toHaveProperty('perm-b');
+    });
+
+    it('cancels only the addressed request when an abort decision arrives', async () => {
+        const harness = createHarness();
+        harness.emitPermissionRequest(buildRequest({ id: 'perm-a' }));
+        harness.emitPermissionRequest(buildRequest({ id: 'perm-b' }));
+
+        await harness.rpcHandlers.get('permission')?.({ id: 'perm-a', approved: false, decision: 'abort' });
+
+        expect(harness.getAgentState().requests).toHaveProperty('perm-b');
+        expect(harness.getAgentState().completedRequests).toHaveProperty('perm-a');
+        expect(harness.respondCalls).toHaveLength(1);
+        expect(harness.respondCalls[0]).toMatchObject({
+            request: expect.objectContaining({ id: 'perm-a' }),
+            response: { outcome: 'cancelled' }
         });
     });
 

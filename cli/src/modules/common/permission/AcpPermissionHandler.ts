@@ -5,6 +5,7 @@ import { deriveToolName } from '@/agent/utils'
 import { logger } from '@/ui/logger'
 import {
     BasePermissionHandler,
+    preservePermissionInput,
     type AutoApprovalDecision,
     type PendingPermissionRequest,
     type PermissionCompletion
@@ -18,7 +19,7 @@ interface PermissionResponseMessage {
 }
 
 function deriveToolInput(request: PermissionRequest): unknown {
-    return request.rawInput !== undefined ? request.rawInput : request.rawOutput
+    return preservePermissionInput(request.rawInput !== undefined ? request.rawInput : request.rawOutput)
 }
 
 function pickOptionId(request: PermissionRequest, preferredKinds: string[]): string | null {

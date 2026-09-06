@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ApiSessionClient } from '@/api/apiSession'
-import type { AgentState } from '@/api/types'
+import { AgentStateSchema, type AgentState } from '@/api/types'
 import type { AgentBackend, PermissionRequest, PermissionResponse } from '@/agent/types'
 import { GrokPermissionHandler } from './permissionHandler'
 
@@ -75,6 +75,19 @@ describe('GrokPermissionHandler', () => {
         harness.emit(request())
         expect(harness.responses).toEqual([])
         expect(harness.state().requests?.['perm-1']).toMatchObject({ tool: 'Shell' })
+    })
+
+    it('keeps unavailable ACP input in serialized pending and completed state', async () => {
+        const harness = createHarness('default')
+        harness.emit({ ...request(), rawInput: undefined, rawOutput: undefined })
+
+        expect(AgentStateSchema.parse(JSON.parse(JSON.stringify(harness.state()))).requests?.['perm-1'].arguments)
+            .toBeNull()
+
+        await harness.rpcHandlers.get('permission')?.({ id: 'perm-1', approved: true, decision: 'approved' })
+
+        expect(AgentStateSchema.parse(JSON.parse(JSON.stringify(harness.state()))).completedRequests?.['perm-1'].arguments)
+            .toBeNull()
     })
 
     it('auto-approves bypassPermissions with the advertised allow-always option', async () => {

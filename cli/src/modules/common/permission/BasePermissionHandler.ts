@@ -11,6 +11,10 @@ type RpcHandlerManagerLike = {
 
 export type AutoApprovalDecision = 'approved' | 'approved_for_session';
 
+export function preservePermissionInput(input: unknown): unknown {
+    return input === undefined ? null : input;
+}
+
 export type AutoApprovalRuleSet = {
     alwaysToolNameHints?: string[];
     alwaysToolIdHints?: string[];
@@ -179,7 +183,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
                 ...currentState.requests,
                 [id]: {
                     tool: toolName,
-                    arguments: input,
+                    arguments: preservePermissionInput(input),
                     createdAt: Date.now()
                 }
             }
