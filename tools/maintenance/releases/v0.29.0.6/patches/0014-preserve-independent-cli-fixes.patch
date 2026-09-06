@@ -1,0 +1,313 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 6 Sep 2026 13:11:00 +0800
+Subject: [PATCH] Preserve independent CLI fixes while excluding jobs
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index 119d238b2c188b9c81414f183ba2048a978c8938..23feb3d6aa74db3bf6a79a7c65f6d70abf9b4456 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -5,6 +5,15 @@ import { AcpStdioTransport, type AcpStderrError } from './AcpStdioTransport';
+ import { AcpMessageHandler, type AcpTextChunkMode } from './AcpMessageHandler';
+ import { ACP_SESSION_UPDATE_TYPES } from './constants';
+ import { thinkingHintFromSessionUpdate } from './shouldBumpThinkingFromSessionUpdate';
++
++/** Why the backend is bumping/clearing hub thinking — launchers filter chatter here (#1553). */
++export type AgentActivitySource =
++    | 'state_update_running'
++    | 'state_update_idle'
++    | 'state_update_requires_action'
++    | 'permission';
++
++export type AgentActivityListener = (thinking: boolean, source: AgentActivitySource) => void;
+ import { logger } from '@/ui/logger';
+ import { withRetry } from '@/utils/time';
+ import packageJson from '../../../../package.json';
+@@ -106,7 +115,7 @@ export class AcpSdkBackend implements AgentBackend {
+     private usageUpdateListener: ((msg: AgentMessage) => void) | null = null;
+     private sessionInfoUpdateListener: ((update: AcpSessionInfoUpdate) => void) | null = null;
+     /** Fired on foreground ACP state / permission so launchers can bump hub thinking (#1470). */
+-    private agentActivityListener: ((thinking: boolean) => void) | null = null;
++    private agentActivityListener: AgentActivityListener | null = null;
+     /** Debounce timer for state_update running → thinking (#1502 chatter). */
+     private runningThinkingTimer: ReturnType<typeof setTimeout> | null = null;
+     /** Cursor chatters running↔idle ~1–2s; require sustained running before bump. */
+@@ -515,7 +524,7 @@ export class AcpSdkBackend implements AgentBackend {
+      * Usage/title noise does not fire. Launchers should ignore no-ops when
+      * session.thinking already matches.
+      */
+-    setAgentActivityListener(listener: ((thinking: boolean) => void) | null): void {
++    setAgentActivityListener(listener: AgentActivityListener | null): void {
+         this.agentActivityListener = listener;
+     }
+ 
+@@ -1062,7 +1071,7 @@ export class AcpSdkBackend implements AgentBackend {
+             if (this.isProcessingMessage) {
+                 return;
+             }
+-            this.agentActivityListener(false);
++            this.agentActivityListener(false, 'state_update_idle');
+             return;
+         }
+ 
+@@ -1073,13 +1082,17 @@ export class AcpSdkBackend implements AgentBackend {
+             }
+             this.runningThinkingTimer = setTimeout(() => {
+                 this.runningThinkingTimer = null;
+-                this.agentActivityListener?.(true);
++                this.agentActivityListener?.(true, 'state_update_running');
+             }, AcpSdkBackend.RUNNING_THINKING_DEBOUNCE_MS);
+             return;
+         }
+ 
+         this.clearRunningThinkingTimer();
+-        this.agentActivityListener(true);
++        const source: AgentActivitySource = update.sessionUpdate === 'state_update'
++            && update.state === 'requires_action'
++            ? 'state_update_requires_action'
++            : 'state_update_running';
++        this.agentActivityListener(true, source);
+     }
+ 
+     private forwardSessionInfoUpdate(sessionId: string | null, update: unknown): void {
+@@ -1385,7 +1398,7 @@ export class AcpSdkBackend implements AgentBackend {
+         if (this.permissionHandler) {
+             try {
+                 // Permission prompts imply the agent is awake (#1470).
+-                this.agentActivityListener?.(true);
++                this.agentActivityListener?.(true, 'permission');
+                 this.permissionHandler(request);
+             } catch (error) {
+                 this.pendingPermissions.delete(toolCallId);
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+index 7ca06a80fbe002bceb03787697937e000056f5c7..f4efe243948897cf3a94a8d003c1d7de25e02f6f 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.test.ts
+@@ -56,7 +56,7 @@ const harness = vi.hoisted(() => ({
+     rejectPromptOnCancel: null as Error | null,
+     disconnectError: null as Error | null,
+     overlayCleanup: null as ReturnType<typeof vi.fn> | null,
+-    agentActivityListener: null as ((thinking: boolean) => void) | null
++    agentActivityListener: null as ((thinking: boolean, source?: string) => void) | null
+ }));
+ 
+ const legacyLauncher = vi.hoisted(() => vi.fn());
+@@ -194,7 +194,7 @@ vi.mock('./utils/cursorAcpBackend', () => ({
+                 harness.stderrErrorHandler = handler;
+             }),
+             setUsageUpdateListener: vi.fn(),
+-            setAgentActivityListener: vi.fn((listener: ((thinking: boolean) => void) | null) => {
++            setAgentActivityListener: vi.fn((listener: ((thinking: boolean, source?: string) => void) | null) => {
+                 harness.agentActivityListener = listener;
+             }),
+             setSessionInfoUpdateListener: vi.fn(),
+@@ -640,7 +640,7 @@ describe('cursorAcpRemoteLauncher', () => {
+         expect(legacyLauncher).not.toHaveBeenCalled();
+     });
+ 
+-    it('applies harness thinking transitions once per edge (#1470)', async () => {
++    it('ignores ambient state_update_running without a prompt; still applies idle/permission (#1553)', async () => {
+         const keepAlive = vi.fn();
+         const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
+         const client = {
+@@ -661,20 +661,74 @@ describe('cursorAcpRemoteLauncher', () => {
+             permissionMode: 'default'
+         });
+         session.onSessionFoundWithProtocol = vi.fn();
+-        // Keep the launcher in the main loop long enough to wire the listener.
+         const runPromise = cursorAcpRemoteLauncher(session);
+         await vi.waitFor(() => expect(harness.agentActivityListener).not.toBeNull());
+ 
+         expect(session.thinking).toBe(false);
+         keepAlive.mockClear();
+ 
+-        harness.agentActivityListener!(true);
+-        harness.agentActivityListener!(true);
+-        harness.agentActivityListener!(false);
++        // Ambient Cursor chatter while queue-idle must not float Working.
++        harness.agentActivityListener!(true, 'state_update_running');
++        expect(session.thinking).toBe(false);
++        expect(keepAlive).not.toHaveBeenCalled();
++
++        harness.agentActivityListener!(true, 'permission');
++        expect(session.thinking).toBe(true);
++        expect(keepAlive).toHaveBeenCalled();
+ 
++        keepAlive.mockClear();
++        harness.agentActivityListener!(false, 'state_update_idle');
+         expect(session.thinking).toBe(false);
+-        expect(keepAlive.mock.calls.map((call) => call[0])).toEqual([true, false]);
++        expect(keepAlive).toHaveBeenCalled();
++
++        queue.close();
++        await runPromise;
++    });
++
++    it('applies state_update_running while a prompt is in flight (#1470)', async () => {
++        const keepAlive = vi.fn();
++        const queue = new MessageQueue2<EnhancedMode>(() => 'mode');
++        const client = {
++            ...makeClient(),
++            keepAlive
++        } as unknown as ApiSessionClient;
++        const session = new CursorSession({
++            api: {} as never,
++            client,
++            path: '/tmp/project',
++            logPath: '/tmp/log',
++            sessionId: null,
++            messageQueue: queue,
++            onModeChange: vi.fn(),
++            mode: 'remote',
++            startedBy: 'runner',
++            startingMode: 'remote',
++            permissionMode: 'default'
++        });
++        session.onSessionFoundWithProtocol = vi.fn();
++
++        harness.deferPrompt = new Promise<void>((resolve) => {
++            harness.releasePrompt = resolve;
++        });
++        queue.push('do work', { permissionMode: 'default' });
++
++        const runPromise = cursorAcpRemoteLauncher(session);
++        await vi.waitFor(() => expect(harness.promptCalls).toBeGreaterThan(0));
++        await vi.waitFor(() => expect(harness.agentActivityListener).not.toBeNull());
+ 
++        // Prompt start already set thinking; clear so we can assert the listener edge.
++        session.onThinkingChange(false);
++        keepAlive.mockClear();
++        harness.agentActivityListener!(true, 'state_update_running');
++        expect(session.thinking).toBe(true);
++        expect(keepAlive).toHaveBeenCalled();
++
++        harness.agentActivityListener!(true, 'state_update_requires_action');
++        expect(session.thinking).toBe(true);
++
++        harness.releasePrompt?.();
++        harness.releasePrompt = null;
++        harness.deferPrompt = null;
+         queue.close();
+         await runPromise;
+     });
+diff --git a/cli/src/cursor/cursorAcpRemoteLauncher.ts b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+index ef40c10832f33f56187943af8d161259afd2bffb..ab25ca21e883fa4bb1d012b5a7046a586674afad 100644
+--- a/cli/src/cursor/cursorAcpRemoteLauncher.ts
++++ b/cli/src/cursor/cursorAcpRemoteLauncher.ts
+@@ -921,11 +921,17 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
+     }
+ 
+     /**
+-     * #1470 / #1502: ACP foreground state → hub thinking via keepalive.
+-     * Background tool/content updates are ignored; running is debounced in the backend.
++     * #1470 / #1502 / #1553: ACP foreground state → hub thinking via keepalive.
++     * Ignore ambient Cursor `state_update_running` when no HAPI prompt is in
++     * flight — that chatter otherwise floats quiet sessions into Working.
++     * Prompt-owned running,
++     * permission, and requires_action still bump thinking.
+      */
+     private wireAgentActivityThinking(backend: AcpSdkBackend, session: CursorSession): void {
+-        backend.setAgentActivityListener((thinking) => {
++        backend.setAgentActivityListener((thinking, source) => {
++            if (source === 'state_update_running' && !this.promptInFlight) {
++                return;
++            }
+             if (session.thinking !== thinking) {
+                 session.onThinkingChange(thinking);
+             }
+diff --git a/cli/src/utils/cliArgs.test.ts b/cli/src/utils/cliArgs.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..068e82b8100e47b0626fdd80dff11dcfc9f5aa0c
+--- /dev/null
++++ b/cli/src/utils/cliArgs.test.ts
+@@ -0,0 +1,13 @@
++import { describe, expect, it } from 'vitest'
++import { normalizeCliArgs } from './cliArgs'
++
++describe('normalizeCliArgs', () => {
++    it.each([
++        [['bun', 'src/index.ts', '--', 'auth', 'login'], ['auth', 'login']],
++        [['bun', 'src/index.ts', 'codex', '--', '--model', 'o3'], ['codex', '--model', 'o3']],
++        [[process.execPath, '--', 'auth', 'login'], ['auth', 'login']],
++        [[process.execPath, 'codex', '--', '--model', 'o3'], ['codex', '--model', 'o3']],
++    ])('preserves the HAPI command while stripping runtime separators: %j', (argv, expected) => {
++        expect(normalizeCliArgs(argv)).toEqual(expected)
++    })
++})
+diff --git a/cli/src/utils/cliArgs.ts b/cli/src/utils/cliArgs.ts
+index 5470e90d95647e8e6e6f202bc114ef1c65f0b60b..476fad74ee579d424c0c34900653ed682d5072ab 100644
+--- a/cli/src/utils/cliArgs.ts
++++ b/cli/src/utils/cliArgs.ts
+@@ -34,6 +34,33 @@ function hasRuntimeWrapper(preArgs: string[], execPath: string, execBase: string
+     return isEntrypointPath(preArgs[1], bunMain);
+ }
+ 
++/** Drop bun/exec/entrypoint prefix so we can see if a HAPI command already follows. */
++function stripRuntimePrefix(
++    args: string[],
++    execPath: string,
++    execBase: string,
++    bunMain: string
++): string[] {
++    let startIndex = 0;
++    while (startIndex < args.length) {
++        const value = args[startIndex] || '';
++        const nextValue = args[startIndex + 1] || '';
++        if (
++            value === 'bun' &&
++            (nextValue === bunMain || nextValue === execPath || nextValue === execBase || isEntrypointPath(nextValue, bunMain))
++        ) {
++            startIndex += 2;
++            continue;
++        }
++        if (value === execPath || value === execBase || isEntrypointPath(value, bunMain)) {
++            startIndex += 1;
++            continue;
++        }
++        break;
++    }
++    return args.slice(startIndex);
++}
++
+ export function normalizeCliArgs(rawArgv: string[]): string[] {
+     if (!Array.isArray(rawArgv) || rawArgv.length === 0) {
+         return [];
+@@ -47,30 +74,19 @@ export function normalizeCliArgs(rawArgv: string[]): string[] {
+     if (dashIndex >= 0) {
+         const preArgs = rawArgv.slice(0, dashIndex);
+         const postArgs = rawArgv.slice(dashIndex + 1);
+-        argv = hasRuntimeWrapper(preArgs, execPath, execBase, bunMain)
+-            ? postArgs
+-            : [...preArgs, ...postArgs];
+-    }
+-
+-    let startIndex = 0;
+-    while (startIndex < argv.length) {
+-        const value = argv[startIndex] || '';
+-        const nextValue = argv[startIndex + 1] || '';
++        const normalizedPre = stripRuntimePrefix(preArgs, execPath, execBase, bunMain);
+         if (
+-            value === 'bun' &&
+-            (nextValue === bunMain || nextValue === execPath || nextValue === execBase || isEntrypointPath(nextValue, bunMain))
++            hasRuntimeWrapper(preArgs, execPath, execBase, bunMain)
++            && normalizedPre.length === 0
+         ) {
+-            startIndex += 2;
+-            continue;
++            // `bun src/index.ts -- auth login` → only postArgs (runtime handoff).
++            argv = postArgs;
++        } else {
++            argv = [...preArgs, ...postArgs];
+         }
+-        if (value === execPath || value === execBase || isEntrypointPath(value, bunMain)) {
+-            startIndex += 1;
+-            continue;
+-        }
+-        break;
+     }
+ 
+-    return argv.slice(startIndex);
++    return stripRuntimePrefix(argv, execPath, execBase, bunMain);
+ }
+ 
+ export function getCliArgs(): string[] {
