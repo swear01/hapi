@@ -119,6 +119,23 @@ describe('Luna Reserve authoritative transitions', () => {
         expect(f.usage().reserve).toBeNull();
     });
 
+    it('copies the native fork return target without deleting the parent recovery record', async () => {
+        const f = await fixture(); await f.enter();
+        const forkId = '01900000-0000-7000-8000-000000000002';
+        f.reserve.attach(forkId, { model: 'gpt-reserve', reasoningEffort: 'medium', thread: { forkedFromId: threadId } });
+        await f.reserve.refresh(mode, () => true);
+        const parent = join(f.dir, 'tui-luna-reserve', `${threadId}.json`);
+        const child = join(f.dir, 'tui-luna-reserve', `${forkId}.json`);
+        expect(await readFile(child, 'utf8')).toBe(await readFile(parent, 'utf8'));
+        f.response.ordinaryUsageAllowed = true; f.response.rateLimitUpsell = null;
+        await f.reserve.refresh(mode, () => true);
+        expect(f.client.updateThreadSettings).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: forkId, model: 'gpt-5.6' }));
+        expect(JSON.parse(await readFile(parent, 'utf8')).model).toBe('gpt-5.6');
+        await expect(readFile(child, 'utf8')).rejects.toThrow();
+        f.reserve.detach();
+        expect(f.usage()).toBeNull();
+    });
+
     it('keeps selection and visibility unchanged on a rejected settings update without looping', async () => {
         const f = await fixture();
         f.client.updateThreadSettings.mockRejectedValue(new Error('Method not found'));

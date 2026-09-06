@@ -89,6 +89,8 @@ export class LunaReserve {
     ) {}
 
     async initialize(): Promise<void> {
+        this.supported = false;
+        this.models = [];
         try {
             const response = UsageSchema.parse(await this.client.readAccountRateLimits());
             this.snapshot = response;
@@ -110,9 +112,9 @@ export class LunaReserve {
     }
 
     attach(threadId: string, response: unknown, forkedFrom?: string): void {
-        const parsed = z.object({ model: z.string(), reasoningEffort: z.string().nullish(), serviceTier: z.string().nullish() }).safeParse(response);
+        const parsed = z.object({ model: z.string(), reasoningEffort: z.string().nullish(), serviceTier: z.string().nullish(), thread: z.object({ forkedFromId: z.string().nullish() }).optional() }).safeParse(response);
         this.threadId = threadId;
-        this.forkedFrom = forkedFrom ?? null;
+        this.forkedFrom = forkedFrom ?? (parsed.success ? parsed.data.thread?.forkedFromId : null) ?? null;
         this.invalidate();
         this.snapshot = null;
         if (parsed.success) {
@@ -141,6 +143,14 @@ export class LunaReserve {
 
     invalidate(): void {
         this.revision++;
+    }
+
+    detach(): void {
+        this.invalidate();
+        this.threadId = null;
+        this.settings = null;
+        this.snapshot = null;
+        this.publishUsage();
     }
 
     dispose(): void {
@@ -279,12 +289,6 @@ export class LunaReserve {
             }
             this.publishUsage();
         }
-    }
-
-    blocksReplay(): boolean {
-        return this.settings?.model === RESERVE_MODEL
-            || BannerSchema.safeParse(this.snapshot?.rateLimitUpsell).success
-            || this.snapshot?.ordinaryUsageAllowed === false;
     }
 
     turnMode(mode: EnhancedMode): EnhancedMode {

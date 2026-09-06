@@ -1860,6 +1860,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         };
 
+        let hasThread = false;
         let activeMessage: QueuedMessage | null = null;
         let sameThreadRetryAttempt = 0;
         let sameThreadCompactAttempt = 0;
@@ -1914,6 +1915,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (session.thinking) session.onThinkingChange(false);
             recoveryInFlight = false;
             activeMessage = null;
+            hasThread = false;
+            this.lunaReserve?.detach();
+            this.currentThreadId = null;
             this.currentTurnId = null;
             wakeLoop();
         });
@@ -2045,6 +2049,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     experimentalApi: true
                 }
             });
+            await this.lunaReserve?.initialize();
         };
 
         // Returns 'accepted' when the thread contains the steered user message
@@ -2909,7 +2914,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             const error = msgType === 'task_failed' ? asString(msg.error) : null;
             const explicitlyNonRetryable = msgType === 'task_failed'
                 && (msg.retryable === false || isPolicyBlockedCodexFailure(msg, error)
-                    || msg.codex_error_info === 'usageLimitExceeded' || this.lunaReserve?.blocksReplay() === true);
+                    || msg.codex_error_info === 'usageLimitExceeded'
+                    || /usage limit|rate limit|quota/i.test(error ?? ''));
 
             if (deferredThreadStatusFailure && isTerminalEvent && !isThreadStatusFailure) {
                 const sameThread = !eventThreadId || eventThreadId === deferredThreadStatusFailure.threadId;
@@ -3701,7 +3707,6 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             logger.debug(`[Codex] collaborationMode/list failed: ${errorMessage(error)}`);
         }
 
-        let hasThread = false;
         let pending: QueuedMessage | null = null;
         let suppressReadyForAdminCommand = false;
 
@@ -3841,7 +3846,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         };
 
-        const ensureThreadForGoal = async (mode: EnhancedMode): Promise<string | null> => {
+        const ensureThread = async (mode: EnhancedMode): Promise<string | null> => {
             if (this.currentThreadId && this.currentThreadId !== invalidThreadId) {
                 hasThread = true;
                 return this.currentThreadId;
@@ -3877,8 +3882,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     hasThread = true;
                     return threadId;
                 } catch (error) {
-                    logger.warn(`[Codex] Failed to resume app-server thread ${resumeCandidate} for /goal`, error);
-                    sendVisibleStatus(`Goal failed: Codex conversation ${resumeCandidate} could not be resumed`);
+                    logger.warn(`[Codex] Failed to resume app-server thread ${resumeCandidate}`, error);
+                    sendVisibleStatus(`Codex conversation ${resumeCandidate} could not be resumed`);
                     return null;
                 }
             }
@@ -3955,7 +3960,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 return true;
             }
 
-            const threadId = await ensureThreadForGoal(message.mode);
+            const threadId = await ensureThread(message.mode);
             if (!threadId) {
                 return true;
             }
@@ -4032,6 +4037,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 invalidThreadId = null;
                 hasThread = false;
                 session.resetCodexThread();
+                reserve.detach();
                 sendVisibleStatus('Context was reset');
                 return true;
             }
@@ -4066,10 +4072,19 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             return true;
         };
 
+        const reconcileIdleThread = async () => {
+            if (!hasThread && session.queue.size() === 0 && session.sessionId && session.sessionId !== session.sourceSessionId) {
+                await ensureThread(currentMode());
+                await refreshUsage();
+            }
+        };
+        await reconcileIdleThread();
+
         while (!this.shouldExit) {
             logActiveHandles('loop-top');
             if (!appServerClient.isConnected() || !appServerClient.isInitialized()) {
                 await ensureAppServerInitialized();
+                await reconcileIdleThread();
             }
             if (pendingSteerReconciliations.size > 0) {
                 await runSteerReconciliation();
@@ -4221,15 +4236,21 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     }
                 }
 
-                await refreshUsage();
+                const beforeRefresh = currentMode();
+                await reserve.refresh(message.mode, () => !turnInFlight && !this.shouldExit);
+                const afterRefresh = currentMode();
+                const transitioned = beforeRefresh.model !== afterRefresh.model
+                    || beforeRefresh.modelReasoningEffort !== afterRefresh.modelReasoningEffort
+                    || beforeRefresh.serviceTier !== afterRefresh.serviceTier;
                 setTurnInFlight(true);
                 this.conversationHistory.setBusy(true);
                 allowAnonymousTerminalEvent = false;
                 const mode = reserve.turnMode({
                     ...message.mode,
-                    model: session.getModel() ?? message.mode.model,
-                    modelReasoningEffort: session.getModelReasoningEffort() ?? undefined,
-                    serviceTier: session.getServiceTier() ?? message.mode.serviceTier
+                    model: transitioned ? afterRefresh.model : message.mode.model ?? afterRefresh.model,
+                    modelReasoningEffort: transitioned ? afterRefresh.modelReasoningEffort
+                        : message.mode.modelReasoningEffort ?? afterRefresh.modelReasoningEffort,
+                    serviceTier: transitioned ? afterRefresh.serviceTier : message.mode.serviceTier ?? afterRefresh.serviceTier
                 });
                 usageModel = typeof mode.model === 'string' && mode.model.trim()
                     ? mode.model.trim()
