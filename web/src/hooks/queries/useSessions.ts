@@ -1,8 +1,7 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import type { SessionSummary, SessionsResponse } from '@/types/api'
+import type { SessionSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
-import { reconcileAttachedJobsFromCache } from './reconcileAttachedJobs'
 
 export function useSessions(api: ApiClient | null): {
     sessions: SessionSummary[]
@@ -10,16 +9,13 @@ export function useSessions(api: ApiClient | null): {
     error: string | null
     refetch: () => Promise<unknown>
 } {
-    const queryClient = useQueryClient()
     const query = useQuery({
         queryKey: queryKeys.sessions,
         queryFn: async () => {
             if (!api) {
                 throw new Error('API unavailable')
             }
-            const fetched = await api.getSessions()
-            const cached = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions)
-            return reconcileAttachedJobsFromCache(fetched, cached)
+            return await api.getSessions()
         },
         enabled: Boolean(api),
     })

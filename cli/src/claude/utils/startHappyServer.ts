@@ -27,13 +27,6 @@ import {
     SESSION_ID_PARAM_DESCRIPTION,
     SPAWN_PEER_TOOL_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation'
-import {
-    SESSION_JOB_TOOL_DESCRIPTION,
-    SESSION_JOB_TOOL_NAME,
-    handleSessionJobTool,
-    sessionJobInputSchema,
-    type SessionJobToolArgs,
-} from "@/modules/sessionJob/sessionJobMcp";
 import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol/modes'
 import { PermissionModeSchema } from '@hapi/protocol/schemas'
 import { PingPeerError, formatInspectPeerReport, inspectPeer, pingPeer } from "@/modules/pingPeer/pingPeer";
@@ -421,19 +414,6 @@ function createHapiMcpServer(
         }
     });
 
-    mcp.registerTool<any, any>(SESSION_JOB_TOOL_NAME, {
-        description: SESSION_JOB_TOOL_DESCRIPTION,
-        title: 'Session-Attached Job',
-        inputSchema: sessionJobInputSchema,
-    }, async (args: SessionJobToolArgs) => {
-        logger.debug('[hapiMCP] session_job:', args.action, args.jobKey);
-        const result = await handleSessionJobTool(args, client.sessionId);
-        return {
-            content: [{ type: 'text' as const, text: result.text }],
-            isError: result.isError,
-        };
-    });
-
     mcp.registerTool<any, any>('inspect_peer', {
         description: INSPECT_PEER_TOOL_DESCRIPTION,
         title: 'Inspect Peer Session',
@@ -593,8 +573,8 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
     }));
 
     const toolNames = enableChangeTitle
-        ? ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer', SESSION_JOB_TOOL_NAME]
-        : ['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer', SESSION_JOB_TOOL_NAME];
+        ? ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer']
+        : ['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
     }

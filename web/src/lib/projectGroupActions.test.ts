@@ -24,8 +24,6 @@ function makeSession(overrides: Partial<SessionSummary>): SessionSummary {
         backgroundTaskCount: 0,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,
-        attachedJob: null,
-        attachedJobUpdatedAt: 0,
         model: null,
         effort: null,
         ...overrides,
@@ -112,23 +110,6 @@ describe('getProjectGroupActionAvailability', () => {
         ])
         expect(canArchiveAll).toBe(false)
         expect(canDelete).toBe(true)
-    })
-
-    it('blocks delete when an archived session has a running attached job', () => {
-        const withRunningJob = archived('a')
-        withRunningJob.attachedJob = {
-            key: 'job',
-            label: 'Still running',
-            status: 'running',
-            heartbeatAt: 1,
-            startedAt: 1,
-            updatedAt: 1,
-        }
-        const { canDelete } = getProjectGroupActionAvailability([
-            withRunningJob,
-            archived('b')
-        ])
-        expect(canDelete).toBe(false)
     })
 
     it('blocks delete when an active session is present', () => {

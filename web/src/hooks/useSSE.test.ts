@@ -179,8 +179,6 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
         backgroundTaskCount: 0,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,
-        attachedJob: null,
-        attachedJobUpdatedAt: 0,
         model: null,
         effort: null,
         ...overrides
@@ -339,23 +337,6 @@ describe('isRenderIrrelevantPatch', () => {
         expect(isRenderIrrelevantPatch(current, next)).toBe(false)
     })
 
-
-    it('reports attachedJob.startedAt changes as relevant', () => {
-        const job = {
-            key: 'beets',
-            label: 'beets',
-            status: 'running' as const,
-            heartbeatAt: 100,
-            startedAt: 100,
-            updatedAt: 100
-        }
-        const current = makeSummary({ attachedJob: job })
-        const next = makeSummary({
-            attachedJob: { ...job, startedAt: 50 },
-            activeAt: 11_000
-        })
-        expect(isRenderIrrelevantPatch(current, next)).toBe(false)
-    })
 })
 
 describe('isRenderIrrelevantSessionPatch', () => {

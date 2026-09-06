@@ -1,4 +1,4 @@
-import type { AgentState, AttachedJob, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
+import type { AgentState, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
 import { isKnownFlavor } from './flavors'
 import type { AgentFlavor } from './modes'
 
@@ -86,13 +86,6 @@ export type SessionSummary = {
     uninvokedScheduledMessageCount?: number
     /** Epoch ms of the soonest uninvoked future scheduled message, or null. */
     nextScheduledAt: number | null
-    /**
-     * Primary running session-attached job (tiann/hapi#1404), or null.
-     * Independent of agent `active` / thinking — work that outlives the agent.
-     */
-    attachedJob: AttachedJob | null
-    /** Watermark for versioned `attachedJob` SSE patches (dual EventSource race). */
-    attachedJobUpdatedAt: number
     /** Epoch ms of the latest scratchlist entry mutation, when present. */
     scratchlistUpdatedAt?: number
     model: string | null
@@ -237,16 +230,7 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
     }
 }
 
-export function toSessionSummary(
-    session: Session,
-    extras?: {
-        attachedJob?: AttachedJob | null
-        /** Explicit SSE/list watermark; required when attachedJob is null so
-         *  a REST refetch does not reset the client gate to 0. */
-        attachedJobUpdatedAt?: number
-    }
-): SessionSummary {
-    const attachedJob = extras?.attachedJob ?? null
+export function toSessionSummary(session: Session): SessionSummary {
     return {
         id: session.id,
         active: session.active,
@@ -266,10 +250,6 @@ export function toSessionSummary(
         backgroundTaskCount: session.backgroundTaskCount ?? 0,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,
-        attachedJob,
-        attachedJobUpdatedAt: extras?.attachedJobUpdatedAt
-            ?? attachedJob?.updatedAt
-            ?? 0,
         model: session.model,
         modelReasoningEffort: session.modelReasoningEffort,
         effort: session.effort

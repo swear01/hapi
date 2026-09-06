@@ -20,7 +20,6 @@ import { notifyCommand } from './notify'
 import { hubCommand } from './hub'
 import { pingPeerCommand } from './pingPeer'
 import { inspectPeerCommand } from './inspectPeer'
-import { jobCommand } from './job'
 import { spawnPeerCommand } from './spawnPeer'
 import { abortPeerCommand, archivePeerCommand, deletePeerCommand, stopPeerCommand } from './stopPeer'
 import { waitPeerCommand } from './waitPeer'
@@ -67,7 +66,6 @@ const COMMANDS: CommandDefinition[] = [
     machinesCommand,
     pingPeerCommand,
     inspectPeerCommand,
-    jobCommand,
     spawnPeerCommand,
     abortPeerCommand,
     stopPeerCommand,

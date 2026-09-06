@@ -5,15 +5,6 @@ import { AcpStdioTransport, type AcpStderrError } from './AcpStdioTransport';
 import { AcpMessageHandler, type AcpTextChunkMode } from './AcpMessageHandler';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
 import { thinkingHintFromSessionUpdate } from './shouldBumpThinkingFromSessionUpdate';
-
-/** Why the backend is bumping/clearing hub thinking — launchers filter chatter here (#1553). */
-export type AgentActivitySource =
-    | 'state_update_running'
-    | 'state_update_idle'
-    | 'state_update_requires_action'
-    | 'permission';
-
-export type AgentActivityListener = (thinking: boolean, source: AgentActivitySource) => void;
 import { logger } from '@/ui/logger';
 import { withRetry } from '@/utils/time';
 import packageJson from '../../../../package.json';
@@ -115,7 +106,7 @@ export class AcpSdkBackend implements AgentBackend {
     private usageUpdateListener: ((msg: AgentMessage) => void) | null = null;
     private sessionInfoUpdateListener: ((update: AcpSessionInfoUpdate) => void) | null = null;
     /** Fired on foreground ACP state / permission so launchers can bump hub thinking (#1470). */
-    private agentActivityListener: AgentActivityListener | null = null;
+    private agentActivityListener: ((thinking: boolean) => void) | null = null;
     /** Debounce timer for state_update running → thinking (#1502 chatter). */
     private runningThinkingTimer: ReturnType<typeof setTimeout> | null = null;
     /** Cursor chatters running↔idle ~1–2s; require sustained running before bump. */
@@ -524,7 +515,7 @@ export class AcpSdkBackend implements AgentBackend {
      * Usage/title noise does not fire. Launchers should ignore no-ops when
      * session.thinking already matches.
      */
-    setAgentActivityListener(listener: AgentActivityListener | null): void {
+    setAgentActivityListener(listener: ((thinking: boolean) => void) | null): void {
         this.agentActivityListener = listener;
     }
 
@@ -1071,7 +1062,7 @@ export class AcpSdkBackend implements AgentBackend {
             if (this.isProcessingMessage) {
                 return;
             }
-            this.agentActivityListener(false, 'state_update_idle');
+            this.agentActivityListener(false);
             return;
         }
 
@@ -1082,17 +1073,13 @@ export class AcpSdkBackend implements AgentBackend {
             }
             this.runningThinkingTimer = setTimeout(() => {
                 this.runningThinkingTimer = null;
-                this.agentActivityListener?.(true, 'state_update_running');
+                this.agentActivityListener?.(true);
             }, AcpSdkBackend.RUNNING_THINKING_DEBOUNCE_MS);
             return;
         }
 
         this.clearRunningThinkingTimer();
-        const source: AgentActivitySource = update.sessionUpdate === 'state_update'
-            && update.state === 'requires_action'
-            ? 'state_update_requires_action'
-            : 'state_update_running';
-        this.agentActivityListener(true, source);
+        this.agentActivityListener(true);
     }
 
     private forwardSessionInfoUpdate(sessionId: string | null, update: unknown): void {
@@ -1398,7 +1385,7 @@ export class AcpSdkBackend implements AgentBackend {
         if (this.permissionHandler) {
             try {
                 // Permission prompts imply the agent is awake (#1470).
-                this.agentActivityListener?.(true, 'permission');
+                this.agentActivityListener?.(true);
                 this.permissionHandler(request);
             } catch (error) {
                 this.pendingPermissions.delete(toolCallId);

@@ -68,7 +68,6 @@ describe('startHappyServer skill_lookup', () => {
     async function connect(enableSkillLookup = true): Promise<Client> {
         sendAgentMessage = vi.fn()
         const sessionClient = {
-            sessionId: 'test-session-id',
             updateMetadata: vi.fn(),
             sendAgentMessage,
             sendClaudeSessionMessage: vi.fn()
@@ -139,7 +138,6 @@ describe('startHappyServer skill_lookup', () => {
             'display_media',
             'ping_peer',
             'spawn_peer',
-            'session_job',
             'inspect_peer'
         ].sort())
     })
@@ -259,7 +257,6 @@ describe('startHappyServer skill_lookup', () => {
 
     it('does not expose change_title when native ACP titles are enabled', async () => {
         const sessionClient = {
-            sessionId: 'test-session-id',
             updateMetadata: vi.fn(),
             sendAgentMessage: vi.fn(),
             sendClaudeSessionMessage: vi.fn()
@@ -272,7 +269,7 @@ describe('startHappyServer skill_lookup', () => {
         await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url)))
         const tools = await mcp.listTools()
 
-        expect(server.toolNames).toEqual(['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer', 'session_job'])
+        expect(server.toolNames).toEqual(['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'])
         expect(tools.tools.map((tool) => tool.name).sort()).toEqual([...server.toolNames].sort())
     })
 
@@ -288,12 +285,10 @@ describe('toClaudeAllowedHapiMcpTools', () => {
             'ping_peer',
             'inspect_peer',
             'spawn_peer',
-            'session_job',
             'skill_lookup'
         ])).toEqual([
             'mcp__hapi__change_title',
             'mcp__hapi__display_image',
-            'mcp__hapi__session_job',
             'mcp__hapi__skill_lookup'
         ])
         expect(toClaudeAllowedHapiMcpTools(['display_video'])).not.toContain('mcp__hapi__display_video')

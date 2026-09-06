@@ -763,16 +763,9 @@ export function getSessionsByNamespace(db: Database, namespace: string): StoredS
 }
 
 export function deleteSession(db: Database, id: string, namespace: string): boolean {
-    // Refuse while a running attached job exists — CASCADE would erase the live
-    // meter for idle (active=false) outliving work. Callers must transfer/clear first.
-    const result = db.prepare(`
-        DELETE FROM sessions
-        WHERE id = ? AND namespace = ?
-          AND NOT EXISTS (
-              SELECT 1 FROM session_jobs
-              WHERE session_id = sessions.id AND status = 'running'
-          )
-    `).run(id, namespace)
+    const result = db.prepare(
+        'DELETE FROM sessions WHERE id = ? AND namespace = ?'
+    ).run(id, namespace)
     return result.changes > 0
 }
 
@@ -796,20 +789,11 @@ export function deleteArchivedSessions(
                 && isPlainObject(metadata)
                 && metadata.lifecycleState === 'archived'
         })
-        const hasRunningJob = db.prepare(`
-            SELECT 1 FROM session_jobs
-            WHERE session_id IN (${placeholders}) AND status = 'running'
-            LIMIT 1
-        `).get(...uniqueIds)
-        if (!allArchived || hasRunningJob) return null
+        if (!allArchived) return null
 
         const deletedRows = db.prepare(`
             DELETE FROM sessions
             WHERE namespace = ? AND id IN (${placeholders})
-              AND NOT EXISTS (
-                  SELECT 1 FROM session_jobs
-                  WHERE session_id = sessions.id AND status = 'running'
-              )
             RETURNING id
         `).all(namespace, ...uniqueIds) as Array<{ id: string }>
         if (deletedRows.length !== uniqueIds.length) {

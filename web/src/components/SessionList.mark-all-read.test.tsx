@@ -13,8 +13,6 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
     return {
         active: false,
         thinking: false,
-        attachedJob: null,
-        attachedJobUpdatedAt: 0,
         activeAt: 0,
         updatedAt: 0,
         metadata: null,

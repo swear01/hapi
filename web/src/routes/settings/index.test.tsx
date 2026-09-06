@@ -97,12 +97,7 @@ vi.mock('@/hooks/useShowActiveSessionsOnly', () => ({
 }))
 
 vi.mock('@/hooks/usePinInProgressSessions', () => ({
-    usePinInProgressSessions: () => ({
-        pinInProgressMode: 'off' as const,
-        setPinInProgressMode: vi.fn(),
-        pinInProgressSessions: false,
-        setPinInProgressSessions: vi.fn(),
-    }),
+    usePinInProgressSessions: () => ({ pinInProgressSessions: false, setPinInProgressSessions: vi.fn() }),
 }))
 
 vi.mock('@/hooks/useSessionHeaderMetadata', () => ({

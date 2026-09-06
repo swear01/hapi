@@ -49,7 +49,6 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, OpenCode, or DeepSeek Harness 
 
 The peer commands reject prefixes. Successful `--json` output has `ok: true`; errors use `ok: false`, a stable error code, and a non-zero exit status.
 
-- `hapi job set|update|clear|list|run` - Attach long-running outliving work to a session so the list UI shows progress while the agent is idle (`tiann/hapi#1404`). Prefer `"$HAPI_SESSION_ID"`. Heartbeat via `update` (or `run`); honest `--remaining` or `--done`/`--total` (omit counts if unknown — never invent a percent). Late-attach clock fix: `set --started-at <epoch-ms>` or clear+set. See `docs/guide/session-jobs.md` and `hapi job --help`.
 
 ### Resume a remote session locally
 

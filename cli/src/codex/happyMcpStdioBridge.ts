@@ -26,17 +26,12 @@ import {
   SESSION_ID_PARAM_DESCRIPTION,
   SPAWN_PEER_TOOL_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation';
-import {
-  SESSION_JOB_TOOL_DESCRIPTION,
-  SESSION_JOB_TOOL_NAME,
-  sessionJobInputSchema,
-} from '@/modules/sessionJob/sessionJobMcp';
 
 import { SESSION_NAME_MAX_LENGTH } from '@hapi/protocol';
 import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol/modes';
 import { PermissionModeSchema } from '@hapi/protocol/schemas';
 
-const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer', SESSION_JOB_TOOL_NAME];
+const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'];
 
 function parseArgs(argv: string[]): { url: string | null; toolNames: Set<string> } {
   let url: string | null = null;
@@ -305,34 +300,6 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
             return {
               content: [
                 { type: 'text' as const, text: `Failed to inspect peer: ${error instanceof Error ? error.message : String(error)}` },
-              ],
-              isError: true,
-            };
-          }
-        }
-      );
-    }
-
-    if (toolNames.has(SESSION_JOB_TOOL_NAME)) {
-      server.registerTool<any, any>(
-        SESSION_JOB_TOOL_NAME,
-        {
-          description: SESSION_JOB_TOOL_DESCRIPTION,
-          title: 'Session-Attached Job',
-          inputSchema: sessionJobInputSchema,
-        },
-        async (args: Record<string, unknown>) => {
-          try {
-            const client = await ensureHttpClient();
-            const response = await client.callTool({ name: SESSION_JOB_TOOL_NAME, arguments: args });
-            return response as any;
-          } catch (error) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to run session_job: ${error instanceof Error ? error.message : String(error)}`,
-                },
               ],
               isError: true,
             };

@@ -1114,37 +1114,6 @@ describe('replaceSessionTodos: watermark ratchet (PR #897 rewind race)', () => {
         store.close()
     })
 
-    it('leaves every member when an archived session owns a running job', () => {
-        const store = makeStore()
-        const blocked = store.sessions.getOrCreateSession(
-            'atomic-running-job',
-            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
-            null,
-            'default',
-            undefined,
-            undefined,
-            undefined,
-            'atomic-running-job'
-        )
-        const sibling = store.sessions.getOrCreateSession(
-            'atomic-running-job-sibling',
-            { path: '/tmp/project', host: 'localhost', lifecycleState: 'archived' },
-            null,
-            'default',
-            undefined,
-            undefined,
-            undefined,
-            'atomic-running-job-sibling'
-        )
-        store.sessionJobs.upsert(blocked.id, 'job', { label: 'Still running', status: 'running' })
-
-        expect(store.sessions.deleteArchivedSessions([blocked.id, sibling.id], 'default')).toBeNull()
-        expect(store.sessions.getSession(blocked.id)).not.toBeNull()
-        expect(store.sessions.getSession(sibling.id)).not.toBeNull()
-        expect(store.sessionJobs.get(blocked.id, 'job')?.status).toBe('running')
-        store.close()
-    })
-
     it('rejects a cross-namespace member without deleting either row', () => {
         const store = makeStore()
         const local = store.sessions.getOrCreateSession(

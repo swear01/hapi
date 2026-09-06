@@ -32,9 +32,6 @@ const AUTO_APPROVE_EXACT_TOOL_NAMES = new Set([
     'happy__skill_lookup',
     'mcp__hapi__skill_lookup',
 ]);
-// session_job is intentionally NOT in this name-only allowlist: ACP titles are
-// spoofable (tool-name derivation prefers backend title). Auto-approve only via
-// trusted HAPI bridge config (Codex tools map / Claude --allowedTools).
 // ping_peer / inspect_peer / spawn_peer intentionally omitted from always-approve:
 // they can resume+inject into another session, read peer histories, or create a
 // new session with an injected remit, so permission modes must still gate them.

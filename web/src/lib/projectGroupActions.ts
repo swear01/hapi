@@ -35,7 +35,7 @@ export function getProjectGroupActionAvailability(
     return {
         canArchiveAll: sessions.some(isSessionArchivable),
         canDelete: sessions.length > 0 && sessions.every(
-            (session) => isSessionArchived(session) && session.attachedJob?.status !== 'running'
+            (session) => isSessionArchived(session)
         )
     }
 }

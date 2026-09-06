@@ -11,7 +11,6 @@ import { PushStore } from './pushStore'
 import { FcmStore } from './fcmStore'
 import { NotificationPreferenceStore } from './notificationPreferenceStore'
 import { ScratchlistStore } from './scratchlistStore'
-import { SessionJobsStore } from './sessionJobsStore'
 import { SessionStore } from './sessionStore'
 import { UserStore } from './userStore'
 import { UsageStore } from './usageStore'
@@ -25,7 +24,6 @@ export type {
     StoredPushSubscription,
     StoredFcmDevice,
     StoredScratchlistEntry,
-    StoredSessionJob,
     StoredSession,
     StoredUser,
     VersionedUpdateResult
@@ -37,7 +35,6 @@ export { PushStore } from './pushStore'
 export { FcmStore } from './fcmStore'
 export { NotificationPreferenceStore } from './notificationPreferenceStore'
 export { ScratchlistStore } from './scratchlistStore'
-export { SessionJobsStore } from './sessionJobsStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 export { UsageStore } from './usageStore'
@@ -78,7 +75,6 @@ export class Store {
     readonly push: PushStore
     readonly fcm: FcmStore
     readonly scratchlist: ScratchlistStore
-    readonly sessionJobs: SessionJobsStore
     readonly usage: UsageStore
     readonly workGraph: WorkGraphStore
     readonly notificationPrefs: NotificationPreferenceStore
@@ -252,7 +248,6 @@ export class Store {
         this.push = new PushStore(this.db)
         this.fcm = new FcmStore(this.db)
         this.scratchlist = new ScratchlistStore(this.db)
-        this.sessionJobs = new SessionJobsStore(this.db)
         this.usage = new UsageStore(this.db)
         this.workGraph = new WorkGraphStore(this.db)
         this.notificationPrefs = new NotificationPreferenceStore(this.db)
