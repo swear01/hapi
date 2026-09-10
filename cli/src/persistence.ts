@@ -9,7 +9,7 @@ import { readFile, writeFile, mkdir, open, unlink, rename, chmod } from 'node:fs
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs'
 import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
 import { configuration } from '@/configuration'
-import { getHapiRunnerProcessIdentity, isProcessAlive } from '@/utils/process';
+import { getHapiRunnerProcessIdentity } from '@/utils/process';
 
 interface Settings {
   // This ID is used as the actual database ID on the server
@@ -233,7 +233,6 @@ export async function acquireRunnerLock(
             if (identity === 'dead' || identity === 'foreign') {
               // Process is gone or belongs to another program; reclaim stale lock.
               unlinkSync(configuration.runnerLockFile);
-              attempt -= 1;
               continue; // Retry acquisition
             }
           }

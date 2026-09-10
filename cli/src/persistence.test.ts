@@ -62,7 +62,7 @@ describe('acquireRunnerLock', () => {
         writeFileSync(join(dir, 'runner.state.json.lock'), '3286')
         identityMock.mockReturnValue('foreign')
 
-        const handle = await acquireRunnerLock(1)
+        const handle = await acquireRunnerLock(2)
 
         expect(handle).not.toBeNull()
         await releaseRunnerLock(handle!)
