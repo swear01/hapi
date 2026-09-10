@@ -2,14 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
-const { dir } = vi.hoisted(() => {
+const { dir, identityMock } = vi.hoisted(() => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { mkdtempSync } = require('node:fs') as typeof import('node:fs')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { tmpdir } = require('node:os') as typeof import('node:os')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { join: pathJoin } = require('node:path') as typeof import('node:path')
-    return { dir: mkdtempSync(pathJoin(tmpdir(), 'hapi-cli-settings-')) }
+    return { dir: mkdtempSync(pathJoin(tmpdir(), 'hapi-cli-settings-')), identityMock: vi.fn() }
 })
 
 vi.mock('@/configuration', () => ({
@@ -23,7 +23,12 @@ vi.mock('@/configuration', () => ({
     },
 }))
 
-import { updateSettings } from './persistence'
+vi.mock('@/utils/process', () => ({
+    getHapiRunnerProcessIdentity: identityMock,
+    isProcessAlive: vi.fn(),
+}))
+
+import { acquireRunnerLock, releaseRunnerLock, updateSettings } from './persistence'
 
 describe('updateSettings', () => {
     afterEach(() => {
@@ -44,5 +49,29 @@ describe('updateSettings', () => {
         ).rejects.toThrow()
 
         expect(readFileSync(settingsFile, 'utf8')).toBe('{not-json')
+    })
+})
+
+describe('acquireRunnerLock', () => {
+    afterEach(() => {
+        rmSync(join(dir, 'runner.state.json.lock'), { force: true })
+        vi.clearAllMocks()
+    })
+
+    it('reclaims a lock whose live PID belongs to an unrelated process', async () => {
+        writeFileSync(join(dir, 'runner.state.json.lock'), '3286')
+        identityMock.mockReturnValue('foreign')
+
+        const handle = await acquireRunnerLock(1)
+
+        expect(handle).not.toBeNull()
+        await releaseRunnerLock(handle!)
+    })
+
+    it('keeps a lock owned by a healthy runner', async () => {
+        writeFileSync(join(dir, 'runner.state.json.lock'), '3286')
+        identityMock.mockReturnValue('runner')
+
+        await expect(acquireRunnerLock(1)).resolves.toBeNull()
     })
 })
