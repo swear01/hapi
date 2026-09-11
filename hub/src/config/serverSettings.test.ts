@@ -11,9 +11,19 @@ function makeTempDir(): string {
 describe('loadServerSettings', () => {
     let dir: string | null = null
     const originalBackgroundOnly = process.env.SERVERCHAN_BACKGROUND_ONLY
+    const originalWxPusherAppToken = process.env.WXPUSHER_APP_TOKEN
+    const originalWxPusherUids = process.env.WXPUSHER_UIDS
+    const originalWxPusherTopicIds = process.env.WXPUSHER_TOPIC_IDS
+    const originalWxPusherNotification = process.env.WXPUSHER_NOTIFICATION
+    const originalWxPusherBackgroundOnly = process.env.WXPUSHER_BACKGROUND_ONLY
 
     beforeEach(() => {
         delete process.env.SERVERCHAN_BACKGROUND_ONLY
+        delete process.env.WXPUSHER_APP_TOKEN
+        delete process.env.WXPUSHER_UIDS
+        delete process.env.WXPUSHER_TOPIC_IDS
+        delete process.env.WXPUSHER_NOTIFICATION
+        delete process.env.WXPUSHER_BACKGROUND_ONLY
     })
 
     afterEach(() => {
@@ -25,6 +35,31 @@ describe('loadServerSettings', () => {
             delete process.env.SERVERCHAN_BACKGROUND_ONLY
         } else {
             process.env.SERVERCHAN_BACKGROUND_ONLY = originalBackgroundOnly
+        }
+        if (originalWxPusherAppToken === undefined) {
+            delete process.env.WXPUSHER_APP_TOKEN
+        } else {
+            process.env.WXPUSHER_APP_TOKEN = originalWxPusherAppToken
+        }
+        if (originalWxPusherUids === undefined) {
+            delete process.env.WXPUSHER_UIDS
+        } else {
+            process.env.WXPUSHER_UIDS = originalWxPusherUids
+        }
+        if (originalWxPusherTopicIds === undefined) {
+            delete process.env.WXPUSHER_TOPIC_IDS
+        } else {
+            process.env.WXPUSHER_TOPIC_IDS = originalWxPusherTopicIds
+        }
+        if (originalWxPusherNotification === undefined) {
+            delete process.env.WXPUSHER_NOTIFICATION
+        } else {
+            process.env.WXPUSHER_NOTIFICATION = originalWxPusherNotification
+        }
+        if (originalWxPusherBackgroundOnly === undefined) {
+            delete process.env.WXPUSHER_BACKGROUND_ONLY
+        } else {
+            process.env.WXPUSHER_BACKGROUND_ONLY = originalWxPusherBackgroundOnly
         }
     })
 
@@ -73,6 +108,28 @@ describe('loadServerSettings', () => {
         expect(result.sources.serverChanBackgroundOnly).toBe('env')
     })
 
+    it('loads the title provider block from settings.json without persisting environment values', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            titleProvider: {
+                baseUrl: 'https://settings.example/v1',
+                apiKey: 'settings-secret',
+                model: 'settings-model',
+                timeoutMs: 20_000
+            }
+        }))
+
+        const result = await loadServerSettings(dir)
+
+        expect(result.settings.titleProvider).toEqual({
+            baseUrl: 'https://settings.example/v1',
+            apiKey: 'settings-secret',
+            model: 'settings-model',
+            timeoutMs: 20_000
+        })
+        expect(result.savedToFile).toBe(false)
+    })
+
     it('rejects a non-boolean ServerChan background-only setting', async () => {
         dir = makeTempDir()
         writeFileSync(join(dir, 'settings.json'), JSON.stringify({
@@ -80,6 +137,164 @@ describe('loadServerSettings', () => {
         }))
 
         await expect(loadServerSettings(dir)).rejects.toThrow('serverChanBackgroundOnly must be a boolean')
+    })
+
+    it('defaults WxPusher settings to disabled without credentials or recipients', async () => {
+        dir = makeTempDir()
+
+        const result = await loadServerSettings(dir)
+
+        expect(result.settings.wxPusherAppToken).toBeNull()
+        expect(result.settings.wxPusherUids).toEqual([])
+        expect(result.settings.wxPusherTopicIds).toEqual([])
+        expect(result.settings.wxPusherNotification).toBe(true)
+        expect(result.settings.wxPusherBackgroundOnly).toBe(false)
+        expect(result.sources.wxPusherAppToken).toBe('default')
+        expect(result.sources.wxPusherUids).toBe('default')
+        expect(result.sources.wxPusherTopicIds).toBe('default')
+    })
+
+    it('loads WxPusher settings from environment variables with normalized recipients', async () => {
+        dir = makeTempDir()
+        process.env.WXPUSHER_APP_TOKEN = 'AT_TEST'
+        process.env.WXPUSHER_UIDS = ' UID_ONE,UID_TWO,UID_ONE '
+        process.env.WXPUSHER_TOPIC_IDS = '12, 34,12'
+        process.env.WXPUSHER_NOTIFICATION = 'false'
+        process.env.WXPUSHER_BACKGROUND_ONLY = 'true'
+
+        const result = await loadServerSettings(dir)
+
+        expect(result.settings.wxPusherAppToken).toBe('AT_TEST')
+        expect(result.settings.wxPusherUids).toEqual(['UID_ONE', 'UID_TWO'])
+        expect(result.settings.wxPusherTopicIds).toEqual([12, 34])
+        expect(result.settings.wxPusherNotification).toBe(false)
+        expect(result.settings.wxPusherBackgroundOnly).toBe(true)
+        expect(result.sources.wxPusherAppToken).toBe('env')
+        expect(result.sources.wxPusherUids).toBe('env')
+        expect(result.sources.wxPusherTopicIds).toBe('env')
+        expect(result.sources.wxPusherNotification).toBe('env')
+        expect(result.sources.wxPusherBackgroundOnly).toBe('env')
+    })
+
+    it('loads WxPusher settings from settings.json', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            wxPusherAppToken: 'AT_FILE',
+            wxPusherUids: ['UID_FILE'],
+            wxPusherTopicIds: [99],
+            wxPusherNotification: false,
+            wxPusherBackgroundOnly: true,
+        }))
+
+        const result = await loadServerSettings(dir)
+
+        expect(result.settings.wxPusherAppToken).toBe('AT_FILE')
+        expect(result.settings.wxPusherUids).toEqual(['UID_FILE'])
+        expect(result.settings.wxPusherTopicIds).toEqual([99])
+        expect(result.settings.wxPusherNotification).toBe(false)
+        expect(result.settings.wxPusherBackgroundOnly).toBe(true)
+        expect(result.sources.wxPusherAppToken).toBe('file')
+        expect(result.sources.wxPusherUids).toBe('file')
+        expect(result.sources.wxPusherTopicIds).toBe('file')
+    })
+
+    it('rejects invalid WxPusher topic IDs from the environment', async () => {
+        dir = makeTempDir()
+        process.env.WXPUSHER_TOPIC_IDS = '12,nope'
+
+        await expect(loadServerSettings(dir)).rejects.toThrow(
+            'WXPUSHER_TOPIC_IDS must be a comma-separated list of positive integers'
+        )
+    })
+
+    it('rejects invalid WxPusher recipient arrays from settings.json', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            wxPusherUids: ['UID_OK', 123],
+        }))
+
+        await expect(loadServerSettings(dir)).rejects.toThrow('wxPusherUids must be an array of strings')
+    })
+
+    it('defaults webhook settings to disabled', async () => {
+        dir = makeTempDir()
+
+        const result = await loadServerSettings(dir)
+
+        expect(result.settings.webhookUrl).toBeNull()
+        expect(result.settings.webhookKey).toBeNull()
+        expect(result.settings.webhookBackgroundOnly).toBe(false)
+        expect(result.sources.webhookUrl).toBe('default')
+    })
+
+    it('loads webhook settings from environment and persists them', async () => {
+        dir = makeTempDir()
+        const originalUrl = process.env.HAPI_WEBHOOK_URL
+        const originalKey = process.env.HAPI_WEBHOOK_KEY
+        process.env.HAPI_WEBHOOK_URL = 'https://relay.example.com/hook'
+        process.env.HAPI_WEBHOOK_KEY = 'secret'
+
+        try {
+            const result = await loadServerSettings(dir)
+
+            expect(result.settings.webhookUrl).toBe('https://relay.example.com/hook')
+            expect(result.settings.webhookKey).toBe('secret')
+            expect(result.sources.webhookUrl).toBe('env')
+
+            const persisted = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'))
+            expect(persisted.webhookUrl).toBe('https://relay.example.com/hook')
+        } finally {
+            if (originalUrl === undefined) delete process.env.HAPI_WEBHOOK_URL
+            else process.env.HAPI_WEBHOOK_URL = originalUrl
+            if (originalKey === undefined) delete process.env.HAPI_WEBHOOK_KEY
+            else process.env.HAPI_WEBHOOK_KEY = originalKey
+        }
+    })
+
+    it('rejects a non-boolean webhook background-only setting', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            webhookBackgroundOnly: 'false'
+        }))
+
+        await expect(loadServerSettings(dir)).rejects.toThrow('webhookBackgroundOnly must be a boolean')
+    })
+
+    it('rejects a non-http webhook URL from the environment', async () => {
+        dir = makeTempDir()
+        process.env.HAPI_WEBHOOK_URL = 'ftp://example.com/hook'
+        try {
+            await expect(loadServerSettings(dir)).rejects.toThrow('HAPI_WEBHOOK_URL must be a valid http(s) URL')
+        } finally {
+            delete process.env.HAPI_WEBHOOK_URL
+        }
+    })
+
+    it('rejects a non-http webhook URL from settings.json', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            webhookUrl: 'not-a-url'
+        }))
+
+        await expect(loadServerSettings(dir)).rejects.toThrow('webhookUrl must be a valid http(s) URL')
+    })
+
+    it('rejects a non-string webhook key from settings.json', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            webhookKey: 12345
+        }))
+
+        await expect(loadServerSettings(dir)).rejects.toThrow('webhookKey must be a string')
+    })
+
+    it('rejects a non-boolean webhook notification setting', async () => {
+        dir = makeTempDir()
+        writeFileSync(join(dir, 'settings.json'), JSON.stringify({
+            webhookNotification: 'false'
+        }))
+
+        await expect(loadServerSettings(dir)).rejects.toThrow('webhookNotification must be a boolean')
     })
 
     it('defaults push settings to null', async () => {

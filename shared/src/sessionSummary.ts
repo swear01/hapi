@@ -43,6 +43,20 @@ export type SessionSummaryMetadata = {
     lifecycleState?: string
     /** Loopback MCP URL when session CLI happy server is running (#956). */
     hapiMcpUrl?: string
+    lastModelError?: {
+        eventId: string
+        kind: string
+        transient: boolean
+        rawSnippet: string
+        atTs: number
+        priorAssistantClaimsDone: boolean
+        bridgedForEventId?: string
+        retriedAndFailed?: boolean
+        supersededByUserTurn?: boolean
+        bridgeable?: boolean
+        acknowledgedAt?: number
+        notifiedAt?: number
+    }
 }
 
 export type SessionSummary = {
@@ -70,8 +84,11 @@ export type SessionSummary = {
     pendingRequests: PendingRequest[]
     backgroundTaskCount: number
     futureScheduledMessageCount: number
+    uninvokedScheduledMessageCount?: number
     /** Epoch ms of the soonest uninvoked future scheduled message, or null. */
     nextScheduledAt: number | null
+    /** Epoch ms of the latest scratchlist entry mutation, when present. */
+    scratchlistUpdatedAt?: number
     model: string | null
     modelReasoningEffort?: string | null
     effort: string | null
@@ -162,7 +179,7 @@ const AGENT_SESSION_ID_FIELD_BY_FLAVOR: Partial<Record<AgentFlavor, keyof Metada
     pi: 'piSessionId'
 }
 
-function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
+export function getSummaryAgentSessionId(metadata: Metadata): string | undefined {
     const flavor = metadata.flavor
     if (isKnownFlavor(flavor)) {
         const flavorField = AGENT_SESSION_ID_FIELD_BY_FLAVOR[flavor]
@@ -199,7 +216,18 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
         worktree: metadata.worktree,
         agentSessionId: getSummaryAgentSessionId(metadata),
         lifecycleState: metadata.lifecycleState,
-        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined
+        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined,
+        // Omit lastUserMessage — bridge recovery text stays in full session
+        // metadata only; list/SSE summaries must not ship up to 32 KB of prompt.
+        lastModelError: metadata.lastModelError
+            ? (() => {
+                const {
+                    lastUserMessage: _omitLastUserMessage,
+                    ...summaryError
+                } = metadata.lastModelError
+                return summaryError
+            })()
+            : undefined
     }
 }
 

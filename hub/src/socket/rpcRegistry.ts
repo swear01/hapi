@@ -51,5 +51,9 @@ export class RpcRegistry {
     getSocketIdForMethod(method: string): string | null {
         return this.methodToSocketId.get(method) ?? null
     }
+
+    hasMethod(method: string): boolean {
+        return this.methodToSocketId.has(method)
+    }
 }
 

@@ -21,6 +21,8 @@ import { EventPublisher } from './eventPublisher'
 type StoredMessageForDelivery = ReturnType<Store['messages']['getMessages']>[number]
 type MessagePosition = { at: number; seq: number }
 
+export class MessageLocalIdConflictError extends Error {}
+
 function messagePosition(message: StoredMessageForDelivery): MessagePosition {
     return {
         at: message.invokedAt ?? message.createdAt,
@@ -522,6 +524,8 @@ export class MessageService {
                 if (settled.status === 'invoked') return settled
                 if (settled.status === 'absent') return { status: 'cancelled', localId }
             } else {
+                // Keep scheduled-mature suppression while held indeterminate.
+                // Explicit retry emits messages-requeued; consume/discard clears it.
                 this.publisher.emit({ type: 'messages-indeterminate', sessionId, localIds: [localId] })
             }
             return { status: 'busy', localId }
@@ -873,6 +877,27 @@ export class MessageService {
         )
         const actualSessionId = inserted.sessionId
         const msg = inserted.message
+        if (!inserted.inserted) {
+            const storedContent = isObject(msg.content) && isObject(msg.content.content)
+                ? msg.content.content
+                : null
+            const storedDeliveryMode = isObject(msg.content) && isObject(msg.content.meta)
+                ? msg.content.meta.deliveryMode
+                : undefined
+            // Deferred steer retries may downgrade to queue, never upgrade a queued message to steer.
+            if (storedContent?.type !== 'text'
+                || storedContent.text !== payload.text
+                || JSON.stringify(storedContent.attachments ?? []) !== JSON.stringify(payload.attachments ?? [])
+                || msg.scheduledAt !== (payload.scheduledAt ?? null)
+                || (deliveryMode === 'steer' && storedDeliveryMode !== 'steer')) {
+                throw new MessageLocalIdConflictError(
+                    'localId is already bound to a different message payload'
+                )
+            }
+            if (msg.invokedAt !== null) {
+                return { actualSessionId, createdAt: msg.createdAt }
+            }
+        }
         // A duplicate localId is an idempotent retry, not proof that the
         // original Pi turn still exists. Its stored row may retain steer
         // provenance from a POST whose response was lost, so deliver the

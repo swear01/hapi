@@ -93,7 +93,7 @@ export class AcpSdkBackend implements AgentBackend {
     private usageUpdateListener: ((msg: AgentMessage) => void) | null = null;
     private sessionInfoUpdateListener: ((update: AcpSessionInfoUpdate) => void) | null = null;
     /** Fired on foreground ACP state / permission so launchers can bump hub thinking (#1470). */
-    private agentActivityListener: ((thinking: boolean) => void) | null = null;
+    private agentActivityListener: ((thinking: boolean, source?: string) => void) | null = null;
     /** Debounce timer for state_update running → thinking (#1502 chatter). */
     private runningThinkingTimer: ReturnType<typeof setTimeout> | null = null;
     private lastForwardedUsageUpdate: AcpUsageUpdate | null = null;
@@ -524,7 +524,7 @@ export class AcpSdkBackend implements AgentBackend {
      * `false` = `state_update` idle (skipped while a HAPI prompt turn is still draining).
      * Launchers should ignore no-ops when session.thinking already matches.
      */
-    setAgentActivityListener(listener: ((thinking: boolean) => void) | null): void {
+    setAgentActivityListener(listener: ((thinking: boolean, source?: string) => void) | null): void {
         this.agentActivityListener = listener;
     }
 

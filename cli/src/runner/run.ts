@@ -21,12 +21,21 @@ import { withRetry } from '@/utils/time';
 import { isRetryableConnectionError } from '@/utils/errorUtils';
 
 import { cleanupRunnerState, getInstalledCliMtimeMs, isRunnerRunningCurrentlyInstalledHappyVersion, stopRunner, waitForRunnerHandoff } from './controlClient';
+import { createRunnerHandoffLockHooks, registerRunnerHandoffLockHooks, FAILED_HANDOFF_LOCK_DELAY_INCREMENT_MS, FAILED_HANDOFF_LOCK_MAX_ATTEMPTS } from './handoffLock';
 import { startRunnerControlServer } from './controlServer';
 import { createWorktree, removeWorktree, type WorktreeInfo } from './worktree';
 import { validateWorkspaceDirectory } from './validateWorkspaceDirectory';
 import { join } from 'path';
-import { buildMachineMetadata } from '@/agent/sessionFactory';
+import {
+  buildMachineMetadata,
+  HAPI_RUNNER_SESSION_TYPE_ENV,
+  HAPI_RUNNER_WORKTREE_NAME_ENV
+} from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
+import {
+    isRunnerSelfUpgradeInFlight,
+    shouldAttemptInstalledCliMtimeHandoff,
+} from '@/upgrade/selfUpgrade'
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
 import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
 import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
@@ -232,7 +241,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
     if (!runningRunnerVersionMatches) {
       logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
-      await stopRunner();
+      if (!(await stopRunner())) {
+        console.error('Failed to verify and stop existing runner');
+        throw new Error('Failed to verify and stop existing runner');
+      }
     } else {
       logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
       console.log('Runner already running with matching version');
@@ -256,7 +268,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
   // re-acquire it. After the null guard above, the initial handle is
   // non-null; the heartbeat path's failure branches either reassign to a
   // re-acquired handle or process.exit() before any subsequent release.
-  let runnerLockHandle = initialLockHandle;
+  let runnerLockHandle: typeof initialLockHandle | null = initialLockHandle;
+
+  registerRunnerHandoffLockHooks(createRunnerHandoffLockHooks(
+    () => runnerLockHandle,
+    (handle) => { runnerLockHandle = handle },
+  ));
 
   // At this point we should be safe to startup the runner:
   // 1. Not have a stale runner state
@@ -273,8 +290,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // tracking, so confirmed exit can be attributed to the requested HAPI row.
     const pidToRequestedSessionId = new Map<number, string>();
     const pidToConfirmedSessionId = new Map<number, string>();
-    // Only actual observed child exits may create a stop-session tombstone.
-    // Tracking loss (notably webhook timeout) is deliberately not evidence.
+    // Only actual observed child exits or pre-PID failures may create a
+    // stop-session tombstone. Tracking loss (notably webhook timeout) is not evidence.
     const exitTombstoneFile = `${configuration.runnerStateFile}.verified-exits.json`;
     const verifiedExitTombstones = (() => {
       try {
@@ -501,6 +518,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
       const agent = options.agent ?? 'claude';
+      const requestedId = options.existingSessionId ?? options.sessionId;
+      if (requestedId) invalidateVerifiedExit(requestedId);
+      const failBeforeChild = (result: SpawnSessionResult): SpawnSessionResult => {
+        if (requestedId) rememberVerifiedExit(requestedId);
+        return result;
+      };
       const availability = getAgentAvailability(agent);
       if (!availability.available) {
         const errorMessage = agentUnavailableMessage(availability);
@@ -509,19 +532,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           type: 'error',
           details: { message: errorMessage }
         });
-        return {
+        return failBeforeChild({
           type: 'error',
           errorMessage,
           code: 'agent_unavailable',
           agent
-        };
+        });
       }
       if (options.validateDirectory && !(await options.validateDirectory(directory))) {
-        return {
+        return failBeforeChild({
           type: 'error',
           errorMessage: 'Directory is outside this machine\'s workspace roots',
           code: 'outside_workspace_roots'
-        };
+        });
       }
       const yolo = options.yolo === true;
       const sessionType = options.sessionType ?? 'simple';
@@ -529,6 +552,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       let directoryCreated = false;
       let spawnDirectory = directory;
       let worktreeInfo: WorktreeInfo | null = null;
+      let cursorNativeWorktree = false;
       let happyProcess: ReturnType<typeof spawnHappyCLI> | null = null;
       let copiedCodexConfigPath: string | null = null;
 
@@ -552,17 +576,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         });
         if (validation.type === 'requestApproval') {
           logger.debug(`[RUNNER RUN] Directory creation not approved for: ${directory}`);
-          return {
+          return failBeforeChild({
             type: 'requestToApproveDirectoryCreation',
             directory
-          };
+          });
         }
         if (validation.type === 'error') {
           logger.debug(`[RUNNER RUN] Workspace directory validation failed: ${validation.errorMessage}`);
-          return {
+          return failBeforeChild({
             type: 'error',
             errorMessage: validation.errorMessage
-          };
+          });
         }
         directoryCreated = validation.created;
         if (validation.created) {
@@ -576,10 +600,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           logger.debug(`[RUNNER RUN] Worktree base directory exists: ${directory}`);
         } catch (error) {
           logger.debug(`[RUNNER RUN] Worktree base directory missing: ${directory}`);
-          return {
+          return failBeforeChild({
             type: 'error',
             errorMessage: `Worktree sessions require an existing Git repository. Directory not found: ${directory}`
-          };
+          });
         }
       }
 
@@ -587,11 +611,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       // symlink swap cannot escape the roots checked by the machine RPC layer.
       if (options.validateDirectory && !(await options.validateDirectory(directory))) {
         logger.debug(`[RUNNER RUN] Workspace directory escaped roots during validation: ${directory}`);
-        return {
+        return failBeforeChild({
           type: 'error',
           errorMessage: 'Directory is outside this machine\'s workspace roots',
           code: 'outside_workspace_roots'
-        };
+        });
       }
 
       if (sessionType === 'worktree') {
@@ -606,6 +630,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
               `[RUNNER RUN] Directory is already a linked git worktree; skipping Cursor --worktree (cwd=${directory})`
             );
           } else {
+            cursorNativeWorktree = true;
             logger.debug(`[RUNNER RUN] Cursor-native worktree requested (nameHint=${worktreeName ?? '(auto)'})`);
           }
         } else {
@@ -615,10 +640,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           });
           if (!worktreeResult.ok) {
             logger.debug(`[RUNNER RUN] Worktree creation failed: ${worktreeResult.error}`);
-            return {
+            return failBeforeChild({
               type: 'error',
               errorMessage: worktreeResult.error
-            };
+            });
           }
           worktreeInfo = worktreeResult.info;
           spawnDirectory = worktreeInfo.worktreePath;
@@ -691,6 +716,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           };
         }
 
+        const appliedWorktreeName = worktreeInfo?.name
+          ?? (cursorNativeWorktree ? worktreeName?.trim() || undefined : undefined);
+        extraEnv = {
+          ...extraEnv,
+          [HAPI_RUNNER_SESSION_TYPE_ENV]: sessionType,
+          [HAPI_RUNNER_WORKTREE_NAME_ENV]: appliedWorktreeName ?? ''
+        };
+
         const args = buildCliArgs(agent, options, yolo);
 
         // sessionId reserved for future use
@@ -752,10 +785,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           });
           await cleanupCopiedCodexConfig('no-pid');
           await maybeCleanupWorktree('no-pid');
-          return {
+          return failBeforeChild({
             type: 'error',
             errorMessage
-          };
+          });
         }
         happyProcess.removeListener('error', captureSpawnErrorBeforePidCheck);
 
@@ -945,10 +978,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             message: `Failed to spawn session: ${errorMessage}`
           }
         });
-        return {
+        const result: SpawnSessionResult = {
           type: 'error',
           errorMessage: `Failed to spawn session: ${errorMessage}`
         };
+        return happyProcess?.pid ? result : failBeforeChild(result);
       }
     };
 
@@ -1210,8 +1244,13 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       requestShutdown: () => requestShutdown('hapi-app')
     });
 
-    // Connect to server
-    apiMachine.connect();
+    // Connect and wait for Socket.IO auth + RPC registration before advertising
+    // hubReadyAt. connect() alone returns before the async 'connect' event.
+    await apiMachine.connectUntilReady();
+    fileState.hubReadyAt = Date.now();
+    writeRunnerState({
+      ...fileState,
+    });
     scheduleCursorModelsPrewarm();
 
     // Visible startup banner. Use console.log so it always appears on stdout,
@@ -1336,10 +1375,14 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         }
       } else {
         const installedCliMtimeMs = getInstalledCliMtimeMs();
-        if (typeof installedCliMtimeMs === 'number' &&
-            typeof startedWithCliMtimeMs === 'number' &&
-            installedCliMtimeMs !== startedWithCliMtimeMs &&
-            Date.now() >= nextHandoffAttemptAt) {
+        if (shouldAttemptInstalledCliMtimeHandoff({
+            disableVersionHandoff: false,
+            selfUpgradeInFlight: isRunnerSelfUpgradeInFlight(),
+            installedCliMtimeMs,
+            startedWithCliMtimeMs,
+            now: Date.now(),
+            nextHandoffAttemptAt,
+        })) {
           logger.debug('[RUNNER RUN] Runner is outdated, triggering self-restart with latest version');
 
           // Hand off to a fresh runner that inherits our original argv (workspace
@@ -1405,7 +1448,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           // success) until it holds the lock, and the lock is ours until
           // we release.
           try {
-            await releaseRunnerLock(runnerLockHandle);
+            if (runnerLockHandle) {
+              await releaseRunnerLock(runnerLockHandle);
+              runnerLockHandle = null;
+            }
           } catch (error) {
             logger.debug('[RUNNER RUN] Failed to release lock for child handoff; continuing wait anyway', error);
           }
@@ -1415,10 +1461,13 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           const handoffOk = await waitForRunnerHandoff(process.pid, { timeoutMs: 30_000 });
           if (!handoffOk) {
             logger.debug(`[RUNNER RUN] Replacement runner did not register within 30s; attempting to re-acquire lock and stay alive to avoid leaving the machine offline.`);
-            // Re-acquire the lock with a long window (the child has likely
-            // either succeeded and we're seeing a stale state, or it gave
-            // up - in either case the lock should be available shortly).
-            const reacquired = await acquireRunnerLock(60, 500);
+            // Bound reclaim to FAILED_HANDOFF_LOCK_* (~27.5s backoff). The old
+            // (60, 500) window (~885s) left the parent unlocked long enough for a
+            // late-connecting child to create dual machine sockets.
+            const reacquired = await acquireRunnerLock(
+              FAILED_HANDOFF_LOCK_MAX_ATTEMPTS,
+              FAILED_HANDOFF_LOCK_DELAY_INCREMENT_MS,
+            );
             if (!reacquired) {
               // Lock is held by someone else (third-party runner, or a
               // child that succeeded but state file hasn't reflected the
@@ -1433,6 +1482,22 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
               return;
             }
             runnerLockHandle = reacquired;
+            // Child may have written state then died; reclaim ownership so the
+            // next heartbeat does not see a foreign dead PID as confusing noise.
+            try {
+              writeRunnerState({
+                ...fileState,
+                pid: process.pid,
+                httpPort: controlPort,
+                startedWithCliVersion: packageJson.version,
+                startedWithCliMtimeMs,
+                startedWithArgv,
+                startedWithVersionHandoffDisabled,
+                lastHeartbeat: new Date().toLocaleString(),
+              });
+            } catch (error) {
+              logger.debug('[RUNNER RUN] Failed to reclaim runner.state.json after failed handoff', error);
+            }
             deferHandoffRetry();
             return;
           }
@@ -1447,8 +1512,16 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       // Race condition is possible, but thats okay for the time being :D
       const runnerState = await readRunnerState();
       if (runnerState && runnerState.pid !== process.pid) {
-        logger.debug('[RUNNER RUN] Somehow a different runner was started without killing us. We should kill ourselves.')
-        requestShutdown('exception', 'A different runner was started without killing us. We should kill ourselves.')
+        // Only yield if the other PID is actually alive. During RPC/mtime handoff
+        // a child can write state then die; treating that as ownership transfer
+        // would suicide the parent and leave the machine offline.
+        if (isProcessAlive(runnerState.pid)) {
+          logger.debug('[RUNNER RUN] Somehow a different runner was started without killing us. We should kill ourselves.')
+          requestShutdown('exception', 'A different runner was started without killing us. We should kill ourselves.')
+          heartbeatRunning = false;
+          return;
+        }
+        logger.debug(`[RUNNER RUN] runner.state.json points at dead PID ${runnerState.pid}; reclaiming with heartbeat`)
       }
 
       // Heartbeat
@@ -1465,6 +1538,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           startedWithExtraHeadersHash: fileState.startedWithExtraHeadersHash,
           startedWithArgv,
           startedWithVersionHandoffDisabled,
+          hubReadyAt: fileState.hubReadyAt,
           lastHeartbeat: new Date().toLocaleString(),
           runnerLogPath: fileState.runnerLogPath
         };
@@ -1502,8 +1576,25 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       apiMachine.shutdown();
       await stopControlServer();
-      await cleanupRunnerState();
-      await releaseRunnerLock(runnerLockHandle);
+      // After a successful handoff the replacement owns runner.state.json / lock.
+      // Deleting them here would strand the child — same Major Codex flagged on
+      // self-upgrade requestShutdown. Only clean up when we still own the state.
+      const localState = await readRunnerState();
+      const replacementOwnsState = Boolean(
+        localState
+        && localState.pid !== process.pid
+        && isProcessAlive(localState.pid),
+      );
+      registerRunnerHandoffLockHooks(null);
+      if (replacementOwnsState) {
+        logger.debug('[RUNNER RUN] Replacement owns runner.state.json; skipping state/lock cleanup');
+      } else {
+        await cleanupRunnerState();
+        if (runnerLockHandle) {
+          await releaseRunnerLock(runnerLockHandle);
+          runnerLockHandle = null;
+        }
+      }
 
       logger.debug('[RUNNER RUN] Cleanup completed, exiting process');
       process.exit(0);

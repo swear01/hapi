@@ -7,14 +7,9 @@ import {
     codexCollaborationSpawnAgentInstructions,
     supportsReasoningSummary
 } from './appServerConfig';
-import { codexSystemPrompt } from './systemPrompt';
 
 describe('appServerConfig', () => {
     const mcpServers = { hapi: { command: 'node', args: ['mcp'] } };
-    const withCollaborationInstructions = (developerInstructions: string): string => {
-        return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}`;
-    };
-
     it('preserves Codex built-in base instructions by omitting the default override', () => {
         const params = buildThreadStartParams({
             cwd: '/workspace/project',
@@ -23,7 +18,7 @@ describe('appServerConfig', () => {
         });
 
         expect(params).not.toHaveProperty('baseInstructions');
-        expect(params.developerInstructions).toBe(codexSystemPrompt);
+        expect(params).not.toHaveProperty('developerInstructions');
     });
 
     it('keeps an explicit base instruction override separate from HAPI developer instructions', () => {
@@ -35,7 +30,7 @@ describe('appServerConfig', () => {
         });
 
         expect(params.baseInstructions).toBe('Custom base instructions.');
-        expect(params.developerInstructions).toBe(codexSystemPrompt);
+        expect(params).not.toHaveProperty('developerInstructions');
     });
 
     it('applies CLI overrides when permission mode is default', () => {
@@ -50,13 +45,12 @@ describe('appServerConfig', () => {
         expect(params.sandbox).toBe('danger-full-access');
         expect(params.approvalPolicy).toBe('never');
         expect(params.baseInstructions).toBeUndefined();
-        expect(params.developerInstructions).toBe(codexSystemPrompt);
+        expect(params).not.toHaveProperty('developerInstructions');
         expect(params.config).toEqual({
             'mcp_servers.hapi': {
                 command: 'node',
                 args: ['mcp']
-            },
-            developer_instructions: codexSystemPrompt
+            }
         });
     });
 
@@ -97,41 +91,6 @@ describe('appServerConfig', () => {
                         approval_mode: 'approve'
                     }
                 }
-            },
-            developer_instructions: codexSystemPrompt
-        });
-    });
-
-    it('preserves user MCP transport fields when building thread config', () => {
-        const params = buildThreadStartParams({
-            cwd: '/workspace/project',
-            mode: { permissionMode: 'default', collaborationMode: 'default' },
-            mcpServers: {
-                'package-manager': {
-                    command: 'uvx',
-                    args: ['example-mcp', 'serve'],
-                    env: { EXAMPLE_TOKEN: 'from-process-environment' }
-                },
-                remote: {
-                    url: 'https://example.test/mcp',
-                    bearer_token_env_var: 'REMOTE_MCP_TOKEN'
-                },
-                hapi: {
-                    command: 'node',
-                    args: ['mcp']
-                }
-            }
-        });
-
-        expect(params.config).toMatchObject({
-            'mcp_servers.package-manager': {
-                command: 'uvx',
-                args: ['example-mcp', 'serve'],
-                env: { EXAMPLE_TOKEN: 'from-process-environment' }
-            },
-            'mcp_servers.remote': {
-                url: 'https://example.test/mcp',
-                bearer_token_env_var: 'REMOTE_MCP_TOKEN'
             }
         });
     });
@@ -186,7 +145,7 @@ describe('appServerConfig', () => {
         });
     });
 
-    it('concatenates custom developer instructions after HAPI instructions without overriding base instructions', () => {
+    it('preserves custom developer instructions without HAPI prose', () => {
         const params = buildThreadStartParams({
             cwd: '/workspace/project',
             mode: { permissionMode: 'default', collaborationMode: 'default' },
@@ -195,13 +154,13 @@ describe('appServerConfig', () => {
         });
 
         expect(params.baseInstructions).toBeUndefined();
-        expect(params.developerInstructions).toBe(`${codexSystemPrompt}\n\nOnly respond in Chinese.`);
+        expect(params.developerInstructions).toBe('Only respond in Chinese.');
         expect(params.config).toEqual({
             'mcp_servers.hapi': {
                 command: 'node',
                 args: ['mcp']
             },
-            developer_instructions: `${codexSystemPrompt}\n\nOnly respond in Chinese.`
+            developer_instructions: 'Only respond in Chinese.'
         });
     });
 
@@ -217,7 +176,6 @@ describe('appServerConfig', () => {
                 command: 'node',
                 args: ['mcp']
             },
-            developer_instructions: codexSystemPrompt,
             model_reasoning_effort: 'ultra'
         });
     });
@@ -383,7 +341,7 @@ describe('appServerConfig', () => {
             settings: {
                 model: 'o3',
                 reasoning_effort: 'high',
-                developer_instructions: withCollaborationInstructions(codexSystemPrompt)
+                developer_instructions: codexCollaborationSpawnAgentInstructions
             }
         });
         expect(params.model).toBeUndefined();
@@ -409,7 +367,7 @@ describe('appServerConfig', () => {
             settings: {
                 model: 'gpt-5.3-codex-spark',
                 reasoning_effort: 'high',
-                developer_instructions: withCollaborationInstructions(codexSystemPrompt)
+                developer_instructions: codexCollaborationSpawnAgentInstructions
             }
         });
     });
@@ -517,7 +475,7 @@ describe('appServerConfig', () => {
         expect(params.collaborationMode?.settings).not.toHaveProperty('reasoning_effort');
     });
 
-    it('injects spawn_agent argument rules into collaboration mode instructions', () => {
+    it('does not inject HAPI instructions into collaboration mode', () => {
         const params = buildTurnStartParams({
             threadId: 'thread-1',
             message: 'hello',
@@ -525,28 +483,10 @@ describe('appServerConfig', () => {
             mode: { permissionMode: 'default', model: 'o3', collaborationMode: 'default' }
         });
 
-        const instructions = params.collaborationMode?.settings.developer_instructions;
-        expect(instructions).toContain('Treat omitted fork_context the same as fork_context: true');
-        expect(instructions).toContain('do not set agent_type, model, or reasoning_effort');
-        expect(instructions).toContain('set fork_context: false');
-        expect(instructions).toContain('Do not rely on parent turn reasoning settings for spawned agents');
-    });
-
-    it('injects proactive multi-agent instructions when /agent mode is enabled', () => {
-        const params = buildTurnStartParams({
-            threadId: 'thread-1',
-            message: 'work',
-            cwd: '/repo',
-            mode: {
-                permissionMode: 'default',
-                model: 'o3',
-                collaborationMode: 'default',
-                proactiveMultiAgent: true
-            }
-        });
-
-        expect(params.collaborationMode?.settings.developer_instructions)
-            .toContain('Proactive multi-agent delegation is active.');
+        expect(params.collaborationMode?.settings.developer_instructions).toBe(
+            codexCollaborationSpawnAgentInstructions
+        );
+        expect(params.collaborationMode?.settings.developer_instructions).not.toMatch(/HAPI|hapi session/i);
     });
 
     it('rejects collaboration mode payloads without a resolved model', () => {
@@ -573,7 +513,7 @@ describe('appServerConfig', () => {
             mode: 'default',
             settings: {
                 model: 'o3',
-                developer_instructions: withCollaborationInstructions(codexSystemPrompt)
+                developer_instructions: codexCollaborationSpawnAgentInstructions
             }
         });
     });
@@ -593,7 +533,7 @@ describe('appServerConfig', () => {
             mode: 'default',
             settings: {
                 model: 'o3',
-                developer_instructions: withCollaborationInstructions(codexSystemPrompt)
+                developer_instructions: codexCollaborationSpawnAgentInstructions
             }
         });
     });
@@ -612,7 +552,7 @@ describe('appServerConfig', () => {
             mode: 'default',
             settings: {
                 model: 'gpt-5',
-                developer_instructions: withCollaborationInstructions(codexSystemPrompt)
+                developer_instructions: codexCollaborationSpawnAgentInstructions
             }
         });
         expect(params.model).toBeUndefined();

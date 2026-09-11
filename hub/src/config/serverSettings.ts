@@ -8,7 +8,8 @@
  * it will be saved to settings.json for future use
  */
 
-import { getSettingsFile, updateSettings } from './settings'
+import { getSettingsFile, updateSettings, type TitleProviderSettings } from './settings'
+import { requireWebhookHttpUrl } from '../webhook/url'
 
 const OLD_SETTINGS_FIELDS = ['webappHost', 'webappPort', 'webappUrl'] as const
 
@@ -36,10 +37,20 @@ export interface ServerSettings {
     serverChanSendKey: string | null
     serverChanNotification: boolean
     serverChanBackgroundOnly: boolean
+    wxPusherAppToken: string | null
+    wxPusherUids: string[]
+    wxPusherTopicIds: number[]
+    wxPusherNotification: boolean
+    wxPusherBackgroundOnly: boolean
+    webhookUrl: string | null
+    webhookKey: string | null
+    webhookNotification: boolean
+    webhookBackgroundOnly: boolean
     listenHost: string
     listenPort: number
     publicUrl: string
     corsOrigins: string[]
+    titleProvider: TitleProviderSettings
     fcmServiceAccountPath: string | null
     iosPushMode: string | null
     iosPushRelayUrl: string | null
@@ -58,6 +69,15 @@ export interface ServerSettingsResult {
         serverChanSendKey: 'env' | 'file' | 'default'
         serverChanNotification: 'env' | 'file' | 'default'
         serverChanBackgroundOnly: 'env' | 'file' | 'default'
+        wxPusherAppToken: 'env' | 'file' | 'default'
+        wxPusherUids: 'env' | 'file' | 'default'
+        wxPusherTopicIds: 'env' | 'file' | 'default'
+        wxPusherNotification: 'env' | 'file' | 'default'
+        wxPusherBackgroundOnly: 'env' | 'file' | 'default'
+        webhookUrl: 'env' | 'file' | 'default'
+        webhookKey: 'env' | 'file' | 'default'
+        webhookNotification: 'env' | 'file' | 'default'
+        webhookBackgroundOnly: 'env' | 'file' | 'default'
         listenHost: 'env' | 'file' | 'default'
         listenPort: 'env' | 'file' | 'default'
         publicUrl: 'env' | 'file' | 'default'
@@ -102,6 +122,46 @@ function deriveCorsOrigins(publicUrl: string): string[] {
     }
 }
 
+function parseCommaSeparatedStrings(value: string): string[] {
+    return [...new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean))]
+}
+
+function parseTopicIds(value: string): number[] {
+    const entries = parseCommaSeparatedStrings(value)
+    const topicIds = entries.map((entry) => Number(entry))
+    if (topicIds.some((topicId) => !Number.isSafeInteger(topicId) || topicId <= 0)) {
+        throw new Error('WXPUSHER_TOPIC_IDS must be a comma-separated list of positive integers')
+    }
+    return [...new Set(topicIds)]
+}
+
+function readStringArraySetting(value: unknown, field: string): string[] {
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+        throw new Error(`${field} must be an array of strings`)
+    }
+    return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))]
+}
+
+function readTopicIdArraySetting(value: unknown, field: string): number[] {
+    if (!Array.isArray(value) || value.some((entry) => !Number.isSafeInteger(entry) || entry <= 0)) {
+        throw new Error(`${field} must be an array of positive integers`)
+    }
+    return [...new Set(value)]
+}
+
+function normalizeTitleProviderSettings(value: unknown): TitleProviderSettings {
+    if (!value || typeof value !== 'object') return {}
+    const raw = value as Record<string, unknown>
+    return {
+        baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl : undefined,
+        apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : undefined,
+        model: typeof raw.model === 'string' ? raw.model : undefined,
+        timeoutMs: typeof raw.timeoutMs === 'number' && Number.isSafeInteger(raw.timeoutMs) && raw.timeoutMs > 0
+            ? raw.timeoutMs
+            : undefined,
+    }
+}
+
 function rejectOldSettingsFields(settings: object, settingsFile: string): void {
     const oldFields = OLD_SETTINGS_FIELDS.filter((field) => field in settings)
     if (oldFields.length === 0) {
@@ -111,6 +171,31 @@ function rejectOldSettingsFields(settings: object, settingsFile: string): void {
         `Unsupported old settings field(s) in ${settingsFile}: ${oldFields.join(', ')}. ` +
         'Use listenHost, listenPort, and publicUrl.'
     )
+}
+
+function parseOptionalWebhookUrl(value: unknown, label: string): string | null {
+    if (value === null || value === undefined) {
+        return null
+    }
+    if (typeof value !== 'string') {
+        throw new Error(`${label} must be a valid http(s) URL`)
+    }
+    const trimmed = value.trim()
+    if (!trimmed) {
+        return null
+    }
+    return requireWebhookHttpUrl(trimmed, label)
+}
+
+function parseOptionalSecret(value: unknown, label: string): string | null {
+    if (value === null || value === undefined) {
+        return null
+    }
+    if (typeof value !== 'string') {
+        throw new Error(`${label} must be a string`)
+    }
+    const trimmed = value.trim()
+    return trimmed ? trimmed : null
 }
 
 /**
@@ -129,6 +214,15 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
             serverChanSendKey: 'default',
             serverChanNotification: 'default',
             serverChanBackgroundOnly: 'default',
+            wxPusherAppToken: 'default',
+            wxPusherUids: 'default',
+            wxPusherTopicIds: 'default',
+            wxPusherNotification: 'default',
+            wxPusherBackgroundOnly: 'default',
+            webhookUrl: 'default',
+            webhookKey: 'default',
+            webhookNotification: 'default',
+            webhookBackgroundOnly: 'default',
             listenHost: 'default',
             listenPort: 'default',
             publicUrl: 'default',
@@ -214,6 +308,144 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
             throw new Error('serverChanBackgroundOnly must be a boolean')
         }
 
+        // wxPusherAppToken: env > file > null
+        let wxPusherAppToken: string | null = null
+        if (process.env.WXPUSHER_APP_TOKEN) {
+            wxPusherAppToken = process.env.WXPUSHER_APP_TOKEN
+            sources.wxPusherAppToken = 'env'
+            if (settings.wxPusherAppToken === undefined) {
+                settings.wxPusherAppToken = wxPusherAppToken
+                needsSave = true
+            }
+        } else if (settings.wxPusherAppToken !== undefined) {
+            if (typeof settings.wxPusherAppToken !== 'string') {
+                throw new Error('wxPusherAppToken must be a string')
+            }
+            wxPusherAppToken = settings.wxPusherAppToken
+            sources.wxPusherAppToken = 'file'
+        }
+
+        // wxPusherUids: env > file > []
+        let wxPusherUids: string[] = []
+        if (process.env.WXPUSHER_UIDS !== undefined) {
+            wxPusherUids = parseCommaSeparatedStrings(process.env.WXPUSHER_UIDS)
+            sources.wxPusherUids = 'env'
+            if (settings.wxPusherUids === undefined) {
+                settings.wxPusherUids = wxPusherUids
+                needsSave = true
+            }
+        } else if (settings.wxPusherUids !== undefined) {
+            wxPusherUids = readStringArraySetting(settings.wxPusherUids, 'wxPusherUids')
+            sources.wxPusherUids = 'file'
+        }
+
+        // wxPusherTopicIds: env > file > []
+        let wxPusherTopicIds: number[] = []
+        if (process.env.WXPUSHER_TOPIC_IDS !== undefined) {
+            wxPusherTopicIds = parseTopicIds(process.env.WXPUSHER_TOPIC_IDS)
+            sources.wxPusherTopicIds = 'env'
+            if (settings.wxPusherTopicIds === undefined) {
+                settings.wxPusherTopicIds = wxPusherTopicIds
+                needsSave = true
+            }
+        } else if (settings.wxPusherTopicIds !== undefined) {
+            wxPusherTopicIds = readTopicIdArraySetting(settings.wxPusherTopicIds, 'wxPusherTopicIds')
+            sources.wxPusherTopicIds = 'file'
+        }
+
+        // wxPusherNotification: env > file > true
+        let wxPusherNotification = true
+        if (process.env.WXPUSHER_NOTIFICATION !== undefined) {
+            wxPusherNotification = process.env.WXPUSHER_NOTIFICATION === 'true'
+            sources.wxPusherNotification = 'env'
+            if (settings.wxPusherNotification === undefined) {
+                settings.wxPusherNotification = wxPusherNotification
+                needsSave = true
+            }
+        } else if (settings.wxPusherNotification !== undefined) {
+            if (typeof settings.wxPusherNotification !== 'boolean') {
+                throw new Error('wxPusherNotification must be a boolean')
+            }
+            wxPusherNotification = settings.wxPusherNotification
+            sources.wxPusherNotification = 'file'
+        }
+
+        // wxPusherBackgroundOnly: env > file > false
+        let wxPusherBackgroundOnly = false
+        if (process.env.WXPUSHER_BACKGROUND_ONLY !== undefined) {
+            wxPusherBackgroundOnly = process.env.WXPUSHER_BACKGROUND_ONLY === 'true'
+            sources.wxPusherBackgroundOnly = 'env'
+            if (settings.wxPusherBackgroundOnly === undefined) {
+                settings.wxPusherBackgroundOnly = wxPusherBackgroundOnly
+                needsSave = true
+            }
+        } else if (typeof settings.wxPusherBackgroundOnly === 'boolean') {
+            wxPusherBackgroundOnly = settings.wxPusherBackgroundOnly
+            sources.wxPusherBackgroundOnly = 'file'
+        } else if (settings.wxPusherBackgroundOnly !== undefined) {
+            throw new Error('wxPusherBackgroundOnly must be a boolean')
+        }
+
+        // webhookUrl: env > file > null (http/https only)
+        let webhookUrl: string | null = null
+        if (process.env.HAPI_WEBHOOK_URL) {
+            webhookUrl = parseOptionalWebhookUrl(process.env.HAPI_WEBHOOK_URL, 'HAPI_WEBHOOK_URL')
+            sources.webhookUrl = 'env'
+            if (settings.webhookUrl === undefined && webhookUrl) {
+                settings.webhookUrl = webhookUrl
+                needsSave = true
+            }
+        } else if (settings.webhookUrl !== undefined) {
+            webhookUrl = parseOptionalWebhookUrl(settings.webhookUrl, 'webhookUrl')
+            sources.webhookUrl = 'file'
+        }
+
+        // webhookKey: env > file > null
+        let webhookKey: string | null = null
+        if (process.env.HAPI_WEBHOOK_KEY) {
+            webhookKey = parseOptionalSecret(process.env.HAPI_WEBHOOK_KEY, 'HAPI_WEBHOOK_KEY')
+            sources.webhookKey = 'env'
+            if (settings.webhookKey === undefined && webhookKey) {
+                settings.webhookKey = webhookKey
+                needsSave = true
+            }
+        } else if (settings.webhookKey !== undefined) {
+            webhookKey = parseOptionalSecret(settings.webhookKey, 'webhookKey')
+            sources.webhookKey = 'file'
+        }
+
+        // webhookNotification: env > file > true
+        let webhookNotification = true
+        if (process.env.HAPI_WEBHOOK_NOTIFICATION !== undefined) {
+            webhookNotification = process.env.HAPI_WEBHOOK_NOTIFICATION === 'true'
+            sources.webhookNotification = 'env'
+            if (settings.webhookNotification === undefined) {
+                settings.webhookNotification = webhookNotification
+                needsSave = true
+            }
+        } else if (typeof settings.webhookNotification === 'boolean') {
+            webhookNotification = settings.webhookNotification
+            sources.webhookNotification = 'file'
+        } else if (settings.webhookNotification !== undefined) {
+            throw new Error('webhookNotification must be a boolean')
+        }
+
+        // webhookBackgroundOnly: env > file > false
+        let webhookBackgroundOnly = false
+        if (process.env.HAPI_WEBHOOK_BACKGROUND_ONLY !== undefined) {
+            webhookBackgroundOnly = process.env.HAPI_WEBHOOK_BACKGROUND_ONLY === 'true'
+            sources.webhookBackgroundOnly = 'env'
+            if (settings.webhookBackgroundOnly === undefined) {
+                settings.webhookBackgroundOnly = webhookBackgroundOnly
+                needsSave = true
+            }
+        } else if (typeof settings.webhookBackgroundOnly === 'boolean') {
+            webhookBackgroundOnly = settings.webhookBackgroundOnly
+            sources.webhookBackgroundOnly = 'file'
+        } else if (settings.webhookBackgroundOnly !== undefined) {
+            throw new Error('webhookBackgroundOnly must be a boolean')
+        }
+
         // listenHost: env > file > default
         let listenHost = '127.0.0.1'
         if (process.env.HAPI_LISTEN_HOST) {
@@ -276,6 +508,7 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
             corsOrigins = deriveCorsOrigins(publicUrl)
         }
 
+        const titleProvider = normalizeTitleProviderSettings(settings.titleProvider)
         // Push settings: env > file > null, env persisted on first sight —
         // one loop instead of nine copies of the per-field block above.
         const push: Record<PushSettingKey, string | null> = {
@@ -313,10 +546,20 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
                     serverChanSendKey,
                     serverChanNotification,
                     serverChanBackgroundOnly,
+                    wxPusherAppToken,
+                    wxPusherUids,
+                    wxPusherTopicIds,
+                    wxPusherNotification,
+                    wxPusherBackgroundOnly,
+                    webhookUrl,
+                    webhookKey,
+                    webhookNotification,
+                    webhookBackgroundOnly,
                     listenHost,
                     listenPort,
                     publicUrl,
                     corsOrigins,
+                    titleProvider,
                     ...push,
                 },
                 sources,

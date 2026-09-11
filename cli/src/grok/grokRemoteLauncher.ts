@@ -19,12 +19,8 @@ import {
 } from './utils/grokBackend'
 import { GrokPermissionHandler } from './utils/permissionHandler'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
-import { getGrokTitleInstruction } from './utils/systemPrompt'
 import { GrokConversationHistory } from './conversationHistory'
 import { isObject } from '@hapi/protocol'
-
-const PLAN_MODE_INSTRUCTION =
-    'Work in plan-only mode. Analyze and propose a plan, but do not execute commands or modify files.'
 
 type GrokRemoteLauncherOptions = {
     model?: string
@@ -47,7 +43,6 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
     private currentBackendEffort: string | null = null
     private defaultBackendEffort: string | null = null
     private currentBackendPermissionMode: 'default' | 'auto' | null = null
-    private instructionsSent = false
     private readonly conversationHistory = new GrokConversationHistory(() => this.backend)
 
     constructor(
@@ -70,9 +65,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
 
     protected async runMainLoop(): Promise<void> {
         const session = this.session
-        const { server, mcpServers } = await buildHapiMcpBridge(session.client, {
-            skillLookup: { workingDirectory: session.path, flavor: 'grok' }
-        })
+        const { server, mcpServers } = await buildHapiMcpBridge(session.client)
         this.happyServer = server
 
         const backend = createGrokBackend({
@@ -301,15 +294,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
 
             this.applyDisplayMode(batch.mode.permissionMode)
             this.messageBuffer.addMessage(batch.message, 'user')
-            const isSlashCommand = batch.message.trimStart().startsWith('/')
-            let text = batch.mode.permissionMode === 'plan' && !isSlashCommand
-                ? `${PLAN_MODE_INSTRUCTION}\n\n${batch.message}`
-                : batch.message
-            if (!this.instructionsSent && !isSlashCommand) {
-                text = `${getGrokTitleInstruction()}\n\n${text}`
-                this.instructionsSent = true
-            }
-            const promptContent: PromptContent[] = [{ type: 'text', text }]
+            const promptContent: PromptContent[] = [{ type: 'text', text: batch.message }]
             const localId = batch.items
                 ?.map((item) => item.localId)
                 .find((id): id is string => typeof id === 'string' && id.length > 0)
@@ -331,9 +316,13 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
             }
 
             try {
-                await backend.prompt(acpSessionId, promptContent, (message: AgentMessage) => {
-                    this.handleAgentMessage(message)
-                })
+                let turnPositionAt: number | undefined;
+                const onUpdate = (message: AgentMessage) => {
+                    const emittedAt = Date.now()
+                    turnPositionAt ??= emittedAt
+                    this.handleAgentMessage(message, emittedAt, turnPositionAt)
+                };
+                await backend.prompt(acpSessionId, promptContent, onUpdate)
                 if (localId && nextPromptIndex != null) {
                     this.conversationHistory.rememberPromptIndex(localId, nextPromptIndex)
                     session.client.updateMetadata((metadata) => ({
@@ -383,9 +372,9 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
-    private handleAgentMessage(message: AgentMessage): void {
+    private handleAgentMessage(message: AgentMessage, createdAt?: number, positionAt?: number): void {
         const converted = convertAgentMessage(message, this.currentBackendModel)
-        if (converted) this.session.sendAgentMessage(converted)
+        if (converted) this.session.sendAgentMessage(converted, createdAt, positionAt)
 
         switch (message.type) {
             case 'text':

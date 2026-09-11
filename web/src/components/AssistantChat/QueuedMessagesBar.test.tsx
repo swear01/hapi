@@ -62,7 +62,12 @@ vi.mock('@/lib/composer-drafts', () => ({
 }))
 
 vi.mock('@/lib/use-translation', () => ({
-    useTranslation: () => ({ t: (key: string) => key }),
+    useTranslation: () => ({
+        t: (key: string) => ({
+            'queuedMessages.edit': 'Edit queued message',
+            'queuedMessages.cancel': 'Cancel queued message',
+        })[key] ?? key,
+    }),
 }))
 
 vi.mock('@/lib/toast-context', () => ({
@@ -736,9 +741,9 @@ describe('QueuedMessagesBar steer action', () => {
         return { unmount: view.unmount }
     }
 
-    it('shows the Steer button only when canSteer is set and the row is immediate', () => {
+    it('shows exactly one Steer action when canSteer is set and the row is immediate', () => {
         const immediate = renderSteerable(true)
-        expect(screen.getByRole('button', { name: 'Steer queued message' })).toBeTruthy()
+        expect(screen.getAllByRole('button', { name: /steer/i })).toHaveLength(1)
         immediate.unmount()
 
         renderSteerable(false)
@@ -763,6 +768,26 @@ describe('QueuedMessagesBar steer action', () => {
             mocks.resolveSteer?.({ status: 'steered', localId: 'local-server-message-id' })
             await Promise.resolve()
         })
+    })
+
+    it('keeps Steer globally disabled across a remount until the request settles', async () => {
+        const first = renderSteerable(true)
+        fireEvent.click(screen.getByRole('button', { name: 'Steer queued message' }))
+        await waitFor(() => expect(mocks.steerMessage).toHaveBeenCalledTimes(1))
+        const resolveFirst = mocks.resolveSteer
+        first.unmount()
+
+        renderSteerable(true)
+        expect(screen.queryByRole('button', { name: 'Steer queued message' })).toBeNull()
+        expect(mocks.steerMessage).toHaveBeenCalledTimes(1)
+
+        await act(async () => {
+            resolveFirst?.({ status: 'steered', localId: 'local-server-message-id' })
+            await Promise.resolve()
+        })
+        await waitFor(() => expect(
+            screen.getByRole('button', { name: 'Steer queued message' })
+        ).toBeEnabled())
     })
 
     it('toasts when the steer fails and leaves the row queued', async () => {

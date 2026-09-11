@@ -232,6 +232,14 @@ function createWebApp(options: {
     const app = new Hono<WebAppEnv>()
 
     app.use('*', logger())
+    app.use('*', async (c, next) => {
+        await next()
+        if (!c.req.path.startsWith('/api') && c.res.headers.get('Content-Type')?.startsWith('text/html')) {
+            c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
+            c.header('CDN-Cache-Control', 'no-store')
+            c.header('Cloudflare-CDN-Cache-Control', 'no-store')
+        }
+    })
 
     const configuration = getConfiguration()
     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins
@@ -290,7 +298,7 @@ function createWebApp(options: {
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
-    app.route('/api', createStorageRoutes(configuration.dbPath))
+    app.route('/api', createStorageRoutes(options.store))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
     app.route('/api', createUsageRoutes(options.store))
     app.route('/api', createGitRoutes(options.getSyncEngine))

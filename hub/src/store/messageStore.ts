@@ -25,6 +25,7 @@ import {
     getMatureScheduledMessages,
     getImmediateQueuedLocalMessages,
     countFutureScheduledBySessionIds,
+    countUninvokedScheduledBySessionIds,
     countFutureScheduledLocalMessages,
     minFutureScheduledAtBySessionIds,
     countMessages,
@@ -38,6 +39,7 @@ import {
     copyMessageToSession as copyStoredMessageToSession,
     copyMessagesToSession as copyStoredMessagesToSession,
     getAllMessages,
+    getMessagesBeforeSeq,
     getMessagesAfterSeq,
     getMessageSeqById,
     truncateMessagesFromLocalId,
@@ -54,8 +56,8 @@ export class MessageStore {
         this.db = db
     }
 
-    addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): StoredMessage {
-        return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt)
+    addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number, positionAt?: number): StoredMessage {
+        return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt, positionAt)
     }
 
     deleteLiveReasoningSnapshots(sessionId: string, streamId: string, keepMessageId?: string): number {
@@ -83,6 +85,10 @@ export class MessageStore {
 
     getAllMessages(sessionId: string): StoredMessage[] {
         return getAllMessages(this.db, sessionId)
+    }
+
+    getMessagesBeforeSeq(sessionId: string, beforeSeq: number, limit: number = 200): StoredMessage[] {
+        return getMessagesBeforeSeq(this.db, sessionId, beforeSeq, limit)
     }
 
     getMessagesAfterSeq(sessionId: string, afterSeq: number): StoredMessage[] {
@@ -152,6 +158,10 @@ export class MessageStore {
 
     countFutureScheduledBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
         return countFutureScheduledBySessionIds(this.db, sessionIds, now)
+    }
+
+    countUninvokedScheduledBySessionIds(sessionIds: string[]): Map<string, number> {
+        return countUninvokedScheduledBySessionIds(this.db, sessionIds)
     }
 
     minFutureScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {

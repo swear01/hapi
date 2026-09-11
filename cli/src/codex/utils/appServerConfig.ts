@@ -1,7 +1,6 @@
 import type { EnhancedMode } from '../loop';
 import type { CodexCliOverrides } from './codexCliOverrides';
 import type { CodexMcpServersConfig } from './codexMcpServers';
-import { getCodexSystemPrompt } from './systemPrompt';
 import type {
     ApprovalPolicy,
     SandboxMode,
@@ -115,26 +114,22 @@ function buildMcpServerConfig(mcpServers: CodexMcpServersConfig): Record<string,
 function resolveInstructions(args: {
     baseInstructions?: string;
     developerInstructions?: string;
-}): { baseInstructions: string | undefined; developerInstructions: string } {
-    const baseInstructions = args.baseInstructions;
-    const hapiDeveloperInstructions = getCodexSystemPrompt();
-    const developerInstructions = args.developerInstructions
-        ? `${hapiDeveloperInstructions}\n\n${args.developerInstructions}`
-        : hapiDeveloperInstructions;
+}): { baseInstructions: string | undefined; developerInstructions: string | undefined } {
     return {
-        baseInstructions,
-        developerInstructions
+        baseInstructions: args.baseInstructions,
+        developerInstructions: args.developerInstructions
     };
 }
 
-function appendCollaborationInstructions(developerInstructions: string, proactiveMultiAgent?: boolean): string {
+function appendCollaborationInstructions(developerInstructions: string | undefined, proactiveMultiAgent?: boolean): string {
+    const prefix = developerInstructions ? `${developerInstructions}\n\n` : '';
     if (proactiveMultiAgent === undefined) {
-        return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}`;
+        return `${prefix}${codexCollaborationSpawnAgentInstructions}`;
     }
     const multiAgentMode = proactiveMultiAgent
         ? 'Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. Use sub-agents when parallel work would materially improve speed or quality. This mode remains active until a later multi-agent mode developer message changes it.'
         : 'Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.';
-    return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}\n\n<multi_agent_mode>${multiAgentMode}</multi_agent_mode>`;
+    return `${prefix}${codexCollaborationSpawnAgentInstructions}\n\n<multi_agent_mode>${multiAgentMode}</multi_agent_mode>`;
 }
 
 function mentionNameFromPath(path: string): string {
@@ -213,7 +208,7 @@ export function buildThreadStartParams(args: {
     } = resolveInstructions(args);
     const configWithInstructions = {
         ...config,
-        developer_instructions: resolvedDeveloperInstructions,
+        ...(resolvedDeveloperInstructions !== undefined ? { developer_instructions: resolvedDeveloperInstructions } : {}),
         ...(args.mode.modelReasoningEffort ? { model_reasoning_effort: args.mode.modelReasoningEffort } : {}),
         ...(args.contextManagementConfig?.modelContextWindow !== undefined
             ? { model_context_window: args.contextManagementConfig.modelContextWindow }
@@ -228,7 +223,7 @@ export function buildThreadStartParams(args: {
         approvalPolicy: resolvedApprovalPolicy,
         sandbox: resolvedSandbox,
         ...(baseInstructions !== undefined ? { baseInstructions } : {}),
-        developerInstructions: resolvedDeveloperInstructions,
+        ...(resolvedDeveloperInstructions !== undefined ? { developerInstructions: resolvedDeveloperInstructions } : {}),
         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
     };
 

@@ -308,3 +308,21 @@ journalctl --user -u hapi-hub -f
 > loginctl enable-linger $USER
 > ```
 </details>
+
+## Fleet upgrade after a hub update
+
+The hub offers an upgrade to connected runners whose reported capabilities are
+older than the hub requires. Published runners install the matching release;
+source-managed runners use the hub artifact. The runner then restarts and
+re-registers its RPC handlers.
+
+If an upgrade reports `RPC handler not registered`:
+
+1. Confirm the runner is online in Settings.
+2. Restart its supervisor so the runner reconnects and registers current RPCs.
+3. Retry **Upgrade** and wait for the capability warning to clear.
+
+Set `HAPI_UPGRADE_CHANNEL=off` on the hub to disable fleet offers. Standalone
+four-part maintained builds default to this disabled channel because those versions
+are not implicitly available from npm; an explicit channel override remains authoritative.
+Reopen remains a soft-fail path while an upgrade is in progress.

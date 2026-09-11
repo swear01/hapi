@@ -1,6 +1,8 @@
 import type { Session } from '../sync/syncEngine'
-import type { NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
+import type { ModelErrorNotification, ModelErrorSendOutcome, NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
 import type { NotificationSendContext } from '../notifications/notificationSendContext'
+import { formatModelErrorBody, formatModelErrorTitle } from '../notifications/modelErrorCopy'
+import { getAgentName, getSessionName } from '../notifications/sessionInfo'
 import { NATIVE_CONTRACT_VERSION, NativeNotificationComposer, type ComposedNativeNotification } from '../notifications/nativeNotificationComposer'
 import type { Store } from '../store'
 import type { SSEManager } from '../sse/sseManager'
@@ -41,6 +43,40 @@ export class FcmNotificationChannel implements NotificationChannel {
         }
 
         await this.deliver(session, this.toFcmPayload(this.composer.composeTask(session, notification)), ctx)
+    }
+
+    async sendModelError(
+        session: Session,
+        notification: ModelErrorNotification,
+        ctx?: NotificationSendContext
+    ): Promise<ModelErrorSendOutcome> {
+        const title = formatModelErrorTitle(notification.kind)
+        const body = formatModelErrorBody(notification, {
+            agentName: getAgentName(session),
+            sessionName: getSessionName(session)
+        })
+        const payload: FcmSendPayload = {
+            title,
+            body,
+            tag: `model-error-${session.id}-${notification.eventId}`,
+            data: {
+                type: 'model-error',
+                sessionId: session.id,
+                sessionName: getSessionName(session),
+                url: `/sessions/${session.id}`,
+                title,
+                body,
+                contractVersion: NATIVE_CONTRACT_VERSION,
+                severity: 'error'
+            }
+        }
+        const result = await this.fcmService.sendToNamespace(session.namespace, payload)
+        if ((result?.sent ?? 0) > 0) {
+            if (ctx?.nativeGate) ctx.nativeGate.sent = true
+            return 'delivered'
+        }
+        if ((result?.failed ?? 0) === 0) return 'unavailable'
+        return 'failed'
     }
 
     private toFcmPayload(composed: ComposedNativeNotification): FcmSendPayload {

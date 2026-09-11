@@ -22,7 +22,9 @@ export default function SettingsLayout() {
         ? 'settings.voice.voice'
         : pathname === '/settings/voice/advanced'
             ? 'settings.voice.advanced.title'
-            : category?.titleKey ?? 'settings.title'
+            : pathname === '/settings/runner-management'
+                ? 'settings.runnerMgmt.title'
+                : category?.titleKey ?? 'settings.title'
     const mobileTitle = t(mobileTitleKey)
 
     return (

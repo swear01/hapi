@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import type { Machine, PiModelSummary } from '@/types/api'
 import { saveNewSessionFormDraft } from './newSessionFormDraft'
@@ -30,6 +31,7 @@ const mocks = vi.hoisted(() => ({
     opencodeVariants: null as Record<string, string[]> | null,
     opencodeVariantsLoading: false,
     opencodeVariantsEnabled: false,
+    claudeDialogSelection: ['claude-native-1'] as string[],
     piDialogSelection: ['pi-native-1'] as string[],
     piModels: [] as PiModelSummary[],
     piModelsLoading: false,
@@ -176,6 +178,13 @@ vi.mock('../../utils/formatRunnerSpawnError', () => ({
 }))
 vi.mock('@/components/CodexSessionSyncDialog', () => ({
     CodexSessionSyncDialog: () => null
+}))
+vi.mock('@/components/ClaudeSessionImportDialog', () => ({
+    ClaudeSessionImportDialog: (props: { isOpen: boolean; sessions: Array<{ id: string }>; onConfirm: (ids: string[]) => Promise<void> }) => props.isOpen ? (
+        <button type="button" data-testid="select-claude-history" disabled={props.sessions.length === 0} onClick={() => void props.onConfirm(mocks.claudeDialogSelection)}>
+            select claude history
+        </button>
+    ) : null
 }))
 vi.mock('@/components/PiSessionImportDialog', () => ({
     PiSessionImportDialog: (props: { isOpen: boolean; sessions: Array<{ id: string }>; onClose: () => void; onConfirm: (ids: string[]) => Promise<void> }) => props.isOpen ? (
@@ -575,6 +584,10 @@ describe('NewSession launch preferences', () => {
             cursorSelectedBase: 'auto',
             effort: 'auto',
             modelReasoningEffort: 'max',
+            serviceTier: 'standard',
+            collaborationMode: 'default',
+            grokPermissionMode: 'default',
+            sessionType: 'simple',
             permissionMode: 'yolo'
         })
     })
@@ -871,6 +884,58 @@ describe('NewSession launch preferences', () => {
             machineId: 'machine-1'
         })
         expect(piApi.reopenSession).toHaveBeenCalledWith('hapi-imported-1')
+        expect(mocks.spawnSession).not.toHaveBeenCalled()
+    })
+
+    it('imports the selected Claude history and resumes the canonical HAPI session', async () => {
+        savePreferredAgent('claude')
+        const claudeApi = {
+            getClaudeSessions: vi.fn().mockResolvedValue({
+                success: true,
+                machineId: 'machine-1',
+                sessions: [{
+                    id: 'claude-native-1',
+                    title: 'Existing Claude session',
+                    cwd: 'C:\\repo',
+                    file: 'C:\\claude-native-1.jsonl',
+                    modifiedAt: 1,
+                    messageCount: 2
+                }]
+            }),
+            importClaudeSessions: vi.fn().mockResolvedValue({
+                success: true,
+                machineId: 'machine-1',
+                results: [{ claudeSessionId: 'claude-native-1', hapiSessionId: 'hapi-claude-1', action: 'created', appended: 2 }]
+            }),
+            reopenSession: vi.fn().mockResolvedValue({ ok: true, sessionId: 'hapi-claude-1', resumed: true })
+        } as unknown as ApiClient
+
+        render(
+            <NewSession
+                api={claudeApi}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.click(screen.getByRole('button', { name: 'claudeImport.inline.choose' }))
+        await waitFor(() => expect(screen.getByTestId('select-claude-history')).toBeEnabled())
+        fireEvent.click(screen.getByTestId('select-claude-history'))
+        fireEvent.click(screen.getByTestId('create'))
+
+        await waitFor(() => expect(mocks.onSuccess).toHaveBeenCalledWith('hapi-claude-1'))
+        expect(claudeApi.importClaudeSessions).toHaveBeenCalledWith({
+            sessionIds: ['claude-native-1'],
+            cwd: 'C:\\repo',
+            machineId: 'machine-1',
+            model: null,
+            effort: null,
+            permissionMode: 'default'
+        })
+        expect(claudeApi.reopenSession).toHaveBeenCalledWith('hapi-claude-1')
         expect(mocks.spawnSession).not.toHaveBeenCalled()
     })
 
@@ -1237,5 +1302,53 @@ describe('NewSession launch preferences', () => {
             agent: 'pi',
             model: 'opencode-go/deepseek-v4-pro',
         }))
+    })
+
+    it('falls back when the preferred agent is hidden', async () => {
+        localStorage.setItem('hapi:newSession:agentVisibility:v1', JSON.stringify({ codex: false }))
+        const { container } = render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+
+        await waitFor(() => expect(container.querySelector<HTMLInputElement>('input[value="agy"]')?.checked).toBe(true))
+    })
+
+    it('normalizes launch state when a restored draft agent is hidden', async () => {
+        localStorage.setItem('hapi:newSession:agentVisibility:v1', JSON.stringify({ codex: false }))
+        saveNewSessionFormDraft({
+            agent: 'codex',
+            model: 'gpt-5.6-terra',
+            cursorSelectedBase: 'auto',
+            machineId: 'machine-1',
+            effort: 'auto',
+            modelReasoningEffort: 'max',
+            serviceTier: 'standard',
+            collaborationMode: 'default',
+            copilotAgentMode: 'interactive',
+            yoloMode: false,
+            nativePermissionMode: 'default',
+            grokPermissionMode: 'default',
+            sessionType: 'simple',
+            worktreeName: ''
+        })
+        mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'fallback-session' })
+
+        const { container } = render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+
+        await waitFor(() => expect(container.querySelector<HTMLInputElement>('input[value="agy"]')?.checked).toBe(true))
+        fireEvent.click(screen.getByTestId('create'))
+        await waitFor(() => expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+            agent: 'agy',
+            model: undefined,
+            modelReasoningEffort: undefined
+        })))
+    })
+
+    it('blocks Create when every agent is hidden', async () => {
+        localStorage.setItem(
+            'hapi:newSession:agentVisibility:v1',
+            JSON.stringify(Object.fromEntries(CREATABLE_AGENT_FLAVORS.map((agent) => [agent, false])))
+        )
+        render(<NewSession api={api} machines={[machine]} initialMachineId="machine-1" initialDirectory="C:\\repo" onSuccess={mocks.onSuccess} onCancel={() => {}} />)
+
+        await waitFor(() => expect(screen.getByTestId('create')).toBeDisabled())
     })
 })

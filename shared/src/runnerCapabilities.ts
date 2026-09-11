@@ -23,7 +23,7 @@ export type RunnerCapabilities = typeof RUNNER_CAPABILITIES
 
 /**
  * Machine-scoped capabilities runners advertise on connect.
- * Hub features that hard-depend on a machine RPC must list that capability
+ * Hub features that hard-depend on runner behavior must list that capability
  * in {@link REQUIRED_MACHINE_CAPABILITIES} so skew surfaces as a banner
  * instead of a silent fail-closed product bug.
  */
@@ -31,6 +31,17 @@ export const MACHINE_CAPABILITIES = {
     AgentAvailability: RPC_METHODS.AgentAvailability,
     CursorChatStoreStatus: RPC_METHODS.CursorChatStoreStatus,
     StopRunner: RPC_METHODS.StopRunner,
+    RunnerSelfUpgrade: RPC_METHODS.RunnerSelfUpgrade,
+    /**
+     * Marker (not an RPC): this runner understands hub-artifact
+     * `targetGeneration` fingerprints. Pre-generation binaries omit it, so the
+     * hub's offer still forces an apply at the same semver instead of a false
+     * "Already at X" no-op that leaves the skew banner stuck forever.
+     */
+    CliArtifactGeneration: 'cli-artifact-generation',
+    /** Read-only file/Git/search RPCs available on the long-lived runner. */
+    WorkspaceFileAccess: 'workspace-file-access',
+    SessionControlSkill: 'session-control-skill-v1',
 } as const
 
 export type MachineCapability =
@@ -41,6 +52,10 @@ export const CURRENT_MACHINE_CAPABILITIES: readonly MachineCapability[] = [
     MACHINE_CAPABILITIES.AgentAvailability,
     MACHINE_CAPABILITIES.CursorChatStoreStatus,
     MACHINE_CAPABILITIES.StopRunner,
+    MACHINE_CAPABILITIES.RunnerSelfUpgrade,
+    MACHINE_CAPABILITIES.CliArtifactGeneration,
+    MACHINE_CAPABILITIES.WorkspaceFileAccess,
+    MACHINE_CAPABILITIES.SessionControlSkill,
 ]
 
 /**
@@ -51,6 +66,7 @@ export const CURRENT_MACHINE_CAPABILITIES: readonly MachineCapability[] = [
 export const REQUIRED_MACHINE_CAPABILITIES: readonly MachineCapability[] = [
     MACHINE_CAPABILITIES.AgentAvailability,
     MACHINE_CAPABILITIES.CursorChatStoreStatus,
+    MACHINE_CAPABILITIES.SessionControlSkill,
 ]
 
 export function missingRequiredCapabilities(

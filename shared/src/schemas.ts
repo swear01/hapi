@@ -34,6 +34,20 @@ export const OpencodeClearOperationSchema = z.object({
 })
 export type OpencodeClearOperation = z.infer<typeof OpencodeClearOperationSchema>
 
+export const SpawnRemitOperationSchema = z.object({
+    reservationId: z.string().uuid().optional(),
+    remitId: z.string().uuid(),
+    requestHash: z.string().length(64),
+    machineId: z.string(),
+    state: z.enum(['pending', 'cleanup-needed', 'failed', 'completed']),
+    updatedAt: z.number(),
+    code: z.string().optional(),
+    error: z.string().optional(),
+    cleanedUp: z.boolean().optional(),
+    orphanSessionId: z.string().optional()
+})
+export type SpawnRemitOperation = z.infer<typeof SpawnRemitOperationSchema>
+
 const SessionCapabilitiesSchema = z.object({
     terminal: z.boolean().optional(),
     conversationHistory: ConversationHistoryCapabilitiesSchema.optional()
@@ -50,6 +64,62 @@ export const WorktreeMetadataSchema = z.object({
 })
 
 export type WorktreeMetadata = z.infer<typeof WorktreeMetadataSchema>
+
+export const CodexTokenUsageSchema = z.object({
+    inputTokens: z.number(),
+    cachedInputTokens: z.number(),
+    outputTokens: z.number(),
+    reasoningOutputTokens: z.number(),
+    totalTokens: z.number()
+})
+
+export type CodexTokenUsage = z.infer<typeof CodexTokenUsageSchema>
+
+export const CodexUsageRateLimitSchema = z.object({
+    usedPercent: z.number(),
+    windowMinutes: z.number(),
+    resetAt: z.number().optional()
+})
+
+export type CodexUsageRateLimit = z.infer<typeof CodexUsageRateLimitSchema>
+
+// Credit-based plans (e.g. Codex Pro on `limit_id: premium`) bill from a
+// balance instead of a 5h/weekly rolling window. When the subscription
+// is also exhausted the codex transcript shows primary=null + secondary=null
+// + credits.has_credits=false; the indicator needs to surface that
+// distinctly from a fresh-account "no rate-limit data yet" state.
+export const CodexUsageCreditsSchema = z.object({
+    hasCredits: z.boolean().optional(),
+    unlimited: z.boolean().optional(),
+    balance: z.string().optional()
+})
+
+export type CodexUsageCredits = z.infer<typeof CodexUsageCreditsSchema>
+
+export const CodexUsageSchema = z.object({
+    contextWindow: z.object({
+        usedTokens: z.number(),
+        limitTokens: z.number(),
+        percent: z.number(),
+        updatedAt: z.number()
+    }).optional(),
+    rateLimits: z.object({
+        fiveHour: CodexUsageRateLimitSchema.optional(),
+        weekly: CodexUsageRateLimitSchema.optional()
+    }).optional().default({}),
+    credits: CodexUsageCreditsSchema.optional(),
+    // Codex surfaces 'primary' / 'secondary' / 'credits' as the canonical
+    // names. Carry through as-is so the UI can render the exact phrase
+    // (e.g. 'You have exceeded your weekly limit', or 'You have run out
+    // of credits') without re-deriving from the boolean state.
+    rateLimitReachedType: z.string().optional(),
+    planType: z.string().optional(),
+    limitId: z.string().optional(),
+    totalTokenUsage: CodexTokenUsageSchema.optional(),
+    lastTokenUsage: CodexTokenUsageSchema.optional()
+})
+
+export type CodexUsage = z.infer<typeof CodexUsageSchema>
 
 export const MetadataSchema = z.object({
     path: z.string(),
@@ -120,12 +190,16 @@ export const MetadataSchema = z.object({
     supersededBySessionId: z.string().optional(),
     // Durable in-progress state for runner-backed OpenCode /clear.
     opencodeClearOperation: OpencodeClearOperationSchema.optional(),
+    // Hub-owned idempotency state for atomic runner spawn + remit delivery.
+    spawnRemitOperation: SpawnRemitOperationSchema.optional(),
     preferredPermissionMode: PermissionModeSchema.optional(),
     preferredCopilotAgentMode: CopilotAgentModeSchema.optional(),
     flavor: z.string().nullish(),
     // Launch mode, surfaced so the web can show the agent-terminal toggle only
     // for PTY sessions (a 'remote'/SDK session has no agent PTY to view).
     startingMode: z.enum(['local', 'remote', 'pty']).nullish(),
+    sessionType: z.enum(['simple', 'worktree']).optional(),
+    worktreeName: z.string().optional(),
     capabilities: SessionCapabilitiesSchema.optional(),
     conversationHistoryPoints: z.record(z.string(), z.literal(true)).optional(),
     // Native locators for historical fork/rewind (e.g. Grok prompt indexes).
@@ -136,6 +210,18 @@ export const MetadataSchema = z.object({
     // Pi localId → append-only session entry id mapping. Pi entry ids are the
     // only stable native boundary accepted by its fork API.
     conversationHistoryEntryIds: z.record(z.string(), z.string().min(1)).optional(),
+    claudeImportState: z.object({
+        state: z.enum(['importing', 'complete', 'failed', 'diverged']),
+        machineId: z.string(),
+        claudeSessionId: z.string(),
+        sourceFile: z.string(),
+        startedAt: z.number(),
+        updatedAt: z.number(),
+        error: z.string().optional(),
+        messageCount: z.number().optional(),
+        lastLocalId: z.string().nullish(),
+        prefixDigest: z.string().optional()
+    }).optional(),
     // Latest Pi append-log entry observed by HAPI. Import uses it as the
     // incremental cursor so native history already streamed live is not copied twice.
     piHistoryLeafEntryId: z.string().optional(),
@@ -159,7 +245,34 @@ export const MetadataSchema = z.object({
     // field stores only modelId (shared across all flavors); this preserves
     // the provider so web can resolve the exact model when two providers
     // share a modelId.
-    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional()
+    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional(),
+    lastModelError: z.object({
+        /** Stable identity for this error event (not wall-clock order). */
+        eventId: z.string().min(1),
+        kind: z.string(),
+        transient: z.boolean(),
+        rawSnippet: z.string(),
+        /** Display / telemetry timestamp only — not used for notify/ack identity. */
+        atTs: z.number(),
+        priorAssistantClaimsDone: z.boolean(),
+        lastUserMessage: z.string().optional(),
+        bridgedForEventId: z.string().optional(),
+        retriedAndFailed: z.boolean().optional(),
+        /**
+         * Set when a non-bridge user turn starts after this error was recorded.
+         * Blocks Bridge so a later retry cannot replay work the newer turn already handled.
+         */
+        supersededByUserTurn: z.boolean().optional(),
+        /**
+         * Explicit false blocks Bridge (idle stderr after a successful turn).
+         * Omitted / true keeps the existing transient gate.
+         */
+        bridgeable: z.boolean().optional(),
+        acknowledgedAt: z.number().optional(),
+        /** Hub-owned: successful push/FCM/Telegram delivery watermark. */
+        notifiedAt: z.number().optional()
+    }).optional(),
+    codexUsage: CodexUsageSchema.optional()
 })
 
 export type Metadata = z.infer<typeof MetadataSchema>
@@ -464,21 +577,30 @@ export const MachineMetadataSchema = z.object({
     platform: z.string(),
     happyCliVersion: z.string(),
     displayName: z.string().optional(),
+    /** process.arch when the runner last registered (x64, arm64, …). */
+    arch: z.string().optional(),
     homeDir: z.string().optional(),
     happyHomeDir: z.string().optional(),
     happyLibDir: z.string().optional(),
     workspaceRoots: z.array(z.string()).optional(),
     /** Machine-scoped RPC capability ids this runner registers (see runnerCapabilities). */
     capabilities: z.array(z.string()).optional(),
+    /** True when this runner process started with HAPI_DISABLE_VERSION_HANDOFF=1. */
+    versionHandoffDisabled: z.boolean().optional(),
+    /**
+     * True when an external supervisor owns restart (systemd/pm2/etc.).
+     * Set only via HAPI_RUNNER_SUPERVISED=1 — never inferred from versionHandoffDisabled.
+     */
+    supervisedRestart: z.boolean().optional(),
     /** CLI binary/package mtime when this runner process started. */
     startedCliMtimeMs: z.number().optional(),
     /** Current on-disk CLI binary/package mtime (may differ after upgrade). */
     installedCliMtimeMs: z.number().optional(),
     /**
-     * Runner is under systemd/pm2 (HAPI_RUNNER_SUPERVISED=1). Banner Restart
-     * may stop-runner; unsupervised detached runners must not use that path.
+     * Hub-artifact build generation this runner last applied (source fingerprint).
+     * Used to detect same-semver soup rebuilds that still need fleet upgrade.
      */
-    supervisedRestart: z.boolean().optional(),
+    cliArtifactGeneration: z.string().optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
@@ -661,6 +783,13 @@ export const CancelMessageResponseSchema = z.discriminatedUnion('status', [
 ])
 
 export type CancelMessageResponse = z.infer<typeof CancelMessageResponseSchema>
+
+export const DeleteArchivedSessionsRequestSchema = z.object({
+    sessionIds: z.array(z.string().min(1)).min(1),
+    requireAllArchived: z.literal(true)
+})
+
+export type DeleteArchivedSessionsRequest = z.infer<typeof DeleteArchivedSessionsRequestSchema>
 
 export const SteerQueuedMessageResponseSchema = z.discriminatedUnion('status', [
     z.object({ status: z.literal('steered'), localId: z.string() }),
