@@ -1,6 +1,6 @@
 upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
 pr-1824	heavygee	b932ff960ecec0366b6d3a7b922f104bfe812230	defer	merge-unstable	clear	missing	-	proportional	preserve	opened after approved selection; CI still pending; test-only timeout, carry next if still small
-pr-1822	swear01	f4915ce7875cd902e0504c66f0cea4d537e2a94f	defer	ready	clear	findings	f4915ce7875cd902e0504c66f0cea4d537e2a94f	mismatch	unjustified-change	opened after approved selection; Cursor ACP spawn/effort rewrite deferred this round
+pr-1822	swear01	4fc73899fed63a56a0a465b2261a62d26abcb18e	defer	ready	clear	findings	f4915ce7875cd902e0504c66f0cea4d537e2a94f	mismatch	unjustified-change	opened after approved selection; Cursor ACP spawn/effort rewrite deferred this round
 pr-1821	heavygee	e132cfb3eddafeb169d182658705b951d46b115b	defer	ready	clear	clean	e132cfb3eddafeb169d182658705b951d46b115b	mismatch	unjustified-change	opened after approved selection; idle-lifecycle is a new behavior, defer until official or next rebuild
 pr-1819	swear01	7f77be104e856279398a72963bdacfcc39397bfe	defer	ready	clear	clean	7f77be104e856279398a72963bdacfcc39397bfe	proportional	preserve	kept deferred from approved set; latest-head HAPI Bot now clean after Auto-switch fix
 pr-1816	HongChenGG	8e9c565f6b58ccb9ff67f221fb1d0a73a67c6f12	defer	ready	clear	findings	8e9c565f6b58ccb9ff67f221fb1d0a73a67c6f12	proportional	preserve	latest-head HAPI Bot findings
