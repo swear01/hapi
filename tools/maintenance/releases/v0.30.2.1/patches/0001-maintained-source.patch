@@ -1,6 +1,6 @@
-From d867b8a69888a205d2c747b8f84ed01664e3d3b2 Mon Sep 17 00:00:00 2001
+From 3bce80b5a084a456138cca481480e03103bc7310 Mon Sep 17 00:00:00 2001
 From: swear01 <stanley.yellow1@gmail.com>
-Date: Sat, 12 Sep 2026 20:50:29 +0800
+Date: Sat, 12 Sep 2026 21:04:08 +0800
 Subject: [PATCH] chore(release): rebuild maintained v0.30.2.1 onto official
  v0.30.2
 
@@ -35,7 +35,7 @@ Co-authored-by: Cursor <cursoragent@cursor.com>
  .github/workflows/webapp.yml                  |      2 +
  .gitignore                                    |      7 +
  CONTEXT.md                                    |    242 +
- .../hapi/companion/feature/chat/TextPaging.kt |      7 +-
+ .../hapi/companion/feature/chat/TextPaging.kt |     13 +-
  .../chat/blocks/QuestionDetailsView.kt        |      4 +-
  .../kotlin/app/hapi/protocol/catalog/Modes.kt |      4 +-
  .../app/hapi/protocol/catalog/CatalogTest.kt  |      4 +-
@@ -616,7 +616,7 @@ Co-authored-by: Cursor <cursoragent@cursor.com>
  web/src/utils/applySuggestion.ts              |      3 +-
  web/src/utils/findActiveWord.test.ts          |     24 +
  web/vite.config.ts                            |     43 +-
- 607 files changed, 189942 insertions(+), 4596 deletions(-)
+ 607 files changed, 189948 insertions(+), 4596 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 .github/release-notes/v0.27.2.2.md
  create mode 100644 .github/release-notes/v0.27.2.3.md
@@ -2097,18 +2097,24 @@ index 000000000..973f40bbf
 +产品：Hub 端口能改吗？
 +开发：能改端口，默认 3006；Host 固定 127.0.0.1。
 diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
-index bdf3956d6..2e9f4e6fe 100644
+index bdf3956d6..24c8b06f1 100644
 --- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
 +++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
-@@ -35,8 +35,11 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
+@@ -35,8 +35,17 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
          if (newline && lines == budget.lines && end > from) break
          if (newline) lines++
          // Iterate through an entire platform grapheme before charging its budget.
 -        while (!boundaries.isBoundary(matcher.end()) && matcher.find()) { /* lazy merge */ }
 -        end = matcher.end()
++        // Keep matcher.end() behind a successful find(); a failed inner find()
++        // would otherwise throw IllegalStateException on older Android runtimes.
 +        var matchEnd = matcher.end()
-+        while (!boundaries.isBoundary(matchEnd) && matcher.find()) {
-+            matchEnd = matcher.end()
++        while (!boundaries.isBoundary(matchEnd)) {
++            if (matcher.find()) {
++                matchEnd = matcher.end()
++            } else {
++                break
++            }
 +        }
 +        end = matchEnd
          characters++

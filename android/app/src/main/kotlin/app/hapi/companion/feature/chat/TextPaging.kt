@@ -35,9 +35,15 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
         if (newline && lines == budget.lines && end > from) break
         if (newline) lines++
         // Iterate through an entire platform grapheme before charging its budget.
+        // Keep matcher.end() behind a successful find(); a failed inner find()
+        // would otherwise throw IllegalStateException on older Android runtimes.
         var matchEnd = matcher.end()
-        while (!boundaries.isBoundary(matchEnd) && matcher.find()) {
-            matchEnd = matcher.end()
+        while (!boundaries.isBoundary(matchEnd)) {
+            if (matcher.find()) {
+                matchEnd = matcher.end()
+            } else {
+                break
+            }
         }
         end = matchEnd
         characters++
