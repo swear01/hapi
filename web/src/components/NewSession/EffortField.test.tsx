@@ -105,9 +105,16 @@ describe('EffortField', () => {
         expect(values).not.toContain('max')
     })
 
-    it('renders nothing for agents without an effort field', () => {
+    it('renders nothing for AGY sessions without an effort field', () => {
         const { container } = render(
             <EffortField {...baseProps} agent="agy" />
+        )
+        expect(container.querySelector('select')).toBeNull()
+    })
+
+    it('renders nothing for agents without an effort field', () => {
+        const { container } = render(
+            <EffortField {...baseProps} agent="gemini" />
         )
         expect(container.querySelector('select')).toBeNull()
     })

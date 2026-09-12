@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import type { Metadata } from '@hapi/protocol/types'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
@@ -8,6 +9,14 @@ import type { RpcGateway } from './rpcGateway'
 function fixture() {
     const store = new Store(':memory:')
     const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+    engine.getOrCreateMachine('machine', {
+        host: 'test',
+        platform: 'linux',
+        happyCliVersion: 'test',
+        homeDir: '/tmp',
+        capabilities: [MACHINE_CAPABILITIES.SessionControlSkill]
+    }, null, 'default')
+    engine.handleMachineAlive({ machineId: 'machine', time: Date.now() })
     const metadata: Metadata = { path: '/tmp/work', host: 'test', machineId: 'machine', hostPid: 42, flavor: 'codex',
         capabilities: { concurrentClients: true, conversationHistory: { forkCurrent: true, forkAtMessage: true } } }
     const create = (name: string, more: Partial<Metadata> = {}) => {

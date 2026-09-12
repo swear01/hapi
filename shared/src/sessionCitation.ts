@@ -36,6 +36,13 @@ export const SESSION_ID_PREFIX_PARAM_DESCRIPTION =
     'Target HAPI session id or unique id prefix (another session - not this chat). ' +
     'Prefer the full UUID from [title](/sessions/<id>) or Copy-reference See session "…" (/sessions/<id>) for context.'
 
+/** #1771 native skill: create a peer session and deliver its required first message. */
+export const SPAWN_PEER_TOOL_DESCRIPTION =
+    'Create a fresh HAPI session and atomically deliver its required first message.'
+
+/** Alias kept for overlay MCP bridges that still name the exact-UUID param. */
+export const SESSION_ID_PARAM_DESCRIPTION = SESSION_ID_PREFIX_PARAM_DESCRIPTION
+
 /**
  * Hub session ids have no dots. Reject dotted tails so source paths like
  * `web/src/routes/sessions/chat.tsx` are not treated as citations.

@@ -1,0 +1,49 @@
+From d04ae741cc9afac155ca10043355d9b981a3a612 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 12 Sep 2026 15:21:01 +0800
+Subject: [PATCH] fix(ci): rerun fixtures when the Bun lockfile changes
+
+The previous fixtures failure was a frozen install against a 1.3.14 lockfile.
+Path filters omitted bun.lock, so the 1.4.0 lockfile rewrite never retriggered the job.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ .github/workflows/fixtures.yml | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/.github/workflows/fixtures.yml b/.github/workflows/fixtures.yml
+index eea08b0bc..04be4725a 100644
+--- a/.github/workflows/fixtures.yml
++++ b/.github/workflows/fixtures.yml
+@@ -12,6 +12,8 @@ on:
+             - 'shared/src/**'
+             - 'web/scripts/**'
+             - 'shared/fixtures/**'
++            - 'package.json'
++            - 'bun.lock'
+             - '.github/workflows/fixtures.yml'
+     pull_request:
+         paths:
+@@ -22,7 +24,10 @@ on:
+             - 'shared/src/**'
+             - 'web/scripts/**'
+             - 'shared/fixtures/**'
++            - 'package.json'
++            - 'bun.lock'
+             - '.github/workflows/fixtures.yml'
++    workflow_dispatch:
+ 
+ permissions:
+     contents: read
+@@ -37,6 +42,8 @@ jobs:
+         steps:
+             - uses: actions/checkout@v4
+             - uses: oven-sh/setup-bun@v2
++              with:
++                  bun-version: 1.4.0
+             - run: bun install --frozen-lockfile
+             - name: Regenerate fixtures from the web pipeline
+               run: bun run gen:fixtures
+-- 
+2.50.1 (Apple Git-155)
+

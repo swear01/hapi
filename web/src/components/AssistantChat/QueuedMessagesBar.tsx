@@ -44,6 +44,7 @@ function ClockIcon() {
     )
 }
 
+/** Inject-into-stream glyph: mid-turn soft steer (icon-only; label via title/aria). */
 function SteerIcon() {
     return (
         <svg
@@ -53,9 +54,23 @@ function SteerIcon() {
             aria-hidden="true"
         >
             <path
-                d="M9.5 1 3 9h3.8L6 15l6.5-8H8.7L9.5 1Z"
+                d="M3 12h10"
                 stroke="currentColor"
-                strokeWidth="1.2"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+            />
+            <path
+                d="M5 3v5.5L9 12"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+            <path
+                d="M7.5 10.5 9 12l1.5-1.5"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
                 strokeLinejoin="round"
             />
         </svg>
@@ -185,9 +200,11 @@ export function computeCanCancel({
 
 /**
  * Floating bar above the composer showing queued (pending invocation) messages.
- * Each item has an edit button (✎) and a cancel button (✕).
+ * Each item has edit, optional Steer (when the agent supports mid-turn delivery),
+ * and cancel.
  *
- * Edit = client-side cancel + prefill composer with message text (Codex dialect).
+ * Edit = client-side cancel + prefill composer with message text.
+ * Steer = soft mid-turn delivery now (Codex turn/steer / Cursor ACP soft-send).
  * Cancel = DELETE /sessions/:id/messages/:messageId with optimistic removal.
  */
 export function QueuedMessagesBar({
@@ -211,9 +228,8 @@ export function QueuedMessagesBar({
      */
     onEdit?: (params: { text: string; pendingSchedule: PendingSchedule | null }) => void
     /**
-     * When true, each queued row gets a Steer button that delivers that
-     * message into the active turn (Pi native steer). The parent computes it
-     * as: pi flavor && session thinking && remote-controlled.
+     * When true, each immediate queued row gets a Steer button that delivers
+     * that message into the active Pi, Codex, or Cursor ACP turn.
      */
     canSteer?: boolean
 }) {
@@ -331,17 +347,17 @@ export function QueuedMessagesBar({
     return (
         <div
             role="status"
-            aria-label={`${queued.length} queued message${queued.length === 1 ? '' : 's'} pending invocation`}
+            aria-label={t('queuedMessages.pendingAriaLabel', { count: queued.length })}
             className="mx-auto w-full max-w-content"
         >
             <div className="px-3 pb-0 pt-2 text-sm text-[var(--app-fg-muted)]">
                 <div className="flex items-center gap-1.5 mb-1.5 text-xs font-medium text-[var(--app-hint)]">
                     <ClockIcon />
-                    <span>Queued</span>
+                    <span>{t('queuedMessages.title')}</span>
                 </div>
                 <ul
                     className="flex flex-col gap-1.5 max-h-32 sm:max-h-48 overflow-y-auto"
-                    aria-label="Queued messages"
+                    aria-label={t('queuedMessages.listAriaLabel')}
                 >
                     {queued.map((msg) => {
                         const preview = getQueuedMessagePreview(msg)
@@ -349,8 +365,10 @@ export function QueuedMessagesBar({
                         const editText = getQueuedMessageEditText(preview)
                         const hasAttachments = attachmentNames.length > 0
                         const localId = msg.localId ?? msg.id
-                        const isPending = cancelMutation.isPending || queuedOperationPending
+                        const isSteerPending = steerMutation.isPending && steerMutation.variables?.localId === localId
+                        const isPending = cancelMutation.isPending || steerMutation.isPending || queuedOperationPending
                         const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending })
+                        const isFutureScheduled = msg.scheduledAt != null && msg.scheduledAt > Date.now()
 
                         const handleCancel = () => {
                             if (!canCancel) return
@@ -368,18 +386,14 @@ export function QueuedMessagesBar({
                             })
                         }
 
-                        // Steer delivers this message into the active Pi turn. Gated
-                        // on the same server-echo + no-pending-op conditions as
-                        // Edit/Cancel, and never offered for future-scheduled rows
-                        // (the hub rejects those).
+                        // Steer delivers this message into the active turn. It is
+                        // never offered for indeterminate or future-scheduled rows.
                         const canSteerRow = Boolean(
                             canSteer
                             && msg.deliveryState !== 'indeterminate'
                             && msg.scheduledAt == null
                             && canCancel
                         )
-                        const steerPending = steerMutation.isPending
-                            && steerMutation.variables?.messageId === msg.id
                         const handleSteer = () => {
                             if (!canSteerRow) return
                             const token = beginQueuedOperation(sessionId)
@@ -387,8 +401,10 @@ export function QueuedMessagesBar({
                             void steerMutation.mutateAsync({
                                 sessionId,
                                 messageId: msg.id,
+                                localId,
+                                snapshot: msg,
                             }).catch(() => {
-                                // useSteerQueuedMessage already toasts the failure.
+                                // useSteerQueuedMessage reports the failure and leaves the row queued.
                             }).finally(() => {
                                 endQueuedOperation(sessionId, token)
                             })
@@ -524,11 +540,11 @@ export function QueuedMessagesBar({
                                             ))}
                                         </div>
                                     ) : null}
-                                    {msg.scheduledAt != null && msg.scheduledAt > Date.now() && (
+                                    {isFutureScheduled && (
                                         <div className="mt-1 flex items-center gap-1 text-xs text-[var(--app-hint)]">
                                             <ClockIcon />
                                             <span>
-                                                {t('queuedMessages.scheduledFor', { time: formatScheduledTime(msg.scheduledAt) })}
+                                                {t('queuedMessages.scheduledFor', { time: formatScheduledTime(msg.scheduledAt!) })}
                                             </span>
                                         </div>
                                     )}
@@ -552,7 +568,7 @@ export function QueuedMessagesBar({
                                             type="button"
                                             aria-label="Steer queued message"
                                             title={t('queuedMessages.steer')}
-                                            disabled={steerPending}
+                                            disabled={isSteerPending}
                                             onClick={handleSteer}
                                             onMouseDown={(e) => e.preventDefault()}
                                             className="flex h-6 w-6 items-center justify-center rounded text-[var(--app-hint)] transition-colors hover:bg-[var(--app-border)] hover:text-[var(--app-fg)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -562,7 +578,8 @@ export function QueuedMessagesBar({
                                     ) : null}
                                     <button
                                         type="button"
-                                        aria-label="Edit queued message"
+                                        aria-label={t('queuedMessages.edit')}
+                                        title={t('queuedMessages.edit')}
                                         disabled={!canEdit}
                                         onClick={handleEdit}
                                         onMouseDown={(e) => e.preventDefault()}
@@ -585,7 +602,8 @@ export function QueuedMessagesBar({
                                     </button>
                                     <button
                                         type="button"
-                                        aria-label="Cancel queued message"
+                                        aria-label={t('queuedMessages.cancel')}
+                                        title={t('queuedMessages.cancel')}
                                         disabled={!canCancel}
                                         onClick={handleCancel}
                                         onMouseDown={(e) => e.preventDefault()}

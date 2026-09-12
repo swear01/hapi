@@ -1,9 +1,13 @@
 import { beforeAll, describe, expect, it, mock } from 'bun:test'
 import { Hono } from 'hono'
 import type { SyncEngine } from '../../sync/syncEngine'
-import { createConfiguration } from '../../configuration'
+import { createConfiguration, getConfiguration } from '../../configuration'
 import { createCliRoutes } from './cli'
 import { SessionIdentityConflictError } from '../../store/sessions'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { writeNamespaceLocale } from '../../config/namespaceSettings'
 
 function createApp(engine: Partial<SyncEngine>) {
     const app = new Hono()
@@ -238,6 +242,29 @@ describe('cli lazy session creation', () => {
         )
     })
 
+    it('does not inject summary locale during session bootstrap', async () => {
+        const dataDir = await mkdtemp(join(tmpdir(), 'hapi-cli-locale-'))
+        try {
+            await writeNamespaceLocale(dataDir, 'default', 'zh-CN')
+            const app = new Hono()
+            app.route('/cli', createCliRoutes(() => ({
+                getOrCreateSession: () => ({ id: sessionId })
+            } as never), dataDir))
+
+            const response = await app.request('/cli/sessions', {
+                method: 'POST',
+                headers: { ...authHeaders(), 'content-type': 'application/json' },
+                body: JSON.stringify({ tag: 'localized', metadata: {} })
+            })
+
+            expect(response.status).toBe(200)
+            const body = await response.json() as { sessionSummaryLocale?: string }
+            expect(body.sessionSummaryLocale).toBeUndefined()
+        } finally {
+            await rm(dataDir, { recursive: true, force: true })
+        }
+    })
+
     it('rejects an embedded machine owned by another namespace', async () => {
         const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
         const getOrCreateSession = mock(() => ({ id: sessionId }))
@@ -264,6 +291,70 @@ describe('cli lazy session creation', () => {
         expect(response.status).toBe(403)
         expect(getOrCreateMachine).not.toHaveBeenCalled()
         expect(getOrCreateSession).not.toHaveBeenCalled()
+    })
+
+    it('rejects a session whose path is outside the machine workspace roots (fork guard)', async () => {
+        const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
+        const getOrCreateSession = mock(() => ({ id: sessionId }))
+        const app = createApp({
+            getMachine: () => null,
+            getMachineByNamespace: () => ({
+                id: 'machine-1',
+                namespace: 'default',
+                metadata: { workspaceRoots: ['/home/ubuntu'] }
+            }),
+            getOrCreateMachine,
+            getOrCreateSession
+        } as never)
+
+        const response = await app.request('/cli/sessions', {
+            method: 'POST',
+            headers: {
+                ...authHeaders(),
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                id: sessionId,
+                tag: 'lazy-tag',
+                metadata: { path: '/tmp', machineId: 'machine-1' },
+                machine: { id: 'machine-1', metadata: {} }
+            })
+        })
+
+        expect(response.status).toBe(403)
+        expect(getOrCreateSession).not.toHaveBeenCalled()
+    })
+
+    it('accepts a session whose path is inside the machine workspace roots', async () => {
+        const getOrCreateMachine = mock(() => ({ id: 'machine-1' }))
+        const getOrCreateSession = mock(() => ({ id: sessionId }))
+        const app = createApp({
+            getMachine: () => null,
+            getMachineByNamespace: () => ({
+                id: 'machine-1',
+                namespace: 'default',
+                metadata: { workspaceRoots: ['/home/ubuntu'] }
+            }),
+            getOrCreateMachine,
+            getOrCreateSession
+        } as never)
+
+        const response = await app.request('/cli/sessions', {
+            method: 'POST',
+            headers: {
+                ...authHeaders(),
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                id: sessionId,
+                tag: 'lazy-tag',
+                metadata: { path: '/home/ubuntu/hapi', machineId: 'machine-1' },
+                machine: { id: 'machine-1', metadata: {} }
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(getOrCreateSession).toHaveBeenCalled()
     })
 
     it('returns 409 for a requested identity conflict', async () => {

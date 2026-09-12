@@ -1636,8 +1636,8 @@ describe('codexRemoteLauncher', () => {
         const { session } = createSessionStub();
 
         await expect(codexRemoteLauncher(session as never)).resolves.toBe('exit');
-        expect(harness.startThreadParams[0]?.config).not.toHaveProperty('model_context_window');
-        expect(harness.startThreadParams[0]?.config).not.toHaveProperty('model_auto_compact_token_limit');
+        expect(harness.startThreadParams[0]?.config ?? {}).not.toHaveProperty('model_context_window');
+        expect(harness.startThreadParams[0]?.config ?? {}).not.toHaveProperty('model_auto_compact_token_limit');
     });
 
     it('uses the native skill catalog for completion and structured turn input', async () => {

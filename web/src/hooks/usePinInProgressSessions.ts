@@ -44,7 +44,7 @@ function safeRemoveItem(key: string): void {
 }
 
 function parsePinInProgressSessions(raw: string | null): boolean {
-    if (raw === 'true') {
+    if (raw === 'true' || raw === 'all') {
         return true
     }
     return DEFAULT_PIN_IN_PROGRESS_SESSIONS

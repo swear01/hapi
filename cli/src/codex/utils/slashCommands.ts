@@ -115,30 +115,6 @@ export function resolveCodexSlashCommand(
         };
     }
 
-    if (command === 'agent') {
-        const value = rest.toLowerCase();
-        if (value === 'status') {
-            return {
-                kind: 'handled',
-                message: `Codex proactive multi-agent mode: ${state.proactiveMultiAgent ? 'on' : 'off'}`
-            };
-        }
-        if (value && !['on', 'enable', 'enabled', 'off', 'disable', 'disabled'].includes(value)) {
-            return {
-                kind: 'handled',
-                message: 'Usage: /agent [on|off|status]'
-            };
-        }
-        const enabled = value
-            ? ['on', 'enable', 'enabled'].includes(value)
-            : !state.proactiveMultiAgent;
-        return {
-            kind: 'handled',
-            message: `Codex proactive multi-agent mode ${enabled ? 'enabled' : 'disabled'}`,
-            updates: { proactiveMultiAgent: enabled }
-        };
-    }
-
     if (command === 'goal') {
         const lowerRest = rest.toLowerCase();
         if (!rest) {

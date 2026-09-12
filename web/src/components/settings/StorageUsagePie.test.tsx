@@ -5,7 +5,8 @@ import { StorageUsagePie } from './StorageUsagePie'
 const labels = {
     title: 'Relative share',
     empty: 'No storage to chart yet.',
-    database: 'Database',
+    used: 'Data',
+    freelist: 'Reclaimable free pages',
     wal: 'Write-ahead log',
     shm: 'Shared memory',
     total: 'Total',
@@ -16,7 +17,7 @@ describe('StorageUsagePie', () => {
     it('keeps total and path in the empty state', () => {
         render(
             <StorageUsagePie
-                usage={{ databaseBytes: 0, walBytes: 0, shmBytes: 0 }}
+                usage={{ usedBytes: 0, freelistBytes: 0, walBytes: 0, shmBytes: 0 }}
                 totalBytes={0}
                 path="/tmp/hapi.db"
                 labels={labels}
@@ -31,18 +32,18 @@ describe('StorageUsagePie', () => {
     it('uses roving tabindex and updates the center readout on legend select', () => {
         render(
             <StorageUsagePie
-                usage={{ databaseBytes: 700, walBytes: 200, shmBytes: 100 }}
+                usage={{ usedBytes: 700, freelistBytes: 100, walBytes: 200, shmBytes: 0 }}
                 totalBytes={1000}
                 path="/tmp/hapi.db"
                 labels={labels}
             />,
         )
 
-        expect(screen.getByTestId('storage-pie-center')).toHaveTextContent('Database')
+        expect(screen.getByTestId('storage-pie-center')).toHaveTextContent('Data')
         expect(screen.getByRole('img', { name: /Relative share/i })).toBeInTheDocument()
-        expect(screen.getByTestId('storage-pie-legend-database')).toHaveAttribute('tabIndex', '0')
+        expect(screen.getByTestId('storage-pie-legend-used')).toHaveAttribute('tabIndex', '0')
+        expect(screen.getByTestId('storage-pie-legend-freelist')).toHaveAttribute('tabIndex', '-1')
         expect(screen.getByTestId('storage-pie-legend-wal')).toHaveAttribute('tabIndex', '-1')
-        expect(screen.getByTestId('storage-pie-legend-shm')).toHaveAttribute('tabIndex', '-1')
         expect(screen.getByRole('listbox')).not.toHaveAttribute('aria-activedescendant')
         expect(screen.getByTestId('storage-pie-total')).toHaveTextContent('1000 B')
         expect(screen.getByTestId('storage-pie-path')).toHaveTextContent('/tmp/hapi.db')
@@ -51,6 +52,6 @@ describe('StorageUsagePie', () => {
         expect(screen.getByTestId('storage-pie-center')).toHaveTextContent('Write-ahead log')
         expect(screen.getByTestId('storage-pie-center')).toHaveTextContent('20%')
         expect(screen.getByTestId('storage-pie-legend-wal')).toHaveAttribute('tabIndex', '0')
-        expect(screen.getByTestId('storage-pie-legend-database')).toHaveAttribute('tabIndex', '-1')
+        expect(screen.getByTestId('storage-pie-legend-used')).toHaveAttribute('tabIndex', '-1')
     })
 })

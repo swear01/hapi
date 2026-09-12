@@ -4,7 +4,7 @@ import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
 
 describe('SyncEngine restartMachineRunner', () => {
-    it('refuses Restart on unsupervised hosts (stop would leave runner offline)', async () => {
+    it('refuses Restart for unsupervised runners (use Upgrade instead)', async () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
             store,
@@ -19,24 +19,25 @@ describe('SyncEngine restartMachineRunner', () => {
 
             engine.getOrCreateMachine(
                 'manual-runner',
-                { host: 'laptop', platform: 'linux', happyCliVersion: '0.20.0' },
+                { host: 'proxmox', platform: 'linux', happyCliVersion: '0.20.0' },
                 null,
                 'default'
             )
             engine.handleMachineAlive({ machineId: 'manual-runner', time: Date.now() })
 
             const result = await engine.restartMachineRunner('manual-runner', 'default')
-            expect(result.type).toBe('error')
-            if (result.type === 'error') {
-                expect(result.code).toBe('restart_unsupported')
-            }
+            expect(result).toEqual({
+                type: 'error',
+                message: 'Restart requires an external runner supervisor (HAPI_RUNNER_SUPERVISED=1); use Upgrade instead',
+                code: 'restart_unavailable',
+            })
             expect(stopRunner).not.toHaveBeenCalled()
         } finally {
             engine.stop()
         }
     })
 
-    it('stop-runners for a supervised online machine (banner escape hatch)', async () => {
+    it('refuses Restart when only versionHandoffDisabled is set (no supervisor proof)', async () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
             store,
@@ -50,24 +51,103 @@ describe('SyncEngine restartMachineRunner', () => {
             ;(engine as any).rpcGateway.stopRunner = stopRunner
 
             engine.getOrCreateMachine(
-                'supervised-runner',
+                'detached-optout',
                 {
-                    host: 'proxmox',
+                    host: 'laptop',
                     platform: 'linux',
                     happyCliVersion: '0.20.0',
-                    supervisedRestart: true,
+                    // Detached `hapi runner start` can set this without anything to relaunch.
+                    versionHandoffDisabled: true,
                 },
                 null,
                 'default'
             )
-            engine.handleMachineAlive({ machineId: 'supervised-runner', time: Date.now() })
+            engine.handleMachineAlive({ machineId: 'detached-optout', time: Date.now() })
 
-            const result = await engine.restartMachineRunner('supervised-runner', 'default')
+            const result = await engine.restartMachineRunner('detached-optout', 'default')
             expect(result).toEqual({
-                type: 'success',
-                message: 'Runner stop requested; supervisor will relaunch',
+                type: 'error',
+                message: 'Restart requires an external runner supervisor (HAPI_RUNNER_SUPERVISED=1); use Upgrade instead',
+                code: 'restart_unavailable',
             })
-            expect(stopRunner).toHaveBeenCalledWith('supervised-runner')
+            expect(stopRunner).not.toHaveBeenCalled()
+        } finally {
+            engine.stop()
+        }
+    })
+
+    it('stop-runners only when supervisedRestart is advertised', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            const stopRunner = mock(async () => undefined)
+            ;(engine as any).rpcGateway.stopRunner = stopRunner
+
+            engine.getOrCreateMachine(
+                'soup-runner',
+                {
+                    host: 'driver',
+                    platform: 'linux',
+                    happyCliVersion: '0.20.0',
+                    versionHandoffDisabled: true,
+                    supervisedRestart: true,
+                    startedCliMtimeMs: 100,
+                    installedCliMtimeMs: 200,
+                },
+                null,
+                'default'
+            )
+            engine.handleMachineAlive({ machineId: 'soup-runner', time: Date.now() })
+
+            const result = await engine.restartMachineRunner('soup-runner', 'default')
+            expect(result).toEqual({ type: 'success', message: 'Runner restart requested' })
+            expect(stopRunner).toHaveBeenCalledWith('soup-runner')
+        } finally {
+            engine.stop()
+        }
+    })
+
+    it('refuses Restart when supervised but on-disk CLI is not newer', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(
+            store,
+            {} as never,
+            new RpcRegistry(),
+            { broadcast() {} } as never
+        )
+
+        try {
+            const stopRunner = mock(async () => undefined)
+            ;(engine as any).rpcGateway.stopRunner = stopRunner
+
+            engine.getOrCreateMachine(
+                'same-bytes',
+                {
+                    host: 'driver',
+                    platform: 'linux',
+                    happyCliVersion: '0.20.0',
+                    supervisedRestart: true,
+                    startedCliMtimeMs: 100,
+                    installedCliMtimeMs: 100,
+                },
+                null,
+                'default'
+            )
+            engine.handleMachineAlive({ machineId: 'same-bytes', time: Date.now() })
+
+            const result = await engine.restartMachineRunner('same-bytes', 'default')
+            expect(result).toEqual({
+                type: 'error',
+                message: 'No newer CLI is installed; use Upgrade first',
+                code: 'restart_unavailable',
+            })
+            expect(stopRunner).not.toHaveBeenCalled()
         } finally {
             engine.stop()
         }

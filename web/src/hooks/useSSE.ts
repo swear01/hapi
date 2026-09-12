@@ -16,8 +16,9 @@ import type {
     Session,
     SessionPatch,
     SessionResponse,
-    SessionsResponse,
     SessionSummary,
+    SessionSummaryMetadata,
+    SessionsResponse,
     SyncEvent
 } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
@@ -162,6 +163,7 @@ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSu
         && current.model === next.model
         && current.modelReasoningEffort === next.modelReasoningEffort
         && current.effort === next.effort
+        && current.scratchlistUpdatedAt === next.scratchlistUpdatedAt
         && current.pendingRequestsCount === next.pendingRequestsCount
         // Structured SSE patches (#897) can move these without touching the
         // keep-alive fields above; omit them and a todos/metadata/agentState
@@ -189,7 +191,7 @@ function getSessionPatch(value: unknown): SessionPatch | null {
     if (!parsed.success) {
         return null
     }
-    return Object.keys(parsed.data).length > 0 ? parsed.data : null
+    return Object.keys(parsed.data).length > 0 ? (parsed.data as SessionPatch) : null
 }
 
 function isMachineRecord(value: unknown): value is Machine {
@@ -488,7 +490,9 @@ export function useSSE(options: {
                 const summary = {
                     ...toSessionSummary(session),
                     futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0,
-                    nextScheduledAt: existing?.nextScheduledAt ?? null
+                    uninvokedScheduledMessageCount: existing?.uninvokedScheduledMessageCount ?? 0,
+                    nextScheduledAt: existing?.nextScheduledAt ?? null,
+                    scratchlistUpdatedAt: existing?.scratchlistUpdatedAt
                 }
                 const nextSessions = previous.sessions.slice()
                 if (existingIndex >= 0) {
@@ -537,6 +541,9 @@ export function useSSE(options: {
                         ? patch.modelReasoningEffort ?? null
                         : current.modelReasoningEffort,
                     effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
+                }
+                if (Object.prototype.hasOwnProperty.call(patch, 'scratchlistUpdatedAt')) {
+                    nextSummary.scratchlistUpdatedAt = patch.scratchlistUpdatedAt
                 }
 
                 // Gate versioned fields against THIS summary's watermarks —

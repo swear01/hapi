@@ -91,18 +91,57 @@ describe('ReasoningGroup', () => {
         vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
     })
 
-    it('is collapsed by default', () => {
+    it('expands historical reasoning when the preference is disabled', () => {
+        const { container } = renderGroup()
+        expect(isCollapsed(container)).toBe(false)
+    })
+
+    it('collapses historical reasoning when the preference is enabled', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
         const { container } = renderGroup()
         expect(isCollapsed(container)).toBe(true)
     })
 
+    it('does not mount reasoning content while collapsed', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
+        const { container, queryByTestId } = renderGroup()
+
+        expect(isCollapsed(container)).toBe(true)
+        expect(queryByTestId('reasoning-content')).toBeNull()
+    })
+
     it('expands on click', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
         const { container } = renderGroup()
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
         expect(scroll.tabIndex).toBe(-1)
         fireEvent.click(container.querySelector('button')!)
         expect(isCollapsed(container)).toBe(false)
         expect(scroll.tabIndex).toBe(0)
+    })
+
+    it('can be expanded manually while the preference is enabled', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
+        const { container } = renderGroup()
+        const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
+        expect(scroll.tabIndex).toBe(-1)
+        fireEvent.click(container.querySelector('button')!)
+        expect(isCollapsed(container)).toBe(false)
+        expect(scroll.tabIndex).toBe(0)
+        expect(container.querySelector('[data-testid="reasoning-content"]')).not.toBeNull()
+    })
+
+    it('unmounts reasoning content after collapsing again', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
+        const { container, queryByTestId } = renderGroup()
+
+        fireEvent.click(container.querySelector('button')!)
+        expect(queryByTestId('reasoning-content')).not.toBeNull()
+
+        fireEvent.click(container.querySelector('button')!)
+
+        expect(isCollapsed(container)).toBe(true)
+        expect(queryByTestId('reasoning-content')).toBeNull()
     })
 
     it('auto-expands while streaming', () => {
@@ -128,14 +167,8 @@ describe('ReasoningGroup', () => {
         expect(isCollapsed(container)).toBe(true)
     })
 
-    it('collapses an auto-expanded streaming block when the preference is enabled from another tab', () => {
-        const { container, rerender } = renderGroup()
-        setStreaming()
-        rerender(
-            <ReasoningGroup>
-                <div data-testid="reasoning-content">thinking text</div>
-            </ReasoningGroup>
-        )
+    it('collapses mounted historical reasoning when the preference is enabled from another tab', () => {
+        const { container } = renderGroup()
         expect(isCollapsed(container)).toBe(false)
 
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
@@ -154,6 +187,19 @@ describe('ReasoningGroup', () => {
 
         expect(isCollapsed(container)).toBe(true)
         expect(onNestedScrollFollowChange).toHaveBeenLastCalledWith(true)
+    })
+
+    it('expands mounted historical reasoning when the preference is disabled from another tab', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'true')
+        const { container } = renderGroup()
+        expect(isCollapsed(container)).toBe(true)
+
+        act(() => {
+            window.localStorage.removeItem(STORAGE_KEY)
+            window.dispatchEvent(new StorageEvent('storage', { key: STORAGE_KEY }))
+        })
+
+        expect(isCollapsed(container)).toBe(false)
     })
 
     it('opens a streaming reasoning panel at the latest content and follows new output at the bottom', () => {

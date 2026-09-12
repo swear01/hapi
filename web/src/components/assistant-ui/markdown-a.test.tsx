@@ -198,7 +198,6 @@ describe('cross-tab sync via storage event', () => {
             window.dispatchEvent(new StorageEvent('storage', {
                 key: STORAGE_KEY,
                 newValue: JSON.stringify(['obsidian']),
-                storageArea: localStorage,
             }))
         })
 

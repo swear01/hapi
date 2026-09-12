@@ -96,22 +96,37 @@ export default defineConfig({
                 name: 'HAPI',
                 short_name: 'HAPI',
                 description: 'AI-powered development assistant',
-                // An installed Android WebAPK stores theme_color once at install time and uses it
-                // as a fixed toolbar color, so any value here pins the status bar to one appearance.
-                // With none, Chrome falls back to white in light mode and black in dark mode. That
-                // follows the Android system uiMode, not the in-app appearance setting, so the bar
-                // and the app diverge while an appearance override is active. `undefined` is
-                // explicit because the plugin fills in its own #42b883 default otherwise, and the
-                // resulting "theme_color is missing" build warning is wrong: theme_color is
-                // optional for installability.
-                theme_color: undefined,
-                // Splash background stays light; only the status bar needed to become adaptive.
+                theme_color: '#ffffff',
                 background_color: '#ffffff',
                 display: 'standalone',
                 orientation: 'portrait',
                 scope: base,
                 start_url: base,
                 icons: [
+                    {
+                        src: 'pwa-16x16.png',
+                        sizes: '16x16',
+                        type: 'image/png',
+                        purpose: 'any'
+                    },
+                    {
+                        src: 'pwa-24x24.png',
+                        sizes: '24x24',
+                        type: 'image/png',
+                        purpose: 'any'
+                    },
+                    {
+                        src: 'pwa-32x32.png',
+                        sizes: '32x32',
+                        type: 'image/png',
+                        purpose: 'any'
+                    },
+                    {
+                        src: 'pwa-48x48.png',
+                        sizes: '48x48',
+                        type: 'image/png',
+                        purpose: 'any'
+                    },
                     {
                         src: 'pwa-64x64.png',
                         sizes: '64x64',
@@ -129,18 +144,6 @@ export default defineConfig({
                         sizes: '512x512',
                         type: 'image/png',
                         purpose: 'any'
-                    },
-                    {
-                        src: 'pwa-maskable-192x192.png',
-                        sizes: '192x192',
-                        type: 'image/png',
-                        purpose: 'maskable'
-                    },
-                    {
-                        src: 'pwa-maskable-512x512.png',
-                        sizes: '512x512',
-                        type: 'image/png',
-                        purpose: 'maskable'
                     }
                 ],
                 // Web Share Target — Android Chrome routes POSTs to /share

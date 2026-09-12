@@ -3,7 +3,7 @@ import type { AgentSelection } from '@/ui/selectAgent'
 import type { CommandContext } from './types'
 
 const { getCliArgsMock, resolveCommandMock, selectAgentMock, ensureRuntimeAssetsMock, runMock } = vi.hoisted(() => ({
-    getCliArgsMock: vi.fn<() => string[]>(),
+    getCliArgsMock: vi.fn<() => string[]>(() => []),
     resolveCommandMock: vi.fn(),
     selectAgentMock: vi.fn<() => Promise<AgentSelection>>(),
     ensureRuntimeAssetsMock: vi.fn(async () => {}),
@@ -17,6 +17,14 @@ vi.mock('@/runtime/assets', () => ({ ensureRuntimeAssets: ensureRuntimeAssetsMoc
 vi.mock('@/projectPath', () => ({ isBunCompiled: () => false }))
 vi.mock('@/ui/logger', () => ({ logger: { debug: vi.fn() } }))
 vi.mock('@/utils/proxyEnv', () => ({ ensureLoopbackProxyBypass: vi.fn() }))
+vi.mock('@/upgrade/upgradeTarget', () => ({
+    clearUpgradeTarget: vi.fn(),
+    isAuthorizedRunnerHandoff: () => false,
+    isRunnerStartCliArgs: () => false,
+    isUpgradeTargetStaleRelativeToCli: () => false,
+    readUpgradeTarget: () => null,
+    shouldDelegateToUpgradeTarget: () => false,
+}))
 
 import { runCli } from './runCli'
 
