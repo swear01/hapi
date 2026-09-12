@@ -35,8 +35,11 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
         if (newline && lines == budget.lines && end > from) break
         if (newline) lines++
         // Iterate through an entire platform grapheme before charging its budget.
-        while (!boundaries.isBoundary(matcher.end()) && matcher.find()) { /* lazy merge */ }
-        end = matcher.end()
+        var matchEnd = matcher.end()
+        while (!boundaries.isBoundary(matchEnd) && matcher.find()) {
+            matchEnd = matcher.end()
+        }
+        end = matchEnd
         characters++
     }
     return TextPage(source.substring(from, end), end)

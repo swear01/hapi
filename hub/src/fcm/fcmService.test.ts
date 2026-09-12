@@ -78,7 +78,7 @@ describe('FcmService.sendToNamespace', () => {
             return new Response('{}', { status: 200 })
         }) as unknown as typeof fetch
 
-        const svc = new FcmService('proj-id', { client_email: 'x', private_key: 'y' }, store as never)
+        const svc = makeService(store)
         await svc.sendToNamespace('default', {
             ...makePayload({ type: 'model-error', severity: 'error' }),
             tag: 'model-error-sess-1-1710000000000'

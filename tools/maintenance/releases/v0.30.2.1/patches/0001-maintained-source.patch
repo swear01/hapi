@@ -1,10 +1,10 @@
-From d39f10553eae2c7492228536ec1d0495342d8e40 Mon Sep 17 00:00:00 2001
+From d867b8a69888a205d2c747b8f84ed01664e3d3b2 Mon Sep 17 00:00:00 2001
 From: swear01 <stanley.yellow1@gmail.com>
-Date: Sat, 12 Sep 2026 20:22:16 +0800
-Subject: [PATCH] chore(release): rebuild maintained v0.30.1.1 onto official
- main
+Date: Sat, 12 Sep 2026 20:50:29 +0800
+Subject: [PATCH] chore(release): rebuild maintained v0.30.2.1 onto official
+ v0.30.2
 
-Rebuild the maintained overlay onto official v0.30.1 and remount Hub
+Rebuild the maintained overlay onto official v0.30.2 and remount Hub
 upgrade routes that the previous four-part binary omitted.
 
 Co-authored-by: Cursor <cursoragent@cursor.com>
@@ -35,6 +35,8 @@ Co-authored-by: Cursor <cursoragent@cursor.com>
  .github/workflows/webapp.yml                  |      2 +
  .gitignore                                    |      7 +
  CONTEXT.md                                    |    242 +
+ .../hapi/companion/feature/chat/TextPaging.kt |      7 +-
+ .../chat/blocks/QuestionDetailsView.kt        |      4 +-
  .../kotlin/app/hapi/protocol/catalog/Modes.kt |      4 +-
  .../app/hapi/protocol/catalog/CatalogTest.kt  |      4 +-
  bun.lock                                      |    594 +-
@@ -614,7 +616,7 @@ Co-authored-by: Cursor <cursoragent@cursor.com>
  web/src/utils/applySuggestion.ts              |      3 +-
  web/src/utils/findActiveWord.test.ts          |     24 +
  web/vite.config.ts                            |     43 +-
- 605 files changed, 189935 insertions(+), 4592 deletions(-)
+ 607 files changed, 189942 insertions(+), 4596 deletions(-)
  create mode 100644 .gitattributes
  create mode 100644 .github/release-notes/v0.27.2.2.md
  create mode 100644 .github/release-notes/v0.27.2.3.md
@@ -2094,6 +2096,44 @@ index 000000000..973f40bbf
 +开发：第一版用 Electron Builder 生成 Windows `.exe` 和 macOS `.app` 预览产物，不做签名公证。
 +产品：Hub 端口能改吗？
 +开发：能改端口，默认 3006；Host 固定 127.0.0.1。
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
+index bdf3956d6..2e9f4e6fe 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
+@@ -35,8 +35,11 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
+         if (newline && lines == budget.lines && end > from) break
+         if (newline) lines++
+         // Iterate through an entire platform grapheme before charging its budget.
+-        while (!boundaries.isBoundary(matcher.end()) && matcher.find()) { /* lazy merge */ }
+-        end = matcher.end()
++        var matchEnd = matcher.end()
++        while (!boundaries.isBoundary(matchEnd) && matcher.find()) {
++            matchEnd = matcher.end()
++        }
++        end = matchEnd
+         characters++
+     }
+     return TextPage(source.substring(from, end), end)
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/QuestionDetailsView.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/QuestionDetailsView.kt
+index cd59c683a..87033354b 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/QuestionDetailsView.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/QuestionDetailsView.kt
+@@ -90,7 +90,7 @@ private fun QuestionAnswerCard(
+                 caption?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.hapi.hint) }
+                 when {
+                     markdown -> QuestionMarkdown(text)
+-                    text.length > TOOL_TEXT_PAGE_SIZE -> ToolTextContent(code = text)
++                    !fitsToolPage(text) -> ToolTextContent(code = text)
+                     else -> Text(text.ifEmpty { stringResource(R.string.chat_empty_snippet) }, style = MaterialTheme.typography.bodyMedium)
+                 }
+                 description?.takeIf { it.isNotEmpty() }?.let { QuestionMarkdown(it) }
+@@ -101,5 +101,5 @@ private fun QuestionAnswerCard(
+ 
+ @Composable
+ private fun QuestionMarkdown(text: String) {
+-    if (text.length > TOOL_TEXT_PAGE_SIZE) ToolTextContent(code = text, language = "markdown") else Markdown(text)
++    if (!fitsToolPage(text)) ToolTextContent(code = text, language = "markdown") else Markdown(text)
+ }
 diff --git a/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt b/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt
 index f2a7770bd..3285d84a7 100644
 --- a/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Modes.kt
@@ -75642,7 +75682,7 @@ index 1a9074075..e15da5766 100644
          return {
              title: composed.title,
 diff --git a/hub/src/fcm/fcmService.test.ts b/hub/src/fcm/fcmService.test.ts
-index a7e4d4005..d1ccccd04 100644
+index a7e4d4005..0aba31b25 100644
 --- a/hub/src/fcm/fcmService.test.ts
 +++ b/hub/src/fcm/fcmService.test.ts
 @@ -68,6 +68,26 @@ describe('FcmService.sendToNamespace', () => {
@@ -75659,7 +75699,7 @@ index a7e4d4005..d1ccccd04 100644
 +            return new Response('{}', { status: 200 })
 +        }) as unknown as typeof fetch
 +
-+        const svc = new FcmService('proj-id', { client_email: 'x', private_key: 'y' }, store as never)
++        const svc = makeService(store)
 +        await svc.sendToNamespace('default', {
 +            ...makePayload({ type: 'model-error', severity: 'error' }),
 +            tag: 'model-error-sess-1-1710000000000'
