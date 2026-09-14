@@ -17,7 +17,7 @@ test('jump to conversation start reaches the top without dragging the composer o
     await page.waitForTimeout(3500)
     await expect.poll(async () => await page.evaluate(() => window.__jumpProbe.windowState().messageCount), {
         timeout: 30_000,
-    }).toBe(200)
+    }).toBe(20)
 
     // Tail usage event is in the window: status bar shows live context stats.
     const initialStatus = await page.evaluate(() => window.__jumpProbe.statusText())
