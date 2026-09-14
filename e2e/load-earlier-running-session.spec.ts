@@ -1,28 +1,43 @@
 import { expect, test } from '@playwright/test'
 
-test('outline selection above the history cap survives the next streaming ingest', async ({ page }) => {
-    test.setTimeout(90_000)
-    await page.goto('/e2e-fixtures/history-load-fixture.html?outline=1')
-    await expect(page.locator('.chat-scroll-y')).toBeVisible()
-    await page.waitForTimeout(3500)
-    for (let loaded = 400; loaded <= 1200; loaded += 200) {
-        await page.getByRole('button', { name: 'Load earlier', exact: true }).evaluate(button => button.click())
-        await expect.poll(() => page.evaluate(() => window.__probe.windowState().messageCount)).toBe(loaded)
-    }
-    await page.evaluate(() => window.__probe.startStreaming(50))
-    await page.locator('aside button').filter({ hasText: 'Fixture message 700' }).evaluate(button => button.click())
-    const selected = page.locator('.happy-thread-messages > [id$="m-700"]')
-    await expect(selected).toBeInViewport()
-    await page.waitForTimeout(1200)
-    const before = await selected.boundingBox()
-    expect(before).not.toBeNull()
-    await page.evaluate(() => window.__probe.startStreaming(150))
-    await expect.poll(() => page.evaluate(() => window.__probe.streamedCount()), { timeout: 15_000 }).toBeGreaterThanOrEqual(3)
-    await expect(selected).toBeInViewport()
-    const after = await selected.boundingBox()
-    expect(after).not.toBeNull()
-    expect(Math.abs(after!.y - before!.y)).toBeLessThan(10)
-})
+for (const navigation of ['outline', 'response'] as const) {
+    test(`${navigation} selection above the history cap survives the next streaming ingest`, async ({ page }) => {
+        test.setTimeout(90_000)
+        await page.goto(`/e2e-fixtures/history-load-fixture.html?outline=1${navigation === 'response' ? '&responseNavigation=1' : ''}`)
+        await expect(page.locator('.chat-scroll-y')).toBeVisible()
+        await page.waitForTimeout(3500)
+        for (let loaded = 400; loaded <= 1200; loaded += 200) {
+            const loadEarlier = page.getByRole('button', { name: 'Load earlier', exact: true })
+            await expect(loadEarlier).toBeEnabled({ timeout: 15_000 })
+            await loadEarlier.evaluate(button => button.click())
+            await expect.poll(() => page.evaluate(() => window.__probe.windowState().messageCount), {
+                timeout: 15_000
+            }).toBe(loaded)
+        }
+        if (navigation === 'outline') {
+            await page.evaluate(() => window.__probe.startStreaming(50))
+            await page.locator('aside button').filter({ hasText: 'Fixture message 700' }).evaluate(button => button.click())
+        } else {
+            await page.locator('aside button').filter({ hasText: 'Fixture message 701' }).evaluate(button => button.click())
+            await expect(page.locator('aside')).toHaveCount(0)
+            await expect.poll(() => page.evaluate(() => window.__probe.windowState().messageCount)).toBe(1200)
+            await page.evaluate(() => window.__probe.startStreaming(50))
+            await page.locator('.happy-message').filter({ hasText: 'Fixture assistant reply 702' })
+                .locator('[title="Jump to turn input"]').evaluate(button => (button as HTMLButtonElement).click())
+        }
+        const selected = page.locator(`.happy-thread-messages > [id$="m-${navigation === 'outline' ? 700 : 701}"]`)
+        await expect(selected).toBeInViewport()
+        await page.waitForTimeout(1200)
+        const before = await selected.boundingBox()
+        expect(before).not.toBeNull()
+        await page.evaluate(() => window.__probe.startStreaming(150))
+        await expect.poll(() => page.evaluate(() => window.__probe.streamedCount()), { timeout: 15_000 }).toBeGreaterThanOrEqual(3)
+        await expect(selected).toBeInViewport()
+        const after = await selected.boundingBox()
+        expect(after).not.toBeNull()
+        expect(Math.abs(after!.y - before!.y)).toBeLessThan(10)
+    })
+}
 
 // Bug report: clicking "Load earlier" (outline button) on a RUNNING session
 // (messages streaming in via SSE) made the chat viewport fly upward and keep

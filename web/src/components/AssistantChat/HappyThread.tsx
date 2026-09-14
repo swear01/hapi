@@ -1958,7 +1958,7 @@ export function HappyThread(props: {
         if (navigationInFlightRef.current) return false
         navigationInFlightRef.current = true
         setIsNavigationInFlight(true)
-        const releaseNavigation = beginOwnedNavigation()
+        const releaseNavigation = beginOwnedNavigation(true)
         try {
             return await scrollToPromptForMessage(messageId, replyToMessageId)
         } finally {
