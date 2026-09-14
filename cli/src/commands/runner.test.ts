@@ -15,7 +15,7 @@ const {
 } = vi.hoisted(() => ({
     checkIfRunnerRunningAndCleanupStaleStateMock: vi.fn(),
     listRunnerSessionsMock: vi.fn(async () => []),
-    stopRunnerMock: vi.fn(async () => {}),
+    stopRunnerMock: vi.fn(async () => true),
     stopRunnerSessionMock: vi.fn(async (_sessionId: string): Promise<'stopped' | 'already_gone' | 'still_alive'> => 'stopped'),
     spawnHappyCLIMock: vi.fn(() => ({ unref: vi.fn() })),
     startRunnerMock: vi.fn(async () => {}),

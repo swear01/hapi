@@ -1632,7 +1632,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         ]);
     });
 
-    it('injects the skill lookup instruction only on the first prompt', async () => {
+    it('does not inject the skill lookup instruction into prompts', async () => {
         const { session } = createSessionStub([
             { message: 'first', mode: createMode() },
             { message: 'second', mode: createMode() }
@@ -1640,11 +1640,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
 
         await opencodeRemoteLauncher(session as never);
 
-        expect(JSON.stringify(harness.promptContents[0])).toContain('$name');
-        expect(JSON.stringify(harness.promptContents[0])).toContain('skill_lookup');
-        expect(JSON.stringify(harness.promptContents[0])).toContain('hapi_display_image');
-        expect(JSON.stringify(harness.promptContents[0])).not.toContain('hapi_change_title');
-        expect(JSON.stringify(harness.promptContents[1])).not.toContain('skill_lookup');
+        expect(JSON.stringify(harness.promptContents[0])).toBe('[{"type":"text","text":"first"}]');
+        expect(JSON.stringify(harness.promptContents[1])).toBe('[{"type":"text","text":"second"}]');
     });
 
     it('spawns the ACP backend with an explicit --port/--hostname from allocateFreePort', async () => {
@@ -1968,7 +1965,7 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(harness.promptCount).toBe(1);
     });
 
-    it('injects plan-mode instructions into plan turns', async () => {
+    it('does not inject plan-mode instructions into plan turns', async () => {
         const { session } = createSessionStub([
             { message: 'design the fix', mode: createPlanMode() }
         ]);
@@ -1976,9 +1973,8 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         await opencodeRemoteLauncher(session as never);
 
         const content = harness.promptContents[0] as Array<{ type: string; text: string }>;
-        expect(content[0]?.text).toContain('You are in plan mode');
-        expect(content[0]?.text).toContain('Do not execute tools');
-        expect(content[0]?.text).toContain('design the fix');
+        expect(content[0]?.text).toBe('design the fix');
+        expect(content[0]?.text).not.toContain('You are in plan mode');
         expect(content[0]?.text).not.toContain('hapi_change_title');
     });
 

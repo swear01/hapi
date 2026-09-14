@@ -91,7 +91,7 @@ private fun QuestionAnswerCard(
                 caption?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.hapi.hint) }
                 when {
                     markdown -> QuestionMarkdown(text)
-                    text.length > TOOL_TEXT_PAGE_SIZE -> ToolTextContent(code = text)
+                    !fitsToolPage(text) -> ToolTextContent(code = text)
                     else -> Text(text.ifEmpty { stringResource(R.string.chat_empty_snippet) }, style = MaterialTheme.typography.bodyMedium)
                 }
                 description?.takeIf { it.isNotEmpty() }?.let { QuestionMarkdown(it) }
@@ -102,5 +102,5 @@ private fun QuestionAnswerCard(
 
 @Composable
 private fun QuestionMarkdown(text: String) {
-    if (text.length > TOOL_TEXT_PAGE_SIZE) ToolTextContent(code = text, language = "markdown") else Markdown(text)
+    if (!fitsToolPage(text)) ToolTextContent(code = text, language = "markdown") else Markdown(text)
 }

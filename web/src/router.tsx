@@ -72,6 +72,8 @@ import SettingsMachinesPage from '@/routes/settings/machines'
 import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
 import SettingsUsagePage from '@/routes/settings/usage'
+import SettingsRunnerManagementPage from '@/routes/settings/runner-management'
+import SettingsNotificationsPage from '@/routes/settings/notifications'
 import SharePage from '@/routes/share'
 import { retargetSharePendingTransfer, setSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer, parseShareSearch } from '@/lib/shareTransfer'
@@ -1241,6 +1243,18 @@ const settingsAboutRoute = createRoute({
     component: SettingsAboutPage,
 })
 
+const settingsRunnerManagementRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'runner-management',
+    component: SettingsRunnerManagementPage,
+})
+
+const settingsNotificationsRoute = createRoute({
+    getParentRoute: () => settingsRoute,
+    path: 'notifications',
+    component: SettingsNotificationsPage,
+})
+
 const settingsStorageRoute = createRoute({
     getParentRoute: () => settingsRoute,
     path: 'storage',
@@ -1289,6 +1303,8 @@ export const routeTree = rootRoute.addChildren([
         settingsStorageRoute,
         settingsUsageRoute,
         settingsAboutRoute,
+        settingsRunnerManagementRoute,
+        settingsNotificationsRoute,
     ]),
     shareRoute,
 ])

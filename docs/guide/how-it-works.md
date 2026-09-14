@@ -33,7 +33,8 @@ The CLI is a wrapper around AI coding agents. It supports multiple agent flavors
 hapi              # Choose an agent interactively and start a session
 hapi <agent>      # Start a supported agent directly (required in scripts)
 hapi runner start # Run background service for remote session spawning
-hapi ping-peer --list  # Shell peer shortlist (prefer MCP list_peers in-session)
+hapi spawn-peer --dir /path --name Worker --message-file - --json
+hapi wait-peer <session-id> --remit-id <remit-id> --json
 ```
 
 MCP peer tools (same hub/namespace as the session): `list_peers` (discover), `inspect_peer` (read), `ping_peer` (message). These work from runner-spawned sessions even when the hub is on another host - see [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-peer-discovery).

@@ -1,14 +1,16 @@
 import { expect, test } from '@playwright/test'
 
+const shortcutModifier = process.platform === 'darwin' ? 'Meta' : 'Control'
+
 /**
  * Regression spec for the Chromium select-all quirk: a page containing a
- * contenteditable (the rich composer) makes Ctrl+A collapse to an empty
+ * contenteditable (the rich composer) makes select-all collapse to an empty
  * caret when focus is outside the editable, so Ctrl+C copies nothing.
  * SessionChat's applyGlobalSelectAll takeover must restore the expected
  * "select the conversation" behavior while leaving composer/input
  * select-all to the browser.
  */
-test.describe('composer Ctrl+A + Ctrl+C copy', () => {
+test.describe('composer select-all + copy', () => {
     test.beforeEach(async ({ context, page }) => {
         await context.grantPermissions(['clipboard-read', 'clipboard-write'])
         await page.goto('/e2e-fixtures/composer-copy-fixture.html')
@@ -16,11 +18,11 @@ test.describe('composer Ctrl+A + Ctrl+C copy', () => {
     })
 
     test('Ctrl+A outside the composer selects the message thread and Ctrl+C copies it', async ({ page }) => {
-        await page.keyboard.press('Control+a')
+        await page.keyboard.press(`${shortcutModifier}+a`)
         const selected = await page.evaluate(() => window.getSelection()?.toString() ?? '')
         expect(selected).toContain('The quick brown fox jumps over the lazy dog')
         expect(selected).toContain('my earlier user message')
-        await page.keyboard.press('Control+c')
+        await page.keyboard.press(`${shortcutModifier}+c`)
         const copied = await page.evaluate(() => navigator.clipboard.readText())
         expect(copied).toBe(selected)
     })
@@ -29,8 +31,8 @@ test.describe('composer Ctrl+A + Ctrl+C copy', () => {
         const editor = page.locator('[data-testid="rich-composer-input"]')
         await editor.click()
         await page.keyboard.type('my draft message')
-        await page.keyboard.press('Control+a')
-        await page.keyboard.press('Control+c')
+        await page.keyboard.press(`${shortcutModifier}+a`)
+        await page.keyboard.press(`${shortcutModifier}+c`)
         const copied = await page.evaluate(() => navigator.clipboard.readText())
         expect(copied).toBe('my draft message')
     })
@@ -44,8 +46,8 @@ test.describe('composer Ctrl+A + Ctrl+C copy', () => {
         })
         const textarea = page.locator('#plain-textarea')
         await textarea.click()
-        await page.keyboard.press('Control+a')
-        await page.keyboard.press('Control+c')
+        await page.keyboard.press(`${shortcutModifier}+a`)
+        await page.keyboard.press(`${shortcutModifier}+c`)
         const copied = await page.evaluate(() => navigator.clipboard.readText())
         expect(copied).toBe('textarea draft')
     })
@@ -56,9 +58,9 @@ test.describe('composer Ctrl+A + Ctrl+C copy', () => {
             sourcePosition: { x: 5, y: 2 },
             targetPosition: { x: 300, y: 2 },
         })
-        await page.keyboard.press('Control+c')
+        await page.keyboard.press(`${shortcutModifier}+c`)
         const copied = await page.evaluate(() => navigator.clipboard.readText())
-        expect(copied).toContain('Another assistant message')
+        expect(copied).toContain('assistant message with a code block')
         expect(copied).toContain('my earlier user message')
     })
 })

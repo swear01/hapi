@@ -1303,7 +1303,7 @@ describe('MessageService.sendMessage deliveryMode', () => {
             deliveryMode: 'steer'
         })
         await service.sendMessage(session.id, {
-            text: 'retry requests queue',
+            text: 'original steer whose response is lost',
             localId: 'duplicate-steer',
             deliveryMode: 'queue'
         })
@@ -1322,6 +1322,66 @@ describe('MessageService.sendMessage deliveryMode', () => {
             content: { text: 'original steer whose response is lost' },
             meta: { sentFrom: 'webapp', deliveryMode: 'steer' }
         })
+    })
+
+    it('does not redeliver an invoked remit after a service restart', async () => {
+        const store = makeStore()
+        const session = makeSession(store, 'invoked-remit-retry')
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+        const payload = { text: 'execute once', localId: 'completed-remit' }
+        const original = await service.sendMessage(session.id, payload)
+        store.messages.markMessagesInvoked(session.id, [payload.localId], Date.now())
+        const restarted = new MessageService(store, io, makePublisher() as any)
+
+        expect(await restarted.sendMessage(session.id, payload)).toEqual(original)
+        expect(cliEmitted).toHaveLength(1)
+        await expect(restarted.sendMessage(session.id, { ...payload, text: 'different' }))
+            .rejects.toThrow(/localId is already bound/)
+    })
+
+    it('rejects a duplicate localId bound to a different message payload', async () => {
+        const store = makeStore()
+        const session = makeSession(store, 'duplicate-payload')
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+
+        await service.sendMessage(session.id, { text: 'original', localId: 'same-id' })
+        await expect(service.sendMessage(session.id, {
+            text: 'different',
+            localId: 'same-id'
+        })).rejects.toThrow(/localId is already bound to a different message payload/)
+
+        expect(cliEmitted).toHaveLength(1)
+        expect(store.messages.getUninvokedLocalMessages(session.id)).toHaveLength(1)
+    })
+
+    it('rejects reusing a scheduled localId for immediate delivery', async () => {
+        const store = makeStore()
+        const session = makeSession(store, 'duplicate-schedule')
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+        const scheduledAt = Date.now() + 60_000
+        await service.sendMessage(session.id, { text: 'work', localId: 'same-id', scheduledAt })
+        await expect(service.sendMessage(session.id, {
+            text: 'work', localId: 'same-id'
+        })).rejects.toThrow(/localId is already bound/)
+        expect(cliEmitted).toHaveLength(0)
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]?.scheduledAt).toBe(scheduledAt)
+    })
+
+    it('rejects changing a queued localId into a native steer', async () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession(
+            'duplicate-queue-to-steer', { path: '/tmp/project', host: 'localhost', flavor: 'pi' }, null, 'default'
+        )
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+        await service.sendMessage(session.id, { text: 'work', localId: 'same-id', deliveryMode: 'queue' })
+        await expect(service.sendMessage(session.id, {
+            text: 'work', localId: 'same-id', deliveryMode: 'steer'
+        })).rejects.toThrow(/localId is already bound/)
+        expect(cliEmitted).toHaveLength(1)
     })
 
     it('downgrades a legacy persisted steer through the mature scheduled scan', () => {

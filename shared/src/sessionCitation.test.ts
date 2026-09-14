@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
     SESSION_REFERENCE_STEER_SUFFIX,
+    SPAWN_PEER_TOOL_DESCRIPTION,
     buildSessionCitationSteerInstruction,
     extractSessionCitationIds,
     normalizeSessionIdPrefix,
@@ -111,5 +112,12 @@ describe('buildSessionCitationSteerInstruction', () => {
         expect(text).toContain('mcp__hapi__ping_peer')
         expect(text).toContain('mcp__hapi__list_peers')
         expect(text.toLowerCase()).toMatch(/not.*(grep|glob|filesystem|local file)/i)
+    })
+})
+
+describe('SPAWN_PEER_TOOL_DESCRIPTION', () => {
+    it('describes a fresh atomic spawn without embedding workflow prose', () => {
+        expect(SPAWN_PEER_TOOL_DESCRIPTION).toContain('fresh HAPI session')
+        expect(SPAWN_PEER_TOOL_DESCRIPTION).toContain('atomically')
     })
 })

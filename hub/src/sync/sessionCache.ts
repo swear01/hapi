@@ -772,18 +772,13 @@ export class SessionCache {
     }
 
     /**
-     * tiann/hapi#916: hub-side write of the archive-metadata fields normally
-     * authored by the CLI's `archiveAndClose`. Called by `syncEngine.archiveSession`
-     * when the kill-RPC fails because the CLI is unreachable (e.g. the
-     * hub-restart cascade already killed it). Without this, the route would
-     * either 500 (pre-fix) or silently return ok=true while leaving
-     * `lifecycleState=running` on disk — both confuse the operator.
+     * Hub-owned write of archive metadata after an accepted archive request,
+     * including when the CLI is already unreachable. This keeps the lifecycle
+     * invariant independent of runner timing.
      *
      * Idempotent: if `lifecycleState` is already `archived` we return without
-     * touching the row to avoid resetting `lifecycleStateSince`. Best-effort:
-     * if every retry hits `version-mismatch` (genuine contention) the original
-     * `archiveSession` flow still marks the session inactive in cache via
-     * `handleSessionEnd`, just without flipping the persisted lifecycle.
+     * touching the row to avoid resetting `lifecycleStateSince`. Persistence
+     * failures and exhausted contention retries surface to the caller.
      */
     markSessionArchivedFromHub(sessionId: string, reason: string): void {
         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
@@ -872,10 +867,10 @@ export class SessionCache {
         throw new Error('Session was modified concurrently. Please try again.')
     }
 
-    async updateSessionSummary(sessionId: string, text: string): Promise<void> {
-        // Keep the generated/native title separate from metadata.name. A
-        // manually chosen name must continue to win in the Web title helper,
-        // while the summary remains available as the agent-authored fallback.
+    async updateSessionSummary(sessionId: string, text: string, options: { clearName?: boolean } = {}): Promise<void> {
+        // Keep the generated/native title separate from metadata.name unless
+        // the user explicitly saved a generated title as the replacement for
+        // an existing manual name.
         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
             const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
             if (!session) {
@@ -889,6 +884,10 @@ export class SessionCache {
                     text,
                     updatedAt: Date.now()
                 }
+            }
+
+            if (options.clearName && Object.prototype.hasOwnProperty.call(newMetadata, 'name')) {
+                delete newMetadata.name
             }
 
             const result = this.store.sessions.updateSessionMetadata(
@@ -912,6 +911,108 @@ export class SessionCache {
         }
 
         throw new Error('Session was modified concurrently. Please try again.')
+    }
+
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        // Bind dismiss to the error the client actually showed. If a newer
+        // lastModelError replaced it between render and click, refuse so we
+        // don't silently ack the unseen error (banner/dot would vanish).
+        // Identity is eventId (not wall-clock atTs). Retry version-mismatch
+        // (CLI metadata race) like markModelErrorNotified.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                throw new Error('Session not found')
+            }
+
+            const currentMetadata = session.metadata ?? { path: '', host: '' }
+            const currentError = currentMetadata.lastModelError
+            if (!currentError) {
+                return
+            }
+            if (currentError.eventId !== eventId) {
+                throw new Error('Model error changed; refresh before acknowledging.')
+            }
+            if (typeof currentError.acknowledgedAt === 'number') {
+                return
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                {
+                    ...currentMetadata,
+                    lastModelError: {
+                        ...currentError,
+                        acknowledgedAt: Date.now()
+                    }
+                },
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+            if (result.result === 'error') {
+                throw new Error('Failed to update session metadata')
+            }
+
+            this.refreshSession(sessionId)
+        }
+
+        throw new Error('Session was modified concurrently. Please try again.')
+    }
+
+    /**
+     * Persist delivery watermark on lastModelError so hub restarts do not
+     * re-page the same unacknowledged eventId (in-memory Map alone is lost).
+     * No-ops when the error changed under us — a different eventId owns the page.
+     * Retries on version-mismatch (same pattern as renameSession / #919).
+     */
+    async markModelErrorNotified(sessionId: string, eventId: string): Promise<void> {
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                return
+            }
+
+            const currentMetadata = session.metadata ?? { path: '', host: '' }
+            const currentError = currentMetadata.lastModelError
+            if (!currentError || currentError.eventId !== eventId) {
+                return
+            }
+            if (typeof currentError.notifiedAt === 'number') {
+                return
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                {
+                    ...currentMetadata,
+                    lastModelError: {
+                        ...currentError,
+                        notifiedAt: Date.now()
+                    }
+                },
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+            if (result.result === 'error') {
+                throw new Error('Failed to persist model-error notification')
+            }
+
+            this.refreshSession(sessionId)
+        }
+
+        throw new Error('Model-error notification metadata stayed contended')
     }
 
     /**
@@ -1093,6 +1194,43 @@ export class SessionCache {
         })
 
         this.publisher.emit({ type: 'session-removed', sessionId, namespace: session.namespace })
+    }
+
+    async deleteArchivedSessions(sessionIds: string[], namespace: string): Promise<void> {
+        const ids = [...new Set(sessionIds)]
+        if (ids.length === 0) return
+        const sessions = ids.map((id) => this.getSessionByNamespace(id, namespace))
+        if (sessions.some((session): session is undefined => !session)) {
+            throw new Error('Session access denied')
+        }
+        const scratchlistAttachments = new Map(
+            sessions.map((session) => [
+                session!.id,
+                this.store.scratchlist.list(session!.id).flatMap((entry) => entry.attachments)
+            ])
+        )
+        const deleted = this.store.sessions.deleteArchivedSessions(ids, namespace)
+        if (!deleted) {
+            throw new Error('Sessions are no longer archived')
+        }
+
+        for (const session of sessions) {
+            this.sessions.delete(session!.id)
+            this.lastBroadcastAtBySessionId.delete(session!.id)
+            this.todoBackfillAttemptedSessionIds.delete(session!.id)
+            this.pendingThinkingUntilBySessionId.delete(session!.id)
+            const attachments = scratchlistAttachments.get(session!.id) ?? []
+            void import('../scratchlistAttachments/storage').then(async ({
+                deleteScratchlistAttachmentFiles,
+                deleteScratchlistSessionAttachmentDir,
+                getHapiHomeDir,
+            }) => {
+                const hapiHome = getHapiHomeDir()
+                await deleteScratchlistAttachmentFiles(hapiHome, attachments)
+                await deleteScratchlistSessionAttachmentDir(hapiHome, namespace, session!.id)
+            })
+            this.publisher.emit({ type: 'session-removed', sessionId: session!.id, namespace })
+        }
     }
 
     async mergeSessions(oldSessionId: string, newSessionId: string, namespace: string): Promise<void> {
@@ -1386,6 +1524,42 @@ export class SessionCache {
         }
         if (typeof oldObj.preferredCopilotAgentMode === 'string' && typeof newObj.preferredCopilotAgentMode !== 'string') {
             merged.preferredCopilotAgentMode = oldObj.preferredCopilotAgentMode
+            changed = true
+        }
+
+        // Preserve durable model-error alert state across resume/dedup row merges.
+        // Identity is eventId (wall-clock atTs is display-only and can go
+        // backwards after NTP/sleep). Carry old when new has none; when both
+        // share an eventId, merge hub watermarks.
+        type ModelErrorState = {
+            eventId?: string
+            atTs?: number
+            acknowledgedAt?: number
+            notifiedAt?: number
+            [key: string]: unknown
+        }
+        const oldError = oldObj.lastModelError as ModelErrorState | undefined
+        const newError = newObj.lastModelError as ModelErrorState | undefined
+        const oldId = typeof oldError?.eventId === 'string' ? oldError.eventId : null
+        const newId = typeof newError?.eventId === 'string' ? newError.eventId : null
+        if (oldError && oldId && !newError) {
+            merged.lastModelError = oldError
+            changed = true
+        } else if (oldError && newError && oldId && newId && oldId === newId) {
+            merged.lastModelError = {
+                ...oldError,
+                ...newError,
+                acknowledgedAt: newError.acknowledgedAt ?? oldError.acknowledgedAt,
+                notifiedAt: newError.notifiedAt ?? oldError.notifiedAt,
+                bridgedForEventId: newError.bridgedForEventId ?? oldError.bridgedForEventId,
+                retriedAndFailed: newError.retriedAndFailed === true || oldError.retriedAndFailed === true,
+                supersededByUserTurn: newError.supersededByUserTurn === true
+                    || oldError.supersededByUserTurn === true,
+                bridgeable: newError.bridgeable === false || oldError.bridgeable === false
+                    ? false
+                    : (newError.bridgeable ?? oldError.bridgeable),
+                lastUserMessage: newError.lastUserMessage ?? oldError.lastUserMessage
+            }
             changed = true
         }
 

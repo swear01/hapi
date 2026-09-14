@@ -25,6 +25,7 @@ import { createStorageRoutes } from './routes/storage'
 import { createUsageRoutes } from './routes/usage'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
+import { createUpgradeRoutes, createUpgradeCliRoutes } from './routes/upgrade'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
 import { createPushRoutes } from './routes/push'
@@ -232,6 +233,14 @@ function createWebApp(options: {
     const app = new Hono<WebAppEnv>()
 
     app.use('*', logger())
+    app.use('*', async (c, next) => {
+        await next()
+        if (!c.req.path.startsWith('/api') && c.res.headers.get('Content-Type')?.startsWith('text/html')) {
+            c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
+            c.header('CDN-Cache-Control', 'no-store')
+            c.header('Cloudflare-CDN-Cache-Control', 'no-store')
+        }
+    })
 
     const configuration = getConfiguration()
     const corsOrigins = options.corsOrigins ?? configuration.corsOrigins
@@ -279,7 +288,8 @@ function createWebApp(options: {
         return next()
     })
 
-    app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/cli', createCliRoutes(options.getSyncEngine, configuration.dataDir))
+    app.route('/cli', createUpgradeCliRoutes())
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
@@ -290,7 +300,8 @@ function createWebApp(options: {
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
-    app.route('/api', createStorageRoutes(configuration.dbPath))
+    app.route('/api', createUpgradeRoutes(options.getSyncEngine))
+    app.route('/api', createStorageRoutes(options.store))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
     app.route('/api', createUsageRoutes(options.store))
     app.route('/api', createGitRoutes(options.getSyncEngine))

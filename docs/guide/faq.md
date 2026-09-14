@@ -84,6 +84,7 @@ HAPI supports these notification channels:
 2. **Telegram Bot** - See [Telegram Setup](./notifications.md#telegram-setup)
 3. **Native app notifications** - Official Android and iOS apps use encrypted push delivery; pair your hub and allow notifications, with no push-provider setup required
 4. **ServerChan (Server酱)** - Send notifications to WeChat and other channels; see [ServerChan Setup](./notifications.md#serverchan-server酱-setup)
+5. **Generic webhook** - POST HAPI's JSON to a relay you control; see [Webhook setup](./notifications.md#webhook-setup)
 
 ### Can I start sessions remotely?
 

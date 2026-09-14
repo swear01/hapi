@@ -14,6 +14,7 @@ afterEach(() => {
     cleanup()
     localStorage.removeItem('hapi-session-preview-limit')
     localStorage.removeItem('hapi-pin-in-progress-sessions')
+    localStorage.removeItem('hapi-session-list-machine-filter')
 })
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -355,7 +356,11 @@ describe('SessionList action menu parity', () => {
 })
 
 describe('SessionList collapse behavior', () => {
-    function renderSessionList(sessions: SessionSummary[], selectedSessionId: string | null = 'session-running') {
+    function renderSessionList(
+        sessions: SessionSummary[],
+        selectedSessionId: string | null = 'session-running',
+        machineLabelsById?: Record<string, string>,
+    ) {
         return (
             <QueryClientProvider client={new QueryClient({
                 defaultOptions: {
@@ -374,6 +379,7 @@ describe('SessionList collapse behavior', () => {
                             isLoading={false}
                             renderHeader={false}
                             api={null}
+                            machineLabelsById={machineLabelsById}
                         />
                     </I18nProvider>
                 </ToastProvider>
@@ -566,6 +572,107 @@ describe('SessionList collapse behavior', () => {
         expect(screen.getByRole('button', { name: /Quiet task/ })).toBeInTheDocument()
         expect(screen.queryByText('Idle')).toBeNull()
         expect(screen.queryByTitle('Idle')).toBeNull()
+    })
+
+    it('omits the redundant machine label from pinned rows with one machine', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    name: 'Running task',
+                    flavor: 'codex',
+                },
+            }),
+        ]
+
+        render(renderSessionList(sessions, null, { 'machine-1': 'NUC' }))
+
+        expect(screen.getByTitle('/work/hapi')).toHaveTextContent('work/hapi')
+        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
+    })
+
+    it('keeps machine labels on pinned rows with multiple machines', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    name: 'Running task',
+                    flavor: 'codex',
+                },
+            }),
+            makeSession({
+                id: 'session-pending',
+                active: true,
+                pendingRequestsCount: 1,
+                updatedAt: 90,
+                metadata: {
+                    path: '/work/docs',
+                    machineId: 'machine-2',
+                    name: 'Pending task',
+                    flavor: 'codex',
+                },
+            }),
+        ]
+
+        render(renderSessionList(sessions, null, {
+            'machine-1': 'NUC',
+            'machine-2': 'Laptop',
+        }))
+
+        expect(screen.getByTitle('/work/hapi')).toHaveTextContent('work/hapi · NUC')
+        expect(screen.getByTitle('/work/docs')).toHaveTextContent('work/docs · Laptop')
+    })
+
+    it('omits the machine label when a multi-machine list is filtered to one machine', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        localStorage.setItem('hapi-session-list-machine-filter', 'machine-1')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    name: 'Running task',
+                    flavor: 'codex',
+                },
+            }),
+            makeSession({
+                id: 'session-other-machine',
+                active: true,
+                thinking: true,
+                updatedAt: 90,
+                metadata: {
+                    path: '/work/docs',
+                    machineId: 'machine-2',
+                    name: 'Other machine task',
+                    flavor: 'codex',
+                },
+            }),
+        ]
+
+        render(renderSessionList(sessions, null, {
+            'machine-1': 'NUC',
+            'machine-2': 'Laptop',
+        }))
+
+        expect(screen.getByTitle('/work/hapi')).toHaveTextContent('work/hapi')
+        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
+        expect(screen.queryByRole('button', { name: /Other machine task/ })).toBeNull()
     })
 
     it('keeps quiet active sessions in the Active section when pin-in-progress is on', () => {
@@ -777,6 +884,85 @@ describe('SessionList collapse behavior', () => {
         // The section stays reported open while searching even though the
         // underlying collapsed state is still set.
         expect(screen.getByTitle('In progress').getAttribute('aria-expanded')).toBe('true')
+    })
+
+    it('allows a directory group to collapse while searching', () => {
+        const sessions = [
+            makeSession({
+                id: 'session-match',
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Matching task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-other',
+                updatedAt: 90,
+                metadata: { path: '/work/hapi', name: 'Other task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions, null))
+
+        const projectHeader = screen.getByTitle('/work/hapi')
+        const projectPanel = projectHeader.nextElementSibling
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        // Establish a manual collapsed state before filtering. The filter
+        // still opens the group by default so matching sessions remain visible.
+        fireEvent.click(projectHeader)
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
+        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
+        fireEvent.change(searchInput, {
+            target: { value: 'Matching' },
+        })
+
+        expect(projectPanel?.getAttribute('data-open')).toBe('true')
+
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBe('true')
+
+        fireEvent.change(searchInput, { target: { value: '' } })
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+    })
+
+    it('restores a selected group collapse after filtering excludes the selected session', async () => {
+        const sessions = [
+            makeSession({
+                id: 'session-selected',
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Selected task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-match',
+                updatedAt: 90,
+                metadata: { path: '/work/hapi', name: 'Matching task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions, 'session-selected'))
+
+        const projectHeader = screen.getByTitle('/work/hapi')
+        const projectPanel = projectHeader.nextElementSibling
+        await waitFor(() => {
+            expect(projectPanel?.getAttribute('data-open')).toBe('true')
+        })
+
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
+        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
+        fireEvent.change(searchInput, { target: { value: 'Matching' } })
+        expect(screen.queryByRole('button', { name: /Selected task/ })).toBeNull()
+        expect(screen.getByRole('button', { name: /Matching task/ })).toBeInTheDocument()
+
+        fireEvent.change(searchInput, { target: { value: '' } })
+        await waitFor(() => {
+            expect(projectPanel?.getAttribute('data-open')).toBeNull()
+        })
     })
 
     it('toggles the running section with the keyboard', () => {

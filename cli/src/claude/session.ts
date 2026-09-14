@@ -19,6 +19,7 @@ export class Session extends AgentSessionBase<EnhancedMode> {
     readonly mcpServers: Record<string, any>;
     readonly allowedTools?: string[];
     readonly hookSettingsPath: string;
+    requestRemoteRestart: (() => Promise<void>) | null = null;
     /** Interactive TUI hooks: mode tracking and native-dialog permission bridge. */
     readonly localHookSettingsPath: string;
     readonly localPermissionBridge: LocalPermissionBridge;

@@ -13,7 +13,32 @@ afterEach(() => {
     }
 })
 
-describe('schema migration v23 to v26', () => {
+function getColumns(store: Store, table: string): string[] {
+    const db: Database = (store as unknown as { db: Database }).db
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+    return rows.map((row) => row.name)
+}
+
+describe('Store V23→V24 migration: session_jobs table', () => {
+    it('fresh DB has session_jobs with expected columns', () => {
+        const store = new Store(':memory:')
+        const cols = getColumns(store, 'session_jobs')
+        expect(cols).toContain('session_id')
+        expect(cols).toContain('job_key')
+        expect(cols).toContain('label')
+        expect(cols).toContain('status')
+        expect(cols).toContain('done')
+        expect(cols).toContain('total')
+        expect(cols).toContain('remaining')
+        expect(cols).toContain('heartbeat_at')
+        expect(cols).toContain('started_at')
+        expect(cols).toContain('updated_at')
+        expect(cols).toContain('run_id')
+        store.close()
+    })
+})
+
+describe('schema migration v23 to v29', () => {
     it('adds fcm_devices.push_key to a V23 database and keeps existing rows', () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v24-'))
         tempDirs.push(dir)
@@ -22,30 +47,50 @@ describe('schema migration v23 to v26', () => {
         new Store(dbPath).close()
         const legacy = new Database(dbPath)
         legacy.exec(`
+            ALTER TABLE usage_events DROP COLUMN context_only;
+            ALTER TABLE usage_events DROP COLUMN cost;
+            ALTER TABLE usage_events DROP COLUMN cost_currency;
             ALTER TABLE fcm_devices DROP COLUMN push_key;
             INSERT INTO fcm_devices (namespace, token, platform, device_id, created_at, updated_at)
             VALUES ('default', 'fcm-tok-1', 'phone', 'pixel-1', 1, 1);
-            PRAGMA user_version = 23;
         `)
+        // Seed v23-shaped derived data: the upgrade must wipe it so the lazy
+        // re-index rebuilds every row under the new semantics.
+        legacy.prepare(`
+            INSERT INTO usage_events (
+                session_id, source_key, source_seq, created_at, agent, model, kind,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+            ) VALUES (
+                'migration-v24-seed', 'delta|seed', 1, 0, 'opencode', NULL, 'delta',
+                100, 20, 0, 0
+            )
+        `).run()
+        legacy.exec('PRAGMA user_version = 23')
         legacy.close()
 
         const migrated = new Store(dbPath)
         const internalDb = (migrated as unknown as { db: Database }).db
-        const columns = internalDb.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        const usageColumns = new Set(
+            (internalDb.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        const fcmColumns = internalDb.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        const messageColumns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
         const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
 
-        expect(columns.some((col) => col.name === 'push_key')).toBe(true)
-        const messageColumns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
-        expect(messageColumns.some((col) => col.name === 'delivery_state')).toBe(true)
-        expect(version.user_version).toBe(26)
+        expect(usageColumns.has('context_only')).toBe(true)
+        expect(usageColumns.has('cost')).toBe(true)
+        expect(usageColumns.has('cost_currency')).toBe(true)
+        expect(fcmColumns.some((column) => column.name === 'push_key')).toBe(true)
+        expect(messageColumns.some((column) => column.name === 'delivery_state')).toBe(true)
+        expect(version.user_version).toBe(29)
+        expect((internalDb.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE session_id = 'migration-v24-seed'").get() as { count: number }).count).toBe(0)
 
-        // Existing Android rows survive with a NULL push key.
         const devices = migrated.fcm.getDevicesByNamespace('default')
         expect(devices).toHaveLength(1)
         expect(devices[0].token).toBe('fcm-tok-1')
         expect(devices[0].pushKey).toBeNull()
 
-        // And the migrated DB accepts new iOS rows.
         migrated.fcm.upsertDevice('default', {
             token: 'a1b2',
             platform: 'ios',
@@ -56,7 +101,7 @@ describe('schema migration v23 to v26', () => {
         migrated.close()
     })
 
-    it('adds messages.delivery_state to an already-upgraded V24 database', () => {
+    it('completes either V24 schema shape before adding delivery state', () => {
         const dir = mkdtempSync(join(tmpdir(), 'hapi-migration-v24-delivery-'))
         tempDirs.push(dir)
         const dbPath = join(dir, 'hapi.db')
@@ -64,6 +109,10 @@ describe('schema migration v23 to v26', () => {
         new Store(dbPath).close()
         const legacy = new Database(dbPath)
         legacy.exec(`
+            ALTER TABLE usage_events DROP COLUMN context_only;
+            ALTER TABLE usage_events DROP COLUMN cost;
+            ALTER TABLE usage_events DROP COLUMN cost_currency;
+            ALTER TABLE fcm_devices DROP COLUMN push_key;
             ALTER TABLE messages DROP COLUMN delivery_state;
             PRAGMA user_version = 24;
         `)
@@ -71,10 +120,16 @@ describe('schema migration v23 to v26', () => {
 
         const migrated = new Store(dbPath)
         const internalDb = (migrated as unknown as { db: Database }).db
-        const columns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+        const usageColumns = internalDb.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>
+        const fcmColumns = internalDb.prepare('PRAGMA table_info(fcm_devices)').all() as Array<{ name: string }>
+        const messageColumns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
         const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
-        expect(columns.some((col) => col.name === 'delivery_state')).toBe(true)
-        expect(version.user_version).toBe(26)
+        expect(usageColumns.some((column) => column.name === 'context_only')).toBe(true)
+        expect(usageColumns.some((column) => column.name === 'cost')).toBe(true)
+        expect(usageColumns.some((column) => column.name === 'cost_currency')).toBe(true)
+        expect(fcmColumns.some((column) => column.name === 'push_key')).toBe(true)
+        expect(messageColumns.some((column) => column.name === 'delivery_state')).toBe(true)
+        expect(version.user_version).toBe(29)
         migrated.close()
     })
 })

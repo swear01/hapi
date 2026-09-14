@@ -1,4 +1,5 @@
 import {
+    AcknowledgeModelErrorRequestSchema,
     CursorMigrateToAcpRequestSchema,
     DeleteUploadRequestSchema,
     ForkConversationRequestSchema,
@@ -27,6 +28,7 @@ import {
 } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
+import { DeleteArchivedSessionsRequestSchema } from '@hapi/protocol/schemas'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
@@ -116,13 +118,17 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             sessionRecords = sessionRecords.slice(0, limit)
         }
         const scheduledCounts = engine.getFutureScheduledMessageCounts(sessionRecords.map((session) => session.id))
+        const uninvokedScheduledCounts = engine.getUninvokedScheduledMessageCounts(sessionRecords.map((session) => session.id))
         const nextScheduledAt = engine.getNextScheduledAtBySessionIds(sessionRecords.map((session) => session.id))
+        const scratchlistUpdatedAt = engine.getScratchlistUpdatedAtBySessionIds(sessionRecords.map((session) => session.id))
         const sessions = sessionRecords.map((session) => {
             const summary = toSessionSummary(session)
             return {
                 ...summary,
                 futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
-                nextScheduledAt: nextScheduledAt.get(session.id) ?? null
+                uninvokedScheduledMessageCount: uninvokedScheduledCounts.get(session.id) ?? 0,
+                nextScheduledAt: nextScheduledAt.get(session.id) ?? null,
+                scratchlistUpdatedAt: scratchlistUpdatedAt.get(session.id)
             }
         })
 
@@ -364,6 +370,17 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         return c.json({ ok: true })
     })
 
+    app.post('/sessions/:id/stop', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+
+        const result = await engine.stopSession(sessionResult.sessionId)
+        return c.json({ ok: true, ...result })
+    })
+
     app.post('/sessions/:id/fork', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
@@ -433,12 +450,8 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
     })
 
     app.post('/sessions/:id/archive', async (c) => {
-        // tiann/hapi#916: relax the blanket `requireActive: true` guard so
-        // the endpoint is idempotent for already-archived rows AND can clean
-        // up split-brain rows after a hub-restart cascade (inactive in cache
-        // but metadata.lifecycleState still 'running'). Normal inactive rows
-        // that are not archived (completed stubs, UI Delete/Reopen targets)
-        // keep the old 409 contract.
+        // Exact-id lifecycle cleanup is idempotent for active, inactive, and
+        // already-archived rows.
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
@@ -454,12 +467,41 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ ok: true, alreadyArchived: true })
         }
 
-        if (!sessionResult.session.active && lifecycleState !== 'running') {
-            return c.json({ error: 'Session is inactive' }, 409)
-        }
-
         await engine.archiveSession(sessionResult.sessionId)
         return c.json({ ok: true })
+    })
+
+    app.post('/sessions/:id/model-error/acknowledge', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = AcknowledgeModelErrorRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+
+        try {
+            await engine.acknowledgeModelError(sessionResult.sessionId, parsed.data.eventId)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to acknowledge model error'
+            if (
+                message.includes('concurrently')
+                || message.includes('version')
+                || message.includes('changed')
+            ) {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
     })
 
     app.post('/sessions/:id/migrate-to-acp', async (c) => {
@@ -871,7 +913,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ title })
         } catch (error) {
             if (error instanceof TitleSuggestionError) {
-                return c.json({ error: error.message }, error.status)
+                return c.json({ error: error.message, code: error.code }, error.status)
             }
             return c.json({ error: 'Failed to generate a session title' }, 502)
         }
@@ -895,7 +937,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         try {
-            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text)
+            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text, {
+                clearName: parsed.data.clearName
+            })
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to update session summary'
@@ -923,6 +967,30 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         return c.json({ ok: true })
     })
 
+    app.post('/sessions/delete-archived', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = DeleteArchivedSessionsRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body' }, 400)
+        }
+
+        try {
+            await engine.deleteArchivedSessions(parsed.data.sessionIds, c.get('namespace'))
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to delete archived sessions'
+            if (message === 'Sessions are no longer archived') {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
+    })
+
     app.delete('/sessions/:id', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
@@ -936,6 +1004,16 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         if (sessionResult.session.active) {
             return c.json({ error: 'Cannot delete active session. Archive it first.' }, 409)
+        }
+
+        // Bulk group-delete guard (#881): the web UI only enables "Delete
+        // Group" when every session in the group is archived, but the server
+        // re-checks so a stale client or a race cannot delete a session whose
+        // lifecycle state is no longer 'archived' (e.g. completed/imported
+        // stubs that are inactive but never formally archived).
+        if (c.req.query('requireArchived') === '1'
+            && sessionResult.session.metadata?.lifecycleState !== 'archived') {
+            return c.json({ error: 'Session is no longer archived' }, 409)
         }
 
         try {
@@ -1448,6 +1526,31 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list OpenCode reasoning effort options'
+            }, 500)
+        }
+    })
+
+    app.get('/sessions/:id/reasoning-effort-options', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+
+        const flavor = sessionResult.session.metadata?.flavor
+        if (flavor !== 'copilot' && flavor !== 'kimi') {
+            return c.json({
+                success: false,
+                error: 'Session reasoning effort options are only available for Copilot and Kimi sessions'
+            }, 400)
+        }
+
+        try {
+            return c.json(await engine.listSessionReasoningEffortOptionsForSession(sessionResult.sessionId))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list session reasoning effort options'
             }, 500)
         }
     })

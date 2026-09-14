@@ -9,7 +9,7 @@ import { readFile, writeFile, mkdir, open, unlink, rename, chmod } from 'node:fs
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs'
 import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock'
 import { configuration } from '@/configuration'
-import { isProcessAlive } from '@/utils/process';
+import { getHapiRunnerProcessIdentity } from '@/utils/process';
 
 interface Settings {
   // This ID is used as the actual database ID on the server
@@ -65,6 +65,12 @@ export interface RunnerLocallyPersistedState {
    * mid-rebuild stop. Persisting this fixes that.
    */
   startedWithVersionHandoffDisabled?: boolean;
+  /**
+   * Set after machine registration + RPC handlers + socket connect.
+   * Parent handoff waits require this so a child that dies between
+   * writeRunnerState and hub readiness cannot become the durable target.
+   */
+  hubReadyAt?: number;
 }
 
 export async function readSettings(): Promise<Settings> {
@@ -223,8 +229,10 @@ export async function acquireRunnerLock(
         try {
           const lockPid = readFileSync(configuration.runnerLockFile, 'utf-8').trim();
           if (lockPid && !isNaN(Number(lockPid))) {
-            if (!isProcessAlive(Number(lockPid))) {
-              // Process doesn't exist, remove stale lock
+            const lockPidNumber = Number(lockPid);
+            const identity = getHapiRunnerProcessIdentity(lockPidNumber);
+            if (identity === 'dead' || identity === 'foreign') {
+              // Process is gone or belongs to another program; reclaim stale lock.
               unlinkSync(configuration.runnerLockFile);
               continue; // Retry acquisition
             }

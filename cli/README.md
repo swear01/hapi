@@ -42,8 +42,18 @@ Choose a supported coding agent from your terminal and control its sessions remo
 - `hapi dsh` - Start DeepSeek Harness through ACP. See `src/dsh/runDsh.ts`.
   DSH is remote-only and its ACP server must be configured separately.
 - `hapi resume [sessionId]` - List resumable sessions for this machine or resume one locally.
-- `hapi ping-peer <session-id-prefix> <message>` - Resume (if needed) and message another session. Prefer this or MCP `ping_peer` / `list_peers` over reinventing JWT+curl. Also `--message-file` / `--list`.
-- `hapi inspect-peer <session-id-or-prefix>` - Read-only peer metadata + recent message text (no resume). Prefer this or MCP `inspect_peer` when a user cites `[title](/sessions/<id>)` or Copy-reference `See session "…" (/sessions/<id>) for context`. `/sessions/<id>` is a hub path, not a local file. Optional `--limit`.
+- `hapi machines [--machine ID] --json` - List or exactly resolve runner machine IDs and advertised workspace roots.
+- `hapi spawn-peer --dir PATH --name TITLE --message-file - --json` - Create a fresh session and atomically deliver its remit; failed delivery stops and archives the child. Automation may pass `--remit-id UUID` and reuse it only when retrying the same request. `--effort` supports Claude/Grok/Pi/AGY/Kimi/Copilot and maps to reasoning effort for Codex/OpenCode; unsupported flavors fail before spawning.
+- `hapi wait-peer <exact-session-id> --remit-id UUID --json` - Wait for that remit's result.
+- `hapi inspect-peer <exact-session-id> --json` - Read metadata and recent message text without resuming.
+- `hapi ping-peer <exact-session-id> --message-file - --json` - Resume if needed and message one explicitly selected session. After an ambiguous response failure, retry the identical message with the returned `remitId` via `--remit-id UUID`.
+- `hapi abort-peer <exact-session-id> --json` - Abort the current turn.
+- `hapi stop-peer <exact-session-id> --json` - Idempotently stop the session process without archiving.
+- `hapi archive-peer <exact-session-id> --json` - Idempotently stop and archive the session.
+- `hapi delete-peer <exact-session-id> --json` - Delete an inactive session record.
+
+The peer commands reject prefixes. Successful `--json` output has `ok: true`; errors use `ok: false`, a stable error code, and a non-zero exit status.
+
 
 The picker lists agents alphabetically by command name. Use Up/Down and Enter
 to choose; Esc or Ctrl-C cancels. It appears on every bare invocation, even
@@ -117,6 +127,8 @@ Both `start` and `start-sync` accept repeatable `--workspace-root <path>` (or `-
 
 - The web `/browse` page surfaces scoped file trees rooted at those paths.
 - The runner refuses `list-directory` and `spawn-session` requests for paths outside the configured roots.
+- The runner can serve read-only file, Git, and ripgrep requests for inactive
+  sessions through its machine-scoped `workspace-file-access` capability.
 - `~` and `~/foo` are expanded.
 
 Omitting the flag keeps manual session spawning unrestricted and leaves the
@@ -195,6 +207,7 @@ controls for DSH.
 - `HAPI_EXPERIMENTAL` - Enable experimental features (true/1/yes).
 - `HAPI_EXTRA_HEADERS_JSON` - JSON object of extra headers to send on CLI → hub requests, e.g. `{"Cookie":"CF_Authorization=..."}`. Can also be set as the `extraHeaders` object in `~/.hapi/settings.json` (environment variable wins).
 - `HAPI_CLAUDE_PATH` - Path to a specific `claude` executable.
+- `HAPI_PI_PATH` - Path to a specific `pi` executable.
 - `HAPI_DSH_ACP_COMMAND` - ACP server executable for `hapi dsh` (default: `dsh-acp-demo`).
 - `HAPI_DSH_ACP_CONFIG` - Optional `dsh-acp-demo --config` path.
 - `HAPI_DSH_ACP_ARGS_JSON` - Optional JSON array of ACP server arguments.
@@ -215,6 +228,12 @@ controls for DSH.
 - `HAPI_WORKTREE_NAME` - Worktree name.
 - `HAPI_WORKTREE_PATH` - Full worktree path.
 - `HAPI_WORKTREE_CREATED_AT` - Creation timestamp (ms).
+
+### Session-control skill
+
+HAPI ships `skills/hapi-session-runtime/SKILL.md`. Before a fresh local, runner-spawned, or resumed session touches the hub, the CLI installs and verifies this canonical skill in the selected runtime's native user skill directory on the execution host. A conflicting higher-priority skill fails the launch closed. Generic ACP runtimes receive a capability-gated `skill_lookup` tool whose catalog exposes only skill names and descriptions; bodies load only by exact name.
+
+HAPI does not add its own system, developer, appended, or synthetic-user prompt prose. Runtime/user custom prompts remain unchanged.
 
 ### Set for the wrapped agent
 

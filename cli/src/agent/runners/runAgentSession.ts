@@ -5,7 +5,7 @@ import { hashObject } from '@/utils/deterministicJson';
 import { AgentRegistry } from '@/agent/AgentRegistry';
 import { convertAgentMessage } from '@/agent/messageConverter';
 import { PermissionAdapter } from '@/agent/permissionAdapter';
-import type { AgentBackend, PromptContent } from '@/agent/types';
+import type { AgentBackend, AgentMessage, PromptContent } from '@/agent/types';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
 import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler';
@@ -187,13 +187,17 @@ export async function runAgentSession(opts: {
             syncKeepAlive();
 
             try {
-                await backend.prompt(agentSessionId, promptContent, (message) => {
+                let turnPositionAt: number | undefined;
+                const onUpdate = (message: AgentMessage) => {
+                    const emittedAt = Date.now();
+                    turnPositionAt ??= emittedAt;
                     const model = backend.getSessionModelsMetadata?.(agentSessionId)?.currentModelId;
                     const converted = convertAgentMessage(message, model);
                     if (converted) {
-                        session.sendAgentMessage(converted);
+                        session.sendAgentMessage(converted, emittedAt, turnPositionAt);
                     }
-                });
+                };
+                await backend.prompt(agentSessionId, promptContent, onUpdate);
             } catch (error) {
                 logger.warn('[ACP] Prompt failed', error);
                 session.sendSessionEvent({

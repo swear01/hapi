@@ -24,6 +24,7 @@ describe('runnerCapabilities', () => {
         expect(missingRequiredCapabilities([])).toEqual([
             MACHINE_CAPABILITIES.AgentAvailability,
             MACHINE_CAPABILITIES.CursorChatStoreStatus,
+            MACHINE_CAPABILITIES.SessionControlSkill,
         ])
     })
 
@@ -32,6 +33,7 @@ describe('runnerCapabilities', () => {
         expect(missingRequiredCapabilities([
             MACHINE_CAPABILITIES.AgentAvailability,
             MACHINE_CAPABILITIES.CursorChatStoreStatus,
+            MACHINE_CAPABILITIES.SessionControlSkill,
             'other-cap',
         ])).toEqual([])
     })

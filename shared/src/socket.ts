@@ -235,7 +235,8 @@ export type MachineUpdateStateAck = {
 
 export interface ServerToClientEvents {
     update: (data: Update, ack?: (response: CancelQueuedMessageAck & { accepted?: boolean }) => void) => void
-    'rpc-request': (data: { method: string; params: string }, callback: (response: string) => void) => void
+    'rpc-request': (data: { method: string; params: string; requestId?: string }, callback: (response: string) => void) => void
+    'rpc-cancel': (data: { requestId: string }) => void
     'terminal:open': (data: TerminalOpenPayload) => void
     'terminal:write': (data: TerminalWritePayload) => void
     'terminal:resize': (data: TerminalResizePayload) => void
@@ -256,7 +257,7 @@ export interface ClientToServerEvents {
     // own origin time (e.g. a Claude transcript entry's timestamp). Currently
     // only honored by the hub for agent messages (no localId) — see
     // messages.ts addMessage. Absent -> hub falls back to Date.now().
-    message: (data: { sid: string; message: unknown; localId?: string; createdAt?: number }) => void
+    message: (data: { sid: string; message: unknown; localId?: string; createdAt?: number; positionAt?: number }) => void
     'session-alive': (data: {
         sid: string
         time: number

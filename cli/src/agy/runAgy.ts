@@ -9,7 +9,7 @@ import type { AgyMode, PermissionMode } from './types';
 import { bootstrapExistingSession, bootstrapSession } from '@/agent/sessionFactory';
 import { registerLocalHandoffHandler } from '@/agent/localHandoff';
 import { createModeChangeHandler, createRunnerLifecycle } from '@/agent/runnerLifecycle';
-import { registerSessionConfigRpc } from '@/agent/sessionConfigRpc';
+import { registerAgySessionConfigRpc } from './agySessionConfig';
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import type { SessionEffort, SessionModel } from '@/api/types';
@@ -79,7 +79,7 @@ export async function runAgy(opts: {
     });
 
     lifecycle.registerProcessHandlers();
-    registerKillSessionHandler(session.rpcHandlerManager, lifecycle.cleanupAndExit);
+    registerKillSessionHandler(session.rpcHandlerManager, lifecycle);
     registerLocalHandoffHandler(session.rpcHandlerManager, lifecycle);
 
     let crashed = false;
@@ -121,19 +121,19 @@ export async function runAgy(opts: {
             return removed;
         });
 
-        registerSessionConfigRpc<PermissionMode>({
+        registerAgySessionConfigRpc({
             rpcHandlerManager: session.rpcHandlerManager,
-            flavor: 'agy',
-            modelMode: 'nullable',
-            onApply: async (config) => {
-                if (config.permissionMode !== undefined) {
-                    currentPermissionMode = config.permissionMode;
-                }
-                if (config.model !== undefined) {
-                    sessionModel = config.model;
-                }
+            getState: () => ({
+                permissionMode: currentPermissionMode,
+                model: sessionModel,
+                effort: sessionEffort,
+            }),
+            setState: (next) => {
+                currentPermissionMode = next.permissionMode;
+                sessionModel = next.model;
+                sessionEffort = next.effort;
             },
-            onAfterApply: syncSessionMode
+            sync: syncSessionMode,
         });
 
         await agyLoop({
