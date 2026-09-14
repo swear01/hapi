@@ -12,7 +12,7 @@ import { reduceChatBlocks } from '../src/chat/reducer'
 import { reconcileChatBlocks } from '../src/chat/reconcile'
 import { buildVisibleChatBlocks } from '../src/chat/toolGroups'
 import { isQueuedForInvocation } from '../src/lib/messages'
-import { getMessageWindowState } from '../src/lib/message-window-store'
+import { getMessageWindowState, ingestIncomingMessages } from '../src/lib/message-window-store'
 import { useHappyRuntime } from '../src/lib/assistant-runtime'
 import { queryClient } from '../src/lib/query-client'
 import { HappyThread } from '../src/components/AssistantChat/HappyThread'
@@ -37,7 +37,8 @@ type JumpProbe = {
     statusSamples: (string | null)[]
     statusText: () => string | null
     composerRect: () => { top: number; left: number; width: number; height: number } | null
-    windowState: () => { viewMode: string; messageCount: number; oldestSeq: number | null; newestSeq: number | null; scrollTop: number }
+    windowState: () => { viewMode: string; messageCount: number; oldestSeq: number | null; newestSeq: number | null; scrollTop: number; navigationLeaseCount: number }
+    ingestNextMessage: () => void
     startSampling: () => void
     stopSampling: () => void
     refetch: () => Promise<void>
@@ -231,6 +232,18 @@ const noopSend = () => {}
 const noopAbort = async () => {}
 
 window.__jumpProbe = {
+    ingestNextMessage: () => {
+        const seq = (allMessages.at(-1)?.seq ?? 0) + 1
+        const message = {
+            ...allMessages[0]!,
+            id: `m-live-${seq}`,
+            seq,
+            createdAt: BASE_AT + seq,
+            invokedAt: BASE_AT + seq
+        }
+        allMessages.push(message)
+        ingestIncomingMessages(SESSION_ID, [message])
+    },
     requests: [],
     composerSamples: [],
     statusSamples: [],
@@ -250,6 +263,7 @@ window.__jumpProbe = {
         const seqs = state.messages.map(messageSeq)
         return {
             viewMode: state.viewMode,
+            navigationLeaseCount: state.navigationLeaseCount,
             messageCount: state.messages.length,
             oldestSeq: seqs.length ? Math.min(...seqs) : null,
             newestSeq: seqs.length ? Math.max(...seqs) : null,

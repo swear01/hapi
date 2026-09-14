@@ -1491,9 +1491,19 @@ export function beginNavigation(sessionId: string, preserveHistory = false): () 
         updateState(sessionId, (previous) => {
             const next = Math.max(0, previous.navigationLeaseCount - 1)
             lastLeaseReleased = next === 0
+            const browsingBoundary = preserveHistory
+                && previous.viewMode === 'history'
+                && previous.historyBoundaryAt === null
+                ? derivePosition(previous.messages, 'newest')
+                : null
             return buildState(previous, {
                 navigationLeaseCount: next,
-                navigationHistoryLeaseCount: previous.navigationHistoryLeaseCount - Number(preserveHistory)
+                navigationHistoryLeaseCount: Math.max(0, previous.navigationHistoryLeaseCount - Number(preserveHistory)),
+                ...(browsingBoundary ? {
+                    historyBoundaryAt: browsingBoundary.at,
+                    historyBoundarySeq: browsingBoundary.seq,
+                    provisionalBoundaryGeneration: null
+                } : {})
             })
         })
         if (!lastLeaseReleased) {

@@ -2569,6 +2569,23 @@ describe('explicit history navigation', () => {
         release()
     })
 
+    it('preserves a retained tail target after navigation hands off to history browsing', () => {
+        const id = sessionId('navigation-browsing-handoff')
+        const releaseStart = beginNavigation(id)
+        setMessageViewMode(id, 'history')
+        ingestIncomingMessages(id, Array.from({ length: 1200 }, (_, index) =>
+            makeAgentMessage({ id: `row-${index}`, seq: index + 1, at: index + 1 })))
+        releaseStart()
+        const releaseTarget = beginNavigation(id, true)
+        releaseTarget()
+        expect(getMessageWindowState(id).navigationLeaseCount).toBe(0)
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'live', seq: 1201, at: 1201 })])
+        expect(getMessageWindowState(id).messages.some(message => message.id === 'row-900')).toBe(true)
+        setMessageViewMode(id, 'tail')
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'after', seq: 1202, at: 1202 })])
+        expect(getMessageWindowState(id).messages.length).toBeLessThanOrEqual(VISIBLE_WINDOW_SIZE)
+    })
+
     it('preserves middle targets for overlapping outline leases and restores normal trimming afterward', () => {
         const id = sessionId('outline-middle-target')
         const first = beginNavigation(id, true)

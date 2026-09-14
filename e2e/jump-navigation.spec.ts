@@ -100,4 +100,13 @@ test('jump to conversation start reaches the top without dragging the composer o
     expect(afterCount).toBeLessThanOrEqual(1)
     // The queued refresh found nothing newer, so the window was not replaced.
     expect(finalState.newestSeq).toBe(1201)
+    await page.locator('.happy-message').filter({ hasText: 'Fixture assistant reply 500' })
+        .locator('[title="Jump to turn input"]').evaluate(button => (button as HTMLButtonElement).click())
+    const selectedInput = page.locator('.happy-thread-messages > [id$="m-user-500"]')
+    await expect(selectedInput).toBeInViewport()
+    await expect.poll(() => page.evaluate(() => window.__jumpProbe.windowState().navigationLeaseCount)).toBe(0)
+    await page.evaluate(() => window.__jumpProbe.ingestNextMessage())
+    await expect(selectedInput).toBeInViewport()
+    await page.waitForTimeout(500)
+    await expect(selectedInput).toBeInViewport()
 })
