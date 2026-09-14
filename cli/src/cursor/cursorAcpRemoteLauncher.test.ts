@@ -1803,7 +1803,7 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
-    it.each([false, true])('rejects Auto after a concrete switch even if the process spawned with auto (partial=%s)', async (partial) => {
+    it.each([[false, false], [true, false], [false, true], [true, true]])('rejects Auto after an Auto-spawned concrete switch (partial=%s, concurrent=%s)', async (partial, concurrent) => {
         const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
         const client = {
             rpcHandlerManager: { registerHandler: vi.fn() },
@@ -1840,11 +1840,32 @@ describe('cursorAcpRemoteLauncher', () => {
         if (partial) {
             harness.modelOptionValues = ['default', 'composer-2.5'];
             harness.failFastConfigOption = true;
-            await expect(session.applyModelConfig('composer-2.5[fast=false]')).rejects.toThrow(
+        }
+        if (concurrent) {
+            harness.deferSetConfigOption = new Promise<void>((resolve) => {
+                harness.releaseSetConfigOption = resolve;
+            });
+        }
+        const concreteRequest = session.applyModelConfig('composer-2.5[fast=false]');
+        const autoRequest = concurrent
+            ? session.applyModelConfig('auto').then(
+                value => ({ value, error: null }),
+                error => ({ value: null, error })
+            )
+            : null;
+        if (concurrent) {
+            await new Promise<void>(resolve => setImmediate(resolve));
+            harness.releaseSetConfigOption?.();
+        }
+        if (partial) {
+            await expect(concreteRequest).rejects.toThrow(
                 'Cursor model is not available via ACP'
             );
         } else {
-            await session.applyModelConfig('composer-2.5[fast=false]');
+            await concreteRequest;
+        }
+        if (autoRequest) {
+            expect((await autoRequest).error?.message).toContain('Cursor Auto requires restarting with --model auto');
         }
         const concreteModel = partial ? 'composer-2.5' : 'composer-2.5[fast=false]';
         expect(session.model).toBe(concreteModel);

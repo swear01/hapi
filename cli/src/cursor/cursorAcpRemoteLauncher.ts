@@ -1,6 +1,7 @@
 import React from 'react';
 import { randomUUID } from 'node:crypto';
 import { logger } from '@/ui/logger';
+import { AsyncLock } from '@/utils/lock';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
 import { convertAgentMessage } from '@/agent/messageConverter';
 import { PermissionAdapter } from '@/agent/permissionAdapter';
@@ -67,7 +68,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private currentBackendModel: string | null = null;
     private defaultBackendModel: string | null = null;
     private unregisterModelApplyHandler: (() => void) | null = null;
-    private modelApplySeq = 0;
+    private readonly modelApplyLock = new AsyncLock();
     private activePromptModeHash: string | null = null;
     /** True while a backend.prompt turn is in flight. */
     private promptInFlight = false;
@@ -949,9 +950,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         previousSetModel: CursorSession['setModel'],
         options: { optimistic: boolean; throwOnFailure: boolean }
     ): Promise<string | null> {
+        return this.modelApplyLock.inLock(() =>
+            this.applyLiveModelLocked(backend, acpSessionId, model, previousSetModel, options));
+    }
+
+    private async applyLiveModelLocked(
+        backend: AcpSdkBackend,
+        acpSessionId: string,
+        model: string | null | undefined,
+        previousSetModel: CursorSession['setModel'],
+        options: { optimistic: boolean; throwOnFailure: boolean }
+    ): Promise<string | null> {
         const requested = model?.trim();
         const previousModel = this.currentBackendModel ?? this.session.model ?? null;
-        const applySeq = ++this.modelApplySeq;
 
         if (!requested || isCursorAutoModelId(requested)) {
             const modelOption = backend.getConfigOptionByCategory?.(acpSessionId, 'model');
@@ -1003,12 +1014,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             const message = `Cursor model is not available via ACP: ${requested}`;
             logger.warn(`[cursor-acp] ${message}`);
 
-            if (result.partiallyAppliedWireId && applySeq === this.modelApplySeq) {
+            if (result.partiallyAppliedWireId) {
                 this.currentBackendModel = result.partiallyAppliedWireId;
                 previousSetModel(result.partiallyAppliedWireId);
                 this.pushModelStatusLine(result.partiallyAppliedWireId);
                 this.session.pushKeepAlive();
-            } else if (options.optimistic && applySeq === this.modelApplySeq) {
+            } else if (options.optimistic) {
                 this.currentBackendModel = previousModel;
                 previousSetModel(previousModel ?? undefined);
                 this.session.pushKeepAlive();
@@ -1029,10 +1040,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             result.requestedWireId ?? requested,
             result.resolvedWireId
         );
-
-        if (applySeq !== this.modelApplySeq) {
-            return this.currentBackendModel;
-        }
 
         const changed = sessionWire !== this.currentBackendModel || this.session.model !== sessionWire;
         this.currentBackendModel = sessionWire;
