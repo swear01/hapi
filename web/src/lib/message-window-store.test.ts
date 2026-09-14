@@ -2546,7 +2546,43 @@ describe('explicit history navigation', () => {
 
         const state = getMessageWindowState(id)
         expect(state.messages.some((message) => message.id === 'queued-middle')).toBe(true)
+        expect(state.messages.some((message) => message.id.startsWith('__transcript-gap__'))).toBe(true)
         releaseNavigation()
+    })
+
+    it('preserves a gap through agent-run and replacement reasoning updates', () => {
+        const id = sessionId('navigation-gap-updates')
+        const release = beginNavigation(id)
+        ingestIncomingMessages(id, [
+            ...Array.from({ length: 1100 }, (_, index) =>
+                makeAgentMessage({ id: `row-${index}`, seq: index + 1, at: index + 1 })),
+            makeReasoningMessage('reasoning-old', 'stream', 1101, 1101)
+        ])
+        const gapId = getMessageWindowState(id).messages.find(message => message.id.startsWith('__transcript-gap__'))!.id
+        for (const message of [
+            makeAgentRunMessage('run', 1102, 1102),
+            makeReasoningMessage('reasoning-new', 'stream', 1103, 1103)
+        ]) {
+            ingestIncomingMessages(id, [message])
+            expect(getMessageWindowState(id).messages.some(message => message.id === gapId)).toBe(true)
+        }
+        release()
+    })
+
+    it('preserves middle targets for overlapping outline leases and restores normal trimming afterward', () => {
+        const id = sessionId('outline-middle-target')
+        const first = beginNavigation(id, true)
+        const second = beginNavigation(id, true)
+        ingestIncomingMessages(id, Array.from({ length: 1200 }, (_, index) =>
+            makeAgentMessage({ id: `row-${index}`, seq: index + 1, at: index + 1 })))
+        first()
+        first()
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'live', seq: 1201, at: 1201 })])
+        expect(getMessageWindowState(id).messages).toHaveLength(1201)
+        expect(getMessageWindowState(id).messages.some(message => message.id === 'row-700')).toBe(true)
+        second()
+        ingestIncomingMessages(id, [makeAgentMessage({ id: 'after', seq: 1202, at: 1202 })])
+        expect(getMessageWindowState(id).messages.length).toBeLessThanOrEqual(VISIBLE_WINDOW_SIZE)
     })
 
     it('keeps every regular row when queued rows push the window past the cap', () => {

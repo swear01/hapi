@@ -85,6 +85,7 @@ type InternalState = MessageWindowState & {
     provisionalBoundaryGeneration: number | null
     requiresLatestReset: boolean
     navigationLeaseCount: number
+    navigationHistoryLeaseCount: number
     preferLatestOnActivation: boolean
     syncGeneration: number
     olderGeneration: number
@@ -282,6 +283,7 @@ function createState(sessionId: string): InternalState {
         provisionalBoundaryGeneration: null,
         requiresLatestReset: false,
         navigationLeaseCount: 0,
+        navigationHistoryLeaseCount: 0,
         preferLatestOnActivation: false,
         syncGeneration: 0,
         olderGeneration: 0
@@ -446,6 +448,7 @@ function buildState(
         | 'provisionalBoundaryGeneration'
         | 'requiresLatestReset'
         | 'navigationLeaseCount'
+        | 'navigationHistoryLeaseCount'
         | 'preferLatestOnActivation'
         | 'syncGeneration'
         | 'olderGeneration'
@@ -533,11 +536,12 @@ function trimNavigationRegularWindow(
     messages: DecryptedMessage[]
 ): DecryptedMessage[] {
     const limit = NAVIGATION_HEAD_LIMIT + NAVIGATION_TAIL_LIMIT
-    if (messages.length <= limit) {
+    const regular = messages.filter(message => !isTranscriptGap(message))
+    if (regular.length <= limit) {
         return messages
     }
-    const head = messages.slice(0, NAVIGATION_HEAD_LIMIT)
-    const tail = messages.slice(-NAVIGATION_TAIL_LIMIT)
+    const head = messages.slice(0, messages.indexOf(regular[NAVIGATION_HEAD_LIMIT - 1]!) + 1)
+    const tail = messages.slice(messages.indexOf(regular[regular.length - NAVIGATION_TAIL_LIMIT]!))
     const headLast = head.at(-1) ?? null
     const tailFirst = tail[0] ?? null
     const headLastSeq = headLast?.seq ?? null
@@ -677,7 +681,7 @@ function mergeIntoWindow(
     const regularLimit = options.regularLimit
         ?? (previous.viewMode === 'history' ? HISTORY_WINDOW_SIZE : VISIBLE_WINDOW_SIZE)
     const merged = dropSupersededReasoningSnapshots(mergeMessages(
-        navigationInFlight ? previous.messages.filter(message => !isTranscriptGap(message)) : previous.messages,
+        previous.messages,
         retainedIncoming
     ))
 
@@ -694,7 +698,10 @@ function mergeIntoWindow(
     let kept: DecryptedMessage[]
     let dropped: DecryptedMessage[]
     let droppedNewest = false
-    if (navigationInFlight) {
+    if (previous.navigationHistoryLeaseCount > 0) {
+        kept = merged
+        dropped = []
+    } else if (navigationInFlight) {
         const trimmed = trimNavigationWindow(merged)
         kept = trimmed.kept
         dropped = trimmed.dropped
@@ -1455,13 +1462,14 @@ export function setMessageViewMode(sessionId: string, mode: MessageViewMode): vo
  * teardown can release safely. A queued tail refresh resumes after the last
  * lease is released and the user returns to tail mode.
  */
-export function beginNavigation(sessionId: string): () => void {
+export function beginNavigation(sessionId: string, preserveHistory = false): () => void {
     const controller = tailSyncControllers.get(sessionId)
     let canceledRunningSync = false
     updateState(sessionId, (previous) => {
         canceledRunningSync = previous.navigationLeaseCount === 0 && Boolean(controller?.running)
         return buildState(previous, {
             navigationLeaseCount: previous.navigationLeaseCount + 1,
+            navigationHistoryLeaseCount: previous.navigationHistoryLeaseCount + Number(preserveHistory),
             ...(canceledRunningSync
                 ? {
                     syncGeneration: previous.syncGeneration + 1,
@@ -1483,7 +1491,10 @@ export function beginNavigation(sessionId: string): () => void {
         updateState(sessionId, (previous) => {
             const next = Math.max(0, previous.navigationLeaseCount - 1)
             lastLeaseReleased = next === 0
-            return buildState(previous, { navigationLeaseCount: next })
+            return buildState(previous, {
+                navigationLeaseCount: next,
+                navigationHistoryLeaseCount: previous.navigationHistoryLeaseCount - Number(preserveHistory)
+            })
         })
         if (!lastLeaseReleased) {
             return

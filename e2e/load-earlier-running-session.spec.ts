@@ -5,12 +5,13 @@ test('outline selection above the history cap survives the next streaming ingest
     await page.goto('/e2e-fixtures/history-load-fixture.html?outline=1')
     await expect(page.locator('.chat-scroll-y')).toBeVisible()
     await page.waitForTimeout(3500)
-    for (let loaded = 400; loaded <= 1000; loaded += 200) {
+    for (let loaded = 400; loaded <= 1200; loaded += 200) {
         await page.getByRole('button', { name: 'Load earlier', exact: true }).evaluate(button => button.click())
         await expect.poll(() => page.evaluate(() => window.__probe.windowState().messageCount)).toBe(loaded)
     }
-    await page.locator('aside button').filter({ hasText: 'Fixture message 1100' }).evaluate(button => button.click())
-    const selected = page.locator('.happy-thread-messages > [id$="m-1100"]')
+    await page.evaluate(() => window.__probe.startStreaming(50))
+    await page.locator('aside button').filter({ hasText: 'Fixture message 700' }).evaluate(button => button.click())
+    const selected = page.locator('.happy-thread-messages > [id$="m-700"]')
     await expect(selected).toBeInViewport()
     await page.waitForTimeout(1200)
     const before = await selected.boundingBox()

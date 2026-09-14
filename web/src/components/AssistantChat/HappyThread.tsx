@@ -1834,7 +1834,7 @@ export function HappyThread(props: {
         setIsNavigationInFlight(true)
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
-        const releaseNavigation = beginOwnedNavigation()
+        const releaseNavigation = beginOwnedNavigation(true)
         try {
             const target = await locateOutlineTargetMessage({
                 targetMessageId: item.targetMessageId,
@@ -1876,8 +1876,8 @@ export function HappyThread(props: {
     // single ref): overlapping navigations each own a lease, and the first
     // completion must not clear teardown ownership for the others.
     const activeNavigationReleasesRef = useRef(new Set<() => void>())
-    const beginOwnedNavigation = useCallback(() => {
-        const release = beginNavigation(sessionIdRef.current)
+    const beginOwnedNavigation = useCallback((preserveHistory = false) => {
+        const release = beginNavigation(sessionIdRef.current, preserveHistory)
         activeNavigationReleasesRef.current.add(release)
         return () => {
             activeNavigationReleasesRef.current.delete(release)
