@@ -1,6 +1,7 @@
 import {
     CURSOR_AUTO_MODEL_ID,
     cursorCliSkuBaseId,
+    cursorModelBaseMatches,
     findBestCliSkuForAcpWire,
     isCursorAcpCatalogModelId,
     isCursorAcpWireModelId as isSharedCursorAcpWireModelId,
@@ -46,6 +47,22 @@ export function cursorModelVariantId(modelId: string): string {
 /** Key for grouping variants of the same base model. No legacy alias normalization. */
 export function cursorModelDedupeKey(modelId: string): string {
     return cursorModelBaseId(modelId)
+}
+
+/** Existing catalog base for a CLI sku base, tolerating the legacy `cursor-` prefix. */
+function findCatalogBaseKey(
+    catalog: CursorModelCatalog,
+    skuBaseId: string
+): string | null {
+    if (catalog.variantsByBase.has(skuBaseId)) {
+        return skuBaseId
+    }
+    for (const baseKey of catalog.variantsByBase.keys()) {
+        if (cursorModelBaseMatches(skuBaseId, baseKey)) {
+            return baseKey
+        }
+    }
+    return null
 }
 
 function normalizeCurrentModel(model?: string | null): string | null {
@@ -264,8 +281,11 @@ export function appendCliSkusToCatalog(
         }
 
         const baseId = cursorCliSkuBaseId(modelId)
-        const existing = catalog.variantsByBase.get(baseId)
-        if (!existing || existing.length === 0) {
+        // CLI sku bases may carry the legacy `cursor-` family prefix
+        // (`cursor-grok-4.6-high` → ACP base `grok-4.6`).
+        const catalogBaseId = findCatalogBaseKey(catalog, baseId)
+        const existing = catalogBaseId ? catalog.variantsByBase.get(catalogBaseId) : undefined
+        if (!catalogBaseId || !existing || existing.length === 0) {
             continue
         }
 
@@ -278,7 +298,7 @@ export function appendCliSkusToCatalog(
             label: sku.name?.trim() && sku.name !== modelId ? sku.name.trim() : modelId,
             sortKey: modelId
         })
-        catalog.wireToBase.set(modelId, baseId)
+        catalog.wireToBase.set(modelId, catalogBaseId)
     }
 
     return catalog
