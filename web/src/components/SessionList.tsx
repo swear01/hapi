@@ -479,6 +479,7 @@ function ProjectGroupHeader(props: {
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
                 onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return
                     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
                         event.preventDefault()
                         const rect = event.currentTarget.getBoundingClientRect()

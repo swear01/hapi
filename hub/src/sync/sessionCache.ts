@@ -1108,6 +1108,9 @@ export class SessionCache {
                 this.store.scratchlist.list(session!.id).flatMap((entry) => entry.attachments)
             ])
         )
+        if (sessions.some(session => session!.active || session!.metadata?.lifecycleState !== 'archived')) {
+            throw new Error('Sessions are no longer archived')
+        }
         const deleted = this.store.sessions.deleteArchivedSessions(ids, namespace)
         if (!deleted) {
             throw new Error('Sessions are no longer archived')

@@ -59,6 +59,28 @@ function renderWithProviders(children: ReactNode) {
 }
 
 describe('SessionList directory action', () => {
+    it.each(['Enter', ' '])('preserves native directory-button activation for %s', (key) => {
+        const onNewSessionInDirectory = vi.fn()
+        const writeText = vi.fn(async () => {})
+        Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+        renderWithProviders(<SessionList
+            sessions={[makeSession({ id: 'keyboard', active: true, metadata: { path: '/work/hapi', name: 'Task' } })]}
+            selectedSessionId={null} onSelect={vi.fn()} onNewSession={vi.fn()}
+            onNewSessionInDirectory={onNewSessionInDirectory} onRefresh={vi.fn()}
+            isLoading={false} renderHeader={false} api={null}
+        />)
+        for (const name of [/Copy: \/work\/hapi/, /New session in this directory/]) {
+            const button = screen.getByRole('button', { name })
+            button.focus()
+            expect(fireEvent.keyDown(button, { key })).toBe(true)
+            expect(screen.getByTitle('/work/hapi').parentElement?.querySelector('.collapsible-panel'))
+                .toHaveAttribute('data-open', 'true')
+            fireEvent.click(button)
+        }
+        expect(writeText).toHaveBeenCalledWith('/work/hapi')
+        expect(onNewSessionInDirectory).toHaveBeenCalledOnce()
+    })
+
     it('starts a new session with the project machine and directory', () => {
         const onNewSessionInDirectory = vi.fn()
         const session = makeSession({
