@@ -575,10 +575,11 @@ describe('applyCursorAcpModel', () => {
         });
 
         await expect(applyCursorAcpModel(backend, 's1', 'composer-2.5')).resolves.toEqual({
-            applied: false
+            applied: false,
+            partiallyAppliedWireId: 'composer-2.5'
         });
         expect(setConfigOption).toHaveBeenCalledTimes(2);
-        expect(backend.pinSessionModelWireId).not.toHaveBeenCalled();
+        expect(backend.pinSessionModelWireId).toHaveBeenCalledWith('s1', 'composer-2.5');
     });
 
     it('retries set_config_option once before failing apply', async () => {

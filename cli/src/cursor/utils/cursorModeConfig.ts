@@ -80,6 +80,7 @@ export async function applyCursorAcpMode(
 
 export type ApplyCursorAcpModelResult = {
     applied: boolean;
+    partiallyAppliedWireId?: string;
     /** Wire id applied via ACP when switching succeeds */
     resolvedWireId?: string;
     /** Original hub/UI request before catalog resolution */
@@ -242,8 +243,10 @@ async function applyParameterizedCursorModel(
         return 'unsupported';
     }
 
+    let partiallyAppliedWireId: string | undefined;
     try {
         await backend.setConfigOption(sessionId, modelOption.id, baseModel);
+        partiallyAppliedWireId = baseModel;
 
         // Selecting the base refreshes Cursor's per-model config options. Re-read them so
         // the parameters are applied against the model that is now active, and skipped
@@ -253,6 +256,7 @@ async function applyParameterizedCursorModel(
         if (activeFast && optionHasValue(activeFast, fast)) {
             await backend.setConfigOption(sessionId, activeFast.id, fast);
             appliedParams.push(`fast=${fast}`);
+            partiallyAppliedWireId = `${baseModel}[${appliedParams.join(',')}]`;
         }
 
         const effortHint = effortHintForCursorSkuOrWire(requested);
@@ -260,6 +264,7 @@ async function applyParameterizedCursorModel(
         if (effort) {
             await backend.setConfigOption(sessionId, effort.option.id, effort.value);
             appliedParams.push(`${effort.option.id}=${effort.value}`);
+            partiallyAppliedWireId = `${baseModel}[${appliedParams.join(',')}]`;
         }
 
         // Only parameters that were actually applied belong in the pinned wire; a model
@@ -271,6 +276,10 @@ async function applyParameterizedCursorModel(
         return { applied: true, resolvedWireId: resolved, requestedWireId: requested };
     } catch (error) {
         logger.debug('[cursor-acp] parameterized model config failed', error);
+        if (partiallyAppliedWireId) {
+            backend.pinSessionModelWireId(sessionId, partiallyAppliedWireId);
+            return { applied: false, partiallyAppliedWireId };
+        }
         return 'failed';
     }
 }

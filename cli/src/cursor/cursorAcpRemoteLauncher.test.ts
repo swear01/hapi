@@ -10,6 +10,7 @@ const harness = vi.hoisted(() => ({
     loadSessionError: null as Error | null,
     newSessionError: null as Error | null,
     failSetConfigOption: false,
+    failFastConfigOption: false,
     supportsLoadSession: true,
     loadSessionCalled: false,
     newSessionCalled: false,
@@ -108,6 +109,9 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 if (harness.failSetConfigOption && configId === 'model-opt') {
                     throw new Error('set_config_option rejected');
                 }
+                if (harness.failFastConfigOption && configId === 'fast') {
+                    throw new Error('fast update rejected');
+                }
                 harness.setConfigOptionCalls.push({ sessionId, configId, value });
             }),
             pinSessionModelWireId: vi.fn(),
@@ -123,6 +127,12 @@ vi.mock('./utils/cursorAcpBackend', () => ({
                 currentModelId: 'composer-2.5[fast=true]'
             })),
             getConfigOptionByCategory: vi.fn((_sessionId: string, category: string) => {
+                if (category === 'fast' && harness.failFastConfigOption) {
+                    return {
+                        id: 'fast',
+                        options: [{ value: 'false' }, { value: 'true' }]
+                    };
+                }
                 if (category === 'mode') {
                     return {
                         id: 'mode-opt',
@@ -289,6 +299,7 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.loadSessionError = null;
         harness.newSessionError = null;
         harness.failSetConfigOption = false;
+        harness.failFastConfigOption = false;
         harness.modelOptionValues = [
             'default[]',
             'composer-2.5[fast=true]',
@@ -1792,7 +1803,7 @@ describe('cursorAcpRemoteLauncher', () => {
         await runPromise;
     });
 
-    it('rejects Auto after a concrete switch even if the process spawned with auto', async () => {
+    it.each([false, true])('rejects Auto after a concrete switch even if the process spawned with auto (partial=%s)', async (partial) => {
         const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
         const client = {
             rpcHandlerManager: { registerHandler: vi.fn() },
@@ -1826,14 +1837,23 @@ describe('cursorAcpRemoteLauncher', () => {
         await vi.waitFor(() => expect(session.canApplyModelConfig()).toBe(true));
         expect(harness.backendArgs).toEqual({ command: 'agent', args: ['--model', 'auto', 'acp'] });
 
-        await session.applyModelConfig('composer-2.5[fast=false]');
-        expect(session.model).toBe('composer-2.5[fast=false]');
+        if (partial) {
+            harness.modelOptionValues = ['default', 'composer-2.5'];
+            harness.failFastConfigOption = true;
+            await expect(session.applyModelConfig('composer-2.5[fast=false]')).rejects.toThrow(
+                'Cursor model is not available via ACP'
+            );
+        } else {
+            await session.applyModelConfig('composer-2.5[fast=false]');
+        }
+        const concreteModel = partial ? 'composer-2.5' : 'composer-2.5[fast=false]';
+        expect(session.model).toBe(concreteModel);
         harness.setConfigOptionCalls.length = 0;
 
         await expect(session.applyModelConfig('auto')).rejects.toThrow(
             'Cursor Auto requires restarting with --model auto'
         );
-        expect(session.model).toBe('composer-2.5[fast=false]');
+        expect(session.model).toBe(concreteModel);
         expect(harness.setConfigOptionCalls.filter((call) => call.configId === 'model-opt')).toEqual([]);
 
         queue.close();

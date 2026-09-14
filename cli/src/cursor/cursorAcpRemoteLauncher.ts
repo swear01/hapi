@@ -996,11 +996,19 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         }
 
         const result = await applyCursorAcpModel(backend, acpSessionId, requested);
+        if (result.applied || result.partiallyAppliedWireId) {
+            this.spawnedWithCliAuto = false;
+        }
         if (!result.applied || !result.resolvedWireId) {
             const message = `Cursor model is not available via ACP: ${requested}`;
             logger.warn(`[cursor-acp] ${message}`);
 
-            if (options.optimistic && applySeq === this.modelApplySeq) {
+            if (result.partiallyAppliedWireId && applySeq === this.modelApplySeq) {
+                this.currentBackendModel = result.partiallyAppliedWireId;
+                previousSetModel(result.partiallyAppliedWireId);
+                this.pushModelStatusLine(result.partiallyAppliedWireId);
+                this.session.pushKeepAlive();
+            } else if (options.optimistic && applySeq === this.modelApplySeq) {
                 this.currentBackendModel = previousModel;
                 previousSetModel(previousModel ?? undefined);
                 this.session.pushKeepAlive();
@@ -1014,7 +1022,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             if (options.throwOnFailure) {
                 throw new Error(message);
             }
-            return previousModel;
+            return result.partiallyAppliedWireId ?? previousModel;
         }
 
         const sessionWire = wireIdForCursorSessionState(
@@ -1028,7 +1036,6 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
         const changed = sessionWire !== this.currentBackendModel || this.session.model !== sessionWire;
         this.currentBackendModel = sessionWire;
-        this.spawnedWithCliAuto = false;
         previousSetModel(sessionWire);
         if (changed) {
             this.pushModelStatusLine(sessionWire);
