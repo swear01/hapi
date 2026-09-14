@@ -208,6 +208,7 @@ export function buildSessionCursorPickerState(args: {
     cliModelSkus?: readonly CursorModelSummary[]
     sessionModel: string | null | undefined
     sessionCurrentModelId: string | null
+    autoRestartLabel?: string
 }): CursorPickerState {
     const catalog = buildCursorCatalogFromSources({
         sessionModels: args.sessionModels,
@@ -217,9 +218,16 @@ export function buildSessionCursorPickerState(args: {
         sessionModelFromHub: args.sessionModel,
         defaultValue: 'auto'
     })
-    return buildCursorPickerState({
+    const picker = buildCursorPickerState({
         catalog,
         currentWireId: args.sessionModel ?? args.sessionCurrentModelId,
         defaultValue: 'auto'
     })
+    const autoRestartLabel = args.autoRestartLabel
+    if (autoRestartLabel && !args.sessionModels.some(model => model.modelId.trim() === 'auto')) {
+        picker.modelOptions = picker.modelOptions.map(option => option.value === 'auto'
+            ? { ...option, label: autoRestartLabel }
+            : option)
+    }
+    return picker
 }
