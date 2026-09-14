@@ -21,6 +21,7 @@ Upstream main: 9c4e6dad6c36a786372789e799e0a9057329592e
 
 ## Open upstream pull requests
 
+- #1849 [UNKNOWN] fix(cli): let agent titles replace Fork seed summaries @ 0ced990364d32ec522a86211e6828e8df82426ee (https://github.com/tiann/hapi/pull/1849)
 - #1847 [UNKNOWN] fix(web): refresh cached session tails with a small page @ 8d1e7b6a3e14e6924eb0d1b4f9ea19f4247c39e5 (https://github.com/tiann/hapi/pull/1847)
 - #1846 [UNKNOWN] fix(web): support bracket-delimited LaTeX in Markdown and share exports @ 6f62bdb1127cb7da0ed7e6e179da7cbc92270c79 (https://github.com/tiann/hapi/pull/1846)
 - #1844 [UNKNOWN] fix(hub): keep notify-cause ingest bounded by advancing the resume watermark @ bb24e6b6254b1f210703a7e024bd5a6e0f44e31c (https://github.com/tiann/hapi/pull/1844)
@@ -184,4 +185,4 @@ Normal carries require ready CI/merge state, clear maintainer signal, latest-hea
 Personal PRs authored by swear01 are auto-carry; record and report every failed quality rule after integration.
 Official upstream is authoritative; upstreamed PRs are accepted and are not replayed.
 
-Open-set snapshot: **27 carry / 124 defer / 4 drop** (155 PRs). Pin official GitHub Release `v0.30.4` `8cefb0f04c413d4f47cd364bcf556e03af6b4073` (ancestor of later `upstream/main`; unpublished main commits are not in this rebuild). New since unpublished `v0.30.2.1` rehearsal: `#1847` `#1846` `#1844` `#1838` deferred. `#1836` `#1831` `#1826` `#1825` stay deferred. Personal `#1822` `#1819` stay deferred from the previous operator set. Carries and drops reuse the `v0.29.1.1` / `v0.30.2.1` approved set (`#1771` `#1635` `#1419` remain `PERSONAL_PR_POLICY_EXCEPTION`). `#1320` stays dropped and is not in the open set. Overlay remounts Hub `/api/upgrade` and `/cli/upgrade` routes.
+Open-set snapshot: **27 carry / 125 defer / 4 drop** (156 PRs). Pin official GitHub Release `v0.30.4` `8cefb0f04c413d4f47cd364bcf556e03af6b4073` (ancestor of later `upstream/main`; unpublished main commits are not in this rebuild). New since unpublished `v0.30.2.1` rehearsal: `#1849` `#1847` `#1846` `#1844` `#1838` deferred. `#1836` `#1831` `#1826` `#1825` stay deferred. Personal `#1822` `#1819` stay deferred from the previous operator set. Carries and drops reuse the `v0.29.1.1` / `v0.30.2.1` approved set (`#1771` `#1635` `#1419` remain `PERSONAL_PR_POLICY_EXCEPTION`). `#1320` stays dropped and is not in the open set. Overlay remounts Hub `/api/upgrade` and `/cli/upgrade` routes.
