@@ -15,23 +15,27 @@ for (const navigation of ['outline', 'response'] as const) {
             }).toBe(loaded)
         }
         if (navigation === 'outline') {
-            await page.evaluate(() => window.__probe.startStreaming(50))
-            await page.locator('aside button').filter({ hasText: 'Fixture message 700' }).evaluate(button => button.click())
+            await page.locator('aside button').filter({ hasText: 'Fixture message 700' }).evaluate(button => {
+                window.__probe.startStreaming(50, 3)
+                button.click()
+            })
         } else {
             await page.locator('aside button').filter({ hasText: 'Fixture message 701' }).evaluate(button => button.click())
             await expect(page.locator('aside')).toHaveCount(0)
             await expect.poll(() => page.evaluate(() => window.__probe.windowState().messageCount)).toBe(1200)
-            await page.evaluate(() => window.__probe.startStreaming(50))
             await page.locator('.happy-message').filter({ hasText: 'Fixture assistant reply 702' })
-                .locator('[title="Jump to turn input"]').evaluate(button => (button as HTMLButtonElement).click())
+                .locator('[title="Jump to turn input"]').evaluate(button => {
+                    window.__probe.startStreaming(50, 3)
+                    ;(button as HTMLButtonElement).click()
+                })
         }
         const selected = page.locator(`.happy-thread-messages > [id$="m-${navigation === 'outline' ? 700 : 701}"]`)
         await expect(selected).toBeInViewport()
         await page.waitForTimeout(1200)
         const before = await selected.boundingBox()
         expect(before).not.toBeNull()
-        await page.evaluate(() => window.__probe.startStreaming(150))
-        await expect.poll(() => page.evaluate(() => window.__probe.streamedCount()), { timeout: 15_000 }).toBeGreaterThanOrEqual(3)
+        await expect.poll(() => page.evaluate(() => window.__probe.streamedCount()), { timeout: 15_000 }).toBe(3)
+        expect(await page.evaluate(() => window.__probe.streamedDuringNavigation())).toBeGreaterThan(0)
         await expect(selected).toBeInViewport()
         const after = await selected.boundingBox()
         expect(after).not.toBeNull()
