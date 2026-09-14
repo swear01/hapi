@@ -13,7 +13,7 @@ public struct ComposerState: Equatable, Sendable {
     /// A send (or its inactive-session resume) is in flight — spinner on the
     /// send button.
     public let isSending: Bool
-    /// A turn is active: long-press send offers Steer, and Abort is shown.
+    /// A turn is active: long-press send offers Steer; an empty draft shows Stop.
     public let canSteer: Bool
 
     public init(text: String, isSending: Bool, canSteer: Bool) {
@@ -35,6 +35,7 @@ public struct QueuedMessageRow: Equatable, Sendable, Identifiable {
     public let canAct: Bool
     /// Steer offered: turn active, not future-scheduled, actionable.
     public let canSteer: Bool
+    public let indeterminate: Bool
 
     public init(
         id: String,
@@ -43,7 +44,8 @@ public struct QueuedMessageRow: Equatable, Sendable, Identifiable {
         attachmentNames: [String],
         scheduledAt: Int?,
         canAct: Bool,
-        canSteer: Bool
+        canSteer: Bool,
+        indeterminate: Bool = false
     ) {
         self.id = id
         self.localId = localId
@@ -52,7 +54,20 @@ public struct QueuedMessageRow: Equatable, Sendable, Identifiable {
         self.scheduledAt = scheduledAt
         self.canAct = canAct
         self.canSteer = canSteer
+        self.indeterminate = indeterminate
     }
+}
+
+// MARK: - Codex plan client actions
+
+/// A shared Codex proposal's client-action footer, independent of permissions.
+public struct CodexPlanActionState: Equatable, Sendable {
+    public let available: Bool
+    public let pending: Bool
+    public let canAct: Bool
+    public let error: String?
+
+    public var isVisible: Bool { available || pending || error != nil }
 }
 
 // MARK: - Permissions
@@ -189,6 +204,9 @@ public struct SessionConfigState: Equatable, Sendable {
     public let permissionMode: PermissionMode?
     /// Catalog modes for this flavor; empty → hide the section (pi).
     public let permissionModes: [PermissionModeOption]
+    /// Codex collaboration is independent of its permission mode.
+    public let collaborationMode: CodexCollaborationMode?
+    public let canChangeCollaborationMode: Bool
     public let model: String?
     /// nil → hide the model section (flavor without a known catalog).
     public let modelOptions: [CatalogOption]?
@@ -205,6 +223,8 @@ public struct SessionConfigState: Equatable, Sendable {
         controlledByUser: Bool,
         permissionMode: PermissionMode?,
         permissionModes: [PermissionModeOption],
+        collaborationMode: CodexCollaborationMode?,
+        canChangeCollaborationMode: Bool,
         model: String?,
         modelOptions: [CatalogOption]?,
         modelOptionsLoading: Bool,
@@ -216,6 +236,8 @@ public struct SessionConfigState: Equatable, Sendable {
         self.controlledByUser = controlledByUser
         self.permissionMode = permissionMode
         self.permissionModes = permissionModes
+        self.collaborationMode = collaborationMode
+        self.canChangeCollaborationMode = canChangeCollaborationMode
         self.model = model
         self.modelOptions = modelOptions
         self.modelOptionsLoading = modelOptionsLoading
@@ -232,6 +254,9 @@ public func buildSessionConfigState(
     codexModels: CodexModelsState
 ) -> SessionConfigState {
     let flavor = detail?.metadata?.flavor ?? summary?.metadata?.flavor
+    let active = detail?.active ?? summary?.active ?? false
+    let controlledByUser = detail?.agentState?.controlledByUser == true
+        && detail?.metadata?.capabilities?.concurrentClients != true
     let model = detail?.model
     var modelOptions: [CatalogOption]?
     var modelOptionsLoading = false
@@ -272,10 +297,14 @@ public func buildSessionConfigState(
 
     return SessionConfigState(
         flavor: flavor,
-        active: detail?.active ?? summary?.active ?? false,
-        controlledByUser: detail?.agentState?.controlledByUser == true,
+        active: active,
+        controlledByUser: controlledByUser,
         permissionMode: detail?.permissionMode,
-        permissionModes: permissionModeOptions(forFlavor: flavor),
+        permissionModes: permissionModeOptions(forFlavor: flavor).filter {
+            detail?.metadata?.capabilities?.concurrentClients != true || $0.mode.rawValue != "safe-yolo"
+        },
+        collaborationMode: detail?.collaborationMode,
+        canChangeCollaborationMode: detail != nil && flavor == "codex" && active && !controlledByUser,
         model: model,
         modelOptions: modelOptions,
         modelOptionsLoading: modelOptionsLoading,

@@ -5,10 +5,10 @@ import {
     useRef,
     useState,
     type CSSProperties,
-    type RefObject
+    type RefObject,
 } from 'react'
 
-type AnchorPoint = { x: number; y: number }
+export type AnchoredMenuPoint = { x: number; y: number }
 
 type MenuPosition = {
     top: number
@@ -17,23 +17,28 @@ type MenuPosition = {
 }
 
 /**
- * Positioning + dismissal controller shared by anchored popup menus
- * (SessionActionMenu, ProjectGroupActionMenu).
+ * Position and dismissal lifecycle for a pointer-anchored context menu.
  *
- * Given a viewport anchor point it flips the menu above/below based on
- * available space, clamps it inside the viewport, dismisses on outside
- * pointerdown / Escape, reflows on resize+scroll, and focuses the first
- * menuitem on open. Callers render a `<div ref={menuRef} style={menuStyle}>`.
+ * Shared by the session action menu and the file action menu: measures the
+ * menu, opens above/below the pointer as space allows, clamps it inside the
+ * viewport, dismisses on outside pointer-down / Escape, repositions on
+ * resize/scroll, and focuses the first `menuitem` when it opens.
  */
-export function useAnchoredMenu(opts: {
+export function useAnchoredMenu(options: {
     isOpen: boolean
     onClose: () => void
-    anchorPoint: AnchorPoint
+    anchorPoint: AnchoredMenuPoint
+    /**
+     * Horizontal alignment relative to the anchor. `center` suits a trigger
+     * button (menu centered under it); `start` suits a pointer/context menu
+     * (menu's left edge at the pointer).
+     */
+    align?: 'center' | 'start'
 }): {
     menuRef: RefObject<HTMLDivElement | null>
     menuStyle: CSSProperties | undefined
 } {
-    const { isOpen, onClose, anchorPoint } = opts
+    const { isOpen, onClose, anchorPoint, align = 'center' } = options
     const menuRef = useRef<HTMLDivElement | null>(null)
     const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
 
@@ -52,14 +57,18 @@ export function useAnchoredMenu(opts: {
         const openAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow
 
         let top = openAbove ? anchorPoint.y - menuRect.height - gap : anchorPoint.y + gap
-        let left = anchorPoint.x - menuRect.width / 2
-        const transformOrigin = openAbove ? 'bottom center' : 'top center'
+        // Center the menu on a trigger button, or start its left edge at a
+        // pointer, then clamp it so it never leaves the viewport.
+        let left = align === 'start' ? anchorPoint.x : anchorPoint.x - menuRect.width / 2
+        const transformOrigin = openAbove
+            ? 'bottom center'
+            : align === 'start' ? 'top left' : 'top center'
 
         top = Math.min(Math.max(top, padding), viewportHeight - menuRect.height - padding)
         left = Math.min(Math.max(left, padding), viewportWidth - menuRect.width - padding)
 
         setMenuPosition({ top, left, transformOrigin })
-    }, [anchorPoint])
+    }, [align, anchorPoint])
 
     useLayoutEffect(() => {
         if (!isOpen) return
@@ -116,7 +125,7 @@ export function useAnchoredMenu(opts: {
         ? {
             top: `max(${menuPosition.top}px, calc(env(safe-area-inset-top) + 8px))`,
             left: menuPosition.left,
-            transformOrigin: menuPosition.transformOrigin
+            transformOrigin: menuPosition.transformOrigin,
         }
         : undefined
 
