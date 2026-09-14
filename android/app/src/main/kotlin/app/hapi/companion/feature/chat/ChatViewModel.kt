@@ -1482,11 +1482,15 @@ class ChatViewModel(
     )
 
     fun implementCodexPlan(planId: String) {
-        val previous = codexPlanOperations.value
-        if (!currentCodexPlanActions().forPlan(planId).canAct) return
-        if (!codexPlanOperations.compareAndSet(previous, previous.copy(
-                pendingPlanId = planId, errors = previous.errors - planId,
-            ))) return
+        while (true) {
+            val previous = codexPlanOperations.value
+            if (!buildCodexPlanActions(
+                    sessionStore.currentDetail(sessionId), previous,
+                    sendInFlight.value || configOpPending.value,
+                ).forPlan(planId).canAct) return
+            val next = previous.copy(pendingPlanId = planId, errors = previous.errors - planId)
+            if (codexPlanOperations.compareAndSet(previous, next)) break
+        }
         scope.launch {
             try {
                 try {
