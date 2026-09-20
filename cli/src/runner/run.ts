@@ -1257,7 +1257,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // regardless of the verbose/quiet logger setting.
     console.log('');
     console.log('Hapi runner started.');
-    console.log(`  Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set — browsing is limited to home)'}`);
+    console.log(`  Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set — browsing and spawning are unrestricted)'}`);
     console.log(`  Hub URL:        ${configuration.apiUrl}`);
     console.log(`  Machine ID:     ${machine.id}`);
     console.log(`  Control port:   ${controlPort}`);
@@ -1493,19 +1493,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       // Heartbeat
       try {
         const updatedState: RunnerLocallyPersistedState = {
-          pid: process.pid,
-          httpPort: controlPort,
-          startTime: fileState.startTime,
-          startedWithCliVersion: packageJson.version,
-          startedWithCliMtimeMs,
-          startedWithApiUrl: fileState.startedWithApiUrl,
-          startedWithMachineId: fileState.startedWithMachineId,
-          startedWithCliApiTokenHash: fileState.startedWithCliApiTokenHash,
-          startedWithExtraHeadersHash: fileState.startedWithExtraHeadersHash,
-          startedWithArgv,
-          startedWithVersionHandoffDisabled,
-          lastHeartbeat: new Date().toLocaleString(),
-          runnerLogPath: fileState.runnerLogPath
+          ...fileState,
+          lastHeartbeat: new Date().toLocaleString()
         };
         writeRunnerState(updatedState);
         if (process.env.DEBUG) {
