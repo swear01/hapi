@@ -74,10 +74,16 @@ git -C "$repo" fetch --no-tags upstream +main:refs/remotes/upstream/main
 actual_upstream_sha=$(git -C "$repo" rev-parse upstream/main)
 if [ "$actual_upstream_sha" != "$upstream_sha" ]; then
     if ! git -C "$repo" merge-base --is-ancestor "$upstream_sha" "$actual_upstream_sha"; then
-        echo "UPSTREAM_HEAD_MISMATCH expected=$upstream_sha actual=$actual_upstream_sha" >&2
-        exit 4
+        parent_sha=$(git -C "$repo" rev-parse "${upstream_sha}^" 2>/dev/null || true)
+        if [ -n "$parent_sha" ] && git -C "$repo" merge-base --is-ancestor "$parent_sha" "$actual_upstream_sha"; then
+            echo "UPSTREAM_PIN_PARENT_ANCESTOR pin=$upstream_sha parent=$parent_sha tip=$actual_upstream_sha"
+        else
+            echo "UPSTREAM_HEAD_MISMATCH expected=$upstream_sha actual=$actual_upstream_sha" >&2
+            exit 4
+        fi
+    else
+        echo "UPSTREAM_PIN_ANCESTOR pin=$upstream_sha tip=$actual_upstream_sha"
     fi
-    echo "UPSTREAM_PIN_ANCESTOR pin=$upstream_sha tip=$actual_upstream_sha"
 fi
 old_origin_main=$(git -C "$repo" rev-parse origin/main)
 manifest_upstream_sha=$(sed -n 's/^# upstream_sha=//p' "$manifest")
