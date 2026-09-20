@@ -6,12 +6,31 @@ import type { ConversationStatus } from '@/realtime/types'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
 import { useRealtimeDictation } from './useRealtimeDictation'
+import { getLiveComposerDraft } from './useComposerDraft'
 
 export function appendTranscript(text: string, transcript: string): string {
     const addition = transcript.trim()
     if (!addition) return text
     if (!text) return addition
     return `${text}${/\s$/.test(text) ? '' : ' '}${addition}`
+}
+
+export function transferVoiceDraftAfterSend(
+    sourceSessionId: string,
+    targetSessionId: string,
+    draftAtStart: string,
+    onResolved?: (sessionId: string) => void,
+): Promise<void> {
+    return transferComposerDraftThenNavigate(sourceSessionId, targetSessionId, () => {
+        getLiveComposerDraft(targetSessionId)?.setText(getDraft(targetSessionId))
+        onResolved?.(targetSessionId)
+    }, [], { preserveTargetAttachments: true, textOverride: (sampledSource) => {
+        const sourceDraft = getLiveComposerDraft(sourceSessionId)?.getText() ?? sampledSource
+        const followUp = sourceDraft === draftAtStart ? '' : sourceDraft
+        return targetSessionId === sourceSessionId
+            ? followUp
+            : appendTranscript(getLiveComposerDraft(targetSessionId)?.getText() ?? getDraft(targetSessionId), followUp)
+    } })
 }
 
 function recordingExtension(mimeType: string): string {
@@ -55,25 +74,27 @@ export function recoverFailedVoiceSend(args: {
     sourceSessionId?: string
     sourceDraftAtStart?: string
 }): void {
-    const liveReplacement = args.mounted ? args.getCurrentText() : ''
-    const sourceSessionId = !args.mounted
-        && args.sourceSessionId !== args.recoverySessionId
+    const target = getLiveComposerDraft(args.recoverySessionId)
+    const liveReplacement = target?.getText() ?? (args.mounted ? args.getCurrentText() : '')
+    const replaceLiveText = target?.setText ?? (args.mounted ? args.onTextChange : undefined)
+    const sourceSessionId = args.sourceSessionId !== args.recoverySessionId
         ? args.sourceSessionId
         : undefined
-    const sourceDraft = sourceSessionId ? getDraft(sourceSessionId) : ''
-    const persistedDraft = sourceDraft && sourceDraft !== args.sourceDraftAtStart
-        ? appendTranscript(getDraft(args.recoverySessionId), sourceDraft)
-        : getDraft(args.recoverySessionId)
-    if (liveReplacement.trim() && liveReplacement !== args.initialText) {
-        const merged = appendTranscript(liveReplacement, args.failedText)
-        saveDraft(args.recoverySessionId, merged)
-        args.onTextChange(merged)
-    } else if (persistedDraft !== '' && persistedDraft !== args.draftAtStart) {
-        saveDraft(args.recoverySessionId, appendTranscript(persistedDraft, args.failedText))
-    } else {
-        saveDraft(args.recoverySessionId, args.failedText)
-        if (args.mounted) args.onTextChange(args.failedText)
+    const persistedDraft = getDraft(args.recoverySessionId)
+    let replacement = liveReplacement.trim() && liveReplacement !== args.initialText
+        ? liveReplacement
+        : persistedDraft !== args.draftAtStart ? persistedDraft : ''
+    if (sourceSessionId) {
+        replacement = target?.getText() ?? persistedDraft
+        const sourceDraft = getLiveComposerDraft(sourceSessionId)?.getText()
+            ?? (args.mounted ? args.getCurrentText() : getDraft(sourceSessionId))
+        if (sourceDraft && sourceDraft !== args.sourceDraftAtStart && sourceDraft !== args.initialText) {
+            replacement = appendTranscript(replacement, sourceDraft)
+        }
     }
+    const merged = appendTranscript(replacement, args.failedText)
+    saveDraft(args.recoverySessionId, merged)
+    replaceLiveText?.(merged)
     if (sourceSessionId) clearDraft(sourceSessionId)
 }
 
@@ -120,6 +141,7 @@ export function useDictation(config: {
         provider: config.provider,
         mode: config.mode,
         onFinalTranscript,
+        onTextChange: config.onTextChange,
         sendMessage: config.sendMessage,
         getCurrentText: config.getCurrentText
     })
@@ -209,25 +231,6 @@ export function useDictation(config: {
                         return cur === '' || cur === baseline
                     }
 
-                    if (!blob.size) {
-                        transcribingRef.current = false
-                        if (pendingSend) {
-                            recoverFailedVoiceSend({
-                                mounted: mountedRef.current,
-                                getCurrentText: config.getCurrentText,
-                                onTextChange: config.onTextChange,
-                                recoverySessionId: pendingSend.sessionId,
-                                initialText: pendingSend.initialText,
-                                failedText: pendingSend.initialText,
-                                draftAtStart: pendingSend.draftAtStart,
-                            })
-                        }
-                        if (mountedRef.current) {
-                            setError('No audio was recorded')
-                            setStatus('error')
-                        }
-                        return
-                    }
                     if (recordingFailed) {
                         transcribingRef.current = false
                         if (pendingSend) {
@@ -243,6 +246,26 @@ export function useDictation(config: {
                         }
                         if (mountedRef.current) {
                             setError('Audio recording failed')
+                            setStatus('error')
+                        }
+                        return
+                    }
+
+                    if (!blob.size) {
+                        transcribingRef.current = false
+                        if (pendingSend) {
+                            recoverFailedVoiceSend({
+                                mounted: mountedRef.current,
+                                getCurrentText: config.getCurrentText,
+                                onTextChange: config.onTextChange,
+                                recoverySessionId: pendingSend.sessionId,
+                                initialText: pendingSend.initialText,
+                                failedText: pendingSend.initialText,
+                                draftAtStart: pendingSend.draftAtStart,
+                            })
+                        }
+                        if (mountedRef.current) {
+                            setError('No audio was recorded')
                             setStatus('error')
                         }
                         return
@@ -263,29 +286,20 @@ export function useDictation(config: {
                                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                                 let targetSessionId = pendingSend.sessionId
                                 let resumed = false
-                                let recoveryDraftAtStart = pendingSend.draftAtStart
                                 try {
                                     if (pendingSend.options.resolveSessionId) {
                                         const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
                                         targetSessionId = resolved.sessionId
                                         resumed = resolved.resumed
-                                        // Snapshot the resumed session's draft BEFORE the send: the
-                                        // catch compares against this to avoid clobbering text the
-                                        // operator typed into the resumed composer while the request
-                                        // was in flight.
-                                        if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
                                     }
                                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
                                     if (resumed) {
-                                        if (!draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
-                                            await transferComposerDraftThenNavigate(
-                                                pendingSend.sessionId,
-                                                targetSessionId,
-                                                () => pendingSend.options.onSessionResolved?.(targetSessionId),
-                                            )
-                                        } else {
-                                            pendingSend.options.onSessionResolved?.(targetSessionId)
-                                        }
+                                        await transferVoiceDraftAfterSend(
+                                            pendingSend.sessionId,
+                                            targetSessionId,
+                                            pendingSend.draftAtStart,
+                                            pendingSend.options.onSessionResolved,
+                                        )
                                     }
                                     if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
                                         clearDraft(pendingSend.sessionId)
@@ -304,7 +318,7 @@ export function useDictation(config: {
                                         recoverySessionId,
                                         initialText: pendingSend.initialText,
                                         failedText: finalMessage,
-                                        draftAtStart: recoveryDraftAtStart,
+                                        draftAtStart: pendingSend.draftAtStart,
                                         sourceSessionId: pendingSend.sessionId,
                                         sourceDraftAtStart: pendingSend.draftAtStart,
                                     })

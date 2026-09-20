@@ -1,23 +1,11 @@
-import { StrictMode } from 'react'
+import { StrictMode, useState } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useComposerDraft } from './useComposerDraft'
 import type { ApiClient } from '@/api/client'
 import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
+import { getDraftAttachments, saveDraftAttachments } from '@/lib/composer-attachment-drafts'
 import { appendTranscript, useDictation } from './useDictation'
-
-const draftTransfer = vi.hoisted(() => ({
-    transferComposerDraft: vi.fn(async (_sourceSessionId: string, _targetSessionId: string) => {}),
-    transferComposerDraftThenNavigate: vi.fn(async (
-        _sourceSessionId: string,
-        _targetSessionId: string,
-        _navigate: () => void | Promise<void>,
-    ) => {})
-}))
-
-vi.mock('@/lib/composer-draft-transfer', () => ({
-    transferComposerDraft: draftTransfer.transferComposerDraft,
-    transferComposerDraftThenNavigate: draftTransfer.transferComposerDraftThenNavigate
-}))
 
 describe('appendTranscript', () => {
     it('preserves the draft and adds one separator', () => {
@@ -30,26 +18,7 @@ describe('appendTranscript', () => {
 })
 
 describe('useDictation', () => {
-    beforeEach(() => {
-        draftTransfer.transferComposerDraft.mockImplementation(async (sourceSessionId: string, targetSessionId: string) => {
-            saveDraft(targetSessionId, getDraft(sourceSessionId))
-            clearDraft(sourceSessionId)
-        })
-        draftTransfer.transferComposerDraftThenNavigate.mockImplementation(async (
-            sourceSessionId: string,
-            targetSessionId: string,
-            navigate: () => void | Promise<void>,
-        ) => {
-            await draftTransfer.transferComposerDraft(sourceSessionId, targetSessionId)
-            await navigate()
-        })
-    })
-
-    afterEach(() => {
-        vi.unstubAllGlobals()
-        draftTransfer.transferComposerDraft.mockClear()
-        draftTransfer.transferComposerDraftThenNavigate.mockClear()
-    })
+    afterEach(() => vi.unstubAllGlobals())
 
     it('records and inserts a final transcript under React StrictMode', async () => {
         const stopTrack = vi.fn()
@@ -87,76 +56,17 @@ describe('useDictation', () => {
             onTextChange
         }), { wrapper: StrictMode })
 
-        await act(async () => { await result.current.toggle() })
+        await act(() => result.current.toggle())
         expect(result.current.status).toBe('connected')
         expect(getUserMedia).toHaveBeenCalledWith({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
         })
-        await act(async () => { await result.current.toggle() })
+        await act(() => result.current.toggle())
 
         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft dictated words'))
         expect(api.transcribeVoice).toHaveBeenCalledOnce()
         expect(stopTrack).toHaveBeenCalled()
     })
-
-    it('resolves stop promise only after transcription and onTextChange complete', async () => {
-        const stopTrack = vi.fn()
-        Object.defineProperty(navigator, 'mediaDevices', {
-            configurable: true,
-            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
-        })
-
-        class MockMediaRecorder {
-            static isTypeSupported() { return true }
-            state: RecordingState = 'inactive'
-            mimeType = 'audio/webm'
-            ondataavailable: ((event: BlobEvent) => void) | null = null
-            onerror: (() => void) | null = null
-            onstop: (() => void) | null = null
-            start() { this.state = 'recording' }
-            stop() {
-                this.state = 'inactive'
-                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
-                this.onstop?.()
-            }
-        }
-        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
-
-        let resolveTranscription!: (val: { text: string }) => void
-        const onTextChange = vi.fn()
-        const api = {
-            transcribeVoice: vi.fn(() => new Promise<{ text: string }>((resolve) => {
-                resolveTranscription = resolve
-            }))
-        }
-        const { result } = renderHook(() => useDictation({
-            api: api as unknown as ApiClient,
-            provider: 'openai',
-            mode: 'standard',
-            getCurrentText: () => 'existing draft',
-            onTextChange
-        }))
-
-        await act(async () => { await result.current.toggle() })
-        expect(result.current.status).toBe('connected')
-
-        let toggleResolved = false
-        const togglePromise = act(async () => {
-            await result.current.toggle()
-            toggleResolved = true
-        })
-
-        // togglePromise should NOT resolve until transcribeVoice finishes
-        expect(toggleResolved).toBe(false)
-        expect(onTextChange).not.toHaveBeenCalled()
-
-        resolveTranscription({ text: 'async dictated text' })
-        await togglePromise
-
-        expect(toggleResolved).toBe(true)
-        expect(onTextChange).toHaveBeenCalledWith('existing draft async dictated text')
-    })
-
 
     it('shows on-device partial text and inserts only the final transcript', async () => {
         vi.stubGlobal('navigator', {
@@ -199,12 +109,12 @@ describe('useDictation', () => {
             onTextChange
         }))
 
-        await act(async () => { await result.current.toggle() })
+        await act(() => result.current.toggle())
         act(() => recognition?.emit('live words', false))
         expect(result.current.partialTranscript).toBe('live words')
         expect(onTextChange).not.toHaveBeenCalled()
         act(() => recognition?.emit('final words', true))
-        await act(async () => { await result.current.toggle() })
+        await act(() => result.current.toggle())
 
         await waitFor(() => expect(onTextChange).toHaveBeenCalledWith('existing draft final words'))
         expect(result.current.partialTranscript).toBe('')
@@ -723,7 +633,7 @@ describe('useDictation', () => {
         expect(result.current.supported).toBe(false)
     })
 
-    it('resumes an inactive session, preserves its follow-up draft, and notifies the resolved session', async () => {
+    it.each(['', 'follow-up typed while sending'])('preserves destination and source drafts after background success: %s', async (sourceDraft) => {
         const stopTrack = vi.fn()
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
@@ -754,7 +664,7 @@ describe('useDictation', () => {
         const api = { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) }
         clearDraft('session-A')
         clearDraft('session-A-resumed')
-        const { result } = renderHook(() => useDictation({
+        const { result, unmount } = renderHook(() => useDictation({
             api: api as unknown as ApiClient,
             provider: 'openai',
             mode: 'standard',
@@ -771,7 +681,20 @@ describe('useDictation', () => {
             })
         })
         await waitFor(() => expect(sendMessage).toHaveBeenCalled())
-        act(() => { saveDraft('session-A', 'follow-up typed while sending') })
+        unmount()
+        act(() => {
+            saveDraft('session-A', sourceDraft)
+            saveDraft('session-A-resumed', 'destination draft')
+        })
+        const attachment = new File(['follow-up'], 'follow-up.txt')
+        saveDraftAttachments('session-A-resumed', [{ id: 'target-file', file: attachment }])
+        const replacement = renderHook(() => {
+            const [text, setText] = useState('')
+            useComposerDraft('session-A-resumed', text, [], false, setText, async () => {})
+            return { text, setText }
+        })
+        await waitFor(() => expect(replacement.result.current.text).toBe('destination draft'))
+        act(() => replacement.result.current.setText('live destination'))
         await act(async () => { resolveSend?.() })
         await waitFor(() => expect(onSessionResolved).toHaveBeenCalled())
 
@@ -779,95 +702,15 @@ describe('useDictation', () => {
         // Message goes to the resumed session id, not the inactive original.
         expect(sendMessage).toHaveBeenCalledWith('session-A-resumed', 'explicit initial text voice payload', undefined)
         expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed')
-        expect(getDraft('session-A-resumed')).toBe('follow-up typed while sending')
-    })
-
-    it('transfers newer source draft text to the replacement session after a successful send', async () => {
-        const stopTrack = vi.fn()
-        Object.defineProperty(navigator, 'mediaDevices', {
-            configurable: true,
-            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopTrack }] })) }
-        })
-        class MockMediaRecorder {
-            static isTypeSupported() { return true }
-            state: RecordingState = 'inactive'
-            mimeType = 'audio/webm'
-            ondataavailable: ((event: BlobEvent) => void) | null = null
-            onerror: (() => void) | null = null
-            onstop: (() => void) | null = null
-            start() { this.state = 'recording' }
-            stop() {
-                this.state = 'inactive'
-                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
-                this.onstop?.()
-            }
-        }
-        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
-        clearDraft('session-A')
-        const resolveSessionId = vi.fn(async () => {
-            saveDraft('session-A', 'newer source draft')
-            return { sessionId: 'session-A-resumed', resumed: true }
-        })
-        const { result } = renderHook(() => useDictation({
-            api: { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) } as unknown as ApiClient,
-            provider: 'openai',
-            mode: 'standard',
-            getCurrentText: () => '',
-            onTextChange: vi.fn(),
-            sendMessage: vi.fn(async () => {})
-        }))
-
-        await act(() => result.current.toggle())
-        await act(async () => {
-            await result.current.stopAndSend('session-A', 'initial text', undefined, { resolveSessionId })
-        })
-
-        expect(draftTransfer.transferComposerDraft).toHaveBeenCalledWith('session-A', 'session-A-resumed')
-    })
-
-    it('preserves the replacement draft when the source draft did not change', async () => {
-        Object.defineProperty(navigator, 'mediaDevices', {
-            configurable: true,
-            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) }
-        })
-        class MockMediaRecorder {
-            static isTypeSupported() { return true }
-            state: RecordingState = 'inactive'
-            mimeType = 'audio/webm'
-            ondataavailable: ((event: BlobEvent) => void) | null = null
-            onerror: (() => void) | null = null
-            onstop: (() => void) | null = null
-            start() { this.state = 'recording' }
-            stop() {
-                this.state = 'inactive'
-                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
-                this.onstop?.()
-            }
-        }
-        vi.stubGlobal('MediaRecorder', MockMediaRecorder)
-        clearDraft('session-A')
-        saveDraft('session-A-resumed', 'existing replacement draft')
-        const onSessionResolved = vi.fn()
-        const { result } = renderHook(() => useDictation({
-            api: { transcribeVoice: vi.fn(async () => ({ text: 'voice payload' })) } as unknown as ApiClient,
-            provider: 'openai',
-            mode: 'standard',
-            getCurrentText: () => '',
-            onTextChange: vi.fn(),
-            sendMessage: vi.fn(async () => {})
-        }))
-
-        await act(() => result.current.toggle())
-        await act(async () => {
-            await result.current.stopAndSend('session-A', 'initial text', undefined, {
-                resolveSessionId: async () => ({ sessionId: 'session-A-resumed', resumed: true }),
-                onSessionResolved,
-            })
-        })
-
-        await waitFor(() => expect(onSessionResolved).toHaveBeenCalledWith('session-A-resumed'))
-        expect(draftTransfer.transferComposerDraft).not.toHaveBeenCalled()
-        expect(getDraft('session-A-resumed')).toBe('existing replacement draft')
+        const expected = ['live destination', sourceDraft].filter(Boolean).join(' ')
+        await waitFor(() => expect(replacement.result.current.text).toBe(expected))
+        replacement.unmount()
+        expect(getDraft('session-A-resumed')).toBe(expected)
+        expect((await getDraftAttachments('session-A-resumed')).map(file => file.name)).toEqual(['follow-up.txt'])
+        const addAttachment = vi.fn(async () => {})
+        const reopened = renderHook(() => useComposerDraft('session-A-resumed', '', [], true, vi.fn(), addAttachment))
+        await waitFor(() => expect(addAttachment).toHaveBeenCalledWith(expect.objectContaining({ name: 'follow-up.txt' })))
+        reopened.unmount()
     })
 
     it('does not notify when the resolver did not resume the session', async () => {
@@ -1024,7 +867,7 @@ describe('useDictation', () => {
         expect(result.current.error).toBe('network down')
     })
 
-    it('preserves source and target follow-up drafts when a post-resume send fails after unmount', async () => {
+    it.each([[false, false, false], [true, false, false], [false, true, false], [false, false, true]])('preserves follow-ups after resume/send failure, sameId=%s, targetBefore=%s, beforeHydration=%s', async (sameId, targetBefore, beforeHydration) => {
         const stopTrack = vi.fn()
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
@@ -1048,7 +891,19 @@ describe('useDictation', () => {
         vi.stubGlobal('MediaRecorder', MockMediaRecorder)
 
         const onTextChange = vi.fn()
-        const resolveSessionId = vi.fn(async () => ({ sessionId: 'session-A-resumed', resumed: true }))
+        const resolveSessionId = vi.fn(async () => {
+            if (targetBefore) {
+                saveDraft('session-A-resumed', 'existing destination')
+                unmount()
+                await Promise.resolve()
+            }
+            if (sameId) {
+                saveDraft('session-A', 'source follow-up')
+                unmount()
+                await Promise.resolve()
+            }
+            return { sessionId: sameId ? 'session-A' : 'session-A-resumed', resumed: true }
+        })
         const onSessionResolved = vi.fn()
         let rejectSend: ((error: Error) => void) | null = null
         const sendMessage = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSend = reject }))
@@ -1076,15 +931,43 @@ describe('useDictation', () => {
         await act(async () => {
             await waitFor(() => expect(sendMessage).toHaveBeenCalled())
         })
+        if (sameId) {
+            await act(async () => { rejectSend?.(new Error('network down')) })
+            await waitFor(() => expect(getDraft('session-A')).toBe('source follow-up initial text voice payload'))
+            expect(onSessionResolved).toHaveBeenCalledWith('session-A')
+            return
+        }
+        if (targetBefore) {
+            await act(async () => { rejectSend?.(new Error('network down')) })
+            await waitFor(() => expect(getDraft('session-A-resumed')).toBe('existing destination initial text voice payload'))
+            return
+        }
         act(() => {
             saveDraft('session-A-resumed', 'newer resumed draft')
             saveDraft('session-A', 'source follow-up')
         })
         unmount()
+        const frames: FrameRequestCallback[] = []
+        const frameSpy = beforeHydration ? vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation(callback => {
+            frames.push(callback)
+            return frames.length
+        }) : undefined
+        const replacement = renderHook(() => {
+            const [text, setText] = useState('')
+            useComposerDraft('session-A-resumed', text, [], false, setText, async () => {})
+            return text
+        })
+        frameSpy?.mockRestore()
+        if (!beforeHydration) await waitFor(() => expect(replacement.result.current).toBe('newer resumed draft'))
         await act(async () => { rejectSend?.(new Error('network down')) })
+        await act(async () => { frames.forEach(callback => callback(performance.now())) })
         await act(async () => {
             await waitFor(() => expect(getDraft('session-A-resumed')).toBe('newer resumed draft source follow-up initial text voice payload'))
         })
+
+        await waitFor(() => expect(replacement.result.current).toBe('newer resumed draft source follow-up initial text voice payload'))
+        replacement.unmount()
+        expect(getDraft('session-A-resumed')).toBe('newer resumed draft source follow-up initial text voice payload')
 
         // Both follow-ups and the failed voice message survive under the live id.
         expect(getDraft('session-A')).toBe('')

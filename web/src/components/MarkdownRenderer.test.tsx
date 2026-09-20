@@ -66,5 +66,4 @@ E = mc^2
         expect(container.querySelector('.katex')).toBeTruthy()
         expect(container.querySelector('.katex-display')).toBeFalsy()
     })
-    })
 })

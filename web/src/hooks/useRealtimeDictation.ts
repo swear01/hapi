@@ -8,9 +8,8 @@ import {
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
-import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import type { ConversationStatus } from '@/realtime/types'
-import { appendTranscript, recoverFailedVoiceSend, type DictationPendingSendOptions } from './useDictation'
+import { appendTranscript, recoverFailedVoiceSend, transferVoiceDraftAfterSend, type DictationPendingSendOptions } from './useDictation'
 import {
     startBrowserLocalTranscription,
     startDeepgramRealtimeTranscription,
@@ -33,6 +32,7 @@ export function useRealtimeDictation(config: {
     provider: TranscriptionProvider | null
     mode: TranscriptionMode
     onFinalTranscript: (text: string) => void
+    onTextChange: (text: string) => void
     sendMessage?: (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => Promise<void>
     getCurrentText?: () => string
 }) {
@@ -49,10 +49,12 @@ export function useRealtimeDictation(config: {
     const sessionRef = useRef<RealtimeTranscriptionSession | null>(null)
     const partialRef = useRef('')
     const onFinalTranscriptRef = useRef(config.onFinalTranscript)
+    const onTextChangeRef = useRef(config.onTextChange)
     const elevenLabsActiveRef = useRef(false)
     const elevenLabsFinalizedRef = useRef(false)
     const resolveElevenLabsCommitRef = useRef<(() => void) | null>(null)
     onFinalTranscriptRef.current = config.onFinalTranscript
+    onTextChangeRef.current = config.onTextChange
 
     const updatePartial = useCallback((text: string) => {
         partialRef.current = text
@@ -71,30 +73,20 @@ export function useRealtimeDictation(config: {
                 const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
                 let targetSessionId = pendingSend.sessionId
                 let resumed = false
-                let recoveryDraftAtStart = pendingSend.draftAtStart
                 try {
                     if (pendingSend.options.resolveSessionId) {
                         const resolved = await pendingSend.options.resolveSessionId(pendingSend.sessionId)
                         targetSessionId = resolved.sessionId
                         resumed = resolved.resumed
-                        // Snapshot the resumed session's draft BEFORE the send: the
-                        // catch compares against this to avoid clobbering text the
-                        // operator typed into the resumed composer while the request
-                        // was in flight.
-                        if (resumed) recoveryDraftAtStart = getDraft(targetSessionId)
                     }
                     await sendMsg(targetSessionId, finalMessage, pendingSend.deliveryMode)
                     if (resumed) {
-                        const followUpDraft = getDraft(pendingSend.sessionId)
-                        if (followUpDraft !== '' && followUpDraft !== pendingSend.draftAtStart) {
-                            await transferComposerDraftThenNavigate(
-                                pendingSend.sessionId,
-                                targetSessionId,
-                                () => pendingSend.options.onSessionResolved?.(targetSessionId),
-                            )
-                        } else {
-                            pendingSend.options.onSessionResolved?.(targetSessionId)
-                        }
+                        await transferVoiceDraftAfterSend(
+                            pendingSend.sessionId,
+                            targetSessionId,
+                            pendingSend.draftAtStart,
+                            pendingSend.options.onSessionResolved,
+                        )
                     }
                     const cur = getDraft(pendingSend.sessionId)
                     if (cur === '' || cur === pendingSend.draftAtStart) {
@@ -110,11 +102,11 @@ export function useRealtimeDictation(config: {
                     recoverFailedVoiceSend({
                         mounted: mountedRef.current,
                         getCurrentText: config.getCurrentText ?? (() => ''),
-                        onTextChange: onFinalTranscriptRef.current,
+                        onTextChange: onTextChangeRef.current,
                         recoverySessionId,
                         initialText: pendingSend.initialText,
                         failedText: finalMessage,
-                        draftAtStart: recoveryDraftAtStart,
+                        draftAtStart: pendingSend.draftAtStart,
                         sourceSessionId: pendingSend.sessionId,
                         sourceDraftAtStart: pendingSend.draftAtStart,
                     })
@@ -123,7 +115,7 @@ export function useRealtimeDictation(config: {
                     }
                     if (mountedRef.current) {
                         if (!config.getCurrentText?.().trim()) {
-                            onFinalTranscriptRef.current(finalMessage)
+                            onTextChangeRef.current(finalMessage)
                         }
                         setError(sendError instanceof Error ? sendError.message : 'Failed to send message')
                         setStatus('error')
@@ -148,7 +140,7 @@ export function useRealtimeDictation(config: {
             recoverFailedVoiceSend({
                 mounted: mountedRef.current,
                 getCurrentText: config.getCurrentText ?? (() => ''),
-                onTextChange: onFinalTranscriptRef.current,
+                onTextChange: onTextChangeRef.current,
                 recoverySessionId: pendingSend.sessionId,
                 initialText: pendingSend.initialText,
                 failedText: finalMessage,

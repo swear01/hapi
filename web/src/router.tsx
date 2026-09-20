@@ -10,8 +10,10 @@ import {
     useMatchRoute,
     useNavigate,
     useParams,
+    useRouter,
     useSearch,
 } from '@tanstack/react-router'
+import { isOnSessionPage } from '@/lib/dictationSend'
 import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
 import {
     getSessionListSelectionNavigation,
@@ -579,6 +581,12 @@ function SessionPage() {
         }
     }, [api, navigate, queryClient, session])
 
+    const router = useRouter()
+    const handleVoiceSessionResolved = useCallback((resolvedSessionId: string) => {
+        if (!isOnSessionPage(router.state.location.pathname, sessionId)) return
+        handleSessionResolved(resolvedSessionId)
+    }, [handleSessionResolved, router, sessionId])
+
     const {
         sendMessage,
         retryMessage,
@@ -811,6 +819,8 @@ function SessionPage() {
             onSend={sendMessage}
             resolveSessionIdForUpload={async (id) => (await resolveSessionId(id)).sessionId}
             onUploadSessionResolved={handleSessionResolved}
+            resolveSessionIdForVoice={resolveSessionId}
+            onVoiceSessionResolved={handleVoiceSessionResolved}
             onViewModeChange={setViewMode}
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}
