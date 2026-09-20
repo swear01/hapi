@@ -1,0 +1,165 @@
+upstream_ref	author	head_sha	decision	status	maintainer_signal	bot_verdict	bot_sha	scope	behavior	reason
+pr-1886	ZJUFangzh	736fcc7831327e882ec8722e9280a2fbbe2b1d3c	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1885	Metaphorme	d5b78a3e33fbb217cdad46366a5eee3217796863	defer	merge-unstable	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1881	miuiadmin	257cee4310b22867aa39e34f1b209bb7f66758e9	defer	checks-failed	review	review	-	review	review	deferred this round; awaiting official review
+pr-1880	ncchinh	f70e1582260c7a46938145b365020be59d400c48	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1879	Metaphorme	4ae75848d7fcb31417f6747dffb4d9f367f05df3	defer	checks-failed	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1878	miuiadmin	c3d2198632177b4df577dee6521f740537fbcc07	defer	checks-failed	review	review	-	review	review	deferred this round; awaiting official review
+pr-1877	miuiadmin	3351b6d213bfe033a271ae32a2cfa382b922add2	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1876	creeep123	a16cd59c60035241150e43548d6f447190c16b3a	defer	merge-unstable	review	review	-	review	review	deferred this round; awaiting official review
+pr-1875	creeep123	1ea30933c68456c3c62ac26eec0af0119248f4a3	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1873	MiroVanDyro	350713a0c0ce80833d9b8a6f2ce688cfedb795e6	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1871	miuiadmin	d2a0e7c1b654aa09a469f7460a40a8ae88b7283c	defer	merge-unstable	review	review	-	review	review	deferred this round; awaiting official review
+pr-1869	sharadvc	fe68899a6a78accf76706395713c4c787ec2b2e9	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1867	heavygee	50cfa158ac51ff3ca64b63096b977a01cce8c48a	defer	merge-unstable	review	review	-	review	review	deferred this round; awaiting official review
+pr-1852	techotaku39	2ce3e22c5033cbdf837c6bea302b8e8001d7a501	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1849	techotaku39	0ced990364d32ec522a86211e6828e8df82426ee	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1844	miuiadmin	bb24e6b6254b1f210703a7e024bd5a6e0f44e31c	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1838	luodeb	f33c573efb81495b3c27b09a33678bdb28d0fd4e	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1836	swear01	3fe0ec5072c41f0445e13f63f822c278d0095054	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1831	luodeb	0ab08bfca124dc75e2c6b3671f2feb2cd0759565	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1826	luodeb	2317b3328b5f65ce374349e3fbf4250048d73d9e	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1825	heavygee	1873d55a0ca3050362fd00c558180065ecbb3d42	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1822	swear01	5b78b7313f110bdbb54f47a5a6c0045d461ad0ee	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1816	HongChenGG	9f8a4afb86600d91f6b931a2f3837dbff765c021	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1801	techotaku39	dfd8df6d298272d8556b30d06364471551aca48a	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1798	techotaku39	5e6a9057f25a3cf2b66ecd1fe6f43617ae785f61	defer	merge-unstable	review	review	-	review	review	deferred this round; awaiting official review
+pr-1797	techotaku39	14df9508dd684702ec5368161e2943b72dab2b1e	carry	ready	clear	clean	14df9508dd684702ec5368161e2943b72dab2b1e	proportional	accepted-change	maintained carry; ready and clean
+pr-1793	heavygee	a2f8f3a8298ea4a82c08d721696027c9a6a0e415	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1791	techotaku39	3e0cc2660a1a251852ca5e363457d26883dae0fe	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1788	techotaku39	b76e0dc1d0a90d5ff76e40b390ccdfc988ea4518	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1787	techotaku39	7771ed305317ee964ae21a8fa468db24a060e239	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1778	techotaku39	d4f2d098aa5e23e24697dfb05a80bd0b023d294d	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1772	techotaku39	b7c5961d5786d576076124f3efd842e3e8c0463e	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1771	swear01	95558c3a3b61486d48217b5fc8caa627cff3de68	carry	ready	clear	clean	95558c3a3b61486d48217b5fc8caa627cff3de68	exception	accepted-change	personal author auto-carry; maintained fork behavior
+pr-1762	heavygee	30b531a4f494b1df058f14e75e3d04e2318e471c	defer	draft	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1758	techotaku39	b9c69bd2194cfc24211b48ef6afac8b477fe23f5	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1753	heavygee	d5fa8963fa91b825a04af6532a9d870dbd466088	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1747	wu736139669	a8e8d6e91b8c6f8a8b3495fb6ba214cdc8594eb6	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1738	heavygee	5a695fbd1bd367fe15835f9f9742cc37fe9fc160	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1733	heavygee	ef4636a9fa07932dabaeec76a6e8263d21bfdd78	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1729	techotaku39	f04288cacaae35ee2c50b381bc4db5604eb03f80	carry	ready	clear	clean	f04288cacaae35ee2c50b381bc4db5604eb03f80	proportional	accepted-change	maintained carry; ready and clean
+pr-1728	techotaku39	7a93bb406734417589da0be5d344161cdd0723b9	carry	ready	clear	clean	7a93bb406734417589da0be5d344161cdd0723b9	proportional	accepted-change	maintained carry; ready and clean
+pr-1727	techotaku39	51084ca52b89d0627c7606200ad39ae5121d447a	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1726	techotaku39	32d49896062b1a463815fee1614feb503b8d9cee	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1725	heavygee	fa9a3dbaa757574260607dde3e09cfd78c833f83	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1722	techotaku39	694c7e0cefaad5baeeed3d01ba08b072ab186f2a	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1721	Zwanan-github	02840df43b4f07bbb8ce60ea55264199287dd295	carry	ready	clear	clean	02840df43b4f07bbb8ce60ea55264199287dd295	proportional	accepted-change	maintained carry; ready and clean
+pr-1720	techotaku39	26d533fc5e0fb8c4afd62df76bd8652ce7be2ac8	carry	ready	clear	clean	26d533fc5e0fb8c4afd62df76bd8652ce7be2ac8	proportional	accepted-change	maintained carry; ready and clean
+pr-1718	heavygee	bbc8d25f05b4e082330ec772ae598748da277293	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1715	HongChenGG	8eea473175ea5b94f2d29fd19bffbfaeb93e9dbd	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1714	new-TonyWang	a227310e3e7438b5940089748367339d060536b1	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1713	techotaku39	f95fe0ad169cfd644c16448785bd3cde7ff46691	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1712	techotaku39	c3f917116144e753fa17cf239d900144fbca735c	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1711	techotaku39	9d197485474de77fddd8297e5e00a8a8c84110a5	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1708	KevinFun	73630bbd3f3058b3eca9f77df0fe392ca1c4940e	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1706	heavygee	26c1615ae754ddb16b43fdbae4850f90ea7d6d85	defer	merge-unstable	review	review	-	review	review	deferred this round; awaiting official review
+pr-1704	techotaku39	19c888c0d0664d1111937471c5a475954b57941f	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1702	techotaku39	d4918bbb60920f6c60fc47a26fd9cf6793f80d6b	carry	ready	clear	clean	d4918bbb60920f6c60fc47a26fd9cf6793f80d6b	proportional	accepted-change	maintained carry; ready and clean
+pr-1695	techotaku39	26699be34cd90d44cbe9a645a8bdb03bdd7fbfd9	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1693	techotaku39	00e4e993c72e527e9e64ec4e55799e2efe5563ae	defer	merge-dirty	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1692	techotaku39	9e4c6e1e07f806af52a3c24ed3543251d0670a4a	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1691	junmo-kim	8486600423596f0c7b9c84d8fde18cb571ba6053	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1684	techotaku39	b489742200f071811e9c34fcaf5ac68555d641f6	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1683	renqiancheng	08fa9726e8d0dce5a5a263987fb54cb2ce649d21	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1680	LinespottingPrivate	62a2218d4458559374e52302a2c6f0f2f76e578e	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1679	junmo-kim	4db160525bb65016758f333a6969d29888a5cc47	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1678	junmo-kim	c4c28624db1da06f27bee573d83201692ab7c778	carry	ready	clear	clean	c4c28624db1da06f27bee573d83201692ab7c778	proportional	accepted-change	maintained carry; ready and clean
+pr-1677	junmo-kim	a832355bc2ea1aed9a703d38838282e7f40b29ea	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1676	junmo-kim	aacc2580dea8e29397df88026fcfeac19545ae44	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1675	rzsgsfm	a816ff9bc70cb0294e8c6fbde5a84bba19ba42c2	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1673	junmo-kim	f6c846ac2a002b236c94515902d04a5e881eb251	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1672	junmo-kim	8d6e67d2061e402728cc609ade172ff3d6af2985	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1668	junmo-kim	483b4467f597e5c1be1e30c3ea78356dc927b834	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1666	techotaku39	e32370634d51ec93a8caf5d5ca278f0bba98eb73	carry	ready	clear	clean	e32370634d51ec93a8caf5d5ca278f0bba98eb73	proportional	accepted-change	maintained carry; ready and clean
+pr-1665	techotaku39	7dd55a12888166b2197ddd349a620039768250db	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1664	yellowdog01	dac80dd1d94060889d786df9b9416216b07b0547	carry	ready	clear	clean	dac80dd1d94060889d786df9b9416216b07b0547	proportional	accepted-change	maintained carry; ready and clean
+pr-1662	swear01	192a41353545b9ad70ce5150311d363bd6f74ffb	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1660	techotaku39	bf182f8ced3ddeb4a474c9a86b2396dd0c472e56	carry	ready	clear	clean	bf182f8ced3ddeb4a474c9a86b2396dd0c472e56	proportional	accepted-change	maintained carry; ready and clean
+pr-1659	techotaku39	6ac0a32204d47b14fe3815835de909c64f2d61c3	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1658	techotaku39	6a86371be75cb5c4cc6989130a59802826d6bcce	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1657	techotaku39	410c2acd1a8c12a2b76712072f3034e7d912d84b	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1656	techotaku39	fb962536e280b94f643aeb66f9b0de8cf873eb72	carry	ready	clear	clean	fb962536e280b94f643aeb66f9b0de8cf873eb72	proportional	accepted-change	maintained carry; ready and clean
+pr-1644	junmo-kim	d608fb3d9d916ee943af2b7805c8ae94ee131ff3	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1642	junmo-kim	ccc098bf7bb5df49acc5e432a93fe132c4a06dcb	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1640	wu736139669	b86a3b6c16c90ab80636a99f07ae9ca58bc129a4	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1637	techotaku39	55ce402c44501893f8b676540bedd596180fae37	carry	ready	clear	clean	55ce402c44501893f8b676540bedd596180fae37	proportional	accepted-change	maintained carry; ready and clean
+pr-1636	techotaku39	60db9468d95b5197cbc49984f022256057f25dbe	carry	ready	clear	clean	60db9468d95b5197cbc49984f022256057f25dbe	proportional	accepted-change	maintained carry; ready and clean
+pr-1635	swear01	0ccf36f6df615e26f8a5cab1d5ca9861e0ba6b26	carry	ready	clear	clean	0ccf36f6df615e26f8a5cab1d5ca9861e0ba6b26	exception	accepted-change	personal author auto-carry; maintained fork behavior
+pr-1629	Overbaker	a084ba83b531ec4436786d6f703e9ca7ff9b0fd5	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1625	techotaku39	9aa1668bc6f76e6d205b1f26e677902c2bec5f59	carry	ready	clear	clean	9aa1668bc6f76e6d205b1f26e677902c2bec5f59	proportional	accepted-change	maintained carry; ready and clean
+pr-1621	techotaku39	96fd48481c8a2da0a751ac758d5b4cb6bb0a531f	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1620	heavygee	72bd413a1c90a67f55e568c5b1097c3f8c46a8bd	carry	ready	clear	clean	72bd413a1c90a67f55e568c5b1097c3f8c46a8bd	proportional	accepted-change	maintained carry; ready and clean
+pr-1618	heavygee	5fa5696566c1831a6803d70b3d20ae0eb5ba8dcb	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1617	techotaku39	ea5ec5c3c1dc240dee87ab54282e4a47622ee3f0	carry	ready	clear	clean	ea5ec5c3c1dc240dee87ab54282e4a47622ee3f0	proportional	accepted-change	maintained carry; ready and clean
+pr-1616	techotaku39	455917d62f10cbc2034dc08de5b51ee957ee18ee	carry	ready	clear	clean	455917d62f10cbc2034dc08de5b51ee957ee18ee	proportional	accepted-change	maintained carry; ready and clean
+pr-1615	techotaku39	131aafd2e94680cfa1ec2baefe78281d4ccab0b2	carry	ready	clear	clean	131aafd2e94680cfa1ec2baefe78281d4ccab0b2	proportional	accepted-change	maintained carry; ready and clean
+pr-1614	MAOJIASONG	64770fb335544e95bbbc549c55e3d587b428d8d0	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1613	heavygee	82caab248e7a20255eea0059432edd9f2a9af88f	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1611	techotaku39	dca25bdf3e28a229a6e150cc2917c75b68819487	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1607	swear01	311e55bb9d54d49ce5ba39ac20852bb673de37b5	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1605	junmo-kim	1b3093ee0963044f1b5112c3e4e3200f263b2312	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1604	techotaku39	c2090400400d7f720e0a26efdee1c33f00b3f58b	carry	ready	clear	clean	c2090400400d7f720e0a26efdee1c33f00b3f58b	proportional	accepted-change	maintained carry; ready and clean
+pr-1603	techotaku39	2fbdb4f1f4c5e89da4890e1244e9be93dd70bb71	carry	ready	clear	clean	2fbdb4f1f4c5e89da4890e1244e9be93dd70bb71	proportional	accepted-change	maintained carry; ready and clean
+pr-1599	techotaku39	6da3c37d2944f862f06b12273e274e765d8e12c9	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1598	techotaku39	82049af1a372e01ecc043b7a16bdf79fcffa0aa6	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1597	swear01	17972547187d34df74038a531ce9758b06e78d6f	drop	merge-unknown	review	review	-	review-huge	review	explicit historical drop
+pr-1592	techotaku39	67112915c48b949df6f2311d4de7cf040c1019aa	carry	ready	clear	clean	67112915c48b949df6f2311d4de7cf040c1019aa	proportional	accepted-change	maintained carry; ready and clean
+pr-1581	techotaku39	213244917fd8cff0d61e6818f322766f4c3e592f	defer	ready	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1567	3em0	aa7fdf0f5bfbacf811cf745409ae7aacb9c84bc3	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1564	heavygee	e8cbc5a005057ac0a5b2224a93d9e787509030c4	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1543	techotaku39	30468dbaf321499e44dcfa93bc3a7e68ec7e67fe	carry	ready	clear	clean	30468dbaf321499e44dcfa93bc3a7e68ec7e67fe	proportional	accepted-change	maintained carry; ready and clean
+pr-1542	swear01	f8953d241b82621f7f455fe05ba9f8a3929047bd	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1537	zj1123581321	693aed6e40beed850caeb65ac32fb4e6d68442d5	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1528	7bata	3517c527077d71033ec3782185ca4cf6d280d0f4	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1527	7bata	597c28d6bcb5dd2fc8938197d60e5dea9d327821	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1525	7bata	85e5ec888140097893bdf30dfe1b101145d2c54e	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1523	techotaku39	772ab7e04d62a51642ec20f41dace93c62550a2c	defer	merge-unstable	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1517	TimChesko	d9767f92f0beb3a245ed2329030126441676e8e0	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1512	techotaku39	4e6237f76c752545313fc68c49c074f9bb976ef3	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1511	heavygee	1fb2a7d17d96c1b76e1947d80a3d0c41840deef3	defer	merge-dirty	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1468	swear01	8f2d931d9ceb7573007df954276747338cd2a585	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1447	wu736139669	19daba6f54b3bc99d4645dd3be25cdc6d2be7b4b	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1443	wu736139669	1888de0e1e3fd9ae84001d49e56e8d607b4b67f8	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1436	swear01	66772e61dbe0dda0a6bd9c853ff190eedbbd0698	carry	ready	clear	clean	66772e61dbe0dda0a6bd9c853ff190eedbbd0698	exception	preserve	personal pr auto-carry; restores voice direct-send and cross-session delivery
+pr-1429	wu736139669	5d3f41bb10bb22e7186d1abc0fc45e5659be479d	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1424	heavygee	53863571b4704e1f39478d48c75cc0f976a22385	drop	ready	review	review	-	review-huge	review	explicit historical drop
+pr-1422	techotaku39	0d027bfbb3b1356d03e7856c78619c9e8627674e	defer	ready	review	review	-	review	review	deferred this round; awaiting official review
+pr-1419	swear01	cb64200637941ed429855a82ffcf2db977610416	carry	ready	clear	clean	cb64200637941ed429855a82ffcf2db977610416	exception	accepted-change	personal author auto-carry; maintained fork behavior
+pr-1418	swear01	14104017aa3390de0fa7ac61cc49e68923ebd3d7	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1414	techotaku39	ef5579e5fa2dedf0ceae7363b6a90b75f69cb703	carry	ready	clear	clean	ef5579e5fa2dedf0ceae7363b6a90b75f69cb703	proportional	accepted-change	maintained carry; ready and clean
+pr-1361	Himehane	e1e7e8c3fbcfcdaaff872398c1d08758d3dcef0f	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1360	wu736139669	b9c9975ae1afa1455385fdd69509c3f8c169c728	defer	merge-dirty	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1351	yin1245	feb70174798df546512ebd9096768c94ddead945	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1309	techotaku39	01a98c4efd4ddcfb0b8278c936ddd346f7e30936	defer	draft	review	review	-	review	review	deferred this round; awaiting official review
+pr-1257	hqhq1025	6957978424f74209dca9295699137179282e80ad	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1242	hqhq1025	2c7a46f98f49a23e638f5188a6960ddc937cade3	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1212	hqhq1025	93d8678da8535c3a812e166f43961c1c4ff50f92	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-1193	mimoren	999f1d1170d382cc4fd5e5fdf6e0a6ab4a0bf65f	defer	draft	review	review	-	review	review	deferred this round; awaiting official review
+pr-1189	tiann	5f949783ad2123d865d758a921681245683f899d	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1188	tiann	1f23f857e4173a25f969879ef139487ec1c9955e	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1163	heavygee	0951ead9fd1adcb6ef450ee31026c44fcda40613	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1158	techotaku39	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	carry	ready	clear	clean	b00e39794e707d3bdbd6ab1029b5a6576b3cf985	proportional	accepted-change	maintained carry; ready and clean
+pr-1126	GoldenZqqq	31ce48080df1a62150e9fe7e0a86fde511ef3cc2	defer	merge-dirty	review	review	-	review	review	deferred this round; awaiting official review
+pr-1099	NPUlrk	91116cd9089107625d95ae2bc99fa615ef87d6a6	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1093	techotaku39	14888e040dc6027a0e1b6132185379998d250bfb	drop	ready	review	review	-	review-large	review	explicit historical drop
+pr-1092	zulinliu	4427e6e08b2fed4429c793af2841f7f47fb70bac	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-1091	zulinliu	0cf0d70310e9c58c5a41509793260a003822a9b4	drop	merge-unknown	review	review	-	review-huge	review	explicit historical drop
+pr-1059	Arnie97	37deeeba5263ceb402429c069e911eac96eb406e	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-1054	DullJZ	9cbe9b1fa24edec152bb610e0b1049930c723432	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-987	heavygee	797896437f2be20a724f97d46ae2dc22a15ac2e6	defer	merge-unstable	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-975	KorenKrita	344c6009b53e20829978e44367fa50b5870986fe	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-945	heavygee	80a1705bb869f5e92c2e1186fdffafc82cb1026c	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-942	dzshzx	f1f93474f042381818f0d605b1d64b3fb42cb02b	defer	merge-unknown	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-847	heavygee	0739b887da32e1ebae32a512303023728b7ab5ce	defer	ready	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-663	SpartaGeorge	5dbf6d406a6bb8507dc07598ba2aecc8cd98ee0f	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-658	yrom	f7d8ca3ea0f8ae47245443ce2c0cfec612263e62	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-553	wzxjohn	6e3da463f4fb213afc6a95d3005232e647f39ec6	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-536	dsus4wang	1de72788e93c6aae6511a5af8bb05bda631093c0	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-535	dsus4wang	abcf3a4bff8b685a70ceeb77008f4f217b43b67c	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-518	duxiaoxiong	72cceea333addd3a8b39948b722750056433d39b	defer	draft	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-490	tehao999	745acf545461ad7f8c615ebd178f3a15df869fb2	defer	draft	review	review	-	review-huge	review	deferred this round; awaiting official review
+pr-484	YiwenZhu77	641a01266de65d4944ec5c609a40c717cd41662a	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-394	koenzhao	fb5f201ec230e0b7abdc15dcf26483d67a56a1be	defer	merge-unknown	review	review	-	review	review	deferred this round; awaiting official review
+pr-325	MrHeB	c12df55ff52d2544ff40f313b702b24dc0732cf8	defer	merge-unknown	review	review	-	review-large	review	deferred this round; awaiting official review
+pr-312	just4zeroq	572d489bbd359fe1ca9b4eb96a852804e42e69ac	defer	merge-dirty	review	review	-	review-large	review	deferred this round; awaiting official review
