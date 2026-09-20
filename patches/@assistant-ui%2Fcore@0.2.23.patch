@@ -1,0 +1,79 @@
+diff --git a/dist/runtime/api/thread-list-runtime.js b/dist/runtime/api/thread-list-runtime.js
+index 6ef90d73e4df62a7047a214d223dbdf5f1fc424a..0286a40f8becdac3a7cbfb2653e0c15939db7fe8 100644
+--- a/dist/runtime/api/thread-list-runtime.js
++++ b/dist/runtime/api/thread-list-runtime.js
+@@ -42,7 +42,7 @@ var ThreadListRuntimeImpl = class {
+ 			getState: () => getThreadListState(_core),
+ 			subscribe: (callback) => _core.subscribe(callback)
+ 		});
+-		this._getState = stateBinding.getState.bind(stateBinding);
++		this._stateBinding = stateBinding; this._getState = stateBinding.getState.bind(stateBinding);
+ 		this._mainThreadListItemRuntime = new ThreadListItemRuntimeImpl(new ShallowMemoizeSubject({
+ 			path: {
+ 				ref: `threadItems[main]`,
+@@ -95,7 +95,7 @@ var ThreadListRuntimeImpl = class {
+ 		return this._getState();
+ 	}
+ 	subscribe(callback) {
+-		return this._core.subscribe(callback);
++		return this._stateBinding.subscribe(callback);
+ 	}
+ 	_mainThreadListItemRuntime;
+ 	main;
+diff --git a/dist/subscribable/subscribable.js b/dist/subscribable/subscribable.js
+index 906ccca137be9a6b1f50cef78e88db3a42df4113..f502b4ec785334861801f933fbf6f55e6a759380 100644
+--- a/dist/subscribable/subscribable.js
++++ b/dist/subscribable/subscribable.js
+@@ -118,7 +118,7 @@ var LazyMemoizeSubject = class extends BaseSubject {
+ 	getState = () => {
+ 		if (!this.isConnected || this._previousStateDirty) {
+ 			const newState = this.binding.getState();
+-			if (newState !== SKIP_UPDATE) this._previousState = newState;
++			if (newState !== SKIP_UPDATE) { if (this._previousState === void 0 || !shallowEqual(this._previousState, newState)) { this._previousState = newState; } }
+ 			this._previousStateDirty = false;
+ 		}
+ 		if (this._previousState === void 0) throw new Error("Entry not available in the store");
+diff --git a/src/runtime/api/thread-list-runtime.ts b/src/runtime/api/thread-list-runtime.ts
+index 5a37e419a00b9c9efaf586fb02b01545141ee5ca..f865ece8b2b90a24ed4535580c776ea56c40aa02 100644
+--- a/src/runtime/api/thread-list-runtime.ts
++++ b/src/runtime/api/thread-list-runtime.ts
+@@ -97,6 +97,7 @@ const getThreadListItemState = (
+ export type ThreadListRuntimeCoreBinding = ThreadListRuntimeCore;
+ 
+ export class ThreadListRuntimeImpl implements ThreadListRuntime {
++  private _stateBinding: any;
+   private _getState;
+   private _core: ThreadListRuntimeCoreBinding;
+   private _runtimeFactory: new (
+@@ -119,6 +120,7 @@ export class ThreadListRuntimeImpl implements ThreadListRuntime {
+       subscribe: (callback) => _core.subscribe(callback),
+     });
+ 
++    this._stateBinding = stateBinding;
+     this._getState = stateBinding.getState.bind(stateBinding);
+ 
+     this._mainThreadListItemRuntime = new ThreadListItemRuntimeImpl(
+@@ -192,7 +194,7 @@ export class ThreadListRuntimeImpl implements ThreadListRuntime {
+   }
+ 
+   public subscribe(callback: () => void): Unsubscribe {
+-    return this._core.subscribe(callback);
++    return this._stateBinding.subscribe(callback);
+   }
+ 
+   private _mainThreadListItemRuntime;
+diff --git a/src/subscribable/subscribable.ts b/src/subscribable/subscribable.ts
+index bff792252c0f87e9edbd972303effadbae93b116..ca22380354ecb9d57c040ea97ae0c5ef59c34c5f 100644
+--- a/src/subscribable/subscribable.ts
++++ b/src/subscribable/subscribable.ts
+@@ -198,7 +198,9 @@ export class LazyMemoizeSubject<TState extends object, TPath>
+     if (!this.isConnected || this._previousStateDirty) {
+       const newState = this.binding.getState();
+       if (newState !== SKIP_UPDATE) {
+-        this._previousState = newState;
++        if (this._previousState === undefined || !shallowEqual(this._previousState, newState)) {
++          this._previousState = newState;
++        }
+       }
+       this._previousStateDirty = false;
+     }

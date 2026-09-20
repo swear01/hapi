@@ -57,5 +57,8 @@
         "playwright": "1.61.0",
         "react-devtools-core": "^7.0.1",
         "vite-plugin-pwa": "^1.2.0"
+    },
+    "patchedDependencies": {
+        "@assistant-ui/core@0.2.23": "patches/@assistant-ui%2Fcore@0.2.23.patch"
     }
 }
