@@ -49,9 +49,14 @@ Record every open pull request. A normal carry requires:
 - `scope=proportional`, or `scope=exception` with evidence
 - `behavior=preserve` or `behavior=accepted-change`
 
-Personal pull requests authored by the owner of `origin` start as carries. The
-release report must still list every quality-gate exception. Officially merged
-behavior is `upstreamed` context and must not be replayed.
+Personal pull requests authored by the owner of `origin` start as carries only
+while they remain open upstream. The release report must still list every
+quality-gate exception. Closed, unmerged upstream PRs are excluded regardless
+of author; officially merged behavior comes from the upstream base and must
+not be replayed. Before the next release, remove the Codex Reopen path check
+from closed PR #847. Review the previous release's carried PRs against their
+current upstream state, then inspect the final source tree: a regenerated
+whole-source overlay can retain closed PR code without a `pr-<number>` row.
 
 ## Manifest
 
