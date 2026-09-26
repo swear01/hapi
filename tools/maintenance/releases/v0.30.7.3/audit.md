@@ -246,3 +246,18 @@ features before publication, or record explicit acceptance of their removal.
 - `bun run gen:fixtures`: no tracked drift.
 - Mac standalone build: pass; after local ad-hoc signing, `hapi --version` reports `0.30.7.3`.
 - Android SDK is absent locally; Android CI has not run on this candidate.
+
+## Replay and provenance
+
+The manifest contains 36 separate patches for the current candidate, including
+24 PR patches. It maps three selected fork changes to prior source commits and
+explicitly drops the other 20 commits unique to the old origin history and
+closed PR #847. The
+large historical rebuild commit `d39f10553` is represented only by the
+separately reviewed desktop distribution change; its other source is not copied.
+
+`sync-from-upstream.sh --skip-tests` verified all 173 open PR audit rows against
+live heads and replayed the patches in an isolated worktree. The source tree
+matched `b9ad5fd41877a3550d337a0fe7a90ecd7e801f9b`; the rehearsal
+worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
+and #1771 (merge dirty). The local checks above ran separately on the candidate.
