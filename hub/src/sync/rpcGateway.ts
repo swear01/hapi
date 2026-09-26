@@ -187,7 +187,7 @@ export class RpcGateway {
     }
 
     async killSession(sessionId: string): Promise<{ pid?: number; processStartMarker?: string }> {
-        const result = await this.sessionRpc(sessionId, RPC_METHODS.KillSession, {})
+        const result = await this.sessionRpc(sessionId, RPC_METHODS.KillSession, { archive: true })
         if (!result || typeof result !== 'object') return {}
         const pid = (result as { pid?: unknown }).pid
         const processStartMarker = (result as { processStartMarker?: unknown }).processStartMarker
@@ -195,6 +195,10 @@ export class RpcGateway {
             ...(typeof pid === 'number' ? { pid } : {}),
             ...(typeof processStartMarker === 'string' ? { processStartMarker } : {}),
         }
+    }
+
+    async stopSessionProcess(sessionId: string): Promise<void> {
+        await this.sessionRpc(sessionId, RPC_METHODS.KillSession, { archive: false })
     }
 
     async stopRunnerSession(
