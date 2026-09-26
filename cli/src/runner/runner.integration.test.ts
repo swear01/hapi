@@ -276,7 +276,7 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     expect(response.status).toBe(502);
     expect(result).toMatchObject({ type: 'error', code: 'outside_workspace_roots', cleanedUp: true });
     expect(result.childSessionId).toBeTruthy();
-    expect(await stopRunnerSession(result.childSessionId!)).toBe('already_gone');
+    expect(await stopRunnerSession(result.childSessionId!)).toBe('unknown');
     expect(await listRunnerSessions()).toEqual([]);
     expect(existsSync(directory)).toBe(false);
     const archived = await fetch(`${configuration.apiUrl}/api/sessions/${result.childSessionId}`, { headers });

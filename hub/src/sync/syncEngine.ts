@@ -2523,7 +2523,8 @@ export class SyncEngine {
         const fail = async (
             code: string,
             message: string,
-            orphanSessionId?: string
+            orphanSessionId?: string,
+            cleanedUp = false
         ): Promise<SpawnSessionWithRemitResult> => {
             const cleanupOperation: SpawnRemitOperation = {
                 ...operation,
@@ -2531,7 +2532,7 @@ export class SyncEngine {
                 updatedAt: Date.now(),
                 code,
                 error: message.slice(0, 500),
-                cleanedUp: false,
+                cleanedUp,
                 orphanSessionId
             }
             if (!this.persistSpawnRemitOperation(sessionId, namespace, operation, cleanupOperation)) {
@@ -2575,7 +2576,17 @@ export class SyncEngine {
                     error instanceof Error ? error.message : 'Runner failed to create a session'
                 )
             }
-            if (result.type === 'error') return await fail(result.code ?? 'spawn_failed', result.message)
+            if (result.type === 'error') {
+                if (result.childStarted === false) {
+                    try {
+                        this.sessionCache.markSessionArchivedFromHub(sessionId, 'Spawn rejected before execution')
+                        return await fail(result.code ?? 'spawn_failed', result.message, undefined, true)
+                    } catch {
+                        // Unknown cleanup state falls through to the runner stop check.
+                    }
+                }
+                return await fail(result.code ?? 'spawn_failed', result.message)
+            }
             if (result.sessionId !== sessionId) {
                 return await fail(
                     'spawn_not_fresh',
