@@ -261,3 +261,7 @@ live heads and replayed the patches in an isolated worktree. The source tree
 matched `b9ad5fd41877a3550d337a0fe7a90ecd7e801f9b`; the rehearsal
 worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
 and #1771 (merge dirty). The local checks above ran separately on the candidate.
+
+Pre-push review holds publication because the missing legacy feature groups
+would be a user-visible regression from v0.30.7.2. No branch push, tag, GitHub
+Release, or fleet update has been performed.
