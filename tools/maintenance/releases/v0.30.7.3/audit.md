@@ -251,7 +251,7 @@ security, data preservation, or release verification gates.
 
 ## Replay and provenance
 
-The manifest contains 36 separate patches for the current candidate, including
+The manifest contains 37 separate patches for the current candidate, including
 24 PR patches. It maps three selected fork changes to prior source commits and
 explicitly drops the other 20 commits unique to the old origin history and
 closed PR #847. The
@@ -260,7 +260,7 @@ separately reviewed desktop distribution change; its other source is not copied.
 
 `sync-from-upstream.sh --skip-tests` verified all 173 open PR audit rows against
 live heads and replayed the patches in an isolated worktree. The source tree
-matched `b9ad5fd41877a3550d337a0fe7a90ecd7e801f9b`; the rehearsal
+matched `2d8dc1e26aa1e5c4bd8ad30fee7ee5616cbce22e`; the rehearsal
 worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
 and #1771 (merge dirty). The local checks above ran separately on the candidate.
 

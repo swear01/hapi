@@ -1,6 +1,6 @@
 # upstream_sha=86c88df93baf5d1f738dd4b202078bdf6dec376e
 # previous_origin_main=4f702af4f3236ccd2de61d630ea090b35c5d8c2b
-# expected_source_tree=b9ad5fd41877a3550d337a0fe7a90ecd7e801f9b
+# expected_source_tree=2d8dc1e26aa1e5c4bd8ad30fee7ee5616cbce22e
 0001-carry-upstream-pr-1158.patch	carry	pr-1158	b00e39794e707d3bdbd6ab1029b5a6576b3cf985
 0002-carry-upstream-pr-1414.patch	carry	pr-1414	ef5579e5fa2dedf0ceae7363b6a90b75f69cb703
 0003-carry-upstream-pr-1419.patch	carry	pr-1419	cb64200637941ed429855a82ffcf2db977610416
@@ -37,6 +37,7 @@
 0034-fix-hub-close-rejected-remit-stubs-without-runner-stop.patch	regenerate	overlay	-
 0035-chore-audit-record-reviewed-prs-and-candidate-feature-gap.patch	regenerate	overlay	-
 0036-chore-audit-record-candidate-verification.patch	regenerate	overlay	-
+0037-docs-release-explain-upstream-rebuild-and-accepted-removals.patch	regenerate	overlay	-
 -	drop	legacy-fork	4f702af4f3236ccd2de61d630ea090b35c5d8c2b
 -	drop	legacy-fork	7a48fb52ba6f651d5533ec090d8ef2a8ec485d7c
 -	drop	legacy-fork	f59b8f311f1251feb6c23e4087d781a5582020e7
