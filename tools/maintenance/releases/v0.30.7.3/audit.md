@@ -233,8 +233,10 @@ maintained release tooling were carried as separate fork changes. The
 `@assistant-ui/core@0.2.23` scroll patch was omitted because this candidate
 uses `@assistant-ui/core@0.3.20`; the current Web scroll tests pass.
 
-This is a candidate, not a release. Review or restore the remaining fork
-features before publication, or record explicit acceptance of their removal.
+On 2026-09-26 the owner explicitly accepted removal of these old fork-only
+features for this and future self-use maintenance releases. They are disclosed
+in the release notes. This acceptance does not change the closed-unmerged PR,
+security, data preservation, or release verification gates.
 
 ## Local verification
 
@@ -262,6 +264,6 @@ matched `b9ad5fd41877a3550d337a0fe7a90ecd7e801f9b`; the rehearsal
 worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
 and #1771 (merge dirty). The local checks above ran separately on the candidate.
 
-Pre-push review holds publication because the missing legacy feature groups
-would be a user-visible regression from v0.30.7.2. No branch push, tag, GitHub
-Release, or fleet update has been performed.
+The previous pre-push hold for removal of legacy fork-only features is lifted
+by the owner's explicit acceptance. No branch push, tag, GitHub Release, or
+fleet update had been performed at the time of this audit update.
