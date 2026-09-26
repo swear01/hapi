@@ -50,6 +50,8 @@ import { formatReopenError } from '@/lib/reopenError'
 import { resolveCursorReopenGate } from '@/lib/sessionResume'
 import { getSessionTitle, hasSessionTitleSignal } from '@/lib/sessionTitle'
 import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+import { getSessionProjectLabel } from '@/lib/sessionProjectLabel'
+import { getPathDisplayName } from '@/utils/path'
 import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
 import type { Machine } from '@/types/api'
 import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
@@ -61,7 +63,6 @@ import { SessionRowSummary } from '@/components/SessionRowSummary'
 import { Spinner } from '@/components/Spinner'
 import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import { useToast } from '@/lib/toast-context'
-import { getPathDisplayName } from '@/utils/path'
 
 export { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
 
@@ -472,7 +473,7 @@ export function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGro
             )
             const hasActiveSession = group.sessions.some(s => s.active)
             const hasPinnedSession = group.sessions.some(s => s.pinned)
-            const displayName = getPathDisplayName(group.directory)
+            const displayName = getSessionProjectLabel(group.directory)
 
             return {
                 key,
@@ -1689,7 +1690,7 @@ export function SessionList(props: {
                                             selected={s.id === selectedSessionId}
                                             showDetailedStatus={showDetailedStatus}
                                             inRunningSection
-                                            projectLabel={getPathDisplayName(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                            projectLabel={getSessionProjectLabel(resolveSessionGroupDirectory(s.metadata ?? {}))}
                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
                                                 : undefined}
@@ -2197,7 +2198,7 @@ export function SessionList(props: {
                                             selected={s.id === selectedSessionId}
                                             showDetailedStatus={showDetailedStatus}
                                             inRunningSection
-                                            projectLabel={getPathDisplayName(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                            projectLabel={getSessionProjectLabel(resolveSessionGroupDirectory(s.metadata ?? {}))}
                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
                                                 : undefined}
