@@ -45,7 +45,11 @@ internal fun CodexPlanActionsView(planId: String, interactions: ChatInteractions
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("plan-implement-$planId"),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (state.pending) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    if (state.pending) CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp,
+                    )
                     Text(stringResource(R.string.chat_plan_implement))
                 }
             }
