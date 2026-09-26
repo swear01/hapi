@@ -1,5 +1,6 @@
 package app.hapi.companion.feature.chat
 
+import java.util.regex.Matcher
 import java.util.regex.Pattern
 import java.text.BreakIterator
 import java.text.StringCharacterIterator
@@ -34,12 +35,20 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
         val newline = first == '\r' || first == '\n' || first == '\u2028' || first == '\u2029' || first == '\u0085'
         if (newline && lines == budget.lines && end > from) break
         if (newline) lines++
-        // Iterate through an entire platform grapheme before charging its budget.
-        while (!boundaries.isBoundary(matcher.end()) && matcher.find()) { /* lazy merge */ }
-        end = matcher.end()
+        end = sharedGraphemeEnd(matcher, boundaries)
         characters++
     }
     return TextPage(source.substring(from, end), end)
+}
+
+/** `Matcher.end()` is only valid after a successful `find()`. */
+private fun sharedGraphemeEnd(matcher: Matcher, boundaries: BreakIterator): Int {
+    var matchEnd = matcher.end()
+    while (!boundaries.isBoundary(matchEnd)) {
+        if (!matcher.find()) return matchEnd
+        matchEnd = matcher.end()
+    }
+    return matchEnd
 }
 
 internal fun messagePreview(source: String): TextPage {
