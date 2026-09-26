@@ -139,7 +139,7 @@ describe('SessionHeader', () => {
         }), api)
 
         fireEvent.click(screen.getByRole('button', { name: /More/ }))
-        expect(screen.queryByRole('menuitem', { name: /Sync Codex/ })).toBeNull()
+        expect(screen.queryByRole('menuitem', { name: /Sync session/ })).toBeNull()
     })
 
     it('keeps manual Codex sync available for an inactive imported thread', () => {
@@ -155,7 +155,7 @@ describe('SessionHeader', () => {
         }), api)
 
         fireEvent.click(screen.getByRole('button', { name: /More/ }))
-        expect(screen.getByRole('menuitem', { name: /Sync Codex/ })).toBeInTheDocument()
+        expect(screen.getByRole('menuitem', { name: /Sync session/ })).toBeInTheDocument()
     })
 
     it('hides title generation when the Hub does not advertise the capability', () => {
