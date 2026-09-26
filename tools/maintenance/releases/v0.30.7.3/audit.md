@@ -235,3 +235,14 @@ uses `@assistant-ui/core@0.3.20`; the current Web scroll tests pass.
 
 This is a candidate, not a release. Review or restore the remaining fork
 features before publication, or record explicit acceptance of their removal.
+
+## Local verification
+
+- `bun install --frozen-lockfile`, `bun typecheck`, and `bun run test`: pass.
+- `bun run test:cli:integration`: 16 pass, 1 opt-in stress test skipped.
+- Playwright CI selection: 33 pass.
+- `python3 -m unittest discover -s tools/maintenance/tests -p 'test_*.py'`: 43 pass.
+- Desktop typecheck, five tests, and build: pass.
+- `bun run gen:fixtures`: no tracked drift.
+- Mac standalone build: pass; after local ad-hoc signing, `hapi --version` reports `0.30.7.3`.
+- Android SDK is absent locally; Android CI has not run on this candidate.
