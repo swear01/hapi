@@ -1536,7 +1536,7 @@ describe('sessions routes', () => {
             expect(await response.json()).toEqual({ error: 'Session not found' })
         })
 
-        it('archives an inactive non-archived row (idempotent cleanup)', async () => {
+        it('rejects an inactive row without a live lifecycle', async () => {
             let called = false
             const session = createSession({ active: false })
             const { app } = createApp(session, {
@@ -1545,9 +1545,9 @@ describe('sessions routes', () => {
 
             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
 
-            expect(response.status).toBe(200)
-            expect(await response.json()).toEqual({ ok: true })
-            expect(called).toBe(true)
+            expect(response.status).toBe(409)
+            expect(await response.json()).toEqual({ error: 'Session is inactive' })
+            expect(called).toBe(false)
         })
 
         it('returns 2xx for an inactive split-brain row still marked lifecycleState=running', async () => {

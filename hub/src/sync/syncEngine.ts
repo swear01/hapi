@@ -2385,7 +2385,9 @@ export class SyncEngine {
                     if (row.active) {
                         this.handleSessionEnd({ sid: allocatedSessionId!, time: Date.now(), reason: 'error' })
                     }
-                    await this.deleteSession(allocatedSessionId!)
+                    // Runner explicitly reported no child; skip deleteSession's
+                    // process stop path, which requires a live runner target.
+                    await this.sessionCache.deleteSession(allocatedSessionId!)
                 } catch {
                     // Leave the stub visible rather than claiming cleanup succeeded.
                 }
