@@ -1,0 +1,55 @@
+From 7a3096bf8d5e76d6a5a6196476e57d3aea03346c Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:36:24 +0800
+Subject: [PATCH] fix(android): retain Codex plan spinner and retry CAS
+
+---
+ .../hapi/companion/feature/chat/ChatViewModel.kt   | 14 +++++++++-----
+ .../feature/chat/blocks/CodexPlanActionsView.kt    |  6 +++++-
+ 2 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt
+index f70720714..64353cb65 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/ChatViewModel.kt
+@@ -1484,11 +1484,15 @@ class ChatViewModel(
+     )
+ 
+     fun implementCodexPlan(planId: String) {
+-        val previous = codexPlanOperations.value
+-        if (!currentCodexPlanActions().forPlan(planId).canAct) return
+-        if (!codexPlanOperations.compareAndSet(previous, previous.copy(
+-                pendingPlanId = planId, errors = previous.errors - planId,
+-            ))) return
++        while (true) {
++            val previous = codexPlanOperations.value
++            if (!buildCodexPlanActions(
++                    sessionStore.currentDetail(sessionId), previous,
++                    sendInFlight.value || configOpPending.value,
++                ).forPlan(planId).canAct) return
++            val next = previous.copy(pendingPlanId = planId, errors = previous.errors - planId)
++            if (codexPlanOperations.compareAndSet(previous, next)) break
++        }
+         scope.launch {
+             try {
+                 try {
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPlanActionsView.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPlanActionsView.kt
+index 776612766..9aeba95e0 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPlanActionsView.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/blocks/CodexPlanActionsView.kt
+@@ -45,7 +45,11 @@ internal fun CodexPlanActionsView(planId: String, interactions: ChatInteractions
+                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("plan-implement-$planId"),
+             ) {
+                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    if (state.pending) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
++                    if (state.pending) CircularProgressIndicator(
++                        modifier = Modifier.size(16.dp),
++                        color = MaterialTheme.colorScheme.onPrimary,
++                        strokeWidth = 2.dp,
++                    )
+                     Text(stringResource(R.string.chat_plan_implement))
+                 }
+             }
+-- 
+2.54.0 (Apple Git-157)
+

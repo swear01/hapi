@@ -1,0 +1,344 @@
+From 5fbbb9cdcefa22f25c56b3c6d8434f57bab635b2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:24:30 +0800
+Subject: [PATCH] carry(upstream): PR #1728
+
+Upstream-PR-Head: 7a93bb406734417589da0be5d344161cdd0723b9
+---
+ .../HappyComposer.sendError.test.tsx          | 50 +++----------------
+ .../AssistantChat/HappyComposer.tsx           | 36 ++-----------
+ web/src/components/SessionChat.tsx            |  7 +--
+ .../hooks/mutations/useSendMessage.test.tsx   |  8 ---
+ web/src/hooks/mutations/useSendMessage.ts     | 10 ----
+ web/src/router.tsx                            |  2 -
+ 6 files changed, 13 insertions(+), 100 deletions(-)
+
+diff --git a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+index e89426269..dbb5330c6 100644
+--- a/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.sendError.test.tsx
+@@ -145,11 +145,8 @@ type HarnessControls = {
+     acceptAndClearSchedule: () => void
+     remount: () => void
+     programmaticSetText: (text: string) => void
+-    acceptSend: () => void
+     setSending: (sending: boolean) => void
+     setThreadDisabled: (disabled: boolean) => void
+-    settleSend: (error?: ComposerSendError) => void
+-    settleAttachmentSendFailure: () => void
+     getClearErrorCalls: () => number
+ }
+ 
+@@ -167,11 +164,6 @@ function ComposerHarness(props: {
+     const [sendError, setSendError] = useState<ComposerSendError | null>(null)
+     const [isSending, setIsSending] = useState(false)
+     const [composerKey, setComposerKey] = useState('composer-a')
+-    const [sendAcceptance, setSendAcceptance] = useState<{ attemptId: string | null } | null>(null)
+-    const [sendSettlement, setSendSettlement] = useState<{
+-        attemptId: string
+-        status: 'success' | 'error'
+-    } | null>(null)
+     const clearErrorCallsRef = useRef(0)
+     const pendingSendIntentRef = useRef<ComposerSendIntent>('default')
+ 
+@@ -197,25 +189,11 @@ function ComposerHarness(props: {
+             ...current,
+             composer: { ...current.composer, text },
+         })),
+-        acceptSend: () => {
+-            setIsSending(true)
+-            setSendSettlement(null)
+-            setSendAcceptance({ attemptId: 'attempt-1' })
+-        },
+         setSending: setIsSending,
+         setThreadDisabled: (disabled) => setSnapshot((current) => ({
+             ...current,
+             thread: { ...current.thread, isDisabled: disabled },
+         })),
+-        settleSend: (error) => {
+-            if (error) setSendError(error)
+-            setSendSettlement({ attemptId: 'attempt-1', status: error ? 'error' : 'success' })
+-            setIsSending(false)
+-        },
+-        settleAttachmentSendFailure: () => {
+-            setSendSettlement({ attemptId: 'attempt-1', status: 'error' })
+-            setIsSending(false)
+-        },
+         getClearErrorCalls: () => clearErrorCallsRef.current,
+     }
+ 
+@@ -226,8 +204,6 @@ function ComposerHarness(props: {
+                 sessionId={composerKey}
+                 disabled={isSending}
+                 pendingSchedule={schedule}
+-                sendAcceptance={sendAcceptance}
+-                sendSettlement={sendSettlement}
+                 onSchedule={setSchedule}
+                 onClearSchedule={() => setSchedule(null)}
+                 sendError={sendError}
+@@ -311,43 +287,33 @@ describe('HappyComposer send-error atomic restore', () => {
+         runtime.setSnapshot = null
+     })
+ 
+-    it('collapses an expanded composer only after an accepted send succeeds', async () => {
+-        const controls = renderComposer('message', null)
++    it('collapses an expanded composer immediately when a send is submitted', () => {
++        renderComposer('message', null)
+         fireEvent.click(screen.getByRole('button', { name: 'expand' }))
+         expect(screen.getByTestId('composer-shell')).toHaveAttribute('data-expanded', 'true')
+ 
+         send()
+-        expect(screen.getByTestId('composer-shell')).toHaveAttribute('data-expanded', 'true')
+-
+-        act(() => controls.current!.acceptSend())
+-        expect(screen.getByTestId('composer-shell')).toHaveAttribute('data-expanded', 'true')
+-
+-        act(() => controls.current!.settleSend())
+-        await waitFor(() => expect(screen.getByTestId('composer-shell')).not.toHaveAttribute('data-expanded'))
++        expect(screen.getByTestId('composer-shell')).not.toHaveAttribute('data-expanded')
+     })
+ 
+-    it('keeps the composer expanded when an accepted send later fails', async () => {
++    it('keeps the composer collapsed when a submitted send later fails', async () => {
+         const controls = renderComposer('message', null)
+         fireEvent.click(screen.getByRole('button', { name: 'expand' }))
+         send()
+ 
+-        act(() => controls.current!.acceptSend())
+-        act(() => controls.current!.settleSend(fail(1, 'message', null)))
++        setError(controls, fail(1, 'message', null))
+ 
+         await waitFor(() => expect(input()).toHaveValue('message'))
+-        expect(screen.getByTestId('composer-shell')).toHaveAttribute('data-expanded', 'true')
++        expect(screen.getByTestId('composer-shell')).not.toHaveAttribute('data-expanded')
+     })
+ 
+-    it('keeps the composer expanded when an attachment send later fails', () => {
++    it('keeps the composer collapsed when an attachment send later fails', () => {
+         const controls = renderComposer('', null)
+         act(() => controls.current!.addAttachment())
+         fireEvent.click(screen.getByRole('button', { name: 'expand' }))
+         send()
+ 
+-        act(() => controls.current!.acceptSend())
+-        act(() => controls.current!.settleAttachmentSendFailure())
+-
+-        expect(screen.getByTestId('composer-shell')).toHaveAttribute('data-expanded', 'true')
++        expect(screen.getByTestId('composer-shell')).not.toHaveAttribute('data-expanded')
+         expect(screen.queryByTestId('composer-send-error')).toBeNull()
+     })
+ 
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 89b5ff9f1..2b6eb2311 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -392,10 +392,6 @@ export function HappyComposer(props: {
+     sendError?: ComposerSendError | null
+     onClearSendError?: () => void
+     onSuppressSendErrorRestore?: (id: number) => void
+-    /** Emitted by SessionChat after a send is accepted. Null attempt ids are settled scratchlist sends. */
+-    sendAcceptance?: { attemptId: string | null } | null
+-    /** Terminal result for a chat mutation, including attachment-bearing failures. */
+-    sendSettlement?: { attemptId: string; status: 'success' | 'error' } | null
+     /**
+      * Resume/handoff path for inactive drafts that only exist in IndexedDB
+      * (no visible text/attachments for assistant-ui to append).
+@@ -579,8 +575,6 @@ export function HappyComposer(props: {
+         selection: { start: 0, end: 0 }
+     })
+     const [isExpanded, setIsExpanded] = useState(false)
+-    const lastSendAcceptanceRef = useRef(props.sendAcceptance)
+-    const pendingSendAttemptIdRef = useRef<string | null>(null)
+     const [showSettings, setShowSettings] = useState(false)
+     // Anchored settings sheet: the model/effort value buttons open only their
+     // own section; the gear (null) opens the full sheet.
+@@ -593,32 +587,6 @@ export function HappyComposer(props: {
+     const isControlled = onScheduleProp !== undefined
+     const pendingSchedule = isControlled ? (pendingScheduleProp ?? null) : pendingScheduleLocal
+     const setPendingSchedule = isControlled ? onScheduleProp : setPendingScheduleLocal
+-    useEffect(() => {
+-        const acceptance = props.sendAcceptance
+-        if (!acceptance || acceptance === lastSendAcceptanceRef.current) return
+-        lastSendAcceptanceRef.current = acceptance
+-        if (acceptance.attemptId === null) {
+-            pendingSendAttemptIdRef.current = null
+-            setIsExpanded(false)
+-            return
+-        }
+-        pendingSendAttemptIdRef.current = acceptance.attemptId
+-        const settlement = props.sendSettlement
+-        if (!settlement || settlement.attemptId !== acceptance.attemptId) return
+-        pendingSendAttemptIdRef.current = null
+-        if (settlement.status === 'success') setIsExpanded(false)
+-    }, [props.sendAcceptance, props.sendSettlement])
+-
+-    // Match the terminal mutation result to the exact accepted attempt. Text
+-    // failures also expose sendError for draft restoration, while attachment
+-    // failures intentionally do not, so settlement must be the outcome source.
+-    useEffect(() => {
+-        const settlement = props.sendSettlement
+-        if (!settlement || settlement.attemptId !== pendingSendAttemptIdRef.current) return
+-        pendingSendAttemptIdRef.current = null
+-        if (settlement.status === 'success') setIsExpanded(false)
+-    }, [props.sendSettlement])
+-
+     const textareaRef = useRef<HTMLTextAreaElement>(null)
+     const richInputRef = useRef<RichComposerInputHandle>(null)
+     const richComposerFueAnchorRef = useRef<HTMLDivElement>(null)
+@@ -1304,6 +1272,10 @@ export function HappyComposer(props: {
+             // Must be adjacent to send(): useHappyRuntime consumes and resets
+             // this ref synchronously from assistant-ui's onNew callback.
+             if (pendingSendIntentRef) pendingSendIntentRef.current = effectiveIntent
++            // The editor is a transient full-screen editing surface. Collapse
++            // when the submit action is dispatched, rather than waiting for a
++            // queued or slow network request to settle.
++            setIsExpanded(false)
+             api.composer().send()
+         } catch (error) {
+             resetPendingSendIntent()
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 8b709c167..b728a0918 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -83,7 +83,7 @@ import {
+     type AttachmentDraftInput,
+ } from '@/lib/composer-attachment-drafts'
+ import { useTranslation } from '@/lib/use-translation'
+-import type { SendMessageAcceptance, SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
++import type { SendMessageAcceptance } from '@/hooks/mutations/useSendMessage'
+ import { handoffComposerDraft, transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+ import { SessionHeader } from '@/components/SessionHeader'
+ import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
+@@ -574,7 +574,6 @@ type SessionChatProps = {
+     isSyncingTail: boolean
+     isLoadingMoreMessages: boolean
+     isSending: boolean
+-    sendSettlement: SendMessageSettlement | null
+     viewMode: 'tail' | 'history'
+     messagesVersion: number
+     historyVersion: number
+@@ -1748,7 +1747,6 @@ function SessionChatInner(props: SessionChatProps) {
+     // absolute epoch-ms using Date.now() at that moment (send-time base for presets).
+     const [pendingSchedule, setPendingSchedule] = useState<PendingSchedule | null>(null)
+     const [pendingScheduleRevision, setPendingScheduleRevision] = useState(0)
+-    const [sendAcceptance, setSendAcceptance] = useState<{ attemptId: string | null } | null>(null)
+     const updatePendingSchedule = useCallback((next: PendingSchedule | null) => {
+         setPendingSchedule(next)
+         setPendingScheduleRevision((revision) => revision + 1)
+@@ -1830,7 +1828,6 @@ function SessionChatInner(props: SessionChatProps) {
+         })
+         const accepted = await onSendForComposer(text, attachments, scheduledAt, deliveryMode)
+         if (!accepted) return
+-        setSendAcceptance({ attemptId: accepted.attemptId })
+         if (!routedToScratchlist) {
+             // Clear pendingSchedule only after the mutation is actually
+             // accepted - covers both pre-mutation guards AND async
+@@ -2085,8 +2082,6 @@ function SessionChatInner(props: SessionChatProps) {
+                         resolveSessionMentionTooltip={resolveSessionMentionTooltip}
+                         disabled={props.isSending}
+                         pendingSchedule={pendingSchedule}
+-                        sendAcceptance={sendAcceptance}
+-                        sendSettlement={props.sendSettlement}
+                         onSchedule={updatePendingSchedule}
+                         onClearSchedule={() => updatePendingSchedule(null)}
+                         permissionMode={props.session.permissionMode}
+diff --git a/web/src/hooks/mutations/useSendMessage.test.tsx b/web/src/hooks/mutations/useSendMessage.test.tsx
+index 236168cdc..b0c6bbf4d 100644
+--- a/web/src/hooks/mutations/useSendMessage.test.tsx
++++ b/web/src/hooks/mutations/useSendMessage.test.tsx
+@@ -64,10 +64,6 @@ describe('useSendMessage', () => {
+         await waitFor(() => {
+             expect(onSuccess).toHaveBeenCalledWith('session-A')
+         })
+-        expect(result.current.sendSettlement).toEqual({
+-            attemptId: 'local-id-1',
+-            status: 'success',
+-        })
+     })
+ 
+     it('keeps a thinking-session send in flight until the POST confirms it is queued', async () => {
+@@ -482,10 +478,6 @@ describe('useSendMessage', () => {
+             await waitFor(() => {
+                 expect(updateMock).toHaveBeenCalledWith('session-A', 'local-id-1', 'failed')
+             })
+-            expect(result.current.sendSettlement).toEqual({
+-                attemptId: 'local-id-1',
+-                status: 'error',
+-            })
+             // No composer-restore: onError is NOT fired and the optimistic
+             // row is NOT removed -- both would destroy the attachment UX.
+             expect(onError).not.toHaveBeenCalled()
+diff --git a/web/src/hooks/mutations/useSendMessage.ts b/web/src/hooks/mutations/useSendMessage.ts
+index cee70d99a..0734e6957 100644
+--- a/web/src/hooks/mutations/useSendMessage.ts
++++ b/web/src/hooks/mutations/useSendMessage.ts
+@@ -27,11 +27,6 @@ export type SendMessageAcceptance = {
+     attemptId: string
+ }
+ 
+-export type SendMessageSettlement = {
+-    attemptId: string
+-    status: 'success' | 'error'
+-}
+-
+ type BlockedReason = 'no-api' | 'no-session' | 'pending'
+ 
+ /**
+@@ -202,11 +197,9 @@ export function useSendMessage(
+     ) => Promise<SendMessageAcceptance | false>
+     retryMessage: (localId: string) => boolean
+     isSending: boolean
+-    sendSettlement: SendMessageSettlement | null
+ } {
+     const { haptic } = usePlatform()
+     const [isResolving, setIsResolving] = useState(false)
+-    const [sendSettlement, setSendSettlement] = useState<SendMessageSettlement | null>(null)
+     const resolveGuardRef = useRef(false)
+     const isSessionThinkingRef = useRef(options?.isSessionThinking ?? false)
+     isSessionThinkingRef.current = options?.isSessionThinking ?? false
+@@ -231,7 +224,6 @@ export function useSendMessage(
+             return { successStatus }
+         },
+         onSuccess: (_, input, context) => {
+-            setSendSettlement({ attemptId: input.localId, status: 'success' })
+             updateMessageStatus(
+                 input.sessionId,
+                 input.localId,
+@@ -241,7 +233,6 @@ export function useSendMessage(
+             options?.onSuccess?.(input.sessionId)
+         },
+         onError: (error, input) => {
+-            setSendSettlement({ attemptId: input.localId, status: 'error' })
+             // Attachment sends keep the legacy failed-bubble UX: the
+             // composer-restore path can only re-seat text + scheduledAt,
+             // not the uploaded attachment metadata.  Removing the row
+@@ -396,6 +387,5 @@ export function useSendMessage(
+         sendMessage,
+         retryMessage,
+         isSending: mutation.isPending || isResolving,
+-        sendSettlement,
+     }
+ }
+diff --git a/web/src/router.tsx b/web/src/router.tsx
+index a187fdf54..073c43a5d 100644
+--- a/web/src/router.tsx
++++ b/web/src/router.tsx
+@@ -598,7 +598,6 @@ function SessionPage() {
+         sendMessage,
+         retryMessage,
+         isSending,
+-        sendSettlement,
+     } = useSendMessage(api, sessionId, {
+         isSessionThinking: session?.thinking ?? false,
+         onSuccess: (sentSessionId) => {
+@@ -814,7 +813,6 @@ function SessionPage() {
+             isSyncingTail={messagesSyncingTail}
+             isLoadingMoreMessages={messagesLoadingMore}
+             isSending={isSending}
+-            sendSettlement={sendSettlement}
+             viewMode={messagesViewMode}
+             messagesVersion={messagesVersion}
+             historyVersion={historyVersion}
+-- 
+2.54.0 (Apple Git-157)
+
