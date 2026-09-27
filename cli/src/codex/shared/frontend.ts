@@ -63,8 +63,8 @@ export async function runSharedCodex(raw: SharedLaunchOptions): Promise<void> {
         options.resumeSessionId ??= session.metadata?.codexSessionId;
         const freshRemit = options.startedBy === 'runner'
             && session.metadata?.spawnRemitOperation?.state === 'pending'
-            && !session.metadata.hostPid
-            && session.metadata.lifecycleState !== 'archived';
+            && !session.metadata?.hostPid
+            && session.metadata?.lifecycleState !== 'archived';
         if (!options.resumeSessionId && !freshRemit) throw new Error('Existing HAPI session has no Codex thread binding');
     }
     const runner = await readRunnerState();
