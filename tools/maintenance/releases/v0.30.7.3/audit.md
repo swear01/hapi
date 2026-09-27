@@ -108,7 +108,7 @@ Upstream main: 86c88df93baf5d1f738dd4b202078bdf6dec376e
 - #1702 [CLEAN] fix(web): debounce and cancel stale file searches @ d4918bbb60920f6c60fc47a26fd9cf6793f80d6b (https://github.com/tiann/hapi/pull/1702)
 - #1695 [CLEAN] feat(web): add fullscreen preview for shared turns @ 26699be34cd90d44cbe9a645a8bdb03bdd7fbfd9 (https://github.com/tiann/hapi/pull/1695)
 - #1693 [DIRTY] feat(web): add fullscreen table preview and export actions @ 00e4e993c72e527e9e64ec4e55799e2efe5563ae (https://github.com/tiann/hapi/pull/1693)
-- #1692 [CLEAN] feat(agent): add provider-specific agent detail inventories @ fd9dafc1aec6d5e0fc28507e256ba32877ddf4d9 (https://github.com/tiann/hapi/pull/1692)
+- #1692 [CLEAN] feat(agent): add provider-specific agent detail inventories @ 316f4197f5e3da3b412bf530808d196e7b454d2c (https://github.com/tiann/hapi/pull/1692)
 - #1691 [CLEAN] feat(cli): show Claude compaction as a summary card with token delta @ 8486600423596f0c7b9c84d8fde18cb571ba6053 (https://github.com/tiann/hapi/pull/1691)
 - #1684 [UNSTABLE] feat(attachments): persist original attachments in Hub @ 8df0545568572b4ddf11fb8955da6bc55fffd262 (https://github.com/tiann/hapi/pull/1684)
 - #1683 [DIRTY] feat(hub): add generic webhook notification channel @ 08fa9726e8d0dce5a5a263987fb54cb2ce649d21 (https://github.com/tiann/hapi/pull/1683)
@@ -163,7 +163,7 @@ Upstream main: 86c88df93baf5d1f738dd4b202078bdf6dec376e
 - #1528 [DIRTY] fix(hub): make session timeout and reconnect state durable and consistent @ 3517c527077d71033ec3782185ca4cf6d280d0f4 (https://github.com/tiann/hapi/pull/1528)
 - #1527 [DIRTY] feat(cli): survive terminal hangup by switching the session to remote mode @ 597c28d6bcb5dd2fc8938197d60e5dea9d327821 (https://github.com/tiann/hapi/pull/1527)
 - #1525 [DIRTY] test(cli): make the suite pass on macOS hosts @ 85e5ec888140097893bdf30dfe1b101145d2c54e (https://github.com/tiann/hapi/pull/1525)
-- #1523 [CLEAN] fix(web): unify agent task status presentation @ cef9e46a9ac0580ee241950634a69bf2deeadde9 (https://github.com/tiann/hapi/pull/1523)
+- #1523 [CLEAN] fix(web): unify agent task status presentation @ 6c5236185bc6d7fc11adaa5d565b1c10aa10fbdf (https://github.com/tiann/hapi/pull/1523)
 - #1517 [DIRTY] Fix Telegram Mini App polish and file tree state @ d9767f92f0beb3a245ed2329030126441676e8e0 (https://github.com/tiann/hapi/pull/1517)
 - #1512 [UNSTABLE] fix(web): use latest assistant replies for session recency @ b1c8d69d84d64131abee91000c27b6e9b0505e51 (https://github.com/tiann/hapi/pull/1512)
 - #1468 [CLEAN] feat(usage): record ACP cost and surface per-agent reporting availability @ 8f2d931d9ceb7573007df954276747338cd2a585 (https://github.com/tiann/hapi/pull/1468)
@@ -251,7 +251,7 @@ security, data preservation, or release verification gates.
 
 ## Replay and provenance
 
-The manifest contains 38 separate patches for the current candidate, including
+The manifest contains 39 separate patches for the current candidate, including
 24 PR patches. It maps three selected fork changes to prior source commits and
 explicitly drops the other 20 commits unique to the old origin history and
 closed PR #847. The
@@ -260,7 +260,7 @@ separately reviewed desktop distribution change; its other source is not copied.
 
 `sync-from-upstream.sh --skip-tests` verified all 173 open PR audit rows against
 live heads and replayed the patches in an isolated worktree. The source tree
-matched `e33b143b37e642375d210bf14ed0840c6609e3f1`; the rehearsal
+matched `5682eedf5d332ccfb315404b0c1b063088995ef9`; the rehearsal
 worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
 and #1771 (merge dirty). The local checks above ran separately on the candidate.
 
@@ -278,3 +278,10 @@ a preferred width that the presentation environment may override. The
 assertion did not test the selection and navigation behavior named by the
 test, so the follow-up removes that one bound while retaining the minimum
 visible width and the navigation behavior assertions.
+
+The repeat iOS run then failed in `ToolTranscriptPresentationTests` because
+a 150 ms fixed sleep ended before a scrolled cell was recycled. That test
+file was also byte-identical to official upstream. The follow-up waits for
+the existing test condition both when scrolling away and returning. The
+two changed deferred PR heads (#1523 and #1692) were refreshed from a new
+173-PR open snapshot; carried PR heads were unchanged.
