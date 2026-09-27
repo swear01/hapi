@@ -247,7 +247,7 @@ security, data preservation, or release verification gates.
 - Desktop typecheck, five tests, and build: pass.
 - `bun run gen:fixtures`: no tracked drift.
 - Mac standalone build: pass; after local ad-hoc signing, `hapi --version` reports `0.30.7.3`.
-- Android SDK is absent locally; Android CI has not run on this candidate.
+- Android SDK is absent locally; the exact-main Android CI passed at `c336dd28`.
 
 ## Replay and provenance
 
@@ -261,7 +261,9 @@ separately reviewed desktop distribution change; its other source is not copied.
 `sync-from-upstream.sh --skip-tests` verified all 173 open PR audit rows against
 live heads and replayed the patches in an isolated worktree. The source tree
 matched `5682eedf5d332ccfb315404b0c1b063088995ef9`; the rehearsal
-worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
+worktree was removed. The rehearsal used a local bare snapshot of the pinned
+previous fork main because the live fork main had already advanced. Personal
+PR policy exceptions: #1419 (merge unstable)
 and #1771 (merge dirty). The local checks above ran separately on the candidate.
 
 The previous pre-push hold for removal of legacy fork-only features is lifted
