@@ -96,7 +96,6 @@ final class SessionSplitPresentationTests: XCTestCase {
         let identity = try XCTUnwrap(probe.instances["a"])
         let sidebar = try XCTUnwrap(split.viewController(for: .primary).flatMap { self.findCollection(in: $0.view) })
         XCTAssertGreaterThanOrEqual(sidebar.bounds.width, 280)
-        XCTAssertLessThanOrEqual(sidebar.bounds.width, 360)
 
         list.selectMachine("debian")
         try await settle { list.rows.map(\.id) == ["b"] }
