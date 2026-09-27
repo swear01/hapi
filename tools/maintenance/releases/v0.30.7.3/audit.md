@@ -251,7 +251,7 @@ security, data preservation, or release verification gates.
 
 ## Replay and provenance
 
-The manifest contains 37 separate patches for the current candidate, including
+The manifest contains 38 separate patches for the current candidate, including
 24 PR patches. It maps three selected fork changes to prior source commits and
 explicitly drops the other 20 commits unique to the old origin history and
 closed PR #847. The
@@ -260,10 +260,21 @@ separately reviewed desktop distribution change; its other source is not copied.
 
 `sync-from-upstream.sh --skip-tests` verified all 173 open PR audit rows against
 live heads and replayed the patches in an isolated worktree. The source tree
-matched `2d8dc1e26aa1e5c4bd8ad30fee7ee5616cbce22e`; the rehearsal
+matched `e33b143b37e642375d210bf14ed0840c6609e3f1`; the rehearsal
 worktree was removed. Personal PR policy exceptions: #1419 (merge unstable)
 and #1771 (merge dirty). The local checks above ran separately on the candidate.
 
 The previous pre-push hold for removal of legacy fork-only features is lifted
 by the owner's explicit acceptance. No branch push, tag, GitHub Release, or
 fleet update had been performed at the time of this audit update.
+
+## iOS CI correction
+
+The first exact-main iOS run failed only in `SessionSplitPresentationTests`:
+its hard `<= 360` sidebar assertion observed 420 points on the iPad
+simulator. Both the test and `SessionSplitView` were byte-identical to the
+pinned official upstream. Apple documents `navigationSplitViewColumnWidth` as
+a preferred width that the presentation environment may override. The
+assertion did not test the selection and navigation behavior named by the
+test, so the follow-up removes that one bound while retaining the minimum
+visible width and the navigation behavior assertions.
