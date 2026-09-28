@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { CodexModelsResponse, CodexModelSummary } from '@hapi/protocol/apiTypes';
 import { CodexAppServerClient } from '@/codex/codexAppServerClient';
 import { resolveCodexHome } from '@/codex/utils/codexHome';
@@ -117,7 +117,7 @@ async function catalogFingerprint(): Promise<string> {
     if (rawPath) {
         catalogPath = rawPath.startsWith('"') ? JSON.parse(rawPath) as string : rawPath.slice(1, -1);
     }
-    const catalog = catalogPath && isAbsolute(catalogPath) ? await readOptionalFile(catalogPath) : null;
+    const catalog = catalogPath ? await readOptionalFile(resolve(home, catalogPath)) : null;
     const hash = createHash('sha256');
     for (const value of [home, config, auth, catalogPath, catalog]) {
         hash.update(value === null || value === undefined ? 'missing' : value);

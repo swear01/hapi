@@ -146,6 +146,22 @@ describe('listCodexModels cwd', () => {
         expect(constructorOptions).toHaveLength(4);
     });
 
+    it('resolves a relative catalog path from the Codex config directory', async () => {
+        const home = await mkdtemp(join(tmpdir(), 'hapi-codex-models-'));
+        temporaryHomes.push(home);
+        vi.stubEnv('CODEX_HOME', home);
+        await writeFile(join(home, 'config.toml'), 'model_catalog_json = "models.json"\n');
+        const catalog = join(home, 'models.json');
+        await writeFile(catalog, 'first');
+        listModelsMock.mockResolvedValue({ data: [{ id: 'first' }] });
+        await listCodexModels();
+
+        await writeFile(catalog, 'second');
+        listModelsMock.mockResolvedValue({ data: [{ id: 'second' }] });
+        expect((await listCodexModels())[0]?.id).toBe('second');
+        expect(constructorOptions).toHaveLength(2);
+    });
+
     it('does not let an older in-flight lookup replace a newer catalog', async () => {
         const home = await mkdtemp(join(tmpdir(), 'hapi-codex-models-'));
         temporaryHomes.push(home);
