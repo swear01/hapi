@@ -261,6 +261,7 @@ final class ToolTranscriptPresentationTests: XCTestCase {
         try await eventually { (collection.cellForItem(at: IndexPath(item: index, section: 0))?.frame.height ?? 0) > initialHeight + 100 }
         XCTAssertEqual(cell.frame.minY - collection.contentOffset.y, anchorY, accuracy: 1)
         let count = collection.numberOfItems(inSection: 0)
+        collection.delegate?.scrollViewWillBeginDragging?(collection)
         collection.scrollToItem(at: IndexPath(item: count - 1, section: 0), at: .bottom, animated: false)
         try await eventually { collection.cellForItem(at: IndexPath(item: index, section: 0)) == nil }
         collection.delegate?.scrollViewWillBeginDragging?(collection)
@@ -281,12 +282,12 @@ final class ToolTranscriptPresentationTests: XCTestCase {
         XCTAssertFalse(model.followsTail)
     }
 
-    private func eventually(_ condition: () -> Bool) async throws {
+    private func eventually(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         for _ in 0..<150 {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTFail("Transcript did not settle")
+        XCTFail("Transcript did not settle", file: file, line: line)
     }
 
     private func findCollection(_ view: UIView) -> UICollectionView? {
