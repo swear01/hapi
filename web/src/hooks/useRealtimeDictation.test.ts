@@ -9,23 +9,57 @@ import { useRealtimeDictation } from './useRealtimeDictation'
 import { useDictation } from './useDictation'
 
 const scribe = vi.hoisted(() => ({
-    options: null as unknown,
-    connect: vi.fn(async () => {}),
+    options: {} as Record<string, (value?: unknown) => void>,
+    closed: false,
+    connect: vi.fn(),
     disconnect: vi.fn(),
     commit: vi.fn()
 }))
 
-vi.mock('@elevenlabs/react', () => ({
+vi.mock('@elevenlabs/client', () => ({
     CommitStrategy: { MANUAL: 'manual' },
-    useScribe: (options: unknown) => {
-        scribe.options = options
-        return {
-            connect: scribe.connect,
-            disconnect: scribe.disconnect,
-            commit: scribe.commit
-        }
+    RealtimeEvents: {
+        SESSION_STARTED: 'session_started', PARTIAL_TRANSCRIPT: 'partial_transcript',
+        COMMITTED_TRANSCRIPT: 'committed_transcript', ERROR: 'error', CLOSE: 'close'
+    },
+    Scribe: {
+        connect: scribe.connect.mockImplementation(() => {
+            scribe.options = {}
+            scribe.closed = false
+            return {
+                on: (event: string, callback: (value?: unknown) => void) => {
+                    const key = {
+                        session_started: 'onSessionStarted', partial_transcript: 'onPartialTranscript',
+                        committed_transcript: 'onCommittedTranscript', error: 'onError', close: 'onDisconnect'
+                    }[event]
+                    if (key) scribe.options[key] = (value) => {
+                        if (event !== 'close' && scribe.closed) return
+                        callback(event === 'error' && value instanceof Error ? { error: value.message } : value)
+                    }
+                },
+                close: () => {
+                    scribe.closed = true
+                    scribe.disconnect()
+                    scribe.options.onDisconnect?.()
+                },
+                commit: scribe.commit
+            }
+        })
     }
 }))
+
+// The React SDK closes its Scribe connection on unmount, independently of our cleanup.
+vi.mock('@elevenlabs/react', async () => {
+    const { useEffect } = await import('react')
+    return {
+        CommitStrategy: { MANUAL: 'manual' },
+        useScribe: (callbacks: Record<string, (value?: unknown) => void>) => {
+            useEffect(() => () => { scribe.disconnect() }, [])
+            scribe.options = callbacks
+            return { connect: async () => {}, disconnect: scribe.disconnect, commit: scribe.commit }
+        }
+    }
+})
 
 type ScribeCallbacks = {
     onPartialTranscript: (event: { text: string }) => void
@@ -35,7 +69,62 @@ type ScribeCallbacks = {
 }
 
 describe('useRealtimeDictation', () => {
-    afterEach(() => vi.clearAllMocks())
+    afterEach(() => { vi.clearAllMocks(); vi.useRealTimers() })
+
+    it.each(['committed', 'timeout'])('keeps ElevenLabs connected after unmount until %s finalization', async (completion) => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() }
+        })
+        scribe.commit.mockImplementation(() => {})
+        clearDraft('session-A')
+        const sendMessage = vi.fn(async () => {})
+        const api = {
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
+        } as unknown as ApiClient
+        const { result, unmount } = renderHook(() => useRealtimeDictation({
+            api, provider: 'elevenlabs', mode: 'realtime',
+            onFinalTranscript: vi.fn(), onTextChange: vi.fn(), sendMessage
+        }))
+        await act(() => result.current.toggle())
+        act(() => (scribe.options as ScribeCallbacks).onPartialTranscript({ text: 'partial words' }))
+        if (completion === 'timeout') vi.useFakeTimers()
+        let pending: Promise<void>
+        act(() => { pending = result.current.stopAndSend('session-A', 'initial text') })
+        unmount()
+        expect(scribe.disconnect).not.toHaveBeenCalled()
+        await act(async () => {
+            if (completion === 'committed') {
+                (scribe.options as ScribeCallbacks).onCommittedTranscript({ text: 'final committed words' })
+            } else {
+                await vi.advanceTimersByTimeAsync(2_500)
+            }
+            await pending!
+        })
+        vi.useRealTimers()
+        expect(sendMessage).toHaveBeenCalledExactlyOnceWith('session-A', completion === 'committed'
+            ? 'initial text final committed words' : 'initial text partial words', undefined)
+        expect(scribe.disconnect).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes an ordinary recording on unmount without sending it', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() }
+        })
+        const sendMessage = vi.fn()
+        const api = {
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' }))
+        } as unknown as ApiClient
+        const { result, unmount } = renderHook(() => useRealtimeDictation({
+            api, provider: 'elevenlabs', mode: 'realtime',
+            onFinalTranscript: vi.fn(), onTextChange: vi.fn(), sendMessage
+        }))
+        await act(() => result.current.toggle())
+        unmount()
+        expect(scribe.disconnect).toHaveBeenCalledTimes(1)
+        expect(sendMessage).not.toHaveBeenCalled()
+    })
 
     it('preserves partial ElevenLabs text on an unexpected disconnect', async () => {
         Object.defineProperty(navigator, 'mediaDevices', {
