@@ -236,6 +236,8 @@ final class ToolTranscriptPresentationTests: XCTestCase {
         host.view.layoutIfNeeded()
         try await eventually { findCollection(host.view) != nil }
         let collection = try XCTUnwrap(findCollection(host.view))
+        // Force recycling instead of retaining offscreen cells in UIKit's prefetch cache.
+        collection.isPrefetchingEnabled = false
         try await eventually { collection.numberOfItems(inSection: 0) == model.blocks.count + 1 }
         collection.delegate?.scrollViewWillBeginDragging?(collection)
         collection.scrollToItem(at: IndexPath(item: index, section: 0), at: .top, animated: false)
