@@ -1733,12 +1733,12 @@ export function HappyComposer(props: {
     const modelEffortControlsDisabled = allowConfigChangesWhileThinking
         ? configurationControlsDisabled
         : controlsDisabled
+    const rawSelectedModel = selectedModelBase !== undefined ? selectedModelBase : model
+    const normalizedSelectedModel = agentFlavor === 'cursor'
+        ? (!rawSelectedModel || rawSelectedModel === 'auto' || rawSelectedModel === 'default' || rawSelectedModel === 'default[]' ? 'auto' : rawSelectedModel)
+        : (!rawSelectedModel || rawSelectedModel === 'auto' || rawSelectedModel === 'default' ? null : rawSelectedModel)
     const modelValueLabel = useMemo(() => {
         if (isNarrowViewport || !onModelChange || !supportsModelChange(agentFlavor)) return undefined
-        const rawKey = selectedModelBase !== undefined ? selectedModelBase : model
-        const normalizedKey = agentFlavor === 'cursor'
-            ? (!rawKey || rawKey === 'auto' || rawKey === 'default' || rawKey === 'default[]' ? 'auto' : rawKey)
-            : (!rawKey || rawKey === 'auto' || rawKey === 'default' ? null : rawKey)
         if (modelPickerOptions.length === 0) return undefined
         const option = modelPickerOptions.find((candidate) => {
             if (candidate.value !== null && typeof candidate.value === 'object') {
@@ -1746,9 +1746,9 @@ export function HappyComposer(props: {
                     ? composerModelValueKey(candidate.value) === composerModelValueKey(piSelectedModel)
                     : candidate.value.modelId === model
             }
-            return candidate.value === normalizedKey
+            return candidate.value === normalizedSelectedModel
         })
-        return option?.label ?? (normalizedKey === null ? t('newSession.model.default') : rawKey ?? undefined)
+        return option?.label ?? (normalizedSelectedModel === null ? t('newSession.model.default') : rawSelectedModel ?? undefined)
     }, [
         isNarrowViewport,
         onModelChange,
@@ -1757,6 +1757,8 @@ export function HappyComposer(props: {
         selectedModelBase,
         model,
         modelPickerOptions,
+        normalizedSelectedModel,
+        rawSelectedModel,
         piSelectedModel,
         t,
     ])
@@ -1862,10 +1864,6 @@ export function HappyComposer(props: {
                                             </div>
                                         ) : null}
                                         {group.options.map((option) => {
-                                            const rawSelectedModel = selectedModelBase !== undefined ? selectedModelBase : model
-                                            const normalizedSelectedModel = !rawSelectedModel || rawSelectedModel === 'auto' || rawSelectedModel === 'default'
-                                                ? null
-                                                : rawSelectedModel
                                             const isSelected = option.value !== null && typeof option.value === 'object'
                                                 ? piSelectedModel
                                                     ? composerModelValueKey(option.value) === composerModelValueKey(piSelectedModel)
@@ -2223,6 +2221,8 @@ export function HappyComposer(props: {
         modelEffortOptions,
         modelPickerGroups,
         modelPickerOptions,
+        normalizedSelectedModel,
+        rawSelectedModel,
         selectedModelBase,
         selectedModelVariant,
         showModelReasoningEffortSettings,

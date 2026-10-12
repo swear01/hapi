@@ -154,11 +154,12 @@ describe('kimiRemoteLauncher skill lookup instruction', () => {
         })
     })
 
-    it('delivers queued prompts when an advertised effort is rejected by the provider', async () => {
+    it.each(['queued', 'startup'])('delivers prompts when an advertised effort is rejected during %s', async (phase) => {
         harness.rejectEffort = true
-        const session = createSession({ permissionMode: 'default', model: 'kimi-k2', effort: 'low' })
-        await expect(kimiRemoteLauncher(session as never, { model: 'kimi-k2' })).resolves.toBe('exit')
+        const session = createSession({ permissionMode: 'default', model: 'kimi-k2', effort: phase === 'queued' ? 'low' : undefined })
+        await expect(kimiRemoteLauncher(session as never, { model: 'kimi-k2', effort: phase === 'startup' ? 'low' : undefined })).resolves.toBe('exit')
         expect(harness.setConfigOptionCalls).toContainEqual(['kimi-session-1', 'thought_level', 'low'])
+        expect(session.setEffort).toHaveBeenCalledWith('medium')
         expect(harness.prompts).toHaveLength(2)
         expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Invalid params') }))
     })

@@ -586,13 +586,17 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.getByRole('button', { name: 'Default' })).toBeTruthy()
     })
 
-    it.each(['auto', 'default', 'default[]'])('preserves Cursor Auto in the unified model button (%s)', (model) => {
+    it.each(['auto', 'default', 'default[]'])('preserves Cursor Auto in the model button and selected row (%s)', (model) => {
         renderComposer('cursor', {
             model,
             availableModelOptions: [{ value: 'auto', label: 'Auto' }],
         })
-        expect(screen.getByRole('button', { name: 'Auto' })).toBeTruthy()
+        const modelButton = screen.getByRole('button', { name: 'Auto' })
+        expect(modelButton).toBeTruthy()
         expect(screen.queryByRole('button', { name: 'Default' })).toBeNull()
+        fireEvent.click(modelButton)
+        const selectedRow = screen.getAllByRole('button', { name: 'Auto' }).find(button => button.querySelector('span'))!
+        expect(selectedRow.querySelector('span')!.className).toContain('text-[var(--app-link)]')
     })
 
     it('toggles the settings sheet closed when the model value button is clicked again', () => {

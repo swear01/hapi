@@ -39,7 +39,8 @@ type LauncherInternals = {
 function createLauncher(
     setMode: (sessionId: string, mode: string) => Promise<void>,
     onModelRollback?: (model: string | null) => void,
-    onEffortChange?: (effort: string | null) => void
+    onEffortChange?: (effort: string | null) => void,
+    effort?: string
 ) {
     const session = {
         sendSessionEvent: vi.fn(),
@@ -49,7 +50,7 @@ function createLauncher(
         setEffort: vi.fn(),
         pushKeepAlive: vi.fn()
     } as unknown as CopilotSession;
-    const launcher = new CopilotRemoteLauncher(session, { onModelRollback, onEffortChange });
+    const launcher = new CopilotRemoteLauncher(session, { onModelRollback, onEffortChange, effort });
     const internals = launcher as unknown as LauncherInternals;
     internals.backend = {
         setMode,
@@ -60,10 +61,10 @@ function createLauncher(
 }
 
 describe('CopilotRemoteLauncher.applyAgentMode', () => {
-    it('delivers a queued prompt when an advertised effort is rejected by the provider', async () => {
-        const { launcher, session } = createLauncher(vi.fn());
+    it.each(['queued', 'startup'])('delivers a prompt when an advertised effort is rejected during %s', async (phase) => {
+        const { launcher, session } = createLauncher(vi.fn(), undefined, undefined, phase === 'startup' ? 'low' : undefined);
         const queue = new MessageQueue2<CopilotMode>(mode => JSON.stringify(mode));
-        queue.push('deliver this prompt', { permissionMode: 'default', effort: 'low' });
+        queue.push('deliver this prompt', { permissionMode: 'default', effort: phase === 'queued' ? 'low' : undefined });
         queue.close();
         const backend = {
             initialize: vi.fn(async () => {}), newSession: vi.fn(async () => 'copilot-session'),
@@ -83,6 +84,7 @@ describe('CopilotRemoteLauncher.applyAgentMode', () => {
         try {
             await (launcher as unknown as { runMainLoop: () => Promise<void> }).runMainLoop();
             expect(backend.setConfigOption).toHaveBeenCalledWith('copilot-session', 'thought_level', 'low');
+            expect(session.setEffort).toHaveBeenCalledWith('medium');
             expect(backend.prompt).toHaveBeenCalledWith('copilot-session', [{ type: 'text', text: 'deliver this prompt' }], expect.any(Function));
             expect(session.sendSessionEvent).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('Invalid params') }));
         } finally {

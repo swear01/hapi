@@ -152,9 +152,6 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
             try {
                 await this.applyEffort(this.effort);
             } catch (error) {
-                if (!isEffortUnavailableError(error)) {
-                    throw error;
-                }
                 const message = error instanceof Error ? error.message : String(error);
                 logger.warn('[kimi-remote] Startup effort is unavailable for the active model', error);
                 this.publishEffort(discoveredEffort);
@@ -466,11 +463,6 @@ export class KimiRemoteLauncher extends RemoteLauncherBase {
     private async handleSwitchRequest(): Promise<void> {
         await this.requestExit('switch', () => this.handleAbort());
     }
-}
-
-function isEffortUnavailableError(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return /unsupported .* effort|effort (?:reset|switching) is unavailable/i.test(message);
 }
 
 function toAcpMcpServers(config: Record<string, { command: string; args: string[] }>): McpServerStdio[] {
