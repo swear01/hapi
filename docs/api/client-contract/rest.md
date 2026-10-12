@@ -46,7 +46,7 @@ Source: `hub/src/web/routes/sessions.ts`; request schemas in `shared/src/apiType
 | `POST /api/sessions/:id/reopen` | `{}` | `{ok: true, sessionId, resumed: boolean, cursorSessionProtocol?}` (`ReopenSessionResponseSchema`); `422 {error, missing[]}` if metadata is incomplete |
 | `POST /api/sessions/:id/abort` | `{}` | `{ok: true}` (active sessions only) |
 | `POST /api/sessions/:id/stop` | `{}` | `{ok: true, alreadyStopped: boolean}`; stops the process without archiving; shared Codex returns 409 before RPC because its runtime cannot stop one session without archiving |
-| `POST /api/sessions/:id/archive` | `{}` | `{ok: true}` or `{ok: true, alreadyArchived: true}`; idempotent for inactive sessions |
+| `POST /api/sessions/:id/archive` | `{}` | `{ok: true}` or `{ok: true, alreadyArchived: true}`; inactive rows without an archived or live (`running`/`idle`) lifecycle return 409 `{error: 'Session is inactive'}` |
 | `DELETE /api/sessions/:id` | — | `{ok: true}` after runner exit confirmation; 409 while active (archive first); failed confirmation preserves the record |
 | `PATCH /api/sessions/:id` | `{name}` (1–255 chars) | `{ok: true}` (rename) |
 | `PATCH /api/sessions/:id/summary` | `{text}` (1–255 chars) | `{ok: true}` |

@@ -49,7 +49,7 @@ Choose a supported coding agent from your terminal and control its sessions remo
 - `hapi ping-peer <exact-session-id> --message-file - --json` - Resume if needed and message one explicitly selected session. After an ambiguous response failure, retry the identical message with the returned `remitId` via `--remit-id UUID`.
 - `hapi abort-peer <exact-session-id> --json` - Abort the current turn.
 - `hapi stop-peer <exact-session-id> --json` - Idempotently stop the session process without archiving. Shared Codex rejects this operation: use `abort-peer` to interrupt its turn or explicitly `archive-peer` to archive it. If the CLI is unreachable, stop can only confirm an already-dead recorded PID; it refuses runner termination that could archive the record.
-- `hapi archive-peer <exact-session-id> --json` - Idempotently stop and archive the session.
+- `hapi archive-peer <exact-session-id> --json` - Idempotently stop and archive an active, live-lifecycle, or already-archived session. Inactive rows without a running/idle or archived lifecycle are rejected with 409.
 - `hapi delete-peer <exact-session-id> --json` - Delete an inactive session record after confirming runner process exit; failed confirmation preserves the record.
 
 The peer commands reject prefixes. Successful `--json` output has `ok: true`; errors use `ok: false`, a stable error code, and a non-zero exit status.

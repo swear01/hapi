@@ -449,8 +449,8 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
     })
 
     app.post('/sessions/:id/archive', async (c) => {
-        // Exact-id lifecycle cleanup is idempotent for active, inactive, and
-        // already-archived rows.
+        // Exact-id lifecycle cleanup is idempotent for active, inactive live-lifecycle,
+        // and already-archived rows.
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
