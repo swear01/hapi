@@ -260,11 +260,10 @@ final class ToolTranscriptPresentationTests: XCTestCase {
         XCTAssertEqual(cell.frame.minY - collection.contentOffset.y, anchorY, accuracy: 1)
         let count = collection.numberOfItems(inSection: 0)
         collection.scrollToItem(at: IndexPath(item: count - 1, section: 0), at: .bottom, animated: false)
-        try await Task.sleep(for: .milliseconds(150))
-        XCTAssertNil(collection.cellForItem(at: IndexPath(item: index, section: 0)))
+        try await eventually { collection.cellForItem(at: IndexPath(item: index, section: 0)) == nil }
         collection.delegate?.scrollViewWillBeginDragging?(collection)
         collection.scrollToItem(at: IndexPath(item: index, section: 0), at: .top, animated: false)
-        try await Task.sleep(for: .milliseconds(200))
+        try await eventually { collection.cellForItem(at: IndexPath(item: index, section: 0)) != nil }
         let returned = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: index, section: 0)))
         XCTAssertGreaterThan(returned.frame.height, initialHeight + 100)
         let restoredY = returned.frame.minY - collection.contentOffset.y
