@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { describe, expect, it, mock, spyOn } from 'bun:test'
 import { createHash } from 'node:crypto'
 import type { SpawnSessionWithRemitRequest } from '@hapi/protocol/apiTypes'
 import type { SpawnRemitOperation } from '@hapi/protocol/schemas'
@@ -694,6 +694,45 @@ describe('spawnSessionWithRemit', () => {
 })
 
 describe('stopSession', () => {
+    it('waits for the acknowledged wrapper PID to exit without signaling it', async () => {
+        const stopRunnerSession = mock()
+            .mockResolvedValueOnce('unknown')
+            .mockResolvedValueOnce('already_gone')
+        const result = await SyncEngine.prototype.stopSession.call({
+            getSession: () => ({ active: false, metadata: { machineId: 'machine-1', startedBy: 'runner', hostPid: 4242 } }),
+            rpcGateway: { stopSessionProcess: async () => ({ pid: 4343 }), stopRunnerSession },
+        } as unknown as SyncEngine, SESSION_ID)
+        expect(result).toEqual({ alreadyStopped: false })
+        expect(stopRunnerSession.mock.calls).toEqual([
+            ['machine-1', 'PID-4343'], ['machine-1', 'PID-4343'],
+        ])
+    })
+
+    it('never archives an expired-lease wrapper through a destructive runner fallback', async () => {
+        const session = { id: SESSION_ID, active: false, metadata: {
+            machineId: 'machine-1', startedBy: 'runner', hostPid: 4242, lifecycleState: 'running'
+        } }
+        const stopSessionProcess = mock(async () => { throw new RpcTargetMissingError('kill-session', 'socket-disconnected') })
+        const stopRunnerSession = mock(async (_machineId: string, target: string) => {
+            if (target === SESSION_ID) {
+                // Runner SIGTERM invokes the wrapper's archiving cleanup.
+                session.metadata.lifecycleState = 'archived'
+                return 'stopped' as const
+            }
+            return 'unknown' as const
+        })
+        const clock = spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(15_001)
+        const error = await SyncEngine.prototype.stopSession.call({
+            getSession: () => session,
+            rpcGateway: { stopSessionProcess, stopRunnerSession },
+        } as unknown as SyncEngine, SESSION_ID).catch(error => error)
+        clock.mockRestore()
+        expect(session.metadata.lifecycleState).toBe('running')
+        expect(stopSessionProcess).toHaveBeenCalledWith(SESSION_ID)
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', 'PID-4242')
+        expect(error).toBeInstanceOf(Error)
+    })
+
     it('is idempotent when the process is already inactive', async () => {
         const killSession = mock(async () => {})
         const result = await SyncEngine.prototype.stopSession.call({
@@ -707,26 +746,26 @@ describe('stopSession', () => {
 
     it('stops a live runner process even when its Hub lease already expired', async () => {
         const stopSessionProcess = mock(async () => {})
-        const stopRunnerSession = mock(async () => 'stopped' as const)
+        const stopRunnerSession = mock(async () => 'already_gone' as const)
         const result = await SyncEngine.prototype.stopSession.call({
             getSession: () => ({
                 id: SESSION_ID,
                 active: false,
-                metadata: { machineId: 'machine-1', startedFromRunner: true }
+                metadata: { machineId: 'machine-1', startedFromRunner: true, hostPid: 4242 }
             }),
             rpcGateway: { stopSessionProcess, stopRunnerSession }
         } as unknown as SyncEngine, SESSION_ID)
 
         expect(result).toEqual({ alreadyStopped: false })
-        expect(stopSessionProcess).not.toHaveBeenCalled()
-        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
+        expect(stopSessionProcess).toHaveBeenCalledWith(SESSION_ID)
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', 'PID-4242')
     })
 
     it('reconciles an active row when its process is already gone', async () => {
         const handleSessionEnd = mock(() => {})
         const stopRunnerSession = mock(async () => 'already_gone' as const)
         const result = await SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1' } }),
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', hostPid: 4242 } }),
             rpcGateway: {
                 stopSessionProcess: async () => { throw new RpcTargetMissingError('kill-session', 'handler-not-registered') },
                 stopRunnerSession
@@ -735,7 +774,7 @@ describe('stopSession', () => {
         } as unknown as SyncEngine, SESSION_ID)
 
         expect(result).toEqual({ alreadyStopped: false })
-        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', 'PID-4242')
         expect(handleSessionEnd).toHaveBeenCalledWith(expect.objectContaining({ sid: SESSION_ID, reason: 'error' }))
     })
 
@@ -748,7 +787,7 @@ describe('stopSession', () => {
         const stopRunnerSession = mock(async () => 'already_gone' as const)
         let settled = false
         const resultPromise = SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', startedBy: 'runner' } }),
+            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', startedBy: 'runner', hostPid: 4242 } }),
             rpcGateway: {
                 stopSessionProcess: async () => {},
                 stopRunnerSession
@@ -765,7 +804,7 @@ describe('stopSession', () => {
         confirmInactive(true)
 
         await expect(resultPromise).resolves.toEqual({ alreadyStopped: false })
-        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', SESSION_ID)
+        expect(stopRunnerSession).toHaveBeenCalledWith('machine-1', 'PID-4242')
         expect(handleSessionEnd).not.toHaveBeenCalled()
     })
 
@@ -785,33 +824,43 @@ describe('stopSession', () => {
     })
 
     it.each(['still_alive', 'unknown'] as const)('fails closed when runner exit is unconfirmed: %s', async status => {
-        await expect(SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', startedFromRunner: true } }),
-            rpcGateway: {
-                stopSessionProcess: async () => {},
-                stopRunnerSession: async () => status
-            },
-            waitForSessionInactive: async () => true
-        } as unknown as SyncEngine, SESSION_ID)).rejects.toThrow(status === 'still_alive' ? /still running/ : /could not be confirmed/)
+        const clock = spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(15_001)
+        try {
+            await expect(SyncEngine.prototype.stopSession.call({
+                getSession: () => ({ id: SESSION_ID, active: true, metadata: { machineId: 'machine-1', startedFromRunner: true, hostPid: 4242 } }),
+                rpcGateway: {
+                    stopSessionProcess: async () => {},
+                    stopRunnerSession: async () => status
+                },
+                waitForSessionInactive: async () => true
+            } as unknown as SyncEngine, SESSION_ID)).rejects.toThrow(status === 'still_alive' ? /still running/ : /could not be confirmed/)
+        } finally {
+            clock.mockRestore()
+        }
     })
 
     it.each(['already_gone', 'unknown', 'still_alive'] as const)(
         'checks an untracked runner session by its recorded PID: %s', async pidStatus => {
             const stopRunnerSession = mock(async (_machineId: string, target: string) =>
-                target === SESSION_ID ? 'unknown' as const : pidStatus)
+                target === 'PID-4242' ? pidStatus : 'unknown' as const)
+            const clock = spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(15_001)
             const result = SyncEngine.prototype.stopSession.call({
                 getSession: () => ({ id: SESSION_ID, active: false, metadata: {
                     machineId: 'machine-1', startedBy: 'runner', hostPid: 4242
                 } }),
-                rpcGateway: { stopRunnerSession }
+                rpcGateway: { stopSessionProcess: async () => { throw new RpcTargetMissingError('kill-session', 'socket-disconnected') }, stopRunnerSession }
             } as unknown as SyncEngine, SESSION_ID)
 
-            if (pidStatus === 'already_gone') {
-                await expect(result).resolves.toEqual({ alreadyStopped: true })
-            } else {
-                await expect(result).rejects.toThrow(/could not be confirmed|still running/)
+            try {
+                if (pidStatus === 'already_gone') {
+                    await expect(result).resolves.toEqual({ alreadyStopped: true })
+                } else {
+                    await expect(result).rejects.toThrow(/could not be confirmed|still running/)
+                }
+            } finally {
+                clock.mockRestore()
             }
-            expect(stopRunnerSession.mock.calls.map((call) => call[1])).toEqual([SESSION_ID, 'PID-4242'])
+            expect(stopRunnerSession.mock.calls.map((call) => call[1])).toEqual(['PID-4242'])
         }
     )
 })
@@ -874,9 +923,10 @@ describe('deleteSession', () => {
             getSession: () => ({ active: false, metadata: {
                 machineId: 'machine-1', startedBy: 'runner', hostPid: 4242
             } }),
-            stopSession: SyncEngine.prototype.stopSession,
-            rpcGateway: { stopRunnerSession },
-            sessionCache: { deleteSession }
+            archiveSession: SyncEngine.prototype.archiveSession,
+            rpcGateway: { killSession: async () => { throw new RpcTargetMissingError('killSession', 'socket-disconnected') }, stopRunnerSession },
+            sessionCache: { deleteSession, getSession: () => ({ metadata: { machineId: 'machine-1', startedBy: 'runner', hostPid: 4242 } }), markSessionArchivedFromHub: () => {} },
+            emitCliSessionMetadataUpdate: () => {}, handleSessionEnd: () => {}
         } as unknown as SyncEngine, SESSION_ID)
 
         expect(deleteSession).toHaveBeenCalledWith(SESSION_ID)
@@ -892,23 +942,28 @@ describe('deleteSession', () => {
                         active: false,
                         metadata: { machineId: 'machine-1', ...runnerMetadata }
                     }),
-                    stopSession: SyncEngine.prototype.stopSession,
+                    archiveSession: SyncEngine.prototype.archiveSession,
                     rpcGateway: {
+                        killSession: async () => { throw new RpcTargetMissingError('killSession', 'socket-disconnected') },
                         stopRunnerSession: mock(async () => {
                             events.push('runner')
                             if (status === 'unreachable') throw new Error('Runner unavailable')
                             return status
                         })
                     },
-                    sessionCache: { deleteSession: mock(async () => { events.push('deleted') }) }
+                    sessionCache: {
+                        deleteSession: mock(async () => { events.push('deleted') }),
+                        getSession: () => ({ metadata: { machineId: 'machine-1', ...runnerMetadata } }), markSessionArchivedFromHub: () => {},
+                    },
+                    emitCliSessionMetadataUpdate: () => {}, handleSessionEnd: () => {},
+                    store: { sessions: { getSession: () => undefined } }
                 }
                 const result = SyncEngine.prototype.deleteSession.call(harness as unknown as SyncEngine, SESSION_ID)
                 if (status === 'still_alive' || status === 'unknown' || status === 'unreachable') {
-                    await expect(result).rejects.toThrow(status === 'still_alive' ? /still running/ : status === 'unknown' ? /could not be confirmed/ : /unavailable/)
+                    await expect(result).rejects.toThrow(status === 'still_alive' ? /still running/ : /still running|could not be stopped/)
                     expect(events).toEqual(['runner'])
                     expect(harness.sessionCache.deleteSession).not.toHaveBeenCalled()
                 } else {
-                    expect(events).toEqual(['runner'])
                     await result
                     expect(events).toEqual(['runner', 'deleted'])
                     expect(harness.sessionCache.deleteSession).toHaveBeenCalledWith(SESSION_ID)

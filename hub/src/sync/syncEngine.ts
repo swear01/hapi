@@ -1949,34 +1949,41 @@ export class SyncEngine {
         if (!session.active && !runnerBacked) return { alreadyStopped: true }
 
         let inactive = !session.active
-        if (session.active) {
-            try {
-                await this.rpcGateway.stopSessionProcess(sessionId)
-                inactive = await this.waitForSessionInactive(sessionId)
-            } catch (error) {
-                if (!(error instanceof RpcTargetMissingError)) throw error
-            }
+        let reportedPid: number | undefined
+        let cliUnavailable = false
+        try {
+            const stopped = await this.rpcGateway.stopSessionProcess(sessionId)
+            reportedPid = stopped?.pid
+            if (session.active) inactive = await this.waitForSessionInactive(sessionId)
+        } catch (error) {
+            if (!(error instanceof RpcTargetMissingError)) throw error
+            cliUnavailable = true
         }
-        if (inactive && !runnerBacked) return { alreadyStopped: false }
+        if (inactive && !runnerBacked && !cliUnavailable) return { alreadyStopped: false }
 
         const machineId = session.metadata?.machineId
-        if (!machineId) throw new Error('Cannot confirm session process exit without a machine id')
-        let status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
-        if (status === 'unknown') {
-            const hostPid = session.metadata?.hostPid
-            if (typeof hostPid === 'number' && hostPid > 0) {
-                status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${hostPid}`)
-            }
+        const hostPid = reportedPid ?? session.metadata?.hostPid
+        if (!machineId || typeof hostPid !== 'number' || !Number.isInteger(hostPid) || hostPid <= 0) {
+            throw new Error('Cannot confirm session process exit without a machine id and recorded PID')
         }
-        if (status === 'still_alive' || status === 'unknown') {
+        // Raw PID probes without a start marker do not terminate live processes.
+        // Session-id termination may SIGTERM another
+        // wrapper generation whose cleanup would archive the same Hub row.
+        const deadline = Date.now() + 15_000
+        let status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${hostPid}`)
+        while ((status === 'unknown' || status === 'still_alive') && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 250))
+            status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${hostPid}`)
+        }
+        if (status !== 'already_gone') {
             throw new Error(status === 'still_alive'
                 ? 'Session process is still running'
-                : 'Session process exit could not be confirmed')
+                : 'Session process exit could not be confirmed without archiving')
         }
         if (!inactive && this.getSession(sessionId)?.active) {
             this.handleSessionEnd({ sid: sessionId, time: Date.now(), reason: 'error' })
         }
-        return { alreadyStopped: !session.active && status === 'already_gone' }
+        return { alreadyStopped: !session.active && cliUnavailable }
     }
 
     /**
@@ -2235,7 +2242,7 @@ export class SyncEngine {
         const session = this.getSession(sessionId)
         if (session?.active) throw new Error('Cannot delete active session')
         if (session?.metadata?.startedBy === 'runner' || session?.metadata?.startedFromRunner === true) {
-            await this.stopSession(sessionId)
+            await this.archiveSession(sessionId)
         }
         await this.sessionCache.deleteSession(sessionId)
     }

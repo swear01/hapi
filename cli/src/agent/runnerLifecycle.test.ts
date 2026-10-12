@@ -143,6 +143,8 @@ describe('createRunnerLifecycle archiveReason defaults (tiann/hapi#914)', () => 
         const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
 
         await lifecycle.stopAndExit()
+        // SIGTERM uses cleanupAndExit; it must retain the established stop intent.
+        await lifecycle.cleanupAndExit()
 
         expect(session.metadataWrites).toHaveLength(0)
         expect(session.sendSessionDeath).toHaveBeenCalled()
