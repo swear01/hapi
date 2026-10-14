@@ -1318,6 +1318,7 @@ export function HappyComposer(props: {
         api,
         attachments,
         canSend,
+        blocksScheduling,
         draftHydration.hasStoredAttachments,
         hasAttachments,
         hasText,
