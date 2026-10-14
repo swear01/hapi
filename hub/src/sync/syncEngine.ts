@@ -1946,9 +1946,8 @@ export class SyncEngine {
         if (!session) return { alreadyStopped: true }
         const runnerBacked = session.metadata?.startedBy === 'runner'
             || session.metadata?.startedFromRunner === true
-        if (!session.active && !runnerBacked) return { alreadyStopped: true }
-
-        let inactive = !session.active
+        const wasActive = session.active
+        let inactive = !wasActive
         let reportedPid: number | undefined
         let cliUnavailable = false
         try {
@@ -1959,7 +1958,7 @@ export class SyncEngine {
             if (!(error instanceof RpcTargetMissingError)) throw error
             cliUnavailable = true
         }
-        if (inactive && !runnerBacked && !cliUnavailable) return { alreadyStopped: false }
+        if (wasActive && inactive && !runnerBacked && !cliUnavailable) return { alreadyStopped: false }
 
         const machineId = session.metadata?.machineId
         const hostPid = reportedPid ?? session.metadata?.hostPid

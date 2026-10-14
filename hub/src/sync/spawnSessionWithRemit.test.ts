@@ -694,6 +694,56 @@ describe('spawnSessionWithRemit', () => {
 })
 
 describe('stopSession', () => {
+    it.each(['already_gone', 'unknown', 'still_alive'] as const)(
+        'confirms process exit after an expired terminal lease: %s', async status => {
+            const session = { id: SESSION_ID, active: false, metadata: {
+                machineId: 'machine-1', startedBy: 'terminal', hostPid: 4242, lifecycleState: 'running'
+            } }
+            const stopSessionProcess = mock(async () => { throw new RpcTargetMissingError('kill-session', 'socket-disconnected') })
+            const stopRunnerSession = mock(async (_machineId: string, _target: string) => status)
+            const clock = spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(15_001)
+            try {
+                const result = SyncEngine.prototype.stopSession.call({
+                    getSession: () => session,
+                    rpcGateway: { stopSessionProcess, stopRunnerSession },
+                } as unknown as SyncEngine, SESSION_ID)
+                if (status === 'already_gone') {
+                    await expect(result).resolves.toEqual({ alreadyStopped: true })
+                } else {
+                    await expect(result).rejects.toThrow(/could not be confirmed|still running/)
+                }
+                expect(stopSessionProcess).toHaveBeenCalledWith(SESSION_ID)
+                expect(stopRunnerSession.mock.calls).toEqual([['machine-1', 'PID-4242']])
+                expect(session.metadata.lifecycleState).toBe('running')
+            } finally {
+                clock.mockRestore()
+            }
+        },
+    )
+
+    it('waits for the acknowledged terminal PID after an expired terminal lease', async () => {
+        const stopSessionProcess = mock(async () => ({ pid: 4343 }))
+        const stopRunnerSession = mock().mockResolvedValueOnce('unknown').mockResolvedValueOnce('already_gone')
+        const result = await SyncEngine.prototype.stopSession.call({
+            getSession: () => ({ active: false, metadata: { machineId: 'machine-1', startedBy: 'terminal', hostPid: 4242 } }),
+            rpcGateway: { stopSessionProcess, stopRunnerSession },
+        } as unknown as SyncEngine, SESSION_ID)
+        expect(result).toEqual({ alreadyStopped: false })
+        expect(stopSessionProcess).toHaveBeenCalledWith(SESSION_ID)
+        expect(stopRunnerSession.mock.calls).toEqual([['machine-1', 'PID-4343'], ['machine-1', 'PID-4343']])
+    })
+
+    it('fails closed without process evidence after an expired terminal lease', async () => {
+        const stopSessionProcess = mock(async () => { throw new RpcTargetMissingError('kill-session', 'socket-disconnected') })
+        const stopRunnerSession = mock()
+        await expect(SyncEngine.prototype.stopSession.call({
+            getSession: () => ({ active: false, metadata: { startedBy: 'terminal' } }),
+            rpcGateway: { stopSessionProcess, stopRunnerSession },
+        } as unknown as SyncEngine, SESSION_ID)).rejects.toThrow(/Cannot confirm session process exit/)
+        expect(stopSessionProcess).toHaveBeenCalledWith(SESSION_ID)
+        expect(stopRunnerSession).not.toHaveBeenCalled()
+    })
+
     it('waits for the acknowledged wrapper PID to exit without signaling it', async () => {
         const stopRunnerSession = mock()
             .mockResolvedValueOnce('unknown')
@@ -733,10 +783,10 @@ describe('stopSession', () => {
         expect(error).toBeInstanceOf(Error)
     })
 
-    it('is idempotent when the process is already inactive', async () => {
+    it('is idempotent when the session no longer exists', async () => {
         const killSession = mock(async () => {})
         const result = await SyncEngine.prototype.stopSession.call({
-            getSession: () => ({ id: SESSION_ID, active: false }),
+            getSession: () => undefined,
             rpcGateway: { stopSessionProcess: killSession }
         } as unknown as SyncEngine, SESSION_ID)
 
