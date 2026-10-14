@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useComposerDraft } from './useComposerDraft'
 import type { ApiClient } from '@/api/client'
+import { resolveVoiceSession } from '@/lib/dictationSend'
 import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
 import { getDraftAttachments, saveDraftAttachments } from '@/lib/composer-attachment-drafts'
 import { useRealtimeDictation } from './useRealtimeDictation'
@@ -105,6 +106,46 @@ describe('useRealtimeDictation', () => {
         expect(sendMessage).toHaveBeenCalledExactlyOnceWith('session-A', completion === 'committed'
             ? 'initial text final committed words' : 'initial text partial words', undefined)
         expect(scribe.disconnect).toHaveBeenCalledTimes(1)
+    })
+
+    it('resumes a session that goes offline before background finalization using the live resolver', async () => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn() },
+        })
+        scribe.commit.mockImplementation(() => {})
+        let active = true
+        const getSession = vi.fn(async () => ({ session: { id: 'voice-live', active, permissionMode: 'default' } }))
+        const resumeSession = vi.fn(async () => 'voice-resumed')
+        const sendMessage = vi.fn(async () => {})
+        const api = {
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' })),
+            getSession, resumeSession,
+        } as unknown as ApiClient
+        clearDraft('voice-live')
+        clearDraft('voice-resumed')
+        const { result, unmount } = renderHook(() => useRealtimeDictation({
+            api, provider: 'elevenlabs', mode: 'realtime',
+            onFinalTranscript: vi.fn(), onTextChange: vi.fn(), sendMessage,
+        }))
+        await act(() => result.current.toggle())
+        let pending: Promise<void>
+        act(() => { pending = result.current.stopAndSend('voice-live', 'initial text', undefined, {
+            resolveSessionId: sessionId => resolveVoiceSession(api, sessionId),
+        }) })
+        expect(getSession).not.toHaveBeenCalled()
+        unmount()
+        active = false
+        await act(async () => {
+            (scribe.options as ScribeCallbacks).onCommittedTranscript({ text: 'complete words' })
+            await pending!
+        })
+        expect(getSession).toHaveBeenCalledWith('voice-live')
+        expect(resumeSession).toHaveBeenCalledWith('voice-live', { permissionMode: 'default' })
+        expect(sendMessage).toHaveBeenCalledExactlyOnceWith('voice-resumed', 'initial text complete words', undefined)
+        expect(scribe.disconnect).toHaveBeenCalledTimes(1)
+        clearDraft('voice-live')
+        clearDraft('voice-resumed')
     })
 
     it('closes an ordinary recording on unmount without sending it', async () => {

@@ -1,3 +1,5 @@
+import type { ApiClient } from '@/api/client'
+
 /**
  * Shared eligibility for a voice dictation direct-send.
  *
@@ -34,4 +36,14 @@ export function dictationDirectSendEligible(args: {
  */
 export function isOnSessionPage(pathname: string, sessionId: string): boolean {
     return pathname.replace(/\/$/, '') === `/sessions/${sessionId}`
+}
+
+export async function resolveVoiceSession(
+    api: Pick<ApiClient, 'getSession' | 'resumeSession'>,
+    sessionId: string,
+): Promise<{ sessionId: string; resumed: boolean }> {
+    const { session } = await api.getSession(sessionId)
+    if (session.active) return { sessionId, resumed: false }
+    const resolvedSessionId = await api.resumeSession(sessionId, { permissionMode: session.permissionMode ?? undefined })
+    return { sessionId: resolvedSessionId, resumed: true }
 }
