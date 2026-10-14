@@ -18,7 +18,7 @@ export function CodexUsage(props: { usage?: CodexAccountUsage | null; model?: st
                 </button>
             </Popover.Trigger>
             <Popover.Portal>
-                <Popover.Content side="top" align="start" sideOffset={8} className="z-50 max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] p-3 text-xs shadow-lg">
+                <Popover.Content side="top" align="start" sideOffset={8} className="z-[70] max-w-[calc(100vw-2rem)] rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] p-3 text-xs shadow-lg">
                     {buckets.map(({ label, value }) => (
                         <div key={label} className="mb-2 last:mb-0">
                             <div className="mb-1 font-medium">{label}</div>
