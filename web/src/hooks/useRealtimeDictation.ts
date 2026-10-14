@@ -7,7 +7,7 @@ import {
 } from '@hapi/protocol/voice'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
-import { saveDraft, clearDraft, getDraft } from '@/lib/composer-drafts'
+import { saveDraft, clearDraft, getDraft, getDraftRevision } from '@/lib/composer-drafts'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript, recoverFailedVoiceSend, transferVoiceDraftAfterSend, type DictationPendingSendOptions } from './useDictation'
 import {
@@ -62,7 +62,7 @@ export function useRealtimeDictation(config: {
         if (mountedRef.current) setPartialTranscript(text)
     }, [])
 
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode; options: DictationPendingSendOptions } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; draftRevisionAtStart: number; deliveryMode?: MessageDeliveryMode; options: DictationPendingSendOptions } | null>(null)
 
     const finish = useCallback(async (text: string) => {
         const pendingSend = sendOnFinishRef.current
@@ -86,11 +86,13 @@ export function useRealtimeDictation(config: {
                             pendingSend.sessionId,
                             targetSessionId,
                             pendingSend.draftAtStart,
+                            pendingSend.draftRevisionAtStart,
                             pendingSend.options.onSessionResolved,
                         )
                     }
                     const cur = getDraft(pendingSend.sessionId)
-                    if (cur === '' || cur === pendingSend.draftAtStart) {
+                    if (cur === '' || (cur === pendingSend.draftAtStart
+                        && getDraftRevision(pendingSend.sessionId) === pendingSend.draftRevisionAtStart)) {
                         clearDraft(pendingSend.sessionId)
                     }
                 } catch (sendError) {
@@ -108,6 +110,7 @@ export function useRealtimeDictation(config: {
                         initialText: pendingSend.initialText,
                         failedText: finalMessage,
                         draftAtStart: pendingSend.draftAtStart,
+                        draftRevisionAtStart: pendingSend.draftRevisionAtStart,
                         sourceSessionId: pendingSend.sessionId,
                         sourceDraftAtStart: pendingSend.draftAtStart,
                     })
@@ -146,6 +149,7 @@ export function useRealtimeDictation(config: {
                 initialText: pendingSend.initialText,
                 failedText: finalMessage,
                 draftAtStart: pendingSend.draftAtStart,
+                draftRevisionAtStart: pendingSend.draftRevisionAtStart,
             })
         }
         elevenLabsActiveRef.current = false
@@ -308,7 +312,7 @@ export function useRealtimeDictation(config: {
     }, [fail])
 
     const stopAndSend = useCallback(async (targetSessionId: string, initialText?: string, deliveryMode?: MessageDeliveryMode, options: DictationPendingSendOptions = {}) => {
-        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), deliveryMode, options }
+        sendOnFinishRef.current = { sessionId: targetSessionId, initialText: initialText ?? '', draftAtStart: getDraft(targetSessionId), draftRevisionAtStart: getDraftRevision(targetSessionId), deliveryMode, options }
         await stop()
     }, [stop])
 

@@ -442,3 +442,83 @@ describe('useRealtimeDictation', () => {
         expect(getDraft('session-A')).toBe('replacement typed by user explicit initial text spoken words')
     })
 })
+
+describe('voice sends preserve a repeated follow-up draft', () => {
+    afterEach(() => vi.unstubAllGlobals())
+
+    it.each([
+        ['standard', false, true, false], ['standard', true, false, false], ['standard', true, true, false],
+        ['realtime', false, true, false], ['realtime', true, false, false], ['realtime', true, true, false],
+        ['standard', false, true, true], ['standard', true, true, true],
+        ['realtime', false, true, true], ['realtime', true, true, true],
+    ] as const)('%s send, resumed=%s, unmounted=%s, failed=%s', async (mode, resumed, unmounted, failed) => {
+        const source = `repeat-${mode}-${resumed}-${unmounted}-${failed}`
+        const target = resumed ? `${source}-resumed` : source
+        saveDraft(source, 'continue')
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: vi.fn() }] })) },
+        })
+        class Recorder {
+            static isTypeSupported() { return true }
+            state: RecordingState = 'inactive'
+            mimeType = 'audio/webm'
+            ondataavailable: ((event: BlobEvent) => void) | null = null
+            onerror: (() => void) | null = null
+            onstop: (() => void) | null = null
+            start() { this.state = 'recording' }
+            stop() {
+                this.state = 'inactive'
+                this.ondataavailable?.({ data: new Blob(['audio'], { type: this.mimeType }) } as BlobEvent)
+                this.onstop?.()
+            }
+        }
+        vi.stubGlobal('MediaRecorder', Recorder)
+        scribe.commit.mockImplementation(() => {
+            (scribe.options as ScribeCallbacks).onCommittedTranscript?.({ text: 'spoken words' })
+        })
+        let complete: (() => void) | undefined
+        const sendMessage = vi.fn(() => new Promise<void>((resolve, reject) => {
+            complete = failed ? () => reject(new Error('delivery failed')) : resolve
+        }))
+        const api = {
+            transcribeVoice: vi.fn(async () => ({ text: 'spoken words' })),
+            fetchRealtimeTranscriptionToken: vi.fn(async () => ({ token: 'single-use-token' })),
+        } as unknown as ApiClient
+        const onResolved = vi.fn()
+        const view = renderHook(() => {
+            const [text, setText] = useState('')
+            const hydration = useComposerDraft(source, text, [], false, setText, async () => {})
+            const voice = useDictation({
+                api, provider: mode === 'standard' ? 'openai' : 'elevenlabs', mode,
+                getCurrentText: () => text, onTextChange: setText, sendMessage,
+            })
+            return { text, setText, hydration, voice }
+        })
+        await waitFor(() => expect(view.result.current.hydration.complete).toBe(true))
+        expect(view.result.current.text).toBe('continue')
+        await act(() => view.result.current.voice.toggle())
+        await act(async () => {
+            view.result.current.setText('')
+            await view.result.current.voice.stopAndSend(source, 'continue', undefined, {
+                resolveSessionId: async () => ({ sessionId: target, resumed }),
+                onSessionResolved: onResolved,
+            })
+        })
+        await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(target, 'continue spoken words', undefined))
+        act(() => view.result.current.setText('continue'))
+        if (unmounted) view.unmount()
+        await act(async () => { complete?.() })
+        const expected = failed ? 'continue continue spoken words' : 'continue'
+        await waitFor(() => expect(getDraft(target)).toBe(expected))
+        if (resumed) {
+            await waitFor(() => expect(onResolved).toHaveBeenCalledWith(target))
+            // IndexedDB is unavailable here: fallback copies text without retiring the source.
+            expect(getDraft(source)).toBe(failed ? '' : 'continue')
+        }
+        if (!unmounted) view.unmount()
+        expect(getDraft(target)).toBe(expected)
+        clearDraft(source)
+        clearDraft(target)
+    })
+})

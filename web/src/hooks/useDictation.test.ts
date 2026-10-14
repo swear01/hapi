@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useComposerDraft } from './useComposerDraft'
 import type { ApiClient } from '@/api/client'
-import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
+import { clearDraft, getDraft, getDraftRevision, saveDraft } from '@/lib/composer-drafts'
 import { getDraftAttachments, saveDraftAttachments } from '@/lib/composer-attachment-drafts'
 import { appendTranscript, recoverFailedVoiceSend, useDictation } from './useDictation'
 
@@ -38,6 +38,7 @@ describe('failed voice draft recovery', () => {
             initialText: 'original message',
             failedText: 'original message voice transcript',
             draftAtStart: '',
+            draftRevisionAtStart: getDraftRevision(sessionId),
         }))
 
         expect(result.current.text).toBe('original message voice transcript')

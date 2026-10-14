@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
-import { clearDraft, getDraft, saveDraft } from '@/lib/composer-drafts'
+import { clearDraft, getDraft, getDraftRevision, saveDraft } from '@/lib/composer-drafts'
 import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import type { ConversationStatus } from '@/realtime/types'
 import type { MessageDeliveryMode } from '@hapi/protocol'
@@ -19,6 +19,7 @@ export function transferVoiceDraftAfterSend(
     sourceSessionId: string,
     targetSessionId: string,
     draftAtStart: string,
+    draftRevisionAtStart: number,
     onResolved?: (sessionId: string) => void,
 ): Promise<void> {
     return transferComposerDraftThenNavigate(sourceSessionId, targetSessionId, () => {
@@ -26,7 +27,7 @@ export function transferVoiceDraftAfterSend(
         onResolved?.(targetSessionId)
     }, [], { preserveTargetAttachments: true, textOverride: (sampledSource) => {
         const sourceDraft = getLiveComposerDraft(sourceSessionId)?.getText() ?? sampledSource
-        const followUp = sourceDraft === draftAtStart ? '' : sourceDraft
+        const followUp = sourceDraft === draftAtStart && getDraftRevision(sourceSessionId) === draftRevisionAtStart ? '' : sourceDraft
         return targetSessionId === sourceSessionId
             ? followUp
             : appendTranscript(getLiveComposerDraft(targetSessionId)?.getText() ?? getDraft(targetSessionId), followUp)
@@ -71,6 +72,7 @@ export function recoverFailedVoiceSend(args: {
     failedText: string
     /** Persisted draft baseline captured before the delivery attempt. */
     draftAtStart: string
+    draftRevisionAtStart: number
     sourceSessionId?: string
     sourceDraftAtStart?: string
 }): void {
@@ -81,14 +83,16 @@ export function recoverFailedVoiceSend(args: {
         ? args.sourceSessionId
         : undefined
     const persistedDraft = getDraft(args.recoverySessionId)
+    const edited = getDraftRevision(args.recoverySessionId) !== args.draftRevisionAtStart
     let replacement = liveReplacement !== undefined
-        ? liveReplacement !== args.initialText ? liveReplacement : ''
-        : persistedDraft !== args.draftAtStart ? persistedDraft : ''
+        ? liveReplacement !== args.initialText || edited ? liveReplacement : ''
+        : persistedDraft !== args.draftAtStart || edited ? persistedDraft : ''
     if (sourceSessionId) {
         replacement = target?.getText() ?? persistedDraft
         const sourceDraft = getLiveComposerDraft(sourceSessionId)?.getText()
             ?? (args.mounted ? args.getCurrentText() : getDraft(sourceSessionId))
-        if (sourceDraft && sourceDraft !== args.sourceDraftAtStart && sourceDraft !== args.initialText) {
+        if (sourceDraft && ((sourceDraft !== args.sourceDraftAtStart && sourceDraft !== args.initialText)
+            || getDraftRevision(sourceSessionId) !== args.draftRevisionAtStart)) {
             replacement = appendTranscript(replacement, sourceDraft)
         }
     }
@@ -162,7 +166,7 @@ export function useDictation(config: {
     const chunksRef = useRef<Blob[]>([])
     const operationRef = useRef(0)
     const transcribingRef = useRef(false)
-    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; deliveryMode?: MessageDeliveryMode; options: DictationPendingSendOptions } | null>(null)
+    const sendOnFinishRef = useRef<{ sessionId: string; initialText: string; draftAtStart: string; draftRevisionAtStart: number; deliveryMode?: MessageDeliveryMode; options: DictationPendingSendOptions } | null>(null)
 
     const stopTracks = useCallback(() => {
         if (mediaStreamRef.current) {
@@ -226,9 +230,9 @@ export function useDictation(config: {
 
                     if (!mountedRef.current && !pendingSend) return
 
-                    const draftUnchanged = (sid: string, baseline: string) => {
+                    const draftUnchanged = (sid: string, baseline: string, baselineRevision: number) => {
                         const cur = getDraft(sid)
-                        return cur === '' || cur === baseline
+                        return cur === '' || (cur === baseline && getDraftRevision(sid) === baselineRevision)
                     }
 
                     if (recordingFailed) {
@@ -242,6 +246,7 @@ export function useDictation(config: {
                                 initialText: pendingSend.initialText,
                                 failedText: pendingSend.initialText,
                                 draftAtStart: pendingSend.draftAtStart,
+                                draftRevisionAtStart: pendingSend.draftRevisionAtStart,
                             })
                         }
                         if (mountedRef.current) {
@@ -262,6 +267,7 @@ export function useDictation(config: {
                                 initialText: pendingSend.initialText,
                                 failedText: pendingSend.initialText,
                                 draftAtStart: pendingSend.draftAtStart,
+                                draftRevisionAtStart: pendingSend.draftRevisionAtStart,
                             })
                         }
                         if (mountedRef.current) {
@@ -298,10 +304,11 @@ export function useDictation(config: {
                                             pendingSend.sessionId,
                                             targetSessionId,
                                             pendingSend.draftAtStart,
+                                            pendingSend.draftRevisionAtStart,
                                             pendingSend.options.onSessionResolved,
                                         )
                                     }
-                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart)) {
+                                    if (draftUnchanged(pendingSend.sessionId, pendingSend.draftAtStart, pendingSend.draftRevisionAtStart)) {
                                         clearDraft(pendingSend.sessionId)
                                     }
                                 } catch (sendError) {
@@ -319,6 +326,7 @@ export function useDictation(config: {
                                         initialText: pendingSend.initialText,
                                         failedText: finalMessage,
                                         draftAtStart: pendingSend.draftAtStart,
+                                        draftRevisionAtStart: pendingSend.draftRevisionAtStart,
                                         sourceSessionId: pendingSend.sessionId,
                                         sourceDraftAtStart: pendingSend.draftAtStart,
                                     })
@@ -351,6 +359,7 @@ export function useDictation(config: {
                                 initialText: pendingSend.initialText,
                                 failedText: pendingSend.initialText,
                                 draftAtStart: pendingSend.draftAtStart,
+                                draftRevisionAtStart: pendingSend.draftRevisionAtStart,
                             })
                         }
                         if (mountedRef.current) {
@@ -391,6 +400,7 @@ export function useDictation(config: {
             sessionId: targetSessionId,
             initialText: initialText ?? config.getCurrentText(),
             draftAtStart: getDraft(targetSessionId),
+            draftRevisionAtStart: getDraftRevision(targetSessionId),
             deliveryMode,
             options
         }

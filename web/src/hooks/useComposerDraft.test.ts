@@ -6,6 +6,7 @@ import { createElement, useEffect, useState } from 'react'
 vi.mock('@/lib/composer-drafts', () => ({
     getDraft: vi.fn(() => ''),
     saveDraft: vi.fn(),
+    markDraftEdited: vi.fn(),
 }))
 vi.mock('@/lib/composer-attachment-drafts', () => ({
     getDraftAttachments: vi.fn(async () => []),

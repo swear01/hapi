@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getDraft, saveDraft } from '@/lib/composer-drafts'
+import { getDraft, markDraftEdited, saveDraft } from '@/lib/composer-drafts'
 import {
     getDraftAttachments,
     getRestoredUploadMetadata,
@@ -50,6 +50,7 @@ export function useComposerDraft(
     setText: (text: string) => void,
     addAttachment: (file: File) => Promise<void>,
 ): ComposerDraftHydration {
+    const textRevisionRef = useRef({ sessionId, text: composerText })
     const composerTextRef = useRef(composerText)
     composerTextRef.current = composerText
     const setTextRef = useRef(setText)
@@ -113,6 +114,7 @@ export function useComposerDraft(
                     restoredAny: true,
                     hasStoredAttachments: false,
                 })
+                textRevisionRef.current = { sessionId, text: draft }
                 composerTextRef.current = draft!
                 setText(draft!)
             }
@@ -238,6 +240,14 @@ export function useComposerDraft(
             attachmentsReadyRef.current = false
         }
     }, [sessionId, canRestoreAttachments]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        const previous = textRevisionRef.current
+        if (sessionId && previous.sessionId === sessionId && previous.text !== composerText) {
+            markDraftEdited(sessionId)
+        }
+        textRevisionRef.current = { sessionId, text: composerText }
+    }, [sessionId, composerText])
 
     return hydration
 }
