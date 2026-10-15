@@ -183,8 +183,9 @@ export class SharedCodexProjection {
                 // A proposal is durable content, not a native approval request.
                 send({ type: 'tool-call-result', callId: planId, output: null }, `${key}:result`);
             } else if (event.type === 'plan_update') {
-                send({ type: 'tool-call', name: 'update_plan', callId: 'codex-plan-state', input: { plan: event.plan, source: 'codex' } }, key);
-                send({ type: 'tool-call-result', callId: 'codex-plan-state', output: { plan: event.plan, source: 'codex', status: 'updated' } }, `${key}:result`);
+                const callId = turnId ? `codex-plan-state:${turnId}` : 'codex-plan-state';
+                send({ type: 'tool-call', name: 'update_plan', callId, input: { plan: event.plan, source: 'codex' } }, key);
+                send({ type: 'tool-call-result', callId, output: { plan: event.plan, source: 'codex', status: 'updated' } }, `${key}:result`);
             } else if (event.type === 'generated_image' && typeof event.saved_path === 'string') {
                 const image = await registerGeneratedImageFromPath({ path: event.saved_path, id: createHash('sha256').update(`${this.threadId}:${key}`).digest('hex'), fileName: string(event.file_name) });
                 if (image) send({ type: 'generated-image', imageId: image.id, fileName: image.fileName, mimeType: image.mimeType }, key);

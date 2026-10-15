@@ -1268,6 +1268,33 @@ function createSessionStub(
 }
 
 describe('codexRemoteLauncher', () => {
+    it('keeps plan cards distinct across native turns and stable within each turn', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, codexMessages } = createSessionStub(['first'], createMode(), false, false);
+        const running = codexRemoteLauncher(session as never);
+        for (let index = 1; index <= 2; index += 1) {
+            await vi.waitFor(() => expect(harness.startTurnThreadIds).toHaveLength(index));
+            const turnId = `turn-${index}`;
+            for (const status of ['pending', 'completed']) {
+                harness.dispatchNotification?.('turn/plan/updated', {
+                    threadId: 'thread-1', turnId, plan: [{ step: 'work', status }]
+                });
+            }
+            harness.dispatchNotification?.('turn/completed', { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } });
+            if (index === 1) session.queue.push('second', createMode());
+        }
+        session.queue.close();
+        await expect(running).resolves.toBe('exit');
+        const plans = codexMessages.filter((message): message is Record<string, unknown> =>
+            typeof message === 'object' && message !== null && 'callId' in message);
+        for (const type of ['tool-call', 'tool-call-result']) {
+            expect(plans.filter(message => message.type === type).map(message => message.callId)).toEqual([
+                'codex-plan-state:turn-1', 'codex-plan-state:turn-1',
+                'codex-plan-state:turn-2', 'codex-plan-state:turn-2'
+            ]);
+        }
+    });
+
     it('persists the matching live app-server duration and ignores child or stale terminals', async () => {
         harness.suppressTurnCompletion = true;
         const { session, codexMessages } = createSessionStub(['first message']);

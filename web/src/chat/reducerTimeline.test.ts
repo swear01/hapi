@@ -350,6 +350,32 @@ describe('reduceTimeline', () => {
         expect((blocks[0] as { roundSummary?: { durationMs?: number } }).roundSummary?.durationMs).toBeUndefined()
     })
 
+    it('preserves completed Round summaries on plan cards scoped to each native turn', () => {
+        const messages: TracedMessage[] = []
+        for (const [index, turnId] of ['first', 'second'].entries()) {
+            messages.push(makeUserMessage(`prompt ${turnId}`, { id: `user-${turnId}` }))
+            const callId = `codex-plan-state:${turnId}`
+            for (const [messageIndex, data] of [
+                { type: 'tool-call', name: 'update_plan', callId, input: { plan: [{ step: turnId, status: 'completed' }] } },
+                { type: 'tool-call-result', callId, output: { status: 'updated' } },
+                { type: 'message', message: `${turnId} answer` },
+                { type: 'token_count', flavor: 'codex', model: 'gpt-5.4',
+                    info: { last_token_usage: { input_tokens: 100 * (index + 1), output_tokens: 10 } } },
+                { type: 'turn_duration', flavor: 'codex', durationMs: 1000 * (index + 1) }
+            ].entries()) {
+                messages.push(normalizeAgentRecord(`${turnId}-${messageIndex}`, null, messages.length,
+                    { type: 'codex', data: { ...data, turn_id: turnId } })!)
+            }
+        }
+        const { blocks } = reduceTimeline(messages, makeContext())
+        const plans = blocks.filter(block => block.kind === 'tool-call')
+        expect(plans).toHaveLength(2)
+        for (const [index, plan] of plans.entries()) {
+            expect(plan).toMatchObject({ roundSummary: { turnId: index === 0 ? 'first' : 'second',
+                durationMs: 1000 * (index + 1), usage: { input_tokens: 100 * (index + 1) } } })
+        }
+    })
+
     it('does not derive a Round summary from unmarked token usage', () => {
         const assistant = makeAgentMessage('Imported Codex answer', {
             id: 'imported-codex-answer',

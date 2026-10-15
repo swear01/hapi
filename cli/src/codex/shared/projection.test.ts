@@ -4,6 +4,24 @@ import { SharedCodexProjection, inputText } from './projection';
 import { codexPlanProposalId } from './plan';
 
 describe('shared history projection', () => {
+    it('keeps plan cards distinct across native turns and stable within each turn', async () => {
+        const send = vi.fn();
+        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+        const projection = new SharedCodexProjection(session, 'thread', async () => {});
+        for (const turnId of ['first', 'second']) {
+            for (const status of ['pending', 'completed']) {
+                await projection.notification('turn/plan/updated', { threadId: 'thread', turnId,
+                    plan: [{ step: 'work', status }] });
+            }
+        }
+        for (const type of ['tool-call', 'tool-call-result']) {
+            expect(send.mock.calls.map(([body]) => body).filter(body => body.type === type).map(body => body.callId)).toEqual([
+                'codex-plan-state:first', 'codex-plan-state:first',
+                'codex-plan-state:second', 'codex-plan-state:second'
+            ]);
+        }
+    });
+
     it.each([undefined, 'root'])('persists proposals without approval and replays the same IDs (parent: %s)', async parentThreadId => {
         const send = vi.fn();
         const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;

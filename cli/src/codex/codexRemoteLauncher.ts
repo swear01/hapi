@@ -3287,10 +3287,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             }
             if (msgType === 'plan_update') {
+                const turnId = eventTurnId ?? this.currentTurnId;
+                const callId = turnId ? `codex-plan-state:${turnId}` : 'codex-plan-state';
                 sendRootMessage({
                     type: 'tool-call',
                     name: 'update_plan',
-                    callId: 'codex-plan-state',
+                    callId,
                     input: {
                         plan: Array.isArray(msg.plan) ? msg.plan : [],
                         source: 'codex'
@@ -3299,7 +3301,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 });
                 sendRootMessage({
                     type: 'tool-call-result',
-                    callId: 'codex-plan-state',
+                    callId,
                     output: {
                         plan: Array.isArray(msg.plan) ? msg.plan : [],
                         source: 'codex',
