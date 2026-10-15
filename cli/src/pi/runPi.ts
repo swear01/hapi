@@ -307,11 +307,13 @@ export async function runPi(opts: {
 
     let cleanupInitiated = false;
     let steerDispatcher: PiSteerDispatcher | null = null;
+    let transportEvents: ReturnType<typeof wireTransportEvents> | null = null;
     const safeCleanup = async () => {
         if (cleanupInitiated) return;
         cleanupInitiated = true;
         steerDispatcher?.stop();
         piSession.cancelReadyGate();
+        await transportEvents?.flush();
         await lifecycle.cleanupAndExit();
     };
 
@@ -331,12 +333,9 @@ export async function runPi(opts: {
     // Pending user-message localIds in FIFO order
     const pendingLocalIds: string[] = [];
 
-    let transportEvents: ReturnType<typeof wireTransportEvents> | null = null;
-
     // --- Transport error/close handlers ---
     transport.onError((error) => {
         steerDispatcher?.stop();
-        transportEvents?.flush();
         transportEvents?.cancelPendingExtensionUi('Pi transport failed', { sendResponse: false });
         transportEvents?.terminatePendingRpc(error);
         logger.debug(`[pi] Transport error: ${error.message}`);
@@ -349,7 +348,6 @@ export async function runPi(opts: {
 
     transport.onClose((code, signal) => {
         steerDispatcher?.stop();
-        transportEvents?.flush();
         transportEvents?.cancelPendingExtensionUi('Pi session ended', { sendResponse: false });
         transportEvents?.terminatePendingRpc(new Error('Pi session ended'));
         if (killedByCleanup) {

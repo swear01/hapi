@@ -429,7 +429,7 @@ async function publishPiTurnUsage(
 // --- Wire transport events to session ---
 
 export type PiTransportEventController = {
-    flush: () => void;
+    flush: () => Promise<void>;
     cancelPendingExtensionUi: (reason: string, options?: { sendResponse?: boolean }) => void;
     terminatePendingRpc: (error: Error) => void;
     beginPromptLifecycle: (promptId: string) => void;
@@ -610,7 +610,7 @@ export function wireTransportEvents(
         latestContextUsageRequest += 1;
         clearLegacySettleFallback();
         clearPromptLifecycleFallback();
-        flushAccumulator();
+        void flushAccumulator();
         session.updateThinkingState(false);
     };
     const deliverSettlement = (): void => {
@@ -689,7 +689,6 @@ export function wireTransportEvents(
             if (converted) session.sendAgentMessage(converted);
         }
     };
-    const flushAccumulator = (): void => sendMessages(assistantMessageAccumulator.flush());
 
     // Serializes chat publishing so tool results (which may await image
     // registration) can never overtake the assistant snapshot of the next
@@ -697,6 +696,15 @@ export function wireTransportEvents(
     // synchronously line-by-line, so without this chain an assistant
     // `message_end` arriving after a `tool_execution_end` would publish first.
     let publishChain: Promise<void> = Promise.resolve();
+    const flushAccumulator = (): Promise<void> => {
+        publishChain = publishChain
+            .then(() => sendMessages(assistantMessageAccumulator.flush()))
+            .catch((error) => {
+                logger.debug('[pi] Failed to flush assistant output:', error instanceof Error ? error.message : String(error));
+            });
+        return publishChain;
+    };
+
     transport.onEvent((event) => {
         // Legacy Pi emitted auto_compaction_*; normalize it before every
         // lifecycle consumer so both the maintenance gate and timeline see the

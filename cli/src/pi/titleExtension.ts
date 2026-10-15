@@ -76,25 +76,25 @@ export default function hapiTitleExtension(pi) {
             if (!filePath) {
                 return { content: [{ type: 'text', text: 'Error: path must be non-empty' }], details: {} };
             }
-            const { stat, readFile } = await import('node:fs/promises');
-            // Bound resource use before reading: reject non-regular paths (e.g.
-            // /dev/zero) and oversized files up front instead of allocating.
-            let meta;
-            try {
-                meta = await stat(filePath);
-            } catch (error) {
-                const detail = error && error.message ? error.message : String(error);
-                return { content: [{ type: 'text', text: 'Failed to read file: ' + detail }], details: {} };
-            }
-            if (!meta.isFile()) {
-                return { content: [{ type: 'text', text: 'Path is not a regular file' }], details: {} };
-            }
-            if (meta.size > 25 * 1024 * 1024) {
-                return { content: [{ type: 'text', text: 'File exceeds the 25 MiB display limit' }], details: {} };
-            }
+            const { constants, open } = await import('node:fs/promises');
             let bytes;
             try {
-                bytes = await readFile(filePath);
+                // One descriptor and a fixed buffer keep replacement/growth bounded.
+                const handle = await open(filePath, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+                try {
+                    const meta = await handle.stat();
+                    if (!meta.isFile()) throw new Error('Path is not a regular file');
+                    if (meta.size > 25 * 1024 * 1024) throw new Error('File exceeds the 25 MiB display limit');
+                    bytes = Buffer.alloc(meta.size);
+                    for (let offset = 0; offset < bytes.length;) {
+                        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+                        if (bytesRead === 0) throw new Error('File changed while reading');
+                        offset += bytesRead;
+                    }
+                    if ((await handle.stat()).size !== meta.size) throw new Error('File changed while reading');
+                } finally {
+                    await handle.close();
+                }
             } catch (error) {
                 const detail = error && error.message ? error.message : String(error);
                 return { content: [{ type: 'text', text: 'Failed to read file: ' + detail }], details: {} };
@@ -112,7 +112,7 @@ export default function hapiTitleExtension(pi) {
 }
 
 function detectImageMime(bytes) {
-    if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+    if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
     if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
     if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38 && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) return 'image/gif';
     if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';

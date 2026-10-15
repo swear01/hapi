@@ -142,7 +142,6 @@ describe('convertPiEvent', () => {
         });
         expect(result[1]).toHaveProperty('imageId');
         expect(result[1]).toHaveProperty('fileName');
-        ;
     });
 
     it('joins multiple text blocks and skips a malformed image block', async () => {
@@ -168,6 +167,18 @@ describe('convertPiEvent', () => {
             output: 'a\nb',
             status: 'completed',
         }]);
+    });
+
+    it.each([
+        { type: 'image', uri: 'file:///private/image.png' },
+        { type: 'image', url: 'https://example.invalid/image.png' },
+        { type: 'image', data: ONE_PX_PNG, mimeType: 'image/jpeg' },
+    ])('drops image blocks outside the inline bytes/MIME boundary: %j', async (block) => {
+        const result = await convertPiEvent({
+            type: 'tool_execution_end', toolCallId: 'boundary', toolName: 'screenshot', isError: false,
+            result: { content: [{ type: 'text', text: 'kept' }, block] },
+        });
+        expect(result).toEqual([{ type: 'tool_result', id: 'boundary', output: 'kept', status: 'completed' }]);
     });
 
     it('keeps a structured result without images as the plain text output', async () => {

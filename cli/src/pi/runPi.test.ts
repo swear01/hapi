@@ -8,6 +8,7 @@ const harness = vi.hoisted(() => ({
     sent: [] as unknown[],
     throwOnGetCommands: true,
     onError: null as ((error: Error) => void) | null,
+    onClose: null as ((code: number | null, signal: string | null) => void) | null,
     onEvent: null as ((event: Record<string, unknown>) => void) | null,
     rpcHandlers: new Map<string, (payload: unknown) => Promise<unknown>>(),
     killCount: 0,
@@ -73,7 +74,9 @@ vi.mock('./piTransport', () => ({
             harness.onError = callback;
         }
 
-        onClose(): void {}
+        onClose(callback: (code: number | null, signal: string | null) => void): void {
+            harness.onClose = callback;
+        }
 
         onEvent(callback: (event: Record<string, unknown>) => void): void {
             harness.onEvent = callback;
@@ -182,6 +185,33 @@ describe('runPi startup', () => {
         harness.killCount = 0;
         harness.cleanupCount = 0;
         vi.useRealTimers();
+    });
+
+    it.each(['error', 'close'] as const)('drains queued assistant output before cleanup on transport %s', async (boundary) => {
+        harness.throwOnGetCommands = false;
+        const cleanupAtPublish: number[] = [];
+        harness.session.sendAgentMessage.mockReset();
+        harness.session.sendAgentMessage.mockImplementation(() => { cleanupAtPublish.push(harness.cleanupCount); });
+        try {
+            const running = runPi({ workingDirectory: '/work' });
+            for (let i = 0; i < 8; i += 1) await Promise.resolve();
+            harness.onEvent?.({ type: 'message_start' });
+            harness.onEvent?.({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'before' } });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            harness.onEvent?.({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: ' shutdown' } });
+            if (boundary === 'error') harness.onError?.(new Error('stop test transport'));
+            else harness.onClose?.(0, null);
+            await running;
+
+            const messages = harness.session.sendAgentMessage.mock.calls.map(([message]) => message);
+            expect(messages).toEqual([
+                expect.objectContaining({ type: 'message', message: 'before' }),
+                expect.objectContaining({ type: 'message', message: 'before shutdown' }),
+            ]);
+            expect(cleanupAtPublish).toEqual([0, 0]);
+        } finally {
+            harness.session.sendAgentMessage.mockReset();
+        }
     });
 
     it('lets Pi create a fresh session when no resume ID is provided', async () => {
