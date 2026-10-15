@@ -1268,6 +1268,30 @@ function createSessionStub(
 }
 
 describe('codexRemoteLauncher', () => {
+    it('persists the matching live app-server duration and ignores child or stale terminals', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, codexMessages } = createSessionStub(['first message']);
+        const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+        const running = codexRemoteLauncher(session as never);
+        try {
+            await vi.waitFor(() => expect(harness.startTurnThreadIds).toHaveLength(1));
+            now.mockReturnValue(20_000);
+            harness.dispatchNotification?.('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: 'completed' } });
+            harness.dispatchNotification?.('turn/completed', { threadId: 'thread-1', turn: { id: 'old', status: 'completed' } });
+            expect(codexMessages.filter(message => typeof message === 'object' && message !== null
+                && 'type' in message && message.type === 'turn_duration')).toHaveLength(0);
+            now.mockReturnValue(49_426);
+            harness.dispatchNotification?.('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } });
+            await expect(running).resolves.toBe('exit');
+            expect(codexMessages.filter(message => typeof message === 'object' && message !== null
+                && 'type' in message && message.type === 'turn_duration')).toEqual([
+                expect.objectContaining({ turn_id: 'turn-1', durationMs: 39_426 })
+            ]);
+        } finally {
+            now.mockRestore();
+        }
+    });
+
     it('invalidates queued steer handlers after abort or cleanup', () => {
         expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
         expect(isCurrentSteerHandler(4, 3, false)).toBe(false);

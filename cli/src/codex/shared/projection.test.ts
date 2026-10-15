@@ -59,6 +59,26 @@ describe('shared history projection', () => {
             }
         }
     });
+    it('persists a live duration once and never times history snapshots', async () => {
+        const send = vi.fn();
+        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+        const projection = new SharedCodexProjection(session, 'thread', async () => {});
+        await projection.history({ turns: [{ id: 'old', status: 'completed', items: [{ id: 'old-answer', type: 'agentMessage', text: 'history' }] }] });
+        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'old', status: 'completed' } }, undefined, 5000);
+        await projection.history({ turns: [{ id: 'already-running', status: 'inProgress', items: [] }] });
+        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'already-running', status: 'completed' } }, undefined, 6000);
+        expect(send.mock.calls.map(([body]) => body).filter(body => body.type === 'turn_duration')).toEqual([]);
+        await projection.notification('turn/started', { threadId: 'thread', turn: { id: 'live' } }, undefined, 10_000);
+        projection.reset();
+        await projection.history({ turns: [{ id: 'live', status: 'inProgress', items: [] }] });
+        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'old', status: 'completed' } }, undefined, 15_000);
+        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'live', status: 'completed' } }, undefined, 49_426);
+        await projection.notification('turn/completed', { threadId: 'thread', turn: { id: 'live', status: 'completed' } }, undefined, 50_000);
+        expect(send.mock.calls.map(([body]) => body).filter(body => body.type === 'turn_duration')).toEqual([
+            expect.objectContaining({ durationMs: 39_426, turn_id: 'live' })
+        ]);
+    });
+
     it('keeps each turn model through settings changes, reconnect replay and rerouting', async () => {
         const send = vi.fn();
         const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
