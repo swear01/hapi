@@ -204,7 +204,7 @@ describe('useDictation', () => {
         })
 
         await waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload', null, undefined, undefined, undefined)
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'explicit initial text voice payload', expect.stringMatching(/^local-/), undefined, undefined, undefined)
         })
     })
 
@@ -503,7 +503,7 @@ describe('useDictation', () => {
         await act(() => result.current.stopAndSend('session-A', 'initial draft'))
 
         await waitFor(() => {
-            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial draft voice text', null, undefined, undefined, undefined)
+            expect(api.sendMessage).toHaveBeenCalledWith('session-A', 'initial draft voice text', expect.stringMatching(/^local-/), undefined, undefined, undefined)
         })
         expect(getDraft('session-A')).toBe('')
     })

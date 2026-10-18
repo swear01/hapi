@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import { clearDraft, getDraft, getDraftRevision, saveDraft } from '@/lib/composer-drafts'
 import { transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
+import { sendVoiceMessage } from '@/lib/dictationSend'
 import type { ConversationStatus } from '@/realtime/types'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { TranscriptionMode, TranscriptionProvider } from '@hapi/protocol/voice'
@@ -289,7 +290,7 @@ export function useDictation(config: {
                         if (pendingSend) {
                             const finalMessage = appendTranscript(pendingSend.initialText, transcribedText)
                             if (finalMessage.trim()) {
-                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => sendVoiceMessage(config.api!, sid, msg, dm))
                                 let targetSessionId = pendingSend.sessionId
                                 let resumed = false
                                 try {

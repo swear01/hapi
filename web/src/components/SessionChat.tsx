@@ -28,6 +28,7 @@ import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@
 import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
 import { useCodexExplorationCollapse } from '@/hooks/useCodexExplorationCollapse'
 import { isQueuedForInvocation } from '@/lib/messages'
+import { sendVoiceMessage } from '@/lib/dictationSend'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import {
     getCodexModelReasoningEfforts,
@@ -1315,7 +1316,7 @@ function SessionChatInner(props: SessionChatProps) {
                         throw new Error('Message was not accepted')
                     }
                 } else {
-                    await props.api.sendMessage(sessionId, message)
+                    await sendVoiceMessage(props.api, sessionId, message)
                 }
             },
             approvePermission: async (sessionId: string, requestId: string) => {

@@ -8,6 +8,7 @@ import {
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import { saveDraft, clearDraft, getDraft, getDraftRevision } from '@/lib/composer-drafts'
+import { sendVoiceMessage } from '@/lib/dictationSend'
 import type { ConversationStatus } from '@/realtime/types'
 import { appendTranscript, recoverFailedVoiceSend, transferVoiceDraftAfterSend, type DictationPendingSendOptions } from './useDictation'
 import {
@@ -71,7 +72,7 @@ export function useRealtimeDictation(config: {
         if (pendingSend) {
             const finalMessage = appendTranscript(pendingSend.initialText, text)
             if (finalMessage.trim()) {
-                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => config.api!.sendMessage(sid, msg, null, undefined, undefined, dm))
+                const sendMsg = config.sendMessage ?? ((sid: string, msg: string, dm?: MessageDeliveryMode) => sendVoiceMessage(config.api!, sid, msg, dm))
                 let targetSessionId = pendingSend.sessionId
                 let resumed = false
                 try {

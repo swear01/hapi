@@ -1,4 +1,20 @@
 import type { ApiClient } from '@/api/client'
+import type { MessageDeliveryMode } from '@hapi/protocol'
+import { makeClientSideId } from '@/lib/messages'
+
+/**
+ * Voice sends bypass `useSendMessage`, so mint the localId it would. Agents
+ * echo the user turn back with that id (shared Codex `clientUserMessageId`);
+ * without it the hub cannot dedupe the echo and the message shows twice.
+ */
+export function sendVoiceMessage(
+    api: Pick<ApiClient, 'sendMessage'>,
+    sessionId: string,
+    text: string,
+    deliveryMode?: MessageDeliveryMode,
+): Promise<void> {
+    return api.sendMessage(sessionId, text, makeClientSideId('local'), undefined, undefined, deliveryMode)
+}
 
 /**
  * Shared eligibility for a voice dictation direct-send.

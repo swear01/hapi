@@ -23,7 +23,7 @@ import {
 import { useNarrowViewport } from '@/hooks/useNarrowViewport'
 import { shouldInvokeComposerDictateShortcut } from '@/lib/composerDictateShortcut'
 import { isRichComposerMentionsEnabled, resolveComposerPlaceholderKey } from '@/lib/composerSegments'
-import { dictationDirectSendEligible } from '@/lib/dictationSend'
+import { dictationDirectSendEligible, sendVoiceMessage } from '@/lib/dictationSend'
 import type { SessionMentionResolveResult } from '@/components/AssistantChat/RichComposerInput'
 import {
     RichComposerInput,
@@ -521,7 +521,7 @@ export function HappyComposer(props: {
         onTextChange: setComposerText,
         sendMessage: async (sessionId: string, text: string, deliveryMode?: MessageDeliveryMode) => {
             if (props.voiceTranscriptionApi) {
-                await props.voiceTranscriptionApi.sendMessage(sessionId, text, null, undefined, undefined, deliveryMode)
+                await sendVoiceMessage(props.voiceTranscriptionApi, sessionId, text, deliveryMode)
             }
         }
     }), [

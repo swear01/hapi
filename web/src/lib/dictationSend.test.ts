@@ -1,6 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Session } from '@/types/api'
-import { dictationDirectSendEligible, isOnSessionPage, resolveVoiceSession } from './dictationSend'
+import { dictationDirectSendEligible, isOnSessionPage, resolveVoiceSession, sendVoiceMessage } from './dictationSend'
+
+describe('sendVoiceMessage', () => {
+    it('sends each voice message with its own localId so agent echoes dedupe', async () => {
+        const api = { sendMessage: vi.fn(async () => {}) }
+        await sendVoiceMessage(api, 'session-A', 'hello', 'steer')
+        await sendVoiceMessage(api, 'session-A', 'hello')
+
+        const [first, second] = api.sendMessage.mock.calls as unknown as unknown[][]
+        expect(first).toEqual(['session-A', 'hello', expect.stringMatching(/^local-/), undefined, undefined, 'steer'])
+        expect(second![2]).toEqual(expect.stringMatching(/^local-/))
+        expect(second![2]).not.toBe(first![2])
+    })
+})
 
 describe('dictationDirectSendEligible', () => {
     const base = {
