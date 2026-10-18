@@ -161,6 +161,14 @@ Source: `hub/src/web/routes/machines.ts`; schemas `SpawnSessionRequestSchema`, `
 | `POST /api/machines/:id/paths/exists` | `{paths: string[]}` (≤ 1000) | `{exists: Record<string, boolean>, outsideWorkspaceRoots?: string[]}` |
 | `POST /api/machines/:id/restart-runner` | `{}` | `{message}`; errors carry `code: 'machine_not_found' \| 'machine_offline'` |
 
+Atomic `spawn-with-remit` uses one `waitActiveSecs` deadline for transport
+activity, native readiness where required, and CLI reports of every requested
+runtime setting. Reserved model/effort values and saved preferences do not
+confirm runtime configuration. It delivers no remit before confirmation;
+reported mismatches, missing reports at the deadline, and an ended child fail
+with `spawn_selection_mismatch`, `spawn_timeout`, and `spawn_ended` respectively,
+with compensating cleanup.
+
 For automation, `hapi machines --json` returns exact machine IDs plus `workspaceRoots`; `--machine ID` performs exact resolution without prefix matching.
 
 Note the spawn response is discriminated on `type`, not HTTP status — a failed

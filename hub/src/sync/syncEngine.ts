@@ -570,6 +570,7 @@ export class SyncEngine {
         effort?: string | null
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
+        copilotAgentMode?: CopilotAgentMode
     }): void {
         this.sessionCache.handleSessionAlive(payload)
         this.messageService.replayImmediateQueuedMessages(payload.sid)
@@ -2625,14 +2626,51 @@ export class SyncEngine {
             )
         }
 
+        const expectedPermissionMode = request.permissionMode
+            ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
+        const requestedRuntime = {
+            model: request.model,
+            modelReasoningEffort: request.modelReasoningEffort,
+            effort: request.effort,
+            permissionMode: expectedPermissionMode,
+            serviceTier: request.serviceTier,
+            collaborationMode: request.collaborationMode,
+            copilotAgentMode: request.copilotAgentMode
+        }
+        const runtimeKeys = (Object.keys(requestedRuntime) as Array<keyof typeof requestedRuntime>)
+            .filter((key) => requestedRuntime[key] !== undefined)
+        if (runtimeKeys.length > 0) {
+            let confirmed = false
+            while (Date.now() < waitDeadline) {
+                const current = this.getSessionByNamespace(sessionId, namespace)
+                if (!current?.metadata || current.metadata.machineId !== machineId) {
+                    return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
+                }
+                if (!current.active || current.metadata.lifecycleState === 'archived') {
+                    return await fail('spawn_ended', 'New session ended before reporting the requested runtime selection')
+                }
+                // Reservation defaults and saved preferences are not child runtime reports.
+                const reported = this.sessionCache.getReportedRuntime(sessionId)
+                if (runtimeKeys.some((key) => reported?.[key] !== undefined && reported[key] !== requestedRuntime[key])) {
+                    return await fail('spawn_selection_mismatch', 'New session did not apply the requested runtime selection')
+                }
+                if (runtimeKeys.every((key) => reported?.[key] !== undefined)) {
+                    confirmed = true
+                    break
+                }
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, Math.max(1, waitDeadline - Date.now()))))
+            }
+            if (!confirmed) {
+                return await fail('spawn_timeout', 'New session did not report the requested runtime selection')
+            }
+        }
+
         const matchedChild = this.getSessionByNamespace(sessionId, namespace)
         const childMetadata = matchedChild?.metadata
         if (!matchedChild || !childMetadata || childMetadata.machineId !== machineId) {
             return await fail('spawn_identity_mismatch', 'New session identity did not match the requested namespace and runner')
         }
         child = matchedChild
-        const expectedPermissionMode = request.permissionMode
-            ?? (request.yolo ? resolveHapiYoloPermissionMode(expectedAgent) : undefined)
         const targetPath = this.getMachineByNamespace(machineId, namespace)?.metadata?.platform === 'win32' ? win32 : posix
         const worktreeBase = childMetadata.worktree?.basePath
         const relativeToBase = worktreeBase && targetPath.isAbsolute(worktreeBase)

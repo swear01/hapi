@@ -44,6 +44,9 @@ function callSpawn(harness: Record<string, unknown>, request: SpawnSessionWithRe
             spawnSessionWithRemitOnce: SyncEngine['spawnSessionWithRemit']
         }).spawnSessionWithRemitOnce,
         getOrCreateSession: () => reserved,
+        sessionCache: {
+            getReportedRuntime: () => (harness.getSessionByNamespace as (() => unknown) | undefined)?.()
+        },
         getMachineByNamespace: () => ({ metadata: { platform: 'linux' } }),
         getQueuedState: () => ({ queuedLocalIds: [], invokedLocalMessages: [] }),
         persistSpawnRemitOperation: () => true,
