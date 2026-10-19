@@ -18,6 +18,7 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { ArchiveSessionDialog } from '@/components/ArchiveSessionDialog'
 import { CopyIcon, CheckIcon, MarkAllReadIcon } from '@/components/icons'
 
 function PinnedSectionIcon(props: { className?: string }) {
@@ -1406,17 +1407,14 @@ function SessionItem(props: {
             ) : null}
 
             {archiveOpen ? (
-                <ConfirmDialog
+                <ArchiveSessionDialog
                     isOpen={true}
                     onClose={() => setArchiveOpen(false)}
-                    title={t('dialog.archive.title')}
-                    description={t('dialog.archive.description', { name: sessionName })}
-                    confirmLabel={t('dialog.archive.confirm')}
-                    confirmingLabel={t('dialog.archive.confirming')}
+                    sessionId={s.id}
+                    sessionName={sessionName}
+                    active={s.active}
                     onConfirm={archiveSession}
                     isPending={isPending}
-                    destructive
-                    centerTitle
                 />
             ) : null}
 
