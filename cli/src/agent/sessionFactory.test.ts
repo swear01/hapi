@@ -9,7 +9,8 @@ const {
     notifyRunnerSessionStartedMock,
     readSettingsMock,
     ensureSkillMock,
-    apiCreateMock
+    apiCreateMock,
+    getProcessStartMarkerMock
 } = vi.hoisted(() => ({
     getSessionMock: vi.fn(),
     getOrCreateSessionMock: vi.fn(),
@@ -18,7 +19,13 @@ const {
     notifyRunnerSessionStartedMock: vi.fn(async () => ({})),
     readSettingsMock: vi.fn(),
     ensureSkillMock: vi.fn(async () => '/tmp/skill/SKILL.md'),
-    apiCreateMock: vi.fn()
+    apiCreateMock: vi.fn(),
+    getProcessStartMarkerMock: vi.fn<(pid: number) => string | null>(() => null)
+}))
+
+vi.mock('@/utils/process', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/utils/process')>()),
+    getProcessStartMarker: getProcessStartMarkerMock
 }))
 
 vi.mock('@/api/api', () => ({
@@ -114,6 +121,7 @@ describe('bootstrapExistingSession', () => {
         sessionSyncClientMock.mockReset()
         notifyRunnerSessionStartedMock.mockClear()
         readSettingsMock.mockReset()
+        getProcessStartMarkerMock.mockClear()
         delete process.env[HAPI_SESSION_ID_ENV]
         delete process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
         delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
@@ -365,6 +373,56 @@ describe('bootstrapExistingSession', () => {
             delete process.env[HAPI_RUNNER_SESSION_TYPE_ENV]
             delete process.env[HAPI_RUNNER_WORKTREE_NAME_ENV]
         }
+    })
+
+    it('reports the start marker of its own process next to hostPid', () => {
+        // The runner compares this against the live PID before adopting an
+        // untracked webhook, so a reused PID is never pinned to this session.
+        getProcessStartMarkerMock.mockReturnValueOnce('Mon Sep 28 10:00:00 2026')
+
+        const metadata = buildSessionMetadata({
+            flavor: 'claude',
+            startedBy: 'runner',
+            workingDirectory: '/tmp/project',
+            machineId: 'machine-1',
+            now: 123
+        })
+
+        expect(getProcessStartMarkerMock).toHaveBeenCalledWith(process.pid)
+        expect(metadata.hostPid).toBe(process.pid)
+        expect(metadata.hostStartMarker).toBe('Mon Sep 28 10:00:00 2026')
+    })
+
+    it('omits the start marker when the platform probe fails', () => {
+        // null from the probe must not reach the hub as a null string.
+        getProcessStartMarkerMock.mockReturnValueOnce(null)
+
+        const metadata = buildSessionMetadata({
+            flavor: 'claude',
+            startedBy: 'runner',
+            workingDirectory: '/tmp/project',
+            machineId: 'machine-1',
+            now: 123
+        })
+
+        expect(metadata.hostStartMarker).toBeUndefined()
+    })
+
+    it('does not probe the start marker for terminal sessions', () => {
+        // The runner only reads the marker of runner-started sessions; the
+        // probe is a synchronous process spawn (PowerShell on Windows) that a
+        // terminal start must not pay for.
+        const metadata = buildSessionMetadata({
+            flavor: 'cursor',
+            startedBy: 'terminal',
+            workingDirectory: '/tmp/project',
+            machineId: 'machine-1',
+            now: 123
+        })
+
+        expect(getProcessStartMarkerMock).not.toHaveBeenCalled()
+        expect(metadata.hostPid).toBe(process.pid)
+        expect(metadata).not.toHaveProperty('hostStartMarker')
     })
 })
 
