@@ -1,0 +1,54 @@
+From 4cd520ae5aba6a3b61f1afe6c33980076a4d348e Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:43:19 +0800
+Subject: [PATCH] fix(hub): clean pre-exec stubs without process stop
+
+---
+ hub/src/sync/syncEngine.ts          | 4 +++-
+ hub/src/web/routes/sessions.test.ts | 8 ++++----
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index eed0f8871..adcd8409c 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -2385,7 +2385,9 @@ export class SyncEngine {
+                     if (row.active) {
+                         this.handleSessionEnd({ sid: allocatedSessionId!, time: Date.now(), reason: 'error' })
+                     }
+-                    await this.deleteSession(allocatedSessionId!)
++                    // Runner explicitly reported no child; skip deleteSession's
++                    // process stop path, which requires a live runner target.
++                    await this.sessionCache.deleteSession(allocatedSessionId!)
+                 } catch {
+                     // Leave the stub visible rather than claiming cleanup succeeded.
+                 }
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 1f617b0e3..d548ad425 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -1536,7 +1536,7 @@ describe('sessions routes', () => {
+             expect(await response.json()).toEqual({ error: 'Session not found' })
+         })
+ 
+-        it('archives an inactive non-archived row (idempotent cleanup)', async () => {
++        it('rejects an inactive row without a live lifecycle', async () => {
+             let called = false
+             const session = createSession({ active: false })
+             const { app } = createApp(session, {
+@@ -1545,9 +1545,9 @@ describe('sessions routes', () => {
+ 
+             const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
+ 
+-            expect(response.status).toBe(200)
+-            expect(await response.json()).toEqual({ ok: true })
+-            expect(called).toBe(true)
++            expect(response.status).toBe(409)
++            expect(await response.json()).toEqual({ error: 'Session is inactive' })
++            expect(called).toBe(false)
+         })
+ 
+         it('returns 2xx for an inactive split-brain row still marked lifecycleState=running', async () => {
+-- 
+2.54.0 (Apple Git-157)
+

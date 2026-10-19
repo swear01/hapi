@@ -1,0 +1,289 @@
+From 6ce0d58945eacfa2562d867cd877578a10f08ed1 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:20:21 +0800
+Subject: [PATCH] carry(upstream): PR #1414
+
+Upstream-PR-Head: ef5579e5fa2dedf0ceae7363b6a90b75f69cb703
+---
+ .../SessionList.directory-action.test.tsx     | 210 +++++++++++++++++-
+ web/src/components/SessionList.tsx            |   8 +-
+ 2 files changed, 215 insertions(+), 3 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 7e399cbb1..227b5cd4f 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -14,6 +14,7 @@ afterEach(() => {
+     cleanup()
+     localStorage.removeItem('hapi-session-preview-limit')
+     localStorage.removeItem('hapi-pin-in-progress-sessions')
++    localStorage.removeItem('hapi-session-list-machine-filter')
+ })
+ 
+ function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
+@@ -58,6 +59,14 @@ function renderWithProviders(children: ReactNode) {
+     )
+ }
+ 
++function getSessionPath(label: string) {
++    const element = screen.getAllByText(label).find((node) => node.getAttribute('title') === label)
++    if (!element) {
++        throw new Error(`Session path not found: ${label}`)
++    }
++    return element
++}
++
+ describe('SessionList directory action', () => {
+     it('starts a new session with the project machine and directory', () => {
+         const onNewSessionInDirectory = vi.fn()
+@@ -355,7 +364,11 @@ describe('SessionList action menu parity', () => {
+ })
+ 
+ describe('SessionList collapse behavior', () => {
+-    function renderSessionList(sessions: SessionSummary[], selectedSessionId: string | null = 'session-running') {
++    function renderSessionList(
++        sessions: SessionSummary[],
++        selectedSessionId: string | null = 'session-running',
++        machineLabelsById: Record<string, string> = {}
++    ) {
+         return (
+             <QueryClientProvider client={new QueryClient({
+                 defaultOptions: {
+@@ -374,6 +387,7 @@ describe('SessionList collapse behavior', () => {
+                             isLoading={false}
+                             renderHeader={false}
+                             api={null}
++                            machineLabelsById={machineLabelsById}
+                         />
+                     </I18nProvider>
+                 </ToastProvider>
+@@ -552,6 +566,200 @@ describe('SessionList collapse behavior', () => {
+         expect(screen.getByRole('button', { name: /Unpinned floater/ })).toBeInTheDocument()
+     })
+ 
++    it('omits the redundant machine label from global pinned rows with one machine', () => {
++        const sessions = [
++            makeSession({
++                id: 'session-global-pinned',
++                globalPinned: true,
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    machineId: 'machine-1',
++                    name: 'Global pinned task',
++                    flavor: 'codex',
++                },
++            }),
++        ]
++
++        render(renderSessionList(sessions, null, { 'machine-1': 'NUC' }))
++
++        expect(screen.getByTitle('work/hapi')).toBeInTheDocument()
++        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
++    })
++
++    it('keeps machine labels on global pinned rows with multiple machines', () => {
++        const sessions = [
++            makeSession({
++                id: 'session-global-pinned-one',
++                globalPinned: true,
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    machineId: 'machine-1',
++                    name: 'Global pinned task',
++                    flavor: 'codex',
++                },
++            }),
++            makeSession({
++                id: 'session-global-pinned-two',
++                globalPinned: true,
++                updatedAt: 90,
++                metadata: {
++                    path: '/work/docs',
++                    machineId: 'machine-2',
++                    name: 'Other global pinned task',
++                    flavor: 'codex',
++                },
++            }),
++        ]
++
++        render(renderSessionList(sessions, null, {
++            'machine-1': 'NUC',
++            'machine-2': 'Laptop',
++        }))
++
++        expect(screen.getByText('work/hapi · NUC')).toHaveAttribute('title', 'work/hapi · NUC')
++        expect(screen.getByText('work/docs · Laptop')).toHaveAttribute('title', 'work/docs · Laptop')
++    })
++
++    it('omits the machine label from global pinned rows when filtered to one machine', () => {
++        localStorage.setItem('hapi-session-list-machine-filter', 'machine-1')
++        const sessions = [
++            makeSession({
++                id: 'session-global-pinned-one',
++                globalPinned: true,
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    machineId: 'machine-1',
++                    name: 'Global pinned task',
++                    flavor: 'codex',
++                },
++            }),
++            makeSession({
++                id: 'session-global-pinned-two',
++                globalPinned: true,
++                updatedAt: 90,
++                metadata: {
++                    path: '/work/docs',
++                    machineId: 'machine-2',
++                    name: 'Other global pinned task',
++                    flavor: 'codex',
++                },
++            }),
++        ]
++
++        render(renderSessionList(sessions, null, {
++            'machine-1': 'NUC',
++            'machine-2': 'Laptop',
++        }))
++
++        expect(screen.getByTitle('work/hapi')).toBeInTheDocument()
++        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
++        expect(screen.queryByRole('button', { name: /Other global pinned task/ })).toBeNull()
++    })
++
++    it('omits the redundant machine label from pinned rows with one machine', () => {
++        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++        const sessions = [
++            makeSession({
++                id: 'session-running',
++                active: true,
++                thinking: true,
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    machineId: 'machine-1',
++                    name: 'Running task',
++                    flavor: 'codex',
++                },
++            }),
++        ]
++
++        render(renderSessionList(sessions, null, { 'machine-1': 'NUC' }))
++
++        expect(getSessionPath('work/hapi')).toHaveAttribute('title', 'work/hapi')
++        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
++    })
++
++    it('keeps machine labels on pinned rows with multiple machines', () => {
++        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++        const sessions = [
++            makeSession({
++                id: 'session-running',
++                active: true,
++                thinking: true,
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    machineId: 'machine-1',
++                    name: 'Running task',
++                    flavor: 'codex',
++                },
++            }),
++            makeSession({
++                id: 'session-pending',
++                active: true,
++                pendingRequestsCount: 1,
++                updatedAt: 90,
++                metadata: {
++                    path: '/work/docs',
++                    machineId: 'machine-2',
++                    name: 'Pending task',
++                    flavor: 'codex',
++                },
++            }),
++        ]
++
++        render(renderSessionList(sessions, null, {
++            'machine-1': 'NUC',
++            'machine-2': 'Laptop',
++        }))
++
++        expect(getSessionPath('work/hapi · NUC')).toHaveAttribute('title', 'work/hapi · NUC')
++        expect(getSessionPath('work/docs · Laptop')).toHaveAttribute('title', 'work/docs · Laptop')
++    })
++
++    it('omits the machine label when a multi-machine list is filtered to one machine', () => {
++        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++        localStorage.setItem('hapi-session-list-machine-filter', 'machine-1')
++        const sessions = [
++            makeSession({
++                id: 'session-running',
++                active: true,
++                thinking: true,
++                updatedAt: 100,
++                metadata: {
++                    path: '/work/hapi',
++                    machineId: 'machine-1',
++                    name: 'Running task',
++                    flavor: 'codex',
++                },
++            }),
++            makeSession({
++                id: 'session-other-machine',
++                active: true,
++                thinking: true,
++                updatedAt: 90,
++                metadata: {
++                    path: '/work/docs',
++                    machineId: 'machine-2',
++                    name: 'Other machine task',
++                    flavor: 'codex',
++                },
++            }),
++        ]
++
++        render(renderSessionList(sessions, null, {
++            'machine-1': 'NUC',
++            'machine-2': 'Laptop',
++        }))
++
++        expect(getSessionPath('work/hapi')).toHaveAttribute('title', 'work/hapi')
++        expect(screen.queryByText('work/hapi · NUC')).toBeNull()
++        expect(screen.queryByRole('button', { name: /Other machine task/ })).toBeNull()
++    })
++
+     it('does not label quiet active sessions as Idle', () => {
+         const sessions = [
+             makeSession({
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index d09f346e9..df071f72c 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1581,7 +1581,9 @@ export function SessionList(props: {
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
+                                             projectLabel={getPathDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
+-                                            machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
++                                            machineLabel={showMachineFilterBar && activeMachineFilter === null
++                                                ? resolveMachineLabel(s.metadata?.machineId ?? null)
++                                                : undefined}
+                                             lastSeenVersion={lastSeenVersion}
+                                         />
+                                     ))}
+@@ -2087,7 +2089,9 @@ export function SessionList(props: {
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
+                                             projectLabel={getPathDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
+-                                            machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
++                                            machineLabel={showMachineFilterBar && activeMachineFilter === null
++                                                ? resolveMachineLabel(s.metadata?.machineId ?? null)
++                                                : undefined}
+                                             lastSeenVersion={lastSeenVersion}
+                                         />
+                                     ))}
+-- 
+2.54.0 (Apple Git-157)
+
