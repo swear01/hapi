@@ -15,7 +15,7 @@ import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
 import { getCliArgs } from '@/utils/cliArgs';
 import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
-import { findStopSessionOrphanTargets, reapRunnerSpawnedOrphans } from '@/runner/orphanReap';
+import { findStopSessionOrphanTargets, listWindowsProcessesWithCommandLine, reapRunnerSpawnedOrphans } from '@/runner/orphanReap';
 import { decideUntrackedRunnerWebhook } from '@/runner/lateRunnerWebhook';
 import {
     decideKeepWrapperArchive,
@@ -1201,11 +1201,29 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       const readLiveRuntimesForStop = async () => {
         try {
-          return (await guard.run(() => readRuntimes({ strict: true }))).filter(runtime =>
+          const scanStarted = Date.now();
+          const records = (await guard.run(() => readRuntimes({ strict: true }))).filter(runtime =>
             runtime.hub === configuration.apiUrl
             && runtime.authHash === runtimeAuthHash()
-            && runtimeMayBeAlive(runtime)
           );
+          // A fresh, complete process snapshot keeps archive cost independent
+          // of old registry entries. Per-record tasklist/CIM calls made three
+          // reads of nine retired runtimes exceed the 30s StopSession RPC.
+          // Read the registry first, then snapshot; never reuse it across scans.
+          let markers: ReadonlyMap<number, string | null> | undefined;
+          if (isWindows() && records.length > 0) {
+            try {
+              const processes = listWindowsProcessesWithCommandLine();
+              if (!processes.length) throw new Error('Empty Windows process snapshot');
+              markers = new Map(processes.map(proc => [proc.pid, proc.startMarker ?? null]));
+            } catch (error) {
+              logger.warn(`[RUNNER RUN] Cannot verify Windows runtimes during stop of ${sessionId}: ${String(error)}`);
+              return null;
+            }
+          }
+          const live = records.filter(runtime => runtimeMayBeAlive(runtime, markers));
+          logger.debug('[RUNNER RUN] Runtime stop scan', { sessionId, records: records.length, live: live.length, elapsedMs: Date.now() - scanStarted });
+          return live;
         } catch (error) {
           logger.warn(
             `[RUNNER RUN] Codex runtime registry unreadable during stop of ${sessionId}: ${
@@ -1398,6 +1416,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             return await guard.run(() => finishKeepWrapperDetach(pid));
           }
 
+          let treeTerminationVerified = false;
           if (session.startedBy === 'runner') {
             // Adopted post-restart sessions have no ChildProcess handle — still
             // tree-kill so agent grandchildren cannot outlive the wrapper.
@@ -1428,15 +1447,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
               }
             }
             try {
+              const reportStop: Parameters<typeof killProcessTreeByPid>[2] = report => {
+                logger.debug('[RUNNER RUN] Session process tree stop proof', { sessionId, ...report });
+              };
               const child = session.childProcess;
               const treeStopped = await guard.run(() => child
-                ? killProcessByChildProcess(child)
-                : killProcessTreeByPid(pid));
+                ? killProcessByChildProcess(child, false, reportStop)
+                : killProcessTreeByPid(pid, false, reportStop));
               if (!treeStopped) {
                 logger.debug(`[RUNNER RUN] Process tree for session ${sessionId} is still alive after stop request`);
                 return 'still_alive';
               }
               logger.debug(`[RUNNER RUN] Requested termination for runner-spawned session ${sessionId}`);
+              treeTerminationVerified = true;
             } catch (error) {
               logger.debug(`[RUNNER RUN] Failed to kill session ${sessionId}:`, error);
               return 'still_alive';
@@ -1459,10 +1482,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             spawnSession.markChildStopping(existingSessionId);
           }
           const deadline = Date.now() + 5_000;
-          while (isProcessAlive(pid) && Date.now() < deadline) {
+          // Full-tree termination already proved this generation exited. A
+          // second raw-PID probe can observe an unrelated, newly reused PID.
+          while (!treeTerminationVerified && isProcessAlive(pid) && Date.now() < deadline) {
             await guard.run(() => new Promise(resolve => setTimeout(resolve, 50)));
           }
-          if (isProcessAlive(pid)) {
+          if (!treeTerminationVerified && isProcessAlive(pid)) {
             logger.debug(`[RUNNER RUN] Session ${sessionId} process ${pid} is still alive after stop request`);
             return 'still_alive';
           }
