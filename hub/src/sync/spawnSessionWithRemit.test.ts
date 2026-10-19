@@ -936,7 +936,7 @@ describe('archiveSession', () => {
                     getSession: () => ({ metadata: { machineId: 'machine-1', startedFromRunner: true } }),
                     markSessionArchivedFromHub: () => { events.push('archived') }
                 },
-                emitCliSessionMetadataUpdate: () => {},
+                emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
                 handleSessionEnd: () => { events.push('ended') }
             }
             const result = SyncEngine.prototype.archiveSession.call(harness as unknown as SyncEngine, SESSION_ID)
@@ -958,7 +958,7 @@ describe('archiveSession', () => {
         await SyncEngine.prototype.archiveSession.call({
             rpcGateway: { killSession: async () => {} },
             sessionCache: { getSession: () => ({ metadata: {} }), markSessionArchivedFromHub },
-            emitCliSessionMetadataUpdate: () => {},
+            emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
             handleSessionEnd
         } as unknown as SyncEngine, SESSION_ID)
 
@@ -979,7 +979,7 @@ describe('deleteSession', () => {
             archiveSession: SyncEngine.prototype.archiveSession,
             rpcGateway: { killSession: async () => { throw new RpcTargetMissingError('killSession', 'socket-disconnected') }, stopRunnerSession },
             sessionCache: { deleteSession, getSession: () => ({ metadata: { machineId: 'machine-1', startedBy: 'runner', hostPid: 4242 } }), markSessionArchivedFromHub: () => {} },
-            emitCliSessionMetadataUpdate: () => {}, handleSessionEnd: () => {}
+            emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {}, handleSessionEnd: () => {}
         } as unknown as SyncEngine, SESSION_ID)
 
         expect(deleteSession).toHaveBeenCalledWith(SESSION_ID)
@@ -1008,7 +1008,7 @@ describe('deleteSession', () => {
                         deleteSession: mock(async () => { events.push('deleted') }),
                         getSession: () => ({ metadata: { machineId: 'machine-1', ...runnerMetadata } }), markSessionArchivedFromHub: () => {},
                     },
-                    emitCliSessionMetadataUpdate: () => {}, handleSessionEnd: () => {},
+                    emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {}, handleSessionEnd: () => {},
                     store: { sessions: { getSession: () => undefined } }
                 }
                 const result = SyncEngine.prototype.deleteSession.call(harness as unknown as SyncEngine, SESSION_ID)
@@ -1032,7 +1032,8 @@ describe('deleteSession', () => {
         const result = SyncEngine.prototype.deleteSession.call({
             getSession: () => ({ active, metadata: { startedBy: active ? 'runner' : 'terminal' } }),
             stopSession,
-            sessionCache: { deleteSession }
+            sessionCache: { deleteSession },
+            releaseSessionEnumerations: () => {}
         } as unknown as SyncEngine, SESSION_ID)
 
         if (active) {
