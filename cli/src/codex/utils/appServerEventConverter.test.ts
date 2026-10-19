@@ -3,6 +3,12 @@ import { logger } from '@/ui/logger';
 import { AppServerEventConverter } from './appServerEventConverter';
 
 describe('AppServerEventConverter', () => {
+    it('preserves a native name on thread start', () => {
+        const converter = new AppServerEventConverter();
+        expect(converter.handleNotification('thread/started', { thread: { id: 'thread-1', name: 'Native name' } }))
+            .toEqual([{ type: 'thread_started', thread_id: 'thread-1', name: 'Native name' }]);
+    });
+
     const footer = 'AGENT_NOTIFY_SUMMARY {"status":"done","summary":"Finished"}';
 
     it.each(['commentary', 'partial_answer'])('removes a summary footer from %s while preserving progress text', phase => {

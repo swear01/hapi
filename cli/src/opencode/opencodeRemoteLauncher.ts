@@ -42,7 +42,6 @@ import {
     type OpencodeRetryStatus
 } from './utils/opencodeEventStream';
 import { OpencodePermissionHandler } from './utils/permissionHandler';
-import { getOpencodeNativeToolInstruction, PLAN_MODE_INSTRUCTION } from './utils/systemPrompt';
 import { resolveThoughtLevelEffort } from './thoughtLevelEffort';
 
 type OpencodeRemoteLauncherOptions = {
@@ -144,7 +143,6 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
     private compactResultSuppressed = false;
     private compactOperationPhase: CompactOperationPhase = 'idle';
     private displayPermissionMode: PermissionMode | null = null;
-    private instructionsSent = false;
     private currentBackendModel: string | null = null;
     private defaultBackendModel: string | null = null;
     private currentBackendEffort: string | null = null;
@@ -184,8 +182,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         const messageBuffer = this.messageBuffer;
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
-            enableChangeTitle: false,
-            skillLookup: { workingDirectory: session.path, flavor: 'opencode' }
+            enableChangeTitle: false
         });
         this.happyServer = happyServer;
 
@@ -738,19 +735,9 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
                 continue;
             }
 
-            // Inject title instructions on first prompt
-            let messageText = batch.message;
-            if (batch.mode.permissionMode === 'plan') {
-                messageText = `${PLAN_MODE_INSTRUCTION}\n\n${messageText}`;
-            }
-            if (!this.instructionsSent) {
-                messageText = `${getOpencodeNativeToolInstruction()}\n\n${messageText}`;
-                this.instructionsSent = true;
-            }
-
             const promptContent: PromptContent[] = [{
                 type: 'text',
-                text: messageText,
+                text: batch.message,
             }];
 
             this.stallErrorReportedForPrompt = false;

@@ -1,5 +1,6 @@
 import { describe, expect, it, spyOn } from 'bun:test'
 import { toSessionSummary } from '@hapi/protocol'
+import { MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import type { SyncEvent } from '@hapi/protocol/types'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
@@ -7,6 +8,15 @@ import { registerSessionHandlers } from '../socket/handlers/cli/sessionHandlers'
 import type { EventPublisher } from './eventPublisher'
 import { SessionCache } from './sessionCache'
 import { SyncEngine } from './syncEngine'
+
+function runnerMetadata(host = 'localhost') {
+    return {
+        host,
+        platform: 'linux',
+        happyCliVersion: '0.1.0',
+        capabilities: [MACHINE_CAPABILITIES.SessionControlSkill]
+    }
+}
 
 function createPublisher(events: SyncEvent[]): EventPublisher {
     return {
@@ -100,7 +110,7 @@ async function runCodexResumeScenario(
     )
     engine.getOrCreateMachine(
         'machine-1',
-        { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+        runnerMetadata(),
         null,
         'default'
     )
@@ -569,7 +579,7 @@ describe('session model', () => {
         try {
             engine.getOrCreateMachine(
                 'machine-cursor',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1337,6 +1347,36 @@ describe('session model', () => {
         expect(activity).toHaveLength(0)
     })
 
+    it('refuses resume before spawn when the runner cannot guarantee skill delivery', async () => {
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        try {
+            const session = engine.getOrCreateSession('session-old-runner-resume', {
+                path: '/tmp/project',
+                host: 'localhost',
+                machineId: 'machine-1',
+                flavor: 'codex',
+                codexSessionId: 'codex-thread-1'
+            }, null, 'default')
+            engine.getOrCreateMachine('machine-1', {
+                host: 'localhost',
+                platform: 'linux',
+                happyCliVersion: 'old',
+                capabilities: []
+            }, null, 'default')
+            engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
+            ;(engine as any).rpcGateway.spawnSession = () => { throw new Error('must not spawn') }
+
+            await expect(engine.resumeSession(session.id, 'default')).resolves.toEqual({
+                type: 'error',
+                message: 'Resume requires an upgraded runner with session-control skill delivery',
+                code: 'resume_failed'
+            })
+        } finally {
+            engine.stop()
+        }
+    })
+
     it('passes the stored model when respawning a resumed session', async () => {
         const store = new Store(':memory:')
         const engine = new SyncEngine(
@@ -1362,7 +1402,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1428,7 +1468,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1482,7 +1522,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1533,7 +1573,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1599,7 +1639,7 @@ describe('session model', () => {
             })
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1679,7 +1719,7 @@ describe('session model', () => {
             })
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -1969,7 +2009,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2029,7 +2069,7 @@ describe('session model', () => {
             await engine.applySessionConfig(session.id, { copilotAgentMode: 'plan' })
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2130,7 +2170,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2196,7 +2236,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2293,7 +2333,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2373,7 +2413,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2429,7 +2469,7 @@ describe('session model', () => {
                 lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
             }, null, 'default')
             store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'keep history' } })
-            engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
+            engine.getOrCreateMachine('machine-1', runnerMetadata(), { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
             let existing: string | undefined
@@ -2458,7 +2498,7 @@ describe('session model', () => {
                 lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
             }, null, 'default')
             const unexpected = engine.getOrCreateSession('pi-unexpected', { path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi' }, null, 'default')
-            engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
+            engine.getOrCreateMachine('machine-1', runnerMetadata(), { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: original.id, time: Date.now() })
             ;(engine as any).rpcGateway.spawnSession = async () => ({ type: 'success', sessionId: unexpected.id })
@@ -2482,7 +2522,7 @@ describe('session model', () => {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-live',
                 lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
             }, null, 'default')
-            engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
+            engine.getOrCreateMachine('machine-1', runnerMetadata(), { status: 'running', capabilities: { piExistingSessionResume: true } }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
             ;(engine as any).rpcGateway.spawnSession = async () => {
@@ -2514,7 +2554,7 @@ describe('session model', () => {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-old-runner',
                 lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
             }, null, 'default')
-            engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, { status: 'running' }, 'default')
+            engine.getOrCreateMachine('machine-1', runnerMetadata(), { status: 'running' }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
             engine.handleSessionEnd({ sid: session.id, time: Date.now() })
             let spawnCalls = 0
@@ -2536,7 +2576,7 @@ describe('session model', () => {
                 path: '/tmp/project', host: 'localhost', machineId: 'machine-1', flavor: 'pi', piSessionId: 'pi-native-spawn-error',
                 lifecycleState: 'archived', archivedBy: 'cli', archiveReason: 'Pi exited',
             }, null, 'default')
-            engine.getOrCreateMachine('machine-1', { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' }, {
+            engine.getOrCreateMachine('machine-1', runnerMetadata(), {
                 status: 'running', capabilities: { piExistingSessionResume: true }
             }, 'default')
             engine.handleMachineAlive({ machineId: 'machine-1', time: Date.now() })
@@ -2818,7 +2858,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -2950,7 +2990,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -3023,7 +3063,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -3325,7 +3365,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'cursor-machine',
-                { host: 'cursor-host', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('cursor-host'),
                 null,
                 'default'
             )
@@ -3387,7 +3427,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'cursor-machine',
-                { host: 'cursor-host', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('cursor-host'),
                 null,
                 'default'
             )
@@ -3441,7 +3481,7 @@ describe('session model', () => {
             for (const machineId of ['other-machine', 'recorded-machine']) {
                 engine.getOrCreateMachine(
                     machineId,
-                    { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                    runnerMetadata('shared-host-label'),
                     null,
                     'default'
                 )
@@ -3496,13 +3536,13 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'recorded-machine-offline',
-                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('shared-host-label'),
                 null,
                 'default'
             )
             engine.getOrCreateMachine(
                 'wrong-same-host-machine',
-                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('shared-host-label'),
                 null,
                 'default'
             )
@@ -3550,13 +3590,13 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'recorded-machine-offline',
-                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('shared-host-label'),
                 null,
                 'default'
             )
             engine.getOrCreateMachine(
                 'wrong-same-host-machine',
-                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('shared-host-label'),
                 null,
                 'default'
             )
@@ -3611,13 +3651,13 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'recorded-machine-offline',
-                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('shared-host-label'),
                 null,
                 'default'
             )
             engine.getOrCreateMachine(
                 'wrong-same-host-machine',
-                { host: 'shared-host-label', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata('shared-host-label'),
                 { status: 'running', capabilities: { piExistingSessionResume: true } },
                 'default'
             )
@@ -3664,7 +3704,7 @@ describe('session model', () => {
             )
             engine.getOrCreateMachine(
                 'machine-1',
-                { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                runnerMetadata(),
                 null,
                 'default'
             )
@@ -4479,7 +4519,7 @@ describe('session model', () => {
                 )
                 engine.getOrCreateMachine(
                     'machine-1',
-                    { host: 'localhost', platform: 'linux', happyCliVersion: '0.1.0' },
+                    runnerMetadata(),
                     null,
                     'default'
                 )

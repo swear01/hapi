@@ -22,6 +22,7 @@ export class SessionCache {
     private readonly deduplicateInProgress: Set<string> = new Set()
     private readonly deduplicatePending: Set<string> = new Set()
     private readonly pendingThinkingUntilBySessionId: Map<string, number> = new Map()
+    private readonly reportedRuntimeBySessionId = new Map<string, Partial<Pick<Session, RuntimeConfigKey>>>()
     private readonly runtimeConfigUpdatedAtBySessionId: Map<string, Partial<Record<RuntimeConfigKey, number>>> = new Map()
     /**
      * Last time the hub saw real agent progress per session (tiann/hapi#1820).
@@ -40,6 +41,10 @@ export class SessionCache {
 
     getSessions(): Session[] {
         return Array.from(this.sessions.values())
+    }
+
+    getReportedRuntime(sessionId: string): Readonly<Partial<Pick<Session, RuntimeConfigKey>>> | undefined {
+        return this.reportedRuntimeBySessionId.get(sessionId)
     }
 
     getSessionsByNamespace(namespace: string): Session[] {
@@ -161,6 +166,7 @@ export class SessionCache {
             const existed = this.sessions.delete(sessionId)
             this.pendingThinkingUntilBySessionId.delete(sessionId)
             this.runtimeConfigUpdatedAtBySessionId.delete(sessionId)
+            this.reportedRuntimeBySessionId.delete(sessionId)
             this.agentProgressAtBySessionId.delete(sessionId)
             if (existed) {
                 this.publisher.emit({ type: 'session-removed', sessionId })
@@ -284,6 +290,7 @@ export class SessionCache {
         if (!session) return
 
         const wasActive = session.active
+        if (!wasActive) this.reportedRuntimeBySessionId.delete(session.id)
         session.active = true
         session.activeAt = Math.max(session.activeAt, t)
 
@@ -404,6 +411,8 @@ export class SessionCache {
         if (!session) return
 
         const wasActive = session.active
+        if (!wasActive) this.reportedRuntimeBySessionId.delete(session.id)
+        const reportedRuntime: Partial<Pick<Session, RuntimeConfigKey>> = {}
         const wasThinking = session.thinking
         const previousActiveTurnStartedAt = session.activeTurnStartedAt
         const previousPermissionMode = session.permissionMode
@@ -434,6 +443,7 @@ export class SessionCache {
         }
         if (payload.permissionMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'permissionMode', t)) {
             session.permissionMode = payload.permissionMode
+            reportedRuntime.permissionMode = payload.permissionMode
             this.persistPreferredPermissionMode(session, payload.permissionMode)
         }
         if (payload.model !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'model', t)) {
@@ -443,6 +453,7 @@ export class SessionCache {
                 })
             }
             session.model = payload.model
+            reportedRuntime.model = payload.model
         }
         if (payload.modelReasoningEffort !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'modelReasoningEffort', t)) {
             if (payload.modelReasoningEffort !== session.modelReasoningEffort) {
@@ -451,6 +462,7 @@ export class SessionCache {
                 })
             }
             session.modelReasoningEffort = payload.modelReasoningEffort
+            reportedRuntime.modelReasoningEffort = payload.modelReasoningEffort
         }
         if (payload.effort !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'effort', t)) {
             if (payload.effort !== session.effort) {
@@ -459,6 +471,7 @@ export class SessionCache {
                 })
             }
             session.effort = payload.effort
+            reportedRuntime.effort = payload.effort
         }
         if (payload.serviceTier !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'serviceTier', t)) {
             if (payload.serviceTier !== session.serviceTier) {
@@ -467,13 +480,23 @@ export class SessionCache {
                 })
             }
             session.serviceTier = payload.serviceTier
+            reportedRuntime.serviceTier = payload.serviceTier
         }
         if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
+            reportedRuntime.collaborationMode = payload.collaborationMode
         }
         if (payload.copilotAgentMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'copilotAgentMode', t)) {
             session.copilotAgentMode = payload.copilotAgentMode
+            reportedRuntime.copilotAgentMode = payload.copilotAgentMode
             this.persistPreferredCopilotAgentMode(session, payload.copilotAgentMode)
+        }
+
+        if (Object.keys(reportedRuntime).length > 0) {
+            this.reportedRuntimeBySessionId.set(session.id, {
+                ...this.reportedRuntimeBySessionId.get(session.id),
+                ...reportedRuntime
+            })
         }
 
         const now = Date.now()
@@ -749,6 +772,7 @@ export class SessionCache {
     }
 
     handleSessionEnd(payload: { sid: string; time: number }): void {
+        this.reportedRuntimeBySessionId.delete(payload.sid)
         const t = clampAliveTime(payload.time) ?? Date.now()
 
         const session = this.sessions.get(payload.sid) ?? this.refreshSession(payload.sid)
@@ -781,6 +805,7 @@ export class SessionCache {
             if (!session.active) continue
             if (now - session.activeAt <= sessionTimeoutMs) continue
             session.active = false
+            this.reportedRuntimeBySessionId.delete(session.id)
             this.store.sessions.setSessionActive(session.id, false, now, session.namespace)
             session.thinking = false
             this.pendingThinkingUntilBySessionId.delete(session.id)
@@ -911,18 +936,13 @@ export class SessionCache {
     }
 
     /**
-     * tiann/hapi#916: hub-side write of the archive-metadata fields normally
-     * authored by the CLI's `archiveAndClose`. Called by `syncEngine.archiveSession`
-     * when the kill-RPC fails because the CLI is unreachable (e.g. the
-     * hub-restart cascade already killed it). Without this, the route would
-     * either 500 (pre-fix) or silently return ok=true while leaving
-     * `lifecycleState=running` on disk — both confuse the operator.
+     * Hub-owned write of archive metadata after an accepted archive request,
+     * including when the CLI is already unreachable. This keeps the lifecycle
+     * invariant independent of runner timing.
      *
      * Idempotent: if `lifecycleState` is already `archived` we return without
-     * touching the row to avoid resetting `lifecycleStateSince`. Best-effort:
-     * if every retry hits `version-mismatch` (genuine contention) the original
-     * `archiveSession` flow still marks the session inactive in cache via
-     * `handleSessionEnd`, just without flipping the persisted lifecycle.
+     * touching the row to avoid resetting `lifecycleStateSince`. Persistence
+     * failures and exhausted contention retries surface to the caller.
      */
     markSessionArchivedFromHub(sessionId: string, reason: string): void {
         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
@@ -1218,6 +1238,7 @@ export class SessionCache {
         }
 
         this.sessions.delete(sessionId)
+        this.reportedRuntimeBySessionId.delete(sessionId)
         this.lastBroadcastAtBySessionId.delete(sessionId)
         this.todoBackfillAttemptedSessionIds.delete(sessionId)
         this.pendingThinkingUntilBySessionId.delete(sessionId)
@@ -1466,6 +1487,7 @@ export class SessionCache {
             }
 
             const existed = this.sessions.delete(oldSessionId)
+            this.reportedRuntimeBySessionId.delete(oldSessionId)
             if (existed) {
                 this.publisher.emit({ type: 'session-removed', sessionId: oldSessionId, namespace })
             }
