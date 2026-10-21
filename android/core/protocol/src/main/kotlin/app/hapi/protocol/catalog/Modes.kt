@@ -28,7 +28,7 @@ enum class PermissionMode(
     Plan("plan", "Plan Mode", PermissionModeTone.Info),
     Ask("ask", "Ask Mode", PermissionModeTone.Info),
     Debug("debug", "Debug Mode", PermissionModeTone.Info),
-    AutoReview("autoReview", "Auto-review", PermissionModeTone.Warning),
+    AutoReview("autoReview", "Auto", PermissionModeTone.Warning),
     ReadOnly("read-only", "Read Only", PermissionModeTone.Warning),
     SafeYolo("safe-yolo", "Safe Yolo", PermissionModeTone.Warning),
     Yolo("yolo", "Yolo", PermissionModeTone.Danger),

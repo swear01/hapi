@@ -117,7 +117,7 @@ struct CatalogTests {
         #expect(PermissionMode.default.label == "Default")
         #expect(PermissionMode.acceptEdits.label == "Accept Edits")
         #expect(PermissionMode.bypassPermissions.label == "Yolo")
-        #expect(PermissionMode.autoReview.label == "Auto-review")
+        #expect(PermissionMode.autoReview.label == "Auto")
         #expect(PermissionMode.readOnly.label == "Read Only")
         #expect(PermissionMode.plan.label == "Plan Mode")
         #expect(PermissionMode.alwaysProceed.label == "Always Proceed")

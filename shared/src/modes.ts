@@ -74,7 +74,7 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
     plan: 'Plan Mode',
     ask: 'Ask Mode',
     debug: 'Debug Mode',
-    autoReview: 'Auto-review',
+    autoReview: 'Auto',
     bypassPermissions: 'Yolo',
     'read-only': 'Read Only',
     'safe-yolo': 'Safe Yolo',
