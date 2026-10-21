@@ -18,9 +18,33 @@ export interface ClaudeSettings {
 /**
  * Get the path to Claude's settings.json file
  */
-function getClaudeSettingsPath(): string {
-  const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+function getClaudeSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
+  const claudeConfigDir = env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
   return join(claudeConfigDir, 'settings.json');
+}
+
+function readSettingsModel(path: string): string | undefined {
+  try {
+    const model = JSON.parse(readFileSync(path, 'utf-8'))?.model;
+    return typeof model === 'string' ? model.trim() || undefined : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The model Claude Code starts with, with any "[1m]" suffix intact, using its
+ * launch precedence: --model, ANTHROPIC_MODEL, project local settings, project
+ * settings, user settings. `env` is the extra env HAPI passes to the process.
+ */
+export function resolveClaudeLaunchModel(opts: { model?: string | null; cwd: string; env?: Record<string, string> }): string | null {
+  const env = { ...process.env, ...opts.env };
+  return opts.model?.trim()
+    || env.ANTHROPIC_MODEL?.trim()
+    || readSettingsModel(join(opts.cwd, '.claude', 'settings.local.json'))
+    || readSettingsModel(join(opts.cwd, '.claude', 'settings.json'))
+    || readSettingsModel(getClaudeSettingsPath(env))
+    || null;
 }
 
 /**
