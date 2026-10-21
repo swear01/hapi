@@ -50,13 +50,16 @@ class CatalogTest {
             PermissionModes.forFlavor("claude").map { it.wireId }
         )
         assertEquals(
-            listOf("default", "read-only", "safe-yolo", "yolo"),
+            listOf("default", "read-only", "safe-yolo", "autoReview", "yolo"),
             PermissionModes.forFlavor("codex").map { it.wireId }
         )
-        // gemini/kimi/copilot share the codex list.
-        assertEquals(PermissionModes.forFlavor("codex"), PermissionModes.forFlavor("gemini"))
-        assertEquals(PermissionModes.forFlavor("codex"), PermissionModes.forFlavor("kimi"))
-        assertEquals(PermissionModes.forFlavor("codex"), PermissionModes.forFlavor("copilot"))
+        assertEquals(
+            listOf("default", "read-only", "safe-yolo", "yolo"),
+            PermissionModes.forFlavor("gemini").map { it.wireId }
+        )
+        // kimi/copilot share the gemini list.
+        assertEquals(PermissionModes.forFlavor("gemini"), PermissionModes.forFlavor("kimi"))
+        assertEquals(PermissionModes.forFlavor("gemini"), PermissionModes.forFlavor("copilot"))
         assertEquals(
             listOf("default", "auto", "plan", "bypassPermissions"),
             PermissionModes.forFlavor("grok").map { it.wireId }
