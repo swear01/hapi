@@ -32,18 +32,30 @@ function readSettingsModel(path: string): string | undefined {
   }
 }
 
+function readArg(args: string[], name: string): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name && i + 1 < args.length && !args[i + 1].startsWith('-')) return args[i + 1];
+    if (args[i].startsWith(`${name}=`)) return args[i].slice(name.length + 1);
+  }
+  return undefined;
+}
+
 /**
  * The model Claude Code starts with, with any "[1m]" suffix intact, using its
  * launch precedence: --model, ANTHROPIC_MODEL, project local settings, project
- * settings, user settings. `env` is the extra env HAPI passes to the process.
+ * settings, user settings (limited by --setting-sources). `env` is the extra
+ * env HAPI passes to the process; `args` are the user's extra Claude args.
  */
-export function resolveClaudeLaunchModel(opts: { model?: string | null; cwd: string; env?: Record<string, string> }): string | null {
+export function resolveClaudeLaunchModel(opts: { model?: string | null; cwd: string; env?: Record<string, string>; args?: string[] }): string | null {
   const env = { ...process.env, ...opts.env };
+  const args = opts.args ?? [];
+  const sources = readArg(args, '--setting-sources')?.split(',').map((s) => s.trim()) ?? ['user', 'project', 'local'];
   return opts.model?.trim()
+    || readArg(args, '--model')?.trim()
     || env.ANTHROPIC_MODEL?.trim()
-    || readSettingsModel(join(opts.cwd, '.claude', 'settings.local.json'))
-    || readSettingsModel(join(opts.cwd, '.claude', 'settings.json'))
-    || readSettingsModel(getClaudeSettingsPath(env))
+    || (sources.includes('local') ? readSettingsModel(join(opts.cwd, '.claude', 'settings.local.json')) : undefined)
+    || (sources.includes('project') ? readSettingsModel(join(opts.cwd, '.claude', 'settings.json')) : undefined)
+    || (sources.includes('user') ? readSettingsModel(getClaudeSettingsPath(env)) : undefined)
     || null;
 }
 

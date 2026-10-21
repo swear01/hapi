@@ -73,7 +73,8 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
             session.localContextModel = resolveClaudeLaunchModel({
                 model: session.getModel(),
                 cwd: session.path,
-                env: session.claudeEnvVars
+                env: session.claudeEnvVars,
+                args: session.claudeArgs
             });
             try {
                 await claudeLocal({

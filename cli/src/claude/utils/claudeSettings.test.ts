@@ -115,6 +115,17 @@ describe('Claude Settings', () => {
       expect(resolveClaudeLaunchModel({ cwd, model: 'opus[1m]', env: { ANTHROPIC_MODEL: 'minimax-m3[1m]' } })).toBe('opus[1m]');
     });
 
+    it('honors the user --model and --setting-sources args', () => {
+      const cwd = join(testClaudeDir, 'project');
+      const env = { ANTHROPIC_MODEL: '' };
+      writeFileSync(join(testClaudeDir, 'settings.json'), JSON.stringify({ model: 'opus' }));
+      writeProjectSettings('settings.json', 'opus[1m]');
+      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--setting-sources', 'user'] })).toBe('opus');
+      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--setting-sources=project'] })).toBe('opus[1m]');
+      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--setting-sources', 'local'] })).toBe(null);
+      expect(resolveClaudeLaunchModel({ cwd, env, args: ['--model', 'sonnet[1m]'] })).toBe('sonnet[1m]');
+    });
+
     it('returns null when nothing is configured', () => {
       expect(resolveClaudeLaunchModel({ cwd: join(testClaudeDir, 'missing'), env: { ANTHROPIC_MODEL: '' } })).toBe(null);
     });
