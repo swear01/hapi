@@ -62,7 +62,7 @@ afterEach(async () => {
 });
 
 type NativeSetup = { turns?: NativeTurn[]; children?: Record<string, NativeTurn[]>; failReads?: boolean; failChildren?: boolean };
-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; native?: NativeSetup; bindMayFail?: boolean }) {
+async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; original?: Partial<Metadata>; native?: NativeSetup; bindMayFail?: boolean }) {
     const directory = await mkdtemp('/tmp/hapi-shared-root-');
     let state: AgentState = { steeringActive: true };
     let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex', ...opts?.metadata };
@@ -87,7 +87,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; me
         sendSessionDeath() {}, async flush() {}, close() {}
     } as unknown as ApiSessionClient;
     const end = opts?.end ?? (async () => { throw new Error('Unexpected root archive'); });
-    const root = new SharedCodexRoot({ session, workingDirectory: directory } as SessionBootstrapResult, {
+    const root = new SharedCodexRoot({ session, workingDirectory: directory, sessionInfo: { metadata: { ...metadata, ...opts?.original } } } as unknown as SessionBootstrapResult, {
         directory, generation: 'test', endpoint: 'mock', settingsFor: () => undefined,
         create: async () => { throw new Error('Unexpected root creation'); },
         end
@@ -170,7 +170,7 @@ describe('shared plan actions', () => {
         const old = { id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'stored without local id' }] };
         const f = await fixture({ metadata: { codexSessionId: 'thread' }, native: { turns: [old] } });
         expect(f.send).not.toHaveBeenCalled();
-        expect(f.metadata().codexHistoryBaseline).toEqual(['old']);
+        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: ['old'], pending: [] });
         f.native.thread.turns.push({ id: 'new', status: 'completed', items: [{ id: 'b', type: 'agentMessage', text: 'fresh' }] });
         await f.root.refresh();
         expect(f.send.mock.calls.map(([body]) => body.message)).toEqual(['fresh']);
@@ -179,20 +179,27 @@ describe('shared plan actions', () => {
     it('imports native history into a newly bound session', async () => {
         const f = await fixture({ native: { turns: [{ id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'native only' }] }] } });
         expect(f.send.mock.calls.map(([body]) => body.message)).toEqual(['native only']);
-        expect(f.metadata().codexHistoryBaseline).toEqual([]);
+        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: [], pending: [] });
+    });
+
+    it('keeps stable-id replay for sessions already created by the shared launcher', async () => {
+        const f = await fixture({ metadata: { codexSessionId: 'thread' }, original: { capabilities: { concurrentClients: true } },
+            native: { turns: [{ id: 'unseen', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'undelivered' }] }] } });
+        expect(f.send.mock.calls.map(([body]) => body.message)).toEqual(['undelivered']);
+        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: [], pending: [] });
     });
 
     it('records the empty baseline with the thread before an interruptible first import', async () => {
         const f = await fixture({ native: { failReads: true }, bindMayFail: true });
-        expect(f.metadata()).toMatchObject({ codexSessionId: 'thread', codexHistoryBaseline: [] });
+        expect(f.metadata()).toMatchObject({ codexSessionId: 'thread', codexHistoryBaseline: { turns: [] } });
     });
 
     it('keeps capturing a legacy child whose history read failed', async () => {
         const childTurns = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
         const f = await fixture({ metadata: { codexSessionId: 'thread' }, native: { children: { child: childTurns }, failChildren: true } });
-        expect(f.metadata().codexHistoryBaseline).toBeUndefined();
+        expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: [], pending: ['child'] });
         f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
-        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toEqual(['child-turn']));
+        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: ['child-turn'], pending: [] }));
         expect(f.send).not.toHaveBeenCalled();
     });
 
@@ -202,8 +209,18 @@ describe('shared plan actions', () => {
         f.native.children.child.push({ id: 'missed', status: 'completed', startedAt: Math.floor(Date.now() / 1000) + 1,
             items: [{ id: 'm', type: 'agentMessage', text: 'during gap' }] });
         f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
-        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toEqual(['child-turn']));
+        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toMatchObject({ turns: ['child-turn'], pending: [] }));
         expect(f.send.mock.calls.map(([body]) => body.message.message)).toEqual(['during gap']);
+    });
+
+    it('keeps the original cutoff and pending children across a restart', async () => {
+        const childTurns: NativeTurn[] = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
+        const first = await fixture({ metadata: { codexSessionId: 'thread' }, native: { children: { child: childTurns }, failChildren: true } });
+        const baseline = first.metadata().codexHistoryBaseline!;
+        const restarted = await fixture({ metadata: { codexSessionId: 'thread', codexHistoryBaseline: baseline }, native: { children: { child: [...childTurns,
+            { id: 'missed', status: 'completed', startedAt: baseline.before + 1, items: [{ id: 'm', type: 'agentMessage', text: 'during gap' }] }] } } });
+        expect(restarted.metadata().codexHistoryBaseline).toEqual({ turns: ['child-turn'], before: baseline.before, pending: [] });
+        expect(restarted.send.mock.calls.map(([body]) => body.message.message)).toEqual(['during gap']);
     });
 
     it('uses only the latest root turn when replaying history', async () => {

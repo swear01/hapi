@@ -50,7 +50,7 @@ export class SharedCodexRoot {
     private projection!: SharedCodexProjection;
     private readonly children = new Map<string, SharedCodexProjection>();
     private readonly historyBaseline: HistoryBaseline = { turns: new Set(), capture: false, before: 0 };
-    // Children whose history could not be read while capturing the baseline.
+    // Legacy children whose history could not be read yet; captured on a later read.
     private readonly uncapturedChildren = new Set<string>();
     private readonly ancestry = new Map<string, string | null>();
     private heartbeat?: ReturnType<typeof setInterval>;
@@ -194,19 +194,21 @@ export class SharedCodexRoot {
             ids => this.session.setSteerDeliveryState(ids, 'queued'));
         await this.queue.load();
         this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
-        // A session already bound to this thread without a baseline was
-        // recorded before stable replay ids (#2086): its native history is
-        // already stored, so capture it once instead of inserting it again.
-        const prior = this.session.getMetadata();
-        for (const turn of prior?.codexHistoryBaseline ?? []) this.historyBaseline.turns.add(turn);
-        const capturing = !prior?.codexHistoryBaseline && prior?.codexSessionId === threadId;
+        // The pre-shared launcher stored this thread's history without local
+        // ids (#2086), so capture it once instead of inserting it again. Its
+        // persisted row (before bootstrap overrides) never had concurrentClients.
+        const prior = this.session.getMetadata()?.codexHistoryBaseline;
+        const original = this.bootstrap.sessionInfo?.metadata;
+        const capturing = !prior && original?.codexSessionId === threadId && !original.capabilities?.concurrentClients;
+        for (const turn of prior?.turns ?? []) this.historyBaseline.turns.add(turn);
+        for (const id of prior?.pending ?? []) this.uncapturedChildren.add(id);
         this.historyBaseline.capture = capturing;
-        // Delayed child capture must never absorb a turn HAPI has not stored.
-        this.historyBaseline.before = Math.floor(Date.now() / 1000);
+        // Durable cutoff: a delayed capture never absorbs a turn HAPI has not stored.
+        this.historyBaseline.before = prior?.before ?? Math.floor(Date.now() / 1000);
         // A fresh binding records its empty baseline atomically with the
         // thread id, so an interrupted import is never mistaken for legacy.
         this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId,
-            ...(!prior?.codexHistoryBaseline && !capturing ? { codexHistoryBaseline: [] } : {}), capabilities: {
+            ...(!prior && !capturing ? { codexHistoryBaseline: { turns: [], before: this.historyBaseline.before, pending: [] } } : {}), capabilities: {
             ...metadata.capabilities, concurrentClients: true, terminal: true,
             // In-place rewind needs a native + hub commit barrier. Do not
             // advertise a destructive operation we cannot make atomic yet.
@@ -223,10 +225,8 @@ export class SharedCodexRoot {
         if (capturing) this.persistBaseline();
     }
     private persistBaseline(): void {
-        // Unpersisted, the next bind recaptures everything.
-        if (this.uncapturedChildren.size) return;
-        const turns = [...this.historyBaseline.turns];
-        this.session.updateMetadata(metadata => ({ ...metadata, codexHistoryBaseline: turns }));
+        const baseline = { turns: [...this.historyBaseline.turns], before: this.historyBaseline.before, pending: [...this.uncapturedChildren] };
+        this.session.updateMetadata(metadata => ({ ...metadata, codexHistoryBaseline: baseline }));
     }
     async activate(options: SharedLaunchOptions = {}): Promise<void> {
         // Restored input cannot run before the cold-resume settings are applied.
@@ -349,7 +349,7 @@ export class SharedCodexRoot {
             for (const id of Array.isArray(page.data) ? page.data : []) if (typeof id === 'string') loaded.add(id);
             cursor = string(page.nextCursor);
         } while (cursor);
-        const pending = this.uncapturedChildren.size > 0;
+        const pending = this.uncapturedChildren.size;
         for (const [id, projection] of this.children) {
             const capture = this.historyBaseline.capture || this.uncapturedChildren.has(id);
             // Replaying a completed/unloaded child must not start its engine.
@@ -362,7 +362,7 @@ export class SharedCodexRoot {
                 logger.debug('[Codex shared] child history unavailable', { id, error });
             }
         }
-        if (pending) this.persistBaseline();
+        if (pending && pending !== this.uncapturedChildren.size) this.persistBaseline();
     }
     nativeQueueDeleted(nativeId: string): Promise<void> { return this.queue.deleted(nativeId); }
     replaySettings(): Array<{ method: string; params: unknown }> {

@@ -150,7 +150,8 @@ export const MetadataSchema = z.object({
     // Codex localId → turnId mapping (durable across runner relaunches).
     conversationHistoryTurns: z.record(z.string(), z.string().min(1)).optional(),
     // Codex turns stored before stable replay ids; history replay skips them.
-    codexHistoryBaseline: z.array(z.string()).optional(),
+    // `before` (unix seconds) bounds capture; `pending` children are not captured yet.
+    codexHistoryBaseline: z.object({ turns: z.array(z.string()), before: z.number(), pending: z.array(z.string()) }).optional(),
     // Pi localId → append-only session entry id mapping. Pi entry ids are the
     // only stable native boundary accepted by its fork API.
     conversationHistoryEntryIds: z.record(z.string(), z.string().min(1)).optional(),
