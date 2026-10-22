@@ -185,10 +185,10 @@ describe('cli session handlers', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('replay', { flavor: 'claude' }, null, 'default')
         const socket = new FakeSocket()
-        const progress = mock(); const activity = mock(); const bgDelta = mock(); const events: SyncEvent[] = []
+        const progress = mock(); const activity = mock(); const bgCount = mock(); const events: SyncEvent[] = []
         registerSessionHandlers(socket as unknown as CliSocketWithData, {
             store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {},
-            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskDelta: bgDelta,
+            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskCount: bgCount,
             onWebappEvent: event => { events.push(event) }
         })
         const message = { role: 'user', content: { type: 'text', text: 'hello' } }
@@ -202,14 +202,13 @@ describe('cli session handlers', () => {
         expect(socket.roomEvents.filter(e => e.event === 'update')).toHaveLength(1)
         expect(events.filter(e => e.type === 'message-received')).toHaveLength(1)
 
-        // A background task start replayed the same way must count once, or the
-        // counter never returns to zero and the session never reconciles idle.
-        const started = { role: 'agent', content: { type: 'output', data: { type: 'tool_result', content: 'Command running in background with ID: bg-1' } } }
-        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
-        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
-        expect(store.messages.getAllMessages(session.id)).toHaveLength(2)
-        expect(bgDelta).toHaveBeenCalledTimes(1)
-        expect(bgDelta).toHaveBeenCalledWith(session.id, { started: 1, completed: 0 })
+        // A replayed background-task snapshot is applied, never stored: it
+        // replaces the count, so applying it twice cannot drift.
+        const snapshot = { role: 'agent', content: { type: 'output', data: { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: 'bg-1' }] } } }
+        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: snapshot })
+        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: snapshot })
+        expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
+        expect(bgCount.mock.calls).toEqual([[session.id, 1], [session.id, 1]])
         store.close()
     })
 

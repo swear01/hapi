@@ -8,7 +8,7 @@ import type { Store, StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import { extractTodoWriteTodosFromMessageContent } from '../../../sync/todos'
 import { extractTeamStateFromMessageContent, applyTeamStateDelta } from '../../../sync/teams'
-import { extractBackgroundTaskDelta } from '../../../sync/backgroundTasks'
+import { extractBackgroundTaskCount } from '../../../sync/backgroundTasks'
 import { shouldRecordSessionActivity } from '../../../sync/sessionActivity'
 import { lifecycleRunningSince } from '../../../sync/sessionIdle'
 import type { CliSocketWithData } from '../../socketTypes'
@@ -92,7 +92,7 @@ export type SessionHandlersDeps = {
     onSessionReady?: (payload: SessionReadyPayload) => void
     onSessionEnd?: (payload: SessionEndPayload) => void
     onWebappEvent?: (event: SyncEvent) => void
-    onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
+    onBackgroundTaskCount?: (sessionId: string, count: number) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
     /** tiann/hapi#1820: any message is agent progress, either direction. */
     onAgentProgress?: (sessionId: string, at: number) => void
@@ -104,7 +104,7 @@ export type SessionHandlersDeps = {
 }
 
 export function registerSessionHandlers(socket: CliSocketWithData, deps: SessionHandlersDeps): void {
-    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
+    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskCount, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
 
     socket.on('native-queue-message', data => {
         const parsed = z.object({ sid: z.string(), localId: z.string().min(1), text: z.string().nullable() }).safeParse(data)
@@ -160,10 +160,18 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
+        // A background-task snapshot is session state, not chat: apply it
+        // without storing a hidden row.
+        const backgroundTaskCount = extractBackgroundTaskCount(content)
+        if (backgroundTaskCount !== null) {
+            onBackgroundTaskCount?.(sid, backgroundTaskCount)
+            return
+        }
+
         const { message: msg, inserted } = store.messages.addMessageWithStatus(sid, content, localId, undefined, createdAt)
         // A localId the session already stored is a reconnect replay (history
         // resync, transcript backfill), not new work: no progress clock, no
-        // activity, no todo/team/background-task deltas, no re-broadcast.
+        // activity, no todo/team deltas, no re-broadcast.
         if (!inserted) {
             return
         }
@@ -231,11 +239,6 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                     }
                 })
             }
-        }
-
-        const bgDelta = extractBackgroundTaskDelta(content)
-        if (bgDelta) {
-            onBackgroundTaskDelta?.(sid, bgDelta)
         }
 
         const update = {
