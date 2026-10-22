@@ -1,0 +1,49 @@
+From a5fff60dbf238a8cc94994f72e81df648ec95ee2 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:36:42 +0800
+Subject: [PATCH] fix(android): keep grapheme Matcher state valid
+
+---
+ .../app/hapi/companion/feature/chat/TextPaging.kt | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
+index bdf3956d6..ef40c8789 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/chat/TextPaging.kt
+@@ -1,5 +1,6 @@
+ package app.hapi.companion.feature.chat
+ 
++import java.util.regex.Matcher
+ import java.util.regex.Pattern
+ import java.text.BreakIterator
+ import java.text.StringCharacterIterator
+@@ -34,14 +35,22 @@ internal fun readTextPage(source: String, start: Int = 0, budget: TextBudget = M
+         val newline = first == '\r' || first == '\n' || first == '\u2028' || first == '\u2029' || first == '\u0085'
+         if (newline && lines == budget.lines && end > from) break
+         if (newline) lines++
+-        // Iterate through an entire platform grapheme before charging its budget.
+-        while (!boundaries.isBoundary(matcher.end()) && matcher.find()) { /* lazy merge */ }
+-        end = matcher.end()
++        end = sharedGraphemeEnd(matcher, boundaries)
+         characters++
+     }
+     return TextPage(source.substring(from, end), end)
+ }
+ 
++/** `Matcher.end()` is only valid after a successful `find()`. */
++private fun sharedGraphemeEnd(matcher: Matcher, boundaries: BreakIterator): Int {
++    var matchEnd = matcher.end()
++    while (!boundaries.isBoundary(matchEnd)) {
++        if (!matcher.find()) return matchEnd
++        matchEnd = matcher.end()
++    }
++    return matchEnd
++}
++
+ internal fun messagePreview(source: String): TextPage {
+     val inline = readTextPage(source, budget = InlineMessageBudget)
+     return if (inline.end == source.length) inline else readTextPage(source, budget = MessagePreviewBudget)
+-- 
+2.54.0 (Apple Git-157)
+

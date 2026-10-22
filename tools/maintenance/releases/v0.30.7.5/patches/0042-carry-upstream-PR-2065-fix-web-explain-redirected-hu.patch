@@ -1,0 +1,701 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:39:42 +0000
+Subject: [PATCH 42/51] carry(upstream): PR #2065 fix(web): explain redirected
+ hub requests instead of "Failed to fetch"
+
+Upstream-head: b7e4223da2d1a8eeb91c510849c51fb58c7a57e2
+---
+ web/src/api/authProxy.test.ts           | 122 ++++++++++++++++++++++
+ web/src/api/authProxy.ts                |  45 ++++++++
+ web/src/api/client.test.ts              |  55 ++++++++++
+ web/src/api/client.ts                   |  15 +--
+ web/src/components/LoginPrompt.test.tsx | 132 +++++++++++++++++++++++-
+ web/src/components/LoginPrompt.tsx      |  17 ++-
+ web/src/lib/locales/en.ts               |   2 +
+ web/src/lib/locales/ru.ts               |   2 +
+ web/src/lib/locales/zh-CN.ts            |   2 +
+ web/src/lib/swCachePolicy.test.ts       |  54 ++++++++++
+ web/src/lib/swCachePolicy.ts            |  26 +++++
+ web/src/sw.ts                           |   4 +
+ 12 files changed, 467 insertions(+), 9 deletions(-)
+ create mode 100644 web/src/api/authProxy.test.ts
+ create mode 100644 web/src/api/authProxy.ts
+ create mode 100644 web/src/lib/swCachePolicy.test.ts
+ create mode 100644 web/src/lib/swCachePolicy.ts
+
+diff --git a/web/src/api/authProxy.test.ts b/web/src/api/authProxy.test.ts
+new file mode 100644
+index 000000000..2f56f1288
+--- /dev/null
++++ b/web/src/api/authProxy.test.ts
+@@ -0,0 +1,122 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { AuthProxyRedirectError, buildAuthProxyReauthUrl, fetchThroughAuthProxy, openAuthProxySignIn } from './authProxy'
++
++function opaqueRedirect(): Response {
++    return { type: 'opaqueredirect', status: 0, ok: false } as Response
++}
++
++describe('fetchThroughAuthProxy', () => {
++    let originalFetch: typeof globalThis.fetch
++    let fetchMock: ReturnType<typeof vi.fn>
++
++    beforeEach(() => {
++        originalFetch = globalThis.fetch
++        fetchMock = vi.fn()
++        globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
++    })
++
++    afterEach(() => {
++        globalThis.fetch = originalFetch
++    })
++
++    it('returns a normal response as is and asks for a manual redirect', async () => {
++        const response = { type: 'basic', status: 200, ok: true } as Response
++        fetchMock.mockResolvedValueOnce(response)
++
++        await expect(fetchThroughAuthProxy('/api/auth')).resolves.toBe(response)
++        expect(fetchMock).toHaveBeenCalledTimes(1)
++        expect(fetchMock.mock.calls[0][1]).toMatchObject({ redirect: 'manual' })
++    })
++
++    it('keeps the caller init, including its abort signal, on the first request', async () => {
++        fetchMock.mockResolvedValueOnce({ type: 'basic', status: 200, ok: true } as Response)
++        const signal = new AbortController().signal
++
++        await fetchThroughAuthProxy('/api/sessions/s/export', { method: 'GET', signal })
++        const firstInit = fetchMock.mock.calls[0][1] as RequestInit
++        expect(firstInit.signal).toBe(signal)
++        expect(firstInit).toMatchObject({ method: 'GET', redirect: 'manual' })
++    })
++
++    it('retries an opaqueredirect with the caller init and returns the retry response', async () => {
++        const retry = { type: 'basic', status: 200, ok: true } as Response
++        fetchMock.mockResolvedValueOnce(opaqueRedirect()).mockResolvedValueOnce(retry)
++
++        const init: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json' } }
++        await expect(fetchThroughAuthProxy('https://h.example/api/auth', init)).resolves.toBe(retry)
++        expect(fetchMock).toHaveBeenCalledTimes(2)
++        expect(fetchMock.mock.calls[1][1]).toBe(init)
++        expect(fetchMock.mock.calls[1][1]).not.toHaveProperty('redirect')
++    })
++
++    it('throws AuthProxyRedirectError when the retry rejects with a TypeError', async () => {
++        fetchMock
++            .mockResolvedValueOnce(opaqueRedirect())
++            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
++
++        const error = await fetchThroughAuthProxy('https://h.example/api/auth').catch((e) => e)
++        expect(error).toBeInstanceOf(AuthProxyRedirectError)
++        expect(error.name).toBe('AuthProxyRedirectError')
++        expect(error.hubOrigin).toBe('https://h.example')
++    })
++
++    it('uses window.location.origin for a relative input', async () => {
++        fetchMock
++            .mockReset()
++            .mockResolvedValueOnce(opaqueRedirect())
++            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
++
++        const error = await fetchThroughAuthProxy('/api/auth').catch((e) => e)
++        expect(error).toBeInstanceOf(AuthProxyRedirectError)
++        expect(error.hubOrigin).toBe(window.location.origin)
++    })
++
++    it('propagates a non-TypeError rejection from the retry unchanged', async () => {
++        const failure = new RangeError('boom')
++        fetchMock.mockResolvedValueOnce(opaqueRedirect()).mockRejectedValueOnce(failure)
++
++        await expect(fetchThroughAuthProxy('/api/auth')).rejects.toBe(failure)
++    })
++
++    it('propagates a first-call rejection unchanged without retrying', async () => {
++        const failure = new TypeError('Failed to fetch')
++        fetchMock.mockRejectedValueOnce(failure)
++
++        await expect(fetchThroughAuthProxy('/api/auth')).rejects.toBe(failure)
++        expect(fetchMock).toHaveBeenCalledTimes(1)
++    })
++})
++
++describe('buildAuthProxyReauthUrl', () => {
++    it('builds a cache-busting reauth url on the hub origin', () => {
++        expect(buildAuthProxyReauthUrl('https://h.example', 123)).toBe('https://h.example/?hapi_reauth=123')
++    })
++})
++
++describe('openAuthProxySignIn', () => {
++    it('assigns in place when the hub is the current origin', () => {
++        const assign = vi.fn()
++        const open = vi.fn()
++        const win = { location: { origin: 'https://app.example', assign }, open } as unknown as Window
++
++        openAuthProxySignIn('https://app.example', win)
++
++        expect(assign).toHaveBeenCalledTimes(1)
++        expect(assign.mock.calls[0][0]).toMatch(/^https:\/\/app\.example\/\?hapi_reauth=\d+$/)
++        expect(open).not.toHaveBeenCalled()
++    })
++
++    it('opens a new tab when the hub is a different origin', () => {
++        const assign = vi.fn()
++        const open = vi.fn()
++        const win = { location: { origin: 'https://app.example', assign }, open } as unknown as Window
++
++        openAuthProxySignIn('https://hub.example', win)
++
++        expect(open).toHaveBeenCalledTimes(1)
++        expect(open.mock.calls[0][0]).toMatch(/^https:\/\/hub\.example\/\?hapi_reauth=\d+$/)
++        expect(open.mock.calls[0][1]).toBe('_blank')
++        expect(open.mock.calls[0][2]).toBe('noopener,noreferrer')
++        expect(assign).not.toHaveBeenCalled()
++    })
++})
+diff --git a/web/src/api/authProxy.ts b/web/src/api/authProxy.ts
+new file mode 100644
+index 000000000..3a4ffd2db
+--- /dev/null
++++ b/web/src/api/authProxy.ts
+@@ -0,0 +1,45 @@
++/** Message of AuthProxyRedirectError; the login screen keys its redirect notice on it. */
++export const AUTH_PROXY_REDIRECT_MESSAGE = 'Request was redirected'
++
++export class AuthProxyRedirectError extends Error {
++    readonly hubOrigin: string
++
++    constructor(hubOrigin: string) {
++        super(AUTH_PROXY_REDIRECT_MESSAGE)
++        this.name = 'AuthProxyRedirectError'
++        this.hubOrigin = hubOrigin
++    }
++}
++
++export async function fetchThroughAuthProxy(input: string, init?: RequestInit): Promise<Response> {
++    const first = await fetch(input, { ...init, redirect: 'manual' })
++    if (first.type !== 'opaqueredirect') {
++        return first
++    }
++
++    // The hub never redirects, so the 3xx came from something in front of it. A gateway that
++    // redirects before forwarding has not passed the request on, so one retry with the caller's
++    // init is safe and lets ordinary redirects (http -> https) succeed. Only a failing retry
++    // means the browser could not follow the redirect (e.g. cross-origin without CORS).
++    try {
++        return await fetch(input, init)
++    } catch (e) {
++        if (e instanceof TypeError) {
++            throw new AuthProxyRedirectError(new URL(input, window.location.href).origin)
++        }
++        throw e
++    }
++}
++
++export function buildAuthProxyReauthUrl(hubOrigin: string, now?: number): string {
++    return `${hubOrigin}/?hapi_reauth=${now ?? Date.now()}`
++}
++
++export function openAuthProxySignIn(hubOrigin: string, win: Window = window): void {
++    const url = buildAuthProxyReauthUrl(hubOrigin)
++    if (hubOrigin === win.location.origin) {
++        win.location.assign(url)
++        return
++    }
++    win.open(url, '_blank', 'noopener,noreferrer')
++}
+diff --git a/web/src/api/client.test.ts b/web/src/api/client.test.ts
+index dffc04b4b..4631adcb1 100644
+--- a/web/src/api/client.test.ts
++++ b/web/src/api/client.test.ts
+@@ -1,4 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { AuthProxyRedirectError } from './authProxy'
+ import { ApiClient, ApiError } from './client'
+ 
+ describe('ApiClient error mapping', () => {
+@@ -375,3 +376,57 @@ describe('ApiClient Kimi session model discovery', () => {
+         expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%2F1/kimi-models')
+     })
+ })
++
++describe('ApiClient auth proxy redirect', () => {
++    let originalFetch: typeof globalThis.fetch
++    let fetchMock: ReturnType<typeof vi.fn>
++
++    beforeEach(() => {
++        originalFetch = globalThis.fetch
++        fetchMock = vi.fn()
++        globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
++    })
++
++    afterEach(() => {
++        globalThis.fetch = originalFetch
++    })
++
++    const opaqueRedirect = () => ({ type: 'opaqueredirect', status: 0, ok: false }) as Response
++
++    // Every hub call site must classify an auth-proxy redirect instead of
++    // surfacing the browser's opaque `Failed to fetch`.
++    const callSites: Array<{ name: string; run: (api: ApiClient) => Promise<unknown> }> = [
++        { name: 'authenticate', run: (api) => api.authenticate({ accessToken: 'token' }) },
++        { name: 'bind', run: (api) => api.bind({ initData: 'init', accessToken: 'token' }) },
++        { name: 'getSessions', run: (api) => api.getSessions() },
++        {
++            name: 'getGeneratedImageBlob',
++            run: (api) => api.getGeneratedImageBlob('session-1', 'image-1')
++        },
++        { name: 'migrateCursorSessionToAcp', run: (api) => api.migrateCursorSessionToAcp('session-1') },
++        {
++            name: 'fetchScratchlistAttachmentBlob',
++            run: (api) => api.fetchScratchlistAttachmentBlob('session-1', 'attachment-1')
++        }
++    ]
++
++    it.each(callSites)('$name rejects with AuthProxyRedirectError', async ({ run }) => {
++        fetchMock
++            .mockResolvedValueOnce(opaqueRedirect())
++            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
++
++        const api = new ApiClient('test-token', { baseUrl: 'https://hub.example' })
++        await expect(run(api)).rejects.toBeInstanceOf(AuthProxyRedirectError)
++    })
++
++    it('getGeneratedImageBlob rejects with AuthProxyRedirectError on the 304 cache re-read', async () => {
++        fetchMock
++            .mockResolvedValueOnce({ type: 'basic', status: 304, ok: false } as Response)
++            .mockResolvedValueOnce(opaqueRedirect())
++            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
++
++        const api = new ApiClient('test-token', { baseUrl: 'https://hub.example' })
++        await expect(api.getGeneratedImageBlob('session-1', 'image-1')).rejects.toBeInstanceOf(AuthProxyRedirectError)
++        expect(fetchMock.mock.calls[1][1]).toMatchObject({ cache: 'force-cache', redirect: 'manual' })
++    })
++})
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 3eb513966..69864e323 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -60,6 +60,7 @@ import type {
+     UsageSummaryResponse,
+     UploadFileResponse
+ } from '@hapi/protocol/apiTypes'
++import { fetchThroughAuthProxy } from '@/api/authProxy'
+ import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
+ import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+ import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+@@ -199,7 +200,7 @@ export class ApiClient {
+             headers.set('content-type', 'application/json')
+         }
+ 
+-        const res = await fetch(this.buildUrl(path), {
++        const res = await fetchThroughAuthProxy(this.buildUrl(path), {
+             ...init,
+             headers
+         })
+@@ -230,7 +231,7 @@ export class ApiClient {
+     }
+ 
+     async authenticate(auth: { initData: string } | { accessToken: string }): Promise<AuthResponse> {
+-        const res = await fetch(this.buildUrl('/api/auth'), {
++        const res = await fetchThroughAuthProxy(this.buildUrl('/api/auth'), {
+             method: 'POST',
+             headers: { 'content-type': 'application/json' },
+             body: JSON.stringify(auth)
+@@ -247,7 +248,7 @@ export class ApiClient {
+     }
+ 
+     async bind(auth: { initData: string; accessToken: string }): Promise<AuthResponse> {
+-        const res = await fetch(this.buildUrl('/api/bind'), {
++        const res = await fetchThroughAuthProxy(this.buildUrl('/api/bind'), {
+             method: 'POST',
+             headers: { 'content-type': 'application/json' },
+             body: JSON.stringify(auth)
+@@ -463,11 +464,11 @@ export class ApiClient {
+             headers.set('authorization', `Bearer ${authToken}`)
+         }
+         const url = this.buildUrl(`/api/sessions/${encodeURIComponent(sessionId)}/generated-images/${encodeURIComponent(imageId)}`)
+-        let res = await fetch(url, { headers })
++        let res = await fetchThroughAuthProxy(url, { headers })
+         // Hub returns ETag + immutable Cache-Control (#927). Default fetch cache stores 200
+         // responses so remounts avoid RPC; on 304 the body is empty — read from cache.
+         if (res.status === 304) {
+-            res = await fetch(url, { headers, cache: 'force-cache' })
++            res = await fetchThroughAuthProxy(url, { headers, cache: 'force-cache' })
+         }
+         if (res.status === 401 && attempt === 0 && this.onUnauthorized) {
+             const refreshed = await this.onUnauthorized()
+@@ -658,7 +659,7 @@ export class ApiClient {
+             if (authToken) {
+                 headers.set('authorization', `Bearer ${authToken}`)
+             }
+-            return fetch(this.buildUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
++            return fetchThroughAuthProxy(this.buildUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
+         }
+ 
+         let res = await tryOnce(null)
+@@ -1097,7 +1098,7 @@ export class ApiClient {
+         if (authToken) {
+             headers.set('authorization', `Bearer ${authToken}`)
+         }
+-        const response = await fetch(
++        const response = await fetchThroughAuthProxy(
+             this.buildUrl(
+                 `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`
+             ),
+diff --git a/web/src/components/LoginPrompt.test.tsx b/web/src/components/LoginPrompt.test.tsx
+index c9e8e7501..0c08a7628 100644
+--- a/web/src/components/LoginPrompt.test.tsx
++++ b/web/src/components/LoginPrompt.test.tsx
+@@ -1,6 +1,7 @@
+-import { describe, it, expect, vi, beforeEach } from 'vitest'
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { render, screen, fireEvent } from '@testing-library/react'
+ import { I18nProvider } from '@/lib/i18n-context'
++import { AUTH_PROXY_REDIRECT_MESSAGE } from '@/api/authProxy'
+ import { LoginPrompt } from './LoginPrompt'
+ 
+ function renderWithProviders(ui: React.ReactElement) {
+@@ -49,3 +50,132 @@ describe('LoginPrompt', () => {
+         expect(screen.queryByText('Hub URL required. Please set it before signing in.')).not.toBeInTheDocument()
+     })
+ })
++
++const REDIRECT_TEXT = 'Request was redirected'
++const OPEN_BUTTON = `Open ${window.location.host}`
++
++describe('LoginPrompt redirected hub requests', () => {
++    let originalFetch: typeof globalThis.fetch
++    let originalLocation: Location
++    let assign: ReturnType<typeof vi.fn>
++
++    beforeEach(() => {
++        originalFetch = globalThis.fetch
++        Object.defineProperty(window, 'localStorage', {
++            value: {
++                getItem: vi.fn(() => 'en'),
++                setItem: vi.fn(),
++                removeItem: vi.fn(),
++                clear: vi.fn(),
++                key: vi.fn(() => null),
++                length: 0,
++            },
++            configurable: true,
++        })
++        assign = vi.fn()
++        originalLocation = window.location
++        Object.defineProperty(window, 'location', {
++            configurable: true,
++            value: { ...originalLocation, origin: originalLocation.origin, host: originalLocation.host, href: originalLocation.href, assign }
++        })
++    })
++
++    afterEach(() => {
++        globalThis.fetch = originalFetch
++        Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
++    })
++
++    function mockRedirectedFetch() {
++        // First attempt (redirect: 'manual') sees the redirect; the follow-up is blocked as cross-origin.
++        ;(globalThis as { fetch: unknown }).fetch = vi.fn()
++            .mockResolvedValueOnce({ type: 'opaqueredirect', status: 0, ok: false } as Response)
++            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
++    }
++
++    function renderPrompt(extra: Partial<React.ComponentProps<typeof LoginPrompt>> = {}) {
++        return renderWithProviders(
++            <LoginPrompt
++                baseUrl={window.location.origin}
++                serverUrl={null}
++                setServerUrl={vi.fn((value: string) => ({ ok: true as const, value }))}
++                clearServerUrl={vi.fn()}
++                onLogin={vi.fn()}
++                onBind={vi.fn()}
++                {...extra}
++            />
++        )
++    }
++
++    function submitToken(label = 'Sign In') {
++        fireEvent.change(screen.getByPlaceholderText('Access token'), { target: { value: 'token' } })
++        fireEvent.click(screen.getByRole('button', { name: label }))
++    }
++
++    it('shows the redirect notice and an open-hub button instead of "Failed to fetch"', async () => {
++        mockRedirectedFetch()
++        renderPrompt()
++
++        submitToken()
++
++        expect(await screen.findByText(REDIRECT_TEXT)).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: OPEN_BUTTON })).toBeInTheDocument()
++        expect(screen.queryByText('Failed to fetch')).not.toBeInTheDocument()
++    })
++
++    it('opens the hub through a URL the service worker precache does not match', async () => {
++        mockRedirectedFetch()
++        renderPrompt()
++
++        submitToken()
++        fireEvent.click(await screen.findByRole('button', { name: OPEN_BUTTON }))
++
++        expect(assign).toHaveBeenCalledTimes(1)
++        expect(assign.mock.calls[0][0]).toMatch(new RegExp(`^${window.location.origin}/\\?hapi_reauth=\\d+$`))
++    })
++
++    it('shows the notice for a redirect error handed down by the parent', () => {
++        renderPrompt({ error: AUTH_PROXY_REDIRECT_MESSAGE })
++
++        expect(screen.getByText(REDIRECT_TEXT)).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: OPEN_BUTTON })).toBeInTheDocument()
++    })
++
++    it('opens the configured hub rather than the page origin', () => {
++        const open = vi.spyOn(window, 'open').mockReturnValue(null)
++        renderPrompt({ baseUrl: 'https://hub.example', error: AUTH_PROXY_REDIRECT_MESSAGE })
++
++        fireEvent.click(screen.getByRole('button', { name: 'Open hub.example' }))
++
++        expect(assign).not.toHaveBeenCalled()
++        expect(open).toHaveBeenCalledTimes(1)
++        expect(open.mock.calls[0][0]).toMatch(/^https:\/\/hub\.example\/\?hapi_reauth=\d+$/)
++        open.mockRestore()
++    })
++
++    it('translates the notice and the button', () => {
++        vi.mocked(window.localStorage.getItem).mockReturnValue('zh-CN')
++        renderPrompt({ error: AUTH_PROXY_REDIRECT_MESSAGE })
++
++        expect(screen.getByText('请求已被重定向')).toBeInTheDocument()
++        expect(screen.getByRole('button', { name: `打开 ${window.location.host}` })).toBeInTheDocument()
++        expect(screen.queryByText(REDIRECT_TEXT)).not.toBeInTheDocument()
++    })
++
++    it('shows the notice without the button in bind mode', () => {
++        renderPrompt({ mode: 'bind', error: AUTH_PROXY_REDIRECT_MESSAGE })
++
++        expect(screen.getByText(REDIRECT_TEXT)).toBeInTheDocument()
++        expect(screen.queryByRole('button', { name: /^Open / })).not.toBeInTheDocument()
++    })
++
++    it('leaves other failures unchanged', async () => {
++        ;(globalThis as { fetch: unknown }).fetch = vi.fn()
++            .mockResolvedValue(new Response('nope', { status: 401, statusText: 'Unauthorized' }))
++        renderPrompt()
++
++        submitToken()
++
++        expect(await screen.findByText(/Auth failed: HTTP 401/)).toBeInTheDocument()
++        expect(screen.queryByRole('button', { name: /^Open / })).not.toBeInTheDocument()
++    })
++})
+diff --git a/web/src/components/LoginPrompt.tsx b/web/src/components/LoginPrompt.tsx
+index be569559e..1d1f5428b 100644
+--- a/web/src/components/LoginPrompt.tsx
++++ b/web/src/components/LoginPrompt.tsx
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useState } from 'react'
+ import { ApiClient } from '@/api/client'
++import { AUTH_PROXY_REDIRECT_MESSAGE, openAuthProxySignIn } from '@/api/authProxy'
+ import { LanguageSwitcher } from '@/components/LanguageSwitcher'
+ import { Spinner } from '@/components/Spinner'
+ import { Button } from '@/components/ui/button'
+@@ -107,6 +108,9 @@ export function LoginPrompt(props: LoginPromptProps) {
+     }, [])
+ 
+     const displayError = error || props.error
++    // Opening the hub lets the browser follow the redirect that the cached app shell hides.
++    const redirected = displayError === AUTH_PROXY_REDIRECT_MESSAGE
++    const hubOrigin = new URL(props.baseUrl || window.location.origin, window.location.href).origin
+     const serverSummary = props.serverUrl ?? `${props.baseUrl} ${t('login.server.default')}`
+     const title = isBindMode ? t('login.bind.title') : t('login.title')
+     const subtitle = t('login.subtitle')
+@@ -144,10 +148,21 @@ export function LoginPrompt(props: LoginPromptProps) {
+ 
+                     {displayError && (
+                         <div className="text-sm text-red-500 text-center">
+-                            {displayError}
++                            {redirected ? t('login.error.redirected') : displayError}
+                         </div>
+                     )}
+ 
++                    {!isBindMode && redirected && (
++                        <Button
++                            type="button"
++                            variant="secondary"
++                            className="w-full"
++                            onClick={() => openAuthProxySignIn(hubOrigin)}
++                        >
++                            {t('login.redirect.open', { host: new URL(hubOrigin).host })}
++                        </Button>
++                    )}
++
+                     <button
+                         type="submit"
+                         disabled={isLoading || !accessToken.trim()}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index b67e7d35b..ab90992a8 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -50,6 +50,8 @@ export default {
+   'login.error.loginUnavailable': 'Login is unavailable.',
+   'login.error.bindFailed': 'Binding failed',
+   'login.error.authFailed': 'Authentication failed',
++  'login.error.redirected': 'Request was redirected',
++  'login.redirect.open': 'Open {host}',
+   'login.help': 'Needs help?',
+   'login.server.default': '(Default)',
+   'login.server.custom': '(Custom)',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 310c7ad13..04bf8e02a 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -50,6 +50,8 @@ export default {
+   'login.error.loginUnavailable': 'Вход недоступен.',
+   'login.error.bindFailed': 'Не удалось привязать',
+   'login.error.authFailed': 'Ошибка аутентификации',
++  'login.error.redirected': 'Запрос был перенаправлен',
++  'login.redirect.open': 'Открыть {host}',
+   'login.help': 'Нужна помощь?',
+   'login.server.default': '(По умолчанию)',
+   'login.server.custom': '(Свой)',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 40de10aa8..83d4c7cfe 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -50,6 +50,8 @@ export default {
+   'login.error.loginUnavailable': '登录服务不可用。',
+   'login.error.bindFailed': '绑定失败',
+   'login.error.authFailed': '认证失败',
++  'login.error.redirected': '请求已被重定向',
++  'login.redirect.open': '打开 {host}',
+   'login.help': '需要帮助？',
+   'login.server.default': '(默认)',
+   'login.server.custom': '(自定义)',
+diff --git a/web/src/lib/swCachePolicy.test.ts b/web/src/lib/swCachePolicy.test.ts
+new file mode 100644
+index 000000000..132eb1aa2
+--- /dev/null
++++ b/web/src/lib/swCachePolicy.test.ts
+@@ -0,0 +1,54 @@
++import { describe, expect, it } from 'vitest'
++import { cacheOkResponsesOnly } from './swCachePolicy'
++
++function redirectedResponse(body: string): Response {
++    // Response objects built in tests cannot set `redirected`; model one that came through a redirect.
++    const inner = new Response(body, { status: 200, statusText: 'OK', headers: { 'content-type': 'application/json' } })
++    return {
++        redirected: true,
++        status: 200,
++        statusText: 'OK',
++        headers: inner.headers,
++        arrayBuffer: () => inner.arrayBuffer(),
++    } as unknown as Response
++}
++
++describe('cacheOkResponsesOnly', () => {
++    it('stores plain 200 responses as they are', async () => {
++        const response = new Response('{}', { status: 200 })
++        expect(await cacheOkResponsesOnly.cacheWillUpdate({ response })).toBe(response)
++    })
++
++    it('rejects opaque redirects and other non-200 responses', async () => {
++        for (const response of [
++            { status: 0, type: 'opaqueredirect' },
++            { status: 0, type: 'opaque' },
++            { status: 204, type: 'basic' },
++            { status: 304, type: 'basic' },
++            { status: 404, type: 'basic' },
++            { status: 500, type: 'basic' },
++        ] as Response[]) {
++            expect(await cacheOkResponsesOnly.cacheWillUpdate({ response })).toBeNull()
++        }
++    })
++
++    it('stores a followed redirect without its redirect history', async () => {
++        const stored = await cacheOkResponsesOnly.cacheWillUpdate({ response: redirectedResponse('{"ok":1}') })
++        expect(stored).not.toBeNull()
++        expect(stored!.redirected).toBe(false)
++        expect(stored!.status).toBe(200)
++        expect(stored!.statusText).toBe('OK')
++        expect(stored!.headers.get('content-type')).toBe('application/json')
++        expect(await stored!.text()).toBe('{"ok":1}')
++    })
++
++    it('serves entries cached with redirect history without it', async () => {
++        const served = await cacheOkResponsesOnly.cachedResponseWillBeUsed({ cachedResponse: redirectedResponse('[1]') })
++        expect(served!.redirected).toBe(false)
++        expect(await served!.text()).toBe('[1]')
++
++        const plain = new Response('[2]', { status: 200 })
++        expect(await cacheOkResponsesOnly.cachedResponseWillBeUsed({ cachedResponse: plain })).toBe(plain)
++        expect(await cacheOkResponsesOnly.cachedResponseWillBeUsed({})).toBeNull()
++    })
++})
+diff --git a/web/src/lib/swCachePolicy.ts b/web/src/lib/swCachePolicy.ts
+new file mode 100644
+index 000000000..37f2e5bec
+--- /dev/null
++++ b/web/src/lib/swCachePolicy.ts
+@@ -0,0 +1,26 @@
++/**
++ * Runtime-cache policy for the API routes, which receive `redirect: 'manual'` requests.
++ * - NetworkFirst caches status 0 by default, so a gateway's opaqueredirect would overwrite
++ *   the last good JSON. Only 200s are stored.
++ * - Fetch makes a service-worker response with redirect history a network error for
++ *   non-`follow` requests, so redirected 200s are re-wrapped when stored and when served.
++ */
++async function withoutRedirectHistory(response: Response): Promise<Response> {
++    if (!response.redirected) {
++        return response
++    }
++    return new Response(await response.arrayBuffer(), {
++        status: response.status,
++        statusText: response.statusText,
++        headers: response.headers,
++    })
++}
++
++export const cacheOkResponsesOnly = {
++    cacheWillUpdate: async ({ response }: { response: Response }): Promise<Response | null> =>
++        response.status === 200 ? await withoutRedirectHistory(response) : null,
++    cachedResponseWillBeUsed: async (
++        { cachedResponse }: { cachedResponse?: Response }
++    ): Promise<Response | null> =>
++        cachedResponse ? await withoutRedirectHistory(cachedResponse) : null,
++}
+diff --git a/web/src/sw.ts b/web/src/sw.ts
+index 1fd49dd3e..75ba9b3da 100644
+--- a/web/src/sw.ts
++++ b/web/src/sw.ts
+@@ -10,6 +10,7 @@ import {
+ } from './lib/shareTransfer'
+ import { shareTargetPathname } from './lib/sharePath'
+ import { focusOrOpenNotificationClient, resolveNotificationTarget } from './lib/notificationClick'
++import { cacheOkResponsesOnly } from './lib/swCachePolicy'
+ 
+ const sharePath = shareTargetPathname()
+ 
+@@ -38,6 +39,7 @@ registerRoute(
+         cacheName: 'api-sessions',
+         networkTimeoutSeconds: 10,
+         plugins: [
++            cacheOkResponsesOnly,
+             new ExpirationPlugin({
+                 maxEntries: 10,
+                 maxAgeSeconds: 60 * 5
+@@ -52,6 +54,7 @@ registerRoute(
+         cacheName: 'api-session-detail',
+         networkTimeoutSeconds: 10,
+         plugins: [
++            cacheOkResponsesOnly,
+             new ExpirationPlugin({
+                 maxEntries: 20,
+                 maxAgeSeconds: 60 * 5
+@@ -66,6 +69,7 @@ registerRoute(
+         cacheName: 'api-machines',
+         networkTimeoutSeconds: 10,
+         plugins: [
++            cacheOkResponsesOnly,
+             new ExpirationPlugin({
+                 maxEntries: 5,
+                 maxAgeSeconds: 60 * 10

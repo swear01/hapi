@@ -1,0 +1,344 @@
+From 90f1e36366731ce1b7d57bba59c3afb6dec218aa Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:23:56 +0800
+Subject: [PATCH] carry(upstream): PR #1721
+
+Upstream-PR-Head: 02840df43b4f07bbb8ce60ea55264199287dd295
+---
+ cli/README.md                                |  1 +
+ cli/src/agent/agentAvailability.test.ts      |  5 ++
+ cli/src/agent/agentLaunchCommand.ts          |  1 +
+ cli/src/modules/common/piModels.ts           |  3 +-
+ cli/src/modules/common/piModelsProbe.test.ts | 21 ++++--
+ cli/src/pi/piTransport.test.ts               | 49 +++++++++++--
+ cli/src/pi/piTransport.ts                    | 27 ++++++--
+ cli/src/pi/piTransport.windows.test.ts       | 73 ++++++++++++++++++++
+ cli/src/pi/runPi.ts                          |  4 +-
+ 9 files changed, 167 insertions(+), 17 deletions(-)
+ create mode 100644 cli/src/pi/piTransport.windows.test.ts
+
+diff --git a/cli/README.md b/cli/README.md
+index 11066a7ba..6a38a550c 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -195,6 +195,7 @@ controls for DSH.
+ - `HAPI_EXPERIMENTAL` - Enable experimental features (true/1/yes).
+ - `HAPI_EXTRA_HEADERS_JSON` - JSON object of extra headers to send on CLI → hub requests, e.g. `{"Cookie":"CF_Authorization=..."}`. Can also be set as the `extraHeaders` object in `~/.hapi/settings.json` (environment variable wins).
+ - `HAPI_CLAUDE_PATH` - Path to a specific `claude` executable.
++- `HAPI_PI_PATH` - Path to a specific `pi` executable.
+ - `HAPI_DSH_ACP_COMMAND` - ACP server executable for `hapi dsh` (default: `dsh-acp-demo`).
+ - `HAPI_DSH_ACP_CONFIG` - Optional `dsh-acp-demo --config` path.
+ - `HAPI_DSH_ACP_ARGS_JSON` - Optional JSON array of ACP server arguments.
+diff --git a/cli/src/agent/agentAvailability.test.ts b/cli/src/agent/agentAvailability.test.ts
+index 8d3e1ac0b..2cb590ff0 100644
+--- a/cli/src/agent/agentAvailability.test.ts
++++ b/cli/src/agent/agentAvailability.test.ts
+@@ -26,6 +26,11 @@ describe('agent executable resolution', () => {
+         })).toEqual({ agent: 'copilot', available: true })
+     })
+ 
++    it('uses the configured Pi executable', () => {
++        expect(getAgentLaunchCommand('pi', { HAPI_PI_PATH: 'C:\\Tools\\pi.cmd' }))
++            .toBe('C:\\Tools\\pi.cmd')
++    })
++
+     it('uses PATHEXT when resolving Windows commands', () => {
+         expect(executableCandidates('agent', {
+             platform: 'win32',
+diff --git a/cli/src/agent/agentLaunchCommand.ts b/cli/src/agent/agentLaunchCommand.ts
+index 5a9607f7a..e14edf2f8 100644
+--- a/cli/src/agent/agentLaunchCommand.ts
++++ b/cli/src/agent/agentLaunchCommand.ts
+@@ -27,6 +27,7 @@ export function getAgentLaunchCommand(
+     if (flavor === 'claude') return env.HAPI_CLAUDE_PATH?.trim() || DEFAULT_COMMANDS.claude
+     if (flavor === 'copilot') return env.COPILOT_CLI_PATH?.trim() || DEFAULT_COMMANDS.copilot
+     if (flavor === 'dsh') return env.HAPI_DSH_ACP_COMMAND?.trim() || DEFAULT_COMMANDS.dsh
++    if (flavor === 'pi') return env.HAPI_PI_PATH?.trim() || DEFAULT_COMMANDS.pi
+     return DEFAULT_COMMANDS[flavor]
+ }
+ 
+diff --git a/cli/src/modules/common/piModels.ts b/cli/src/modules/common/piModels.ts
+index 5e8d19dcd..36d57f756 100644
+--- a/cli/src/modules/common/piModels.ts
++++ b/cli/src/modules/common/piModels.ts
+@@ -1,4 +1,4 @@
+-import { spawn } from 'node:child_process'
++import spawn from 'cross-spawn'
+ import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand'
+ import { homedir } from 'node:os'
+ import { parse } from 'node:path'
+@@ -127,7 +127,6 @@ function runPiModelsProbe(): Promise<ListPiModelsForMachineResponse> {
+             // filesystem root (see resolveProbeCwd).
+             cwd: resolveProbeCwd(),
+             stdio: ['pipe', 'pipe', 'pipe'],
+-            shell: process.platform === 'win32',
+             windowsHide: process.platform === 'win32',
+         })
+         let stdoutBuffer = ''
+diff --git a/cli/src/modules/common/piModelsProbe.test.ts b/cli/src/modules/common/piModelsProbe.test.ts
+index c8fa68574..21d8610a6 100644
+--- a/cli/src/modules/common/piModelsProbe.test.ts
++++ b/cli/src/modules/common/piModelsProbe.test.ts
+@@ -8,10 +8,7 @@ const { spawnMock, killMock } = vi.hoisted(() => ({
+     killMock: vi.fn(),
+ }))
+ 
+-vi.mock('node:child_process', async (importOriginal) => {
+-    const actual = await importOriginal<typeof import('node:child_process')>()
+-    return { ...actual, spawn: spawnMock }
+-})
++vi.mock('cross-spawn', () => ({ default: spawnMock }))
+ 
+ vi.mock('../../utils/process', () => ({
+     killProcessByChildProcess: killMock,
+@@ -51,6 +48,7 @@ beforeEach(() => {
+ 
+ afterEach(() => {
+     vi.useRealTimers()
++    vi.unstubAllEnvs()
+ })
+ 
+ describe('runPiModelsProbe spawn', () => {
+@@ -125,6 +123,21 @@ describe('runPiModelsProbe spawn', () => {
+         expect(args).not.toContain('--no-extensions')
+         expect(args).toEqual(expect.arrayContaining(['--mode', 'rpc', '--no-session']))
+     })
++
++    it('passes a spaced HAPI_PI_PATH directly to the shim-safe launcher', async () => {
++        killMock.mockResolvedValue(true)
++        vi.stubEnv('HAPI_PI_PATH', 'C:\\Program Files\\Pi\\pi.cmd')
++
++        const pending = listPiModelsForMachine()
++        child.emitModelsResponse([{ id: 'm1', provider: 'p1' }])
++        await pending
++
++        expect(spawnMock).toHaveBeenCalledWith(
++            'C:\\Program Files\\Pi\\pi.cmd',
++            expect.any(Array),
++            expect.not.objectContaining({ shell: expect.anything() }),
++        )
++    })
+ })
+ 
+ describe('runPiModelsProbe teardown', () => {
+diff --git a/cli/src/pi/piTransport.test.ts b/cli/src/pi/piTransport.test.ts
+index ea5772bd9..bdb666bef 100644
+--- a/cli/src/pi/piTransport.test.ts
++++ b/cli/src/pi/piTransport.test.ts
+@@ -3,8 +3,13 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+ import { EventEmitter } from 'node:events';
+ 
+ const mockSpawn = vi.fn();
+-vi.mock('node:child_process', () => ({
+-    get spawn() { return mockSpawn; }
++const mockKillProcessByChildProcess = vi.fn();
++vi.mock('cross-spawn', () => ({
++    default: mockSpawn
++}));
++
++vi.mock('@/utils/process', () => ({
++    killProcessByChildProcess: mockKillProcessByChildProcess
+ }));
+ 
+ vi.mock('@/ui/logger', () => ({
+@@ -44,6 +49,7 @@ describe('PiTransport', () => {
+         vi.clearAllMocks();
+         mockProcess = createMockProcess();
+         mockSpawn.mockReturnValue(mockProcess);
++        mockKillProcessByChildProcess.mockResolvedValue(true);
+     });
+ 
+     describe('start()', () => {
+@@ -170,12 +176,45 @@ describe('PiTransport', () => {
+     });
+ 
+     describe('kill()', () => {
+-        it('should send SIGTERM to the process', () => {
++        it('should stop the process tree', async () => {
++            const transport = new PiTransport({ command: 'pi', args: ['--mode', 'rpc'], cwd: '/work' });
++            transport.start();
++
++            await transport.kill();
++            expect(mockKillProcessByChildProcess).toHaveBeenCalledWith(mockProcess, false);
++        });
++
++        it('should force-stop the process tree when graceful cleanup fails', async () => {
++            mockKillProcessByChildProcess
++                .mockResolvedValueOnce(false)
++                .mockResolvedValueOnce(true);
++            const transport = new PiTransport({ command: 'pi', args: ['--mode', 'rpc'], cwd: '/work' });
++            transport.start();
++
++            await transport.kill();
++            expect(mockKillProcessByChildProcess).toHaveBeenNthCalledWith(1, mockProcess, false);
++            expect(mockKillProcessByChildProcess).toHaveBeenNthCalledWith(2, mockProcess, true);
++        });
++
++        it('should force-stop the process tree when graceful cleanup throws', async () => {
++            mockKillProcessByChildProcess
++                .mockRejectedValueOnce(new Error('taskkill failed'))
++                .mockResolvedValueOnce(true);
+             const transport = new PiTransport({ command: 'pi', args: ['--mode', 'rpc'], cwd: '/work' });
+             transport.start();
+ 
+-            transport.kill();
+-            expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM');
++            await transport.kill();
++            expect(mockKillProcessByChildProcess).toHaveBeenNthCalledWith(2, mockProcess, true);
++        });
++
++        it('should not stop a PID after the process has already closed', async () => {
++            const transport = new PiTransport({ command: 'pi', args: ['--mode', 'rpc'], cwd: '/work' });
++            transport.start();
++            mockProcess.emit('close', 0, null);
++
++            await transport.kill();
++
++            expect(mockKillProcessByChildProcess).not.toHaveBeenCalled();
+         });
+ 
+         it('should be a no-op when process is not running', () => {
+diff --git a/cli/src/pi/piTransport.ts b/cli/src/pi/piTransport.ts
+index 85a1fa3ad..c91cdcb31 100644
+--- a/cli/src/pi/piTransport.ts
++++ b/cli/src/pi/piTransport.ts
+@@ -1,6 +1,8 @@
+-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
++import type { ChildProcessWithoutNullStreams } from 'node:child_process';
++import spawn from 'cross-spawn';
+ import { logger } from '@/ui/logger';
+ import { JsonLineParser } from '@/utils/jsonLineParser';
++import { killProcessByChildProcess } from '@/utils/process';
+ import { PiAgentEventSchema } from './schemas';
+ import type { PiAgentEvent, PiRpcCommand } from './types';
+ 
+@@ -107,10 +109,27 @@ export class PiTransport extends JsonLineParser {
+         this.errorHandler = handler;
+     }
+ 
+-    kill(): void {
+-        if (!this.process || this.killed) return;
++    async kill(): Promise<void> {
++        if (!this.process || this.killed || this.exited) return;
+         this.killed = true;
+-        this.process.kill('SIGTERM');
++
++        let stopped = false;
++        try {
++            stopped = await killProcessByChildProcess(this.process, false);
++        } catch {
++            stopped = false;
++        }
++        if (!stopped) {
++            try {
++                stopped = await killProcessByChildProcess(this.process, true);
++            } catch {
++                stopped = false;
++            }
++        }
++
++        if (!stopped) {
++            logger.warn(`[pi] Failed to stop Pi process tree (pid=${this.process.pid ?? 'unknown'})`);
++        }
+     }
+ 
+     protected handleLine(line: string): void {
+diff --git a/cli/src/pi/piTransport.windows.test.ts b/cli/src/pi/piTransport.windows.test.ts
+new file mode 100644
+index 000000000..2eabc0de8
+--- /dev/null
++++ b/cli/src/pi/piTransport.windows.test.ts
+@@ -0,0 +1,73 @@
++import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
++import { join } from 'node:path'
++import { afterAll, beforeAll, describe, expect, it } from 'vitest'
++import { isProcessAlive, killProcessTreeByPid } from '@/utils/process'
++import { PiTransport } from './piTransport'
++
++let fixtureDirectory: string
++let childPid: number | null = null
++
++async function waitFor<T>(read: () => Promise<T | null>, timeoutMs = 5_000): Promise<T> {
++    const deadline = Date.now() + timeoutMs
++    while (Date.now() < deadline) {
++        const value = await read()
++        if (value !== null) return value
++        await new Promise((resolve) => setTimeout(resolve, 25))
++    }
++    throw new Error('Timed out waiting for the Pi shim child process')
++}
++
++describe.skipIf(process.platform !== 'win32')('PiTransport on Windows', () => {
++    beforeAll(async () => {
++        fixtureDirectory = await mkdtemp(join(process.cwd(), '.tmp-pi-transport-test-'))
++        await writeFile(
++            join(fixtureDirectory, 'pi-child.cjs'),
++            "require('node:fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000)\n"
++        )
++        await writeFile(
++            join(fixtureDirectory, 'pi-test.cmd'),
++            `@echo off\r\n"${process.execPath}" "%~dp0pi-child.cjs" "%~dp0pi-child.pid"\r\n`
++        )
++    })
++
++    afterAll(async () => {
++        if (childPid && isProcessAlive(childPid)) {
++            await killProcessTreeByPid(childPid, true)
++        }
++        await rm(fixtureDirectory, { recursive: true, force: true })
++    })
++
++    it('launches an npm-style .cmd shim and stops its process tree', async () => {
++        const transport = new PiTransport({
++            command: 'pi-test',
++            args: [],
++            cwd: fixtureDirectory,
++            env: {
++                ...process.env,
++                PATH: fixtureDirectory,
++                PATHEXT: '.CMD',
++            },
++        })
++
++        const error = new Promise<never>((_, reject) => {
++            transport.onError(reject)
++        })
++
++        transport.start()
++        childPid = await Promise.race([
++            waitFor(async () => {
++                try {
++                    return Number.parseInt(await readFile(join(fixtureDirectory, 'pi-child.pid'), 'utf8'), 10)
++                } catch {
++                    return null
++                }
++            }),
++            error,
++        ])
++        expect(isProcessAlive(childPid)).toBe(true)
++
++        await transport.kill()
++        await waitFor(async () => isProcessAlive(childPid!) ? null : true)
++        expect(isProcessAlive(childPid)).toBe(false)
++    })
++})
+diff --git a/cli/src/pi/runPi.ts b/cli/src/pi/runPi.ts
+index 55e1e70d1..0f50221ea 100644
+--- a/cli/src/pi/runPi.ts
++++ b/cli/src/pi/runPi.ts
+@@ -297,10 +297,10 @@ export async function runPi(opts: {
+         session: apiSession,
+         logTag: 'pi',
+         stopKeepAlive: () => piSession.stopKeepAlive(),
+-        onAfterClose: () => {
++        onAfterClose: async () => {
+             piSession.stopKeepAlive();
+             killedByCleanup = true;
+-            transport.kill();
++            await transport.kill();
+         }
+     });
+ 
+-- 
+2.54.0 (Apple Git-157)
+

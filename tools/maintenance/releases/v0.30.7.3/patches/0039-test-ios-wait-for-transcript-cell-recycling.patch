@@ -1,0 +1,30 @@
+From 8ee18e39f96e7512abad15323643a18c9ff885d4 Mon Sep 17 00:00:00 2001
+From: swear01 <swear01@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 10:48:32 +0800
+Subject: [PATCH] test(ios): wait for transcript cell recycling
+
+---
+ ios/HapiTests/ToolTranscriptPresentationTests.swift | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/ios/HapiTests/ToolTranscriptPresentationTests.swift b/ios/HapiTests/ToolTranscriptPresentationTests.swift
+index ce04f7f0..b50ec1e1 100644
+--- a/ios/HapiTests/ToolTranscriptPresentationTests.swift
++++ b/ios/HapiTests/ToolTranscriptPresentationTests.swift
+@@ -260,11 +260,10 @@ final class ToolTranscriptPresentationTests: XCTestCase {
+         XCTAssertEqual(cell.frame.minY - collection.contentOffset.y, anchorY, accuracy: 1)
+         let count = collection.numberOfItems(inSection: 0)
+         collection.scrollToItem(at: IndexPath(item: count - 1, section: 0), at: .bottom, animated: false)
+-        try await Task.sleep(for: .milliseconds(150))
+-        XCTAssertNil(collection.cellForItem(at: IndexPath(item: index, section: 0)))
++        try await eventually { collection.cellForItem(at: IndexPath(item: index, section: 0)) == nil }
+         collection.delegate?.scrollViewWillBeginDragging?(collection)
+         collection.scrollToItem(at: IndexPath(item: index, section: 0), at: .top, animated: false)
+-        try await Task.sleep(for: .milliseconds(200))
++        try await eventually { collection.cellForItem(at: IndexPath(item: index, section: 0)) != nil }
+         let returned = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: index, section: 0)))
+         XCTAssertGreaterThan(returned.frame.height, initialHeight + 100)
+         let restoredY = returned.frame.minY - collection.contentOffset.y
+-- 
+2.54.0 (Apple Git-157)
+

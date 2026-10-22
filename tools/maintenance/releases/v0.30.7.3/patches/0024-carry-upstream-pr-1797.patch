@@ -1,0 +1,176 @@
+From c449e1291d063f15f39a37c3d258c0cb62d5b6f6 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:30:50 +0800
+Subject: [PATCH] carry(upstream): PR #1797
+
+Upstream-PR-Head: 14df9508dd684702ec5368161e2943b72dab2b1e
+---
+ .../SessionList.directory-action.test.tsx     | 79 +++++++++++++++++++
+ web/src/components/SessionList.tsx            | 28 +++++--
+ 2 files changed, 101 insertions(+), 6 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 395aa0171..e658c95c7 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -1036,6 +1036,85 @@ describe('SessionList collapse behavior', () => {
+         expect(screen.getByTitle('In progress').getAttribute('aria-expanded')).toBe('true')
+     })
+ 
++    it('allows a directory group to collapse while searching', () => {
++        const sessions = [
++            makeSession({
++                id: 'session-match',
++                updatedAt: 100,
++                metadata: { path: '/work/hapi', name: 'Matching task', flavor: 'codex' },
++            }),
++            makeSession({
++                id: 'session-other',
++                updatedAt: 90,
++                metadata: { path: '/work/hapi', name: 'Other task', flavor: 'codex' },
++            }),
++        ]
++        render(renderSessionList(sessions, null))
++
++        const projectHeader = screen.getByTitle('/work/hapi')
++        const projectPanel = projectHeader.nextElementSibling
++        expect(projectPanel?.getAttribute('data-open')).toBeNull()
++
++        // Establish a manual collapsed state before filtering. The filter
++        // still opens the group by default so matching sessions remain visible.
++        fireEvent.click(projectHeader)
++        fireEvent.click(projectHeader)
++        expect(projectPanel?.getAttribute('data-open')).toBeNull()
++
++        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
++        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
++        fireEvent.change(searchInput, {
++            target: { value: 'Matching' },
++        })
++
++        expect(projectPanel?.getAttribute('data-open')).toBe('true')
++
++        fireEvent.click(projectHeader)
++        expect(projectPanel?.getAttribute('data-open')).toBeNull()
++
++        fireEvent.click(projectHeader)
++        expect(projectPanel?.getAttribute('data-open')).toBe('true')
++
++        fireEvent.change(searchInput, { target: { value: '' } })
++        expect(projectPanel?.getAttribute('data-open')).toBeNull()
++    })
++
++    it('restores a selected group collapse after filtering excludes the selected session', async () => {
++        const sessions = [
++            makeSession({
++                id: 'session-selected',
++                updatedAt: 100,
++                metadata: { path: '/work/hapi', name: 'Selected task', flavor: 'codex' },
++            }),
++            makeSession({
++                id: 'session-match',
++                updatedAt: 90,
++                metadata: { path: '/work/hapi', name: 'Matching task', flavor: 'codex' },
++            }),
++        ]
++        render(renderSessionList(sessions, 'session-selected'))
++
++        const projectHeader = screen.getByTitle('/work/hapi')
++        const projectPanel = projectHeader.nextElementSibling
++        await waitFor(() => {
++            expect(projectPanel?.getAttribute('data-open')).toBe('true')
++        })
++
++        fireEvent.click(projectHeader)
++        expect(projectPanel?.getAttribute('data-open')).toBeNull()
++
++        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
++        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
++        fireEvent.change(searchInput, { target: { value: 'Matching' } })
++        expect(screen.queryByRole('button', { name: /Selected task/ })).toBeNull()
++        expect(screen.getByRole('button', { name: /Matching task/ })).toBeInTheDocument()
++
++        fireEvent.change(searchInput, { target: { value: '' } })
++        await waitFor(() => {
++            expect(projectPanel?.getAttribute('data-open')).toBeNull()
++        })
++    })
++
+     it('toggles the running section with the keyboard', () => {
+         localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+         const sessions = [
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 638a2ea6a..a140f358d 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -1538,14 +1538,21 @@ export function SessionList(props: {
+     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
+         () => new Map()
+     )
++    const [filterCollapseOverrides, setFilterCollapseOverrides] = useState<Map<string, boolean>>(
++        () => new Map()
++    )
+     const [runningSectionCollapsed, setRunningSectionCollapsed] = useState(false)
+     const [activeSectionCollapsed, setActiveSectionCollapsed] = useState(false)
+     const [pinnedSectionCollapsed, setPinnedSectionCollapsed] = useState(false)
+     const autoExpandedSelectedSessionKeyRef = useRef<string | null>(null)
+     const isGroupCollapsed = (group: SessionGroup): boolean => {
+-        if (isFiltering) return false
+-        const override = collapseOverrides.get(group.key)
++        const override = isFiltering
++            ? filterCollapseOverrides.get(group.key)
++            : collapseOverrides.get(group.key)
+         if (override !== undefined) return override
++        // Keep matching groups open by default while filtering. Explicit
++        // header clicks use a temporary override for the active filter.
++        if (isFiltering) return false
+         const hasSelectedSession = selectedSessionId
+             ? group.sessions.some(session => session.id === selectedSessionId)
+             : false
+@@ -1553,13 +1560,19 @@ export function SessionList(props: {
+     }
+ 
+     const toggleGroup = (groupKey: string, isCollapsed: boolean) => {
+-        setCollapseOverrides(prev => {
++        const setOverrides = isFiltering ? setFilterCollapseOverrides : setCollapseOverrides
++        setOverrides(prev => {
+             const next = new Map(prev)
+             next.set(groupKey, !isCollapsed)
+             return next
+         })
+     }
+ 
++    useEffect(() => {
++        if (isFiltering) return
++        setFilterCollapseOverrides(prev => prev.size === 0 ? prev : new Map())
++    }, [isFiltering])
++
+     // Per-group reveal cap for paginated session previews. Absent = the configured
+     // preview limit; expand/collapse controls move the cap by one preview-sized batch.
+     const [sessionVisibleCounts, setSessionVisibleCounts] = useState<Map<string, number>>(
+@@ -1879,7 +1892,9 @@ export function SessionList(props: {
+             // (e.g. it moved to the pinned "in progress" section). Drop the
+             // guard so it auto-expands again when it transitions back into a
+             // group later.
+-            autoExpandedSelectedSessionKeyRef.current = null
++            if (!isFiltering) {
++                autoExpandedSelectedSessionKeyRef.current = null
++            }
+             return
+         }
+ 
+@@ -1887,8 +1902,9 @@ export function SessionList(props: {
+         if (autoExpandedSelectedSessionKeyRef.current === autoExpandKey) return
+         autoExpandedSelectedSessionKeyRef.current = autoExpandKey
+ 
+-        setCollapseOverrides(prev => expandSelectedSessionCollapseOverrides(prev, group))
+-    }, [selectedSessionId, groups])
++        const setOverrides = isFiltering ? setFilterCollapseOverrides : setCollapseOverrides
++        setOverrides(prev => expandSelectedSessionCollapseOverrides(prev, group))
++    }, [selectedSessionId, groups, isFiltering])
+ 
+     // Clean up stale collapse overrides
+     useEffect(() => {
+-- 
+2.54.0 (Apple Git-157)
+
