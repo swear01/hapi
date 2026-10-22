@@ -638,7 +638,9 @@ function setMirrorSelection(root: HTMLElement, selection: ComposerSelection) {
 const MENTION_TOOLTIP_DELAY_MS = 300
 const HISTORY_LIMIT = 200
 
-type HistoryEntry = { value: string; selection: ComposerSelection }
+// Segments, not serialized text: reparsing would turn literal
+// `[title](/sessions/<id>)` text into a mention chip.
+type HistoryEntry = { segments: readonly ComposerSegment[]; selection: ComposerSelection }
 type TypingRun = { kind: string; value: string; caret: number }
 
 /** Lazily probed once — Firefox <136 treats unknown values as inherit (not editable). */
@@ -722,7 +724,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
 
     const recordUndo = useCallback((segments: readonly ComposerSegment[], selection: ComposerSelection) => {
         typingRunRef.current = null
-        pushUndo({ value: serializeComposerSegments(segments), selection })
+        pushUndo({ segments, selection })
     }, [pushUndo])
 
     const commitSegments = useCallback((
@@ -772,7 +774,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
             && selection.start === selection.end
             && selection.start === run.caret
         ) return
-        pushUndo({ value, selection })
+        pushUndo({ segments, selection })
         typingRunRef.current = { kind, value, caret: -1 }
     }, [pushUndo])
 
@@ -781,15 +783,16 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         if (!root || composingRef.current) return
         const from = redo ? redoStackRef.current : undoStackRef.current
         const to = redo ? undoStackRef.current : redoStackRef.current
-        const current = serializeComposerSegments(segmentsFromEditor(root))
+        const current = segmentsFromEditor(root)
+        const currentKey = JSON.stringify(current)
         // Skip snapshots of edits that changed nothing (e.g. a cancelled IME).
         let entry = from.pop()
-        while (entry && entry.value === current) entry = from.pop()
+        while (entry && JSON.stringify(entry.segments) === currentKey) entry = from.pop()
         if (!entry) return
-        to.push({ value: current, selection: getMirrorSelection(root) })
+        to.push({ segments: current, selection: getMirrorSelection(root) })
         typingRunRef.current = null
         clearMentionTooltip()
-        commitSegments(root, parseComposerSegments(entry.value), entry.selection)
+        commitSegments(root, entry.segments, entry.selection)
         onEdit?.()
     }, [clearMentionTooltip, commitSegments, onEdit])
 

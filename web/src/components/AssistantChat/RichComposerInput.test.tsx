@@ -423,6 +423,31 @@ describe('RichComposerInput undo history', () => {
         expect(value.textContent).toBe('')
     })
 
+    it('restores literal session-link text without turning it into a mention', () => {
+        const literal = '[two  spaces](/sessions/abc)'
+        render(<UndoHarness initial="" />)
+        const editor = screen.getByTestId('rich-composer-input')
+        const value = screen.getByTestId('controlled-value')
+        editor.focus()
+        const text = editor.firstChild as Text
+        text.textContent = literal
+        placeCaret(text, literal.length)
+        fireEvent.input(editor)
+        expect(value.textContent).toBe(literal)
+
+        const range = document.createRange()
+        range.selectNodeContents(editor)
+        window.getSelection()?.removeAllRanges()
+        window.getSelection()?.addRange(range)
+        fireEvent.keyDown(editor, { key: 'Backspace' })
+        expect(value.textContent).toBe('')
+
+        fireEvent.keyDown(editor, { key: 'z', ctrlKey: true })
+        expect(value.textContent).toBe(literal)
+        expect(editor.querySelector('[data-composer-mention]')).toBeNull()
+        expect(currentSelection(editor)).toEqual({ start: 0, end: literal.length })
+    })
+
     it('undoes a native typing run as one step and handles beforeinput historyUndo', () => {
         render(<UndoHarness initial="ab" />)
         const editor = screen.getByTestId('rich-composer-input')
