@@ -117,7 +117,7 @@ describe('shared history projection', () => {
         const session = { getMetadata: () => ({}), sendAgentMessage: send, sendUserMessage: user, updateMetadata() {} } as unknown as ApiSessionClient;
         const projection = new SharedCodexProjection(session, 'thread', committed);
         const items = [{ id: 'u', type: 'userMessage', clientId: 'local', content: [{ type: 'text', text: 'hi' }] }, { id: 'a', type: 'agentMessage', text: 'old' }];
-        await projection.history({ turns: [{ id: 'old', status: 'completed', items }] }, { turns: new Set(['old']), capture: false });
+        await projection.history({ turns: [{ id: 'old', status: 'completed', items }] }, { turns: new Set(['old']), capture: false, before: 0 });
         expect(committed).toHaveBeenCalledWith('local');
         expect(send).not.toHaveBeenCalled(); expect(user).not.toHaveBeenCalled();
     });

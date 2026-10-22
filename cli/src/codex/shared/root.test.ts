@@ -7,7 +7,7 @@ import { SharedCodexRoot, type RootHost } from './root';
 import { codexPlanProposalId } from './plan';
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
-type NativeTurn = { id: string; status: string; items: unknown[] };
+type NativeTurn = { id: string; status: string; items: unknown[]; startedAt?: number };
 
 vi.mock('../codexAppServerClient', () => ({
     CodexAppServerClient: class {
@@ -194,6 +194,16 @@ describe('shared plan actions', () => {
         f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
         await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toEqual(['child-turn']));
         expect(f.send).not.toHaveBeenCalled();
+    });
+
+    it('never absorbs a child turn started after the bind into a delayed capture', async () => {
+        const childTurns = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
+        const f = await fixture({ metadata: { codexSessionId: 'thread' }, native: { children: { child: childTurns }, failChildren: true } });
+        f.native.children.child.push({ id: 'missed', status: 'completed', startedAt: Math.floor(Date.now() / 1000) + 1,
+            items: [{ id: 'm', type: 'agentMessage', text: 'during gap' }] });
+        f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
+        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toEqual(['child-turn']));
+        expect(f.send.mock.calls.map(([body]) => body.message.message)).toEqual(['during gap']);
     });
 
     it('uses only the latest root turn when replaying history', async () => {

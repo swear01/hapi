@@ -49,7 +49,7 @@ export class SharedCodexRoot {
     private queue!: SharedCodexQueue;
     private projection!: SharedCodexProjection;
     private readonly children = new Map<string, SharedCodexProjection>();
-    private readonly historyBaseline: HistoryBaseline = { turns: new Set(), capture: false };
+    private readonly historyBaseline: HistoryBaseline = { turns: new Set(), capture: false, before: 0 };
     // Children whose history could not be read while capturing the baseline.
     private readonly uncapturedChildren = new Set<string>();
     private readonly ancestry = new Map<string, string | null>();
@@ -201,6 +201,8 @@ export class SharedCodexRoot {
         for (const turn of prior?.codexHistoryBaseline ?? []) this.historyBaseline.turns.add(turn);
         const capturing = !prior?.codexHistoryBaseline && prior?.codexSessionId === threadId;
         this.historyBaseline.capture = capturing;
+        // Delayed child capture must never absorb a turn HAPI has not stored.
+        this.historyBaseline.before = Math.floor(Date.now() / 1000);
         // A fresh binding records its empty baseline atomically with the
         // thread id, so an interrupted import is never mistaken for legacy.
         this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId,
@@ -353,7 +355,7 @@ export class SharedCodexRoot {
             // Replaying a completed/unloaded child must not start its engine.
             try {
                 if (subscribe && loaded.has(id)) await this.client.request('thread/resume', { threadId: id });
-                projection.reset(); await projection.history(await this.readThread(id), { turns: this.historyBaseline.turns, capture });
+                projection.reset(); await projection.history(await this.readThread(id), { ...this.historyBaseline, capture });
                 this.uncapturedChildren.delete(id);
             } catch (error) {
                 if (capture) this.uncapturedChildren.add(id);
