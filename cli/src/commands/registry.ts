@@ -25,6 +25,7 @@ import { spawnPeerCommand } from './spawnPeer'
 import { abortPeerCommand, archivePeerCommand, deletePeerCommand, stopPeerCommand } from './stopPeer'
 import { waitPeerCommand } from './waitPeer'
 import { machinesCommand } from './machines'
+import { setModeCommand } from './setMode'
 import type { CommandContext, CommandDefinition } from './types'
 
 // Gemini CLI was sunset (Google stopped serving the consumer Gemini CLI on
@@ -73,7 +74,8 @@ const COMMANDS: CommandDefinition[] = [
     stopPeerCommand,
     archivePeerCommand,
     deletePeerCommand,
-    waitPeerCommand
+    waitPeerCommand,
+    setModeCommand
 ]
 
 const commandMap = new Map<string, CommandDefinition>()

@@ -53,6 +53,7 @@ Choose a supported coding agent from your terminal and control its sessions remo
 - `hapi delete-peer <exact-session-id> --json` - Delete an inactive session record after confirming runner process exit; failed confirmation preserves the record.
 
 The peer commands reject prefixes. Successful `--json` output has `ok: true`; errors use `ok: false`, a stable error code, and a non-zero exit status.
+- `hapi set-mode <exact-session-id> <mode>` - Change the permission mode of an existing session, like the web permission picker. Active sessions switch immediately; inactive ones use it on next resume. An invalid mode prints the modes allowed for that agent.
 
 The picker lists agents alphabetically by command name. Use Up/Down and Enter
 to choose; Esc or Ctrl-C cancels. It appears on every bare invocation, even
