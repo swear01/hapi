@@ -1,0 +1,525 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:39:03 +0000
+Subject: [PATCH 39/51] carry(upstream): PR #2046 perf(cli): reduce Windows
+ process probes during session shutdown
+
+Upstream-head: 02137a0d4560e9bc793b02020e97f120d33f0006
+---
+ cli/src/utils/process.test.ts                 | 204 +++++++++++++++++-
+ cli/src/utils/process.ts                      |  94 ++++++--
+ cli/src/utils/windowsProcessTree.pwsh.test.ts |  19 +-
+ cli/src/utils/windowsProcessTreeQuery.test.ts |  61 ++++++
+ 4 files changed, 355 insertions(+), 23 deletions(-)
+ create mode 100644 cli/src/utils/windowsProcessTreeQuery.test.ts
+
+diff --git a/cli/src/utils/process.test.ts b/cli/src/utils/process.test.ts
+index b6620ca2c..7c2b15594 100644
+--- a/cli/src/utils/process.test.ts
++++ b/cli/src/utils/process.test.ts
+@@ -41,6 +41,53 @@ function unavailable(command: string) {
+ }
+ 
+ describe('getHapiRunnerProcessIdentity on Windows', () => {
++    it.each(['', '[]', '{}', '{broken', JSON.stringify([{ ProcessId: 100, CreationDate: 'generation' }]),
++        JSON.stringify([{ ProcessId: process.pid }, { ProcessId: process.pid }]),
++        JSON.stringify([{ ProcessId: process.pid }, { ProcessId: 1.5 }]),
++        JSON.stringify([{ ProcessId: process.pid }, { ProcessId: -1 }])])(
++        'rejects an unverifiable complete process-generation snapshot: %s', async (stdout) => {
++            const { readWindowsProcessStartMarkers } = await import('./process')
++            spawnSyncMock.mockReturnValue(completed(stdout))
++            expect(readWindowsProcessStartMarkers()).toBeNull()
++        }
++    )
++
++    it('keeps present processes with unknown creation times distinct from absent processes', async () => {
++        const { readWindowsProcessStartMarkers } = await import('./process')
++        spawnSyncMock.mockReturnValue(completed(JSON.stringify([
++            { ProcessId: process.pid, CreationDate: 'scanner-generation' },
++            { ProcessId: 100, CreationDate: null }
++        ])))
++        const snapshot = readWindowsProcessStartMarkers()!
++        expect(snapshot.has(100)).toBe(true)
++        expect(snapshot.get(100)).toBeNull()
++        expect(snapshot.has(200)).toBe(false)
++    })
++
++    it('does not use stdout as a complete snapshot after a failed OS query', async () => {
++        const { readWindowsProcessStartMarkers } = await import('./process')
++        const stdout = JSON.stringify([{ ProcessId: process.pid, CreationDate: 'scanner-generation' }])
++        spawnSyncMock.mockReturnValue(completed(stdout, 1))
++        expect(readWindowsProcessStartMarkers()).toBeNull()
++        spawnSyncMock.mockReturnValue({ ...completed(stdout), error: new Error('query failed') })
++        expect(readWindowsProcessStartMarkers()).toBeNull()
++    })
++    it('reads the generation directly from CIM without a redundant tasklist probe', async () => {
++        const { getProcessStartMarker } = await import('./process')
++        spawnSyncMock.mockImplementation((command: string) => command === 'powershell'
++            ? completed('generation-100') : completed('hapi.exe 100 Console'))
++        expect(getProcessStartMarker(100)).toBe('generation-100')
++        expect(spawnSyncMock.mock.calls.filter(call => call[0] === 'tasklist')).toHaveLength(0)
++    })
++
++    it('keeps a missing CIM generation unknown and rejects invalid PIDs without probing', async () => {
++        const { getProcessStartMarker } = await import('./process')
++        spawnSyncMock.mockReturnValue(completed(''))
++        expect(getProcessStartMarker(100)).toBeNull()
++        spawnSyncMock.mockClear()
++        for (const pid of [0, -1, 1.5, NaN, Infinity]) expect(getProcessStartMarker(pid)).toBeNull()
++        expect(spawnSyncMock).not.toHaveBeenCalled()
++    })
+     beforeAll(() => {
+         if (!originalPlatformDescriptor?.configurable) {
+             throw new Error('process.platform is not configurable in this runtime')
+@@ -362,6 +409,159 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
+         expect(alive.size).toBe(0)
+     })
+ 
++    it('keeps a single-process tree on individual checks instead of adding bulk enumeration', async () => {
++        vi.useRealTimers()
++        const { killProcessTreeByPid } = await import('./process')
++        const root = 100_001_001;let alive = true, bulkQueries = 0, markerQueries = 0
++        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
++            if (command === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed(`OK:${root}`)
++                if (script.includes('Select-Object ProcessId,')) {
++                    bulkQueries++
++                    return completed(JSON.stringify([
++                        { ProcessId: process.pid, CreationDate: 'scanner' },
++                        ...(alive ? [{ ProcessId: root, CreationDate: 'original' }] : [])
++                    ]))
++                }
++                markerQueries++;return completed(alive ? 'original' : '')
++            }
++            if (command === 'tasklist') return completed(alive ? `process.exe ${root} Console` : 'INFO: No tasks')
++            if (command === 'taskkill') alive = false
++            return completed('')
++        })
++        await expect(killProcessTreeByPid(root, true)).resolves.toBe(true)
++        expect(bulkQueries).toBe(0)
++        expect(markerQueries).toBe(1)
++    })
++
++    it.each(['exited', 'reused', 'root-reused', 'initial-exited'] as const)('batches identity checks while preserving tree generations: %s', async (outcome) => {
++        vi.useRealTimers()
++        const { killProcessTreeByPid } = await import('./process')
++        const root = 100_001_001, child = 100_001_002
++        const alive = new Set([root, child])
++        const markers = new Map([[root, 'root-generation'], [child, 'child-generation']])
++        const signalled: number[] = []
++        let singleMarkerProbes = 0, snapshots = 0
++        const childTasklistProbes: number[] = []
++        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
++            if (command === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed(`OK:${child},${root}`)
++                if (script.includes('Select-Object ProcessId,')) {
++                    snapshots++
++                    if (snapshots === 1 && outcome === 'initial-exited') alive.delete(child)
++                    const result = completed(JSON.stringify([
++                        { ProcessId: process.pid, CreationDate: 'scanner-generation' },
++                        ...[...alive].map(pid => ({ ProcessId: pid, CreationDate: markers.get(pid) }))
++                    ]))
++                    if (snapshots === 1 && outcome === 'root-reused') markers.set(root, 'replacement-generation')
++                    if (snapshots === 1 && outcome === 'initial-exited') { alive.add(child);markers.set(child, 'replacement-generation') }
++                    return result
++                }
++                singleMarkerProbes++
++                const pid = Number(/ProcessId = (\d+)/.exec(script)?.[1])
++                return completed(alive.has(pid) ? markers.get(pid) ?? '' : '')
++            }
++            if (command === 'tasklist') {
++                const pid = Number(args.find(arg => arg.startsWith('PID eq '))?.slice(7))
++                if (pid === child) childTasklistProbes.push(pid)
++                return completed(alive.has(pid) ? `process.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (command === 'taskkill') {
++                const pid = Number(args[args.indexOf('/PID') + 1]);signalled.push(pid);alive.delete(pid)
++                if (outcome === 'exited') alive.delete(child)
++                else markers.set(child, 'replacement-generation')
++            }
++            return completed('')
++        })
++        const report = vi.fn()
++        await expect(killProcessTreeByPid(root, true, report)).resolves.toBe(true)
++        expect(signalled).toEqual([outcome === 'root-reused' ? child : root])
++        // The root still receives an immediate generation check before its signal.
++        expect(singleMarkerProbes).toBe(outcome === 'root-reused' ? 2 : 1)
++        if (outcome !== 'root-reused') expect(childTasklistProbes).toEqual([])
++        expect(snapshots).toBe(3)
++        expect(report).toHaveBeenCalledWith(expect.objectContaining({
++            outcome: 'verified', members: expect.arrayContaining([expect.objectContaining({
++                pid: child, resolution: outcome === 'reused' ? 'generation_changed' : 'exited'
++            })])
++        }))
++        if (outcome === 'root-reused') {
++            expect(alive.has(root)).toBe(true)
++            expect(report).toHaveBeenCalledWith(expect.objectContaining({ members: expect.arrayContaining([
++                expect.objectContaining({ pid: root, resolution: 'generation_changed' })
++            ]) }))
++        }
++    })
++
++    it('rechecks a survivor immediately before signalling when its batch observation is stale', async () => {
++        vi.useRealTimers()
++        const { killProcessTreeByPid } = await import('./process')
++        const root = 100_001_001, child = 100_001_002
++        const alive = new Set([root, child]);let generation = 'original';let snapshots = 0
++        const signalled: number[] = []
++        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
++            if (command === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed(`OK:${child},${root}`)
++                if (script.includes('Select-Object ProcessId,')) {
++                    snapshots++
++                    const result = completed(JSON.stringify([
++                        { ProcessId: process.pid, CreationDate: 'scanner' },
++                        ...[...alive].map(pid => ({ ProcessId: pid, CreationDate: generation }))
++                    ]))
++                    if (snapshots === 2) generation = 'replacement'
++                    return result
++                }
++                return completed(generation)
++            }
++            if (command === 'tasklist') {
++                const pid = Number(args.find(arg => arg.startsWith('PID eq '))?.slice(7))
++                return completed(alive.has(pid) ? `process.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (command === 'taskkill') {
++                const pid = Number(args[args.indexOf('/PID') + 1]);signalled.push(pid);alive.delete(pid)
++            }
++            return completed('')
++        })
++        await expect(killProcessTreeByPid(root, true)).resolves.toBe(true)
++        expect(signalled).toEqual([root])
++        expect(alive.has(child)).toBe(true)
++        expect(snapshots).toBe(3)
++    })
++
++    it('cannot confirm a present survivor with unknown generation from an otherwise valid snapshot', async () => {
++        const { killProcessTreeByPid } = await import('./process')
++        const root = 100_001_001, child = 100_001_002
++        const alive = new Set([root, child]);const signalled: number[] = []
++        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
++            if (command === 'powershell') {
++                const script = args.at(-1) ?? ''
++                if (script.includes('ParentProcessId')) return completed(`OK:${child},${root}`)
++                if (script.includes('Select-Object ProcessId,')) return completed(JSON.stringify([
++                    { ProcessId: process.pid, CreationDate: 'scanner' },
++                    ...[...alive].map(pid => ({ ProcessId: pid, CreationDate: pid === child ? null : 'original' }))
++                ]))
++                if (script.includes(`ProcessId = ${root}`)) return completed('original')
++                throw new Error('A verified batch must not downgrade unknown descendant identity to a per-PID guess')
++            }
++            if (command === 'tasklist') {
++                const pid = Number(args.find(arg => arg.startsWith('PID eq '))?.slice(7))
++                return completed(alive.has(pid) ? `process.exe ${pid} Console` : 'INFO: No tasks')
++            }
++            if (command === 'taskkill') {
++                const pid = Number(args[args.indexOf('/PID') + 1]);signalled.push(pid);alive.delete(pid)
++            }
++            return completed('')
++        })
++        const report = vi.fn();const done = killProcessTreeByPid(root, true, report)
++        await vi.advanceTimersByTimeAsync(3_000)
++        await expect(done).resolves.toBe(false)
++        expect(signalled).toEqual([root])
++        expect(report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'unconfirmed' }))
++    })
++
+     it('killProcessTreeByPid signals surviving descendants after taskkill /T misses them', async () => {
+         // #1911 bot Major: taskkill /T exit 0 is "signalled", not "tree gone".
+         // When the root dies but a grandchild survives (broken intermediate link),
+@@ -589,8 +789,8 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
+         // Assert generated command text, not mocked stdout (mocks never parse PS).
+         const { windowsProcessTreeCimCommand } = await import('./process')
+         const cmd = windowsProcessTreeCimCommand(4242)
+-        expect(cmd).toContain('$root=4242')
+-        expect(cmd).toContain('ParentProcessId=$p')
++        expect(cmd).toContain('$root=[long]4242')
++        expect(cmd).toContain('ParentProcessId')
+         // Statements must be on separate lines — spaces between `$x=@{}` tokens fail.
+         expect(cmd).toContain('\n$seen=@{}')
+         expect(cmd).toContain('\n$bfs=@()')
+diff --git a/cli/src/utils/process.ts b/cli/src/utils/process.ts
+index 7b1bfd2df..3786e7602 100644
+--- a/cli/src/utils/process.ts
++++ b/cli/src/utils/process.ts
+@@ -73,8 +73,10 @@ export function windowsProcessMarkerCimCommand(pid: number): string {
+ 
+ /** Stable marker for one OS PID generation; null means the platform probe failed. */
+ export function getProcessStartMarker(pid: number): string | null {
+-  if (!isProcessAlive(pid)) return null;
++  if (!Number.isInteger(pid) || pid <= 0) return null;
+   if (isWindows()) {
++    // CIM already answers whether this PID has a readable generation. A
++    // preceding tasklist adds a process launch without strengthening identity.
+     // Same UTC ISO 'o' string as orphanReap listWindowsProcessesWithCommandLine.
+     // Do not print raw DateTime or use WMIC DMTF (format mismatch skips reap).
+     const powershell = spawn.sync('powershell', [
+@@ -87,6 +89,7 @@ export function getProcessStartMarker(pid: number): string | null {
+     }
+     return null;
+   }
++  if (!isProcessAlive(pid)) return null;
+   const result = spawn.sync('ps', ['-p', String(pid), '-o', 'lstart='], {
+     stdio: 'pipe',
+     env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+@@ -96,6 +99,38 @@ export function getProcessStartMarker(pid: number): string | null {
+   return result.stdout?.toString().trim() || null;
+ }
+ 
++/** A fresh complete listing. Null means unavailable, never proof of absence. */
++export function readWindowsProcessStartMarkers(): ReadonlyMap<number, string | null> | null {
++  if (!isWindows()) return null;
++  try {
++    const command = [
++      "$ErrorActionPreference='Stop'",
++      'trap { exit 1 }',
++      'Get-CimInstance Win32_Process | Select-Object ProcessId,'
++        + `@{N='CreationDate';E={if ($_.CreationDate) { ${WINDOWS_CIM_CREATION_DATE_MARKER_EXPR} } else { $null }}}`
++        + ' | ConvertTo-Json -Compress',
++    ].join('\n');
++    const result = spawn.sync('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], {
++      encoding: 'utf8', windowsHide: true, timeout: SPAWN_SYNC_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024
++    });
++    if (result.error || result.status !== 0) return null;
++    const parsed: unknown = JSON.parse(result.stdout?.toString() ?? '');
++    const rows = Array.isArray(parsed) ? parsed : [parsed];
++    const markers = new Map<number, string | null>();
++    for (const value of rows) {
++      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
++      const row = value as Record<string, unknown>;
++      if (typeof row.ProcessId !== 'number' || !Number.isInteger(row.ProcessId)
++        || row.ProcessId < 0 || markers.has(row.ProcessId)) return null;
++      markers.set(row.ProcessId, typeof row.CreationDate === 'string' && row.CreationDate.length > 0
++        ? row.CreationDate : null);
++    }
++    // This caller remains alive for the whole query. Missing it makes the
++    // listing unverifiable; do not infer that any other PID has exited.
++    return markers.has(process.pid) ? markers : null;
++  } catch { return null; }
++}
++
+ // ponytail: ps -p is cheap and avoids PID-reuse false positives after OS upgrades/reboots
+ function isRunnerCommand(commandLine: string): boolean {
+   return /(?:^|\s)runner(?:\s|$)/.test(commandLine) && /(?:^|\s)start-sync(?:\s|$)/.test(commandLine);
+@@ -218,7 +253,17 @@ export function windowsProcessTreeCimCommand(pid: number): string {
+   return [
+     "$ErrorActionPreference='Stop'",
+     'trap { exit 1 }',
+-    `$root=${pid}`,
++    `$root=[long]${pid}`,
++    // One complete enumeration keeps cost independent of tree depth. Build
++    // parent links from the same observation, rather than querying each parent.
++    '$processes=@(Get-CimInstance Win32_Process)',
++    'if($processes.Count -eq 0 -or -not ($processes | Where-Object ProcessId -eq $PID)){ throw "Incomplete process snapshot" }',
++    '$children=@{}',
++    'foreach($process in $processes){',
++    '  $parent=[long]$process.ParentProcessId',
++    '  if(-not $children.ContainsKey($parent)){ $children[$parent]=[System.Collections.Generic.List[long]]::new() }',
++    '  $children[$parent].Add([long]$process.ProcessId)',
++    '}',
+     '$seen=@{}',
+     '$bfs=@()',
+     '$queue=@($root)',
+@@ -227,8 +272,7 @@ export function windowsProcessTreeCimCommand(pid: number): string {
+     '  if($seen.ContainsKey($p)){continue}',
+     '  $seen[$p]=$true',
+     '  $bfs+=$p',
+-    '  Get-CimInstance Win32_Process -Filter "ParentProcessId=$p" |',
+-    '    ForEach-Object { $queue+=,[int]$_.ProcessId }',
++    '  if($children.ContainsKey($p)){ foreach($child in $children[$p]){ $queue+=,$child } }',
+     '}',
+     // children-first: reverse BFS so root is last; OK: marks clean completion
+     'if($bfs.Count -gt 0){ [array]::Reverse($bfs); Write-Output ("OK:" + ($bfs -join ",")) }',
+@@ -432,22 +476,44 @@ export async function killProcessTreeByPid(
+       phaseMs.signal = Date.now() - started - phaseMs.scan;
+       return finish('scan_failed');
+     }
++    // A leaf needs only one identity probe. Do not add full enumerations to
++    // the common model-discovery cleanup path, which has no descendants.
++    const useSnapshot = treePids.length > 1;
++    const initialSnapshot = useSnapshot ? readWindowsProcessStartMarkers() : null;
+     const markers = new Map<number, string | null>();
+     for (const candidate of treePids) {
+-      // CIM/tasklist probes are synchronous and can take seconds per PID.
+-      // Let the runner accept session-started webhooks between probes.
++      // The bulk observation is fresh for this phase. If it was unavailable,
++      // retain individual identity checks and service control work between them.
+       await new Promise<void>(resolve => setImmediate(resolve));
+-      markers.set(candidate, getProcessStartMarker(candidate));
++      markers.set(candidate, initialSnapshot ? initialSnapshot.get(candidate) ?? null : getProcessStartMarker(candidate));
+       members.set(candidate, { pid: candidate, expectedMarker: markers.get(candidate) ?? null });
++      if (initialSnapshot && !initialSnapshot.has(candidate)) {
++        Object.assign(members.get(candidate)!, { alive: false, resolution: 'exited', observedAt: Date.now() });
++      }
+     }
+     phaseMs.markers = Date.now() - started - phaseMs.scan;
+     const signallingStarted = Date.now();
+-    await signalAndWaitWindowsRoot(n, force);
++    let signalRoot = !initialSnapshot || initialSnapshot.has(n);
++    const rootMarker = markers.get(n);
++    if (initialSnapshot && rootMarker) {
++      const current = getProcessStartMarker(n);
++      Object.assign(members.get(n)!, { observedMarker: current, observedAt: Date.now() });
++      signalRoot = current === rootMarker;
++    }
++    if (signalRoot) await signalAndWaitWindowsRoot(n, force);
++    const survivorSnapshot = useSnapshot ? readWindowsProcessStartMarkers() : null;
+     for (const survivor of treePids) {
+       await new Promise<void>(resolve => setImmediate(resolve));
+       if (survivor === n) continue;
+-      if (!isProcessAlive(survivor)) continue;
+       const expected = markers.get(survivor);
++      if (survivorSnapshot) {
++        if (!survivorSnapshot.has(survivor)) continue;
++        const observed = survivorSnapshot.get(survivor);
++        Object.assign(members.get(survivor)!, { observedMarker: observed, observedAt: Date.now() });
++        if (!expected || !observed || observed !== expected) continue;
++      } else if (!isProcessAlive(survivor)) continue;
++      // A previous batch can become stale while another survivor is stopped.
++      // Recheck this exact generation immediately before signalling it.
+       const current = getProcessStartMarker(survivor);
+       Object.assign(members.get(survivor)!, { observedMarker: current, observedAt: Date.now() });
+       // Unverifiable or reused PID — never signal the new/unknown process.
+@@ -460,12 +526,13 @@ export async function killProcessTreeByPid(
+     // unverified or reused PID.
+     const deadline = Date.now() + 2_000;
+     const verificationStarted = Date.now();
+-    const remaining = new Set(treePids);
++    const remaining = new Set(treePids.filter(candidate => !members.get(candidate)?.resolution));
+     for (;;) {
++      const verificationSnapshot = useSnapshot ? readWindowsProcessStartMarkers() : null;
+       for (const candidate of remaining) {
+         await new Promise<void>(resolve => setImmediate(resolve));
+         const member = members.get(candidate)!;
+-        const alive = isProcessAlive(candidate);
++        const alive = verificationSnapshot ? verificationSnapshot.has(candidate) : isProcessAlive(candidate);
+         Object.assign(member, { alive, observedAt: Date.now() });
+         if (!alive) {
+           member.resolution = 'exited';
+@@ -473,7 +540,8 @@ export async function killProcessTreeByPid(
+           continue;
+         }
+         const expected = markers.get(candidate);
+-        const current = expected ? getProcessStartMarker(candidate) : null;
++        const current = expected ? verificationSnapshot
++          ? verificationSnapshot.get(candidate) ?? null : getProcessStartMarker(candidate) : null;
+         member.observedMarker = current;
+         // A different known generation proves this tree member exited. Once
+         // proven gone, a PID must never re-enter the tree through later reuse.
+@@ -481,7 +549,7 @@ export async function killProcessTreeByPid(
+         if (expected && current && current !== expected) {
+           member.resolution = 'generation_changed';
+           remaining.delete(candidate);
+-        } else if (!isProcessAlive(candidate)) {
++        } else if (!verificationSnapshot && !isProcessAlive(candidate)) {
+           Object.assign(member, { alive: false, resolution: 'exited' });
+           remaining.delete(candidate);
+         }
+diff --git a/cli/src/utils/windowsProcessTree.pwsh.test.ts b/cli/src/utils/windowsProcessTree.pwsh.test.ts
+index 607bbf35c..1295baab0 100644
+--- a/cli/src/utils/windowsProcessTree.pwsh.test.ts
++++ b/cli/src/utils/windowsProcessTree.pwsh.test.ts
+@@ -67,13 +67,12 @@ describePwsh('windowsProcessTreeCimCommand under real pwsh (#1911 B1)', () => {
+         const mock = `
+ function Get-CimInstance {
+   param($ClassName, $Filter)
+-  $ppid = [int](($Filter -split "=")[1])
+-  if ($ppid -eq 1234) {
+-    [pscustomobject]@{ ProcessId = 2000 }
+-    [pscustomobject]@{ ProcessId = 3000 }
+-  } elseif ($ppid -eq 2000) {
+-    [pscustomobject]@{ ProcessId = 4000 }
+-  }
++  # A healthy full enumeration includes parent links and the scanner itself.
++  [pscustomobject]@{ ProcessId = 1234; ParentProcessId = 0 }
++  [pscustomobject]@{ ProcessId = 2000; ParentProcessId = 1234 }
++  [pscustomobject]@{ ProcessId = 3000; ParentProcessId = 1234 }
++  [pscustomobject]@{ ProcessId = 4000; ParentProcessId = 2000 }
++  [pscustomobject]@{ ProcessId = $PID; ParentProcessId = 0 }
+ }
+ ${windowsProcessTreeCimCommand(1234)}
+ `
+@@ -84,7 +83,11 @@ ${windowsProcessTreeCimCommand(1234)}
+ 
+     it('emits OK:root alone when the mocked tree has no children', () => {
+         const mock = `
+-function Get-CimInstance { param($ClassName, $Filter) }
++function Get-CimInstance {
++  param($ClassName, $Filter)
++  [pscustomobject]@{ ProcessId = 1234; ParentProcessId = 0 }
++  [pscustomobject]@{ ProcessId = $PID; ParentProcessId = 0 }
++}
+ ${windowsProcessTreeCimCommand(1234)}
+ `
+         const result = runPwsh(mock)
+diff --git a/cli/src/utils/windowsProcessTreeQuery.test.ts b/cli/src/utils/windowsProcessTreeQuery.test.ts
+new file mode 100644
+index 000000000..8a2774076
+--- /dev/null
++++ b/cli/src/utils/windowsProcessTreeQuery.test.ts
+@@ -0,0 +1,61 @@
++import { describe, expect, it } from 'vitest'
++import { execFileSync } from 'node:child_process'
++import { windowsProcessTreeCimCommand } from './process'
++
++// Execute the actual generated WinPS query against an in-memory CIM fixture.
++// No process is signalled by this test.
++describe.skipIf(process.platform !== 'win32')('Windows process-tree query', () => {
++    it('uses one CIM enumeration across the Windows PID range and terminates on parent cycles', () => {
++        const setup = `
++$script:calls=0
++$script:rows=@(
++    [pscustomobject]@{ProcessId=100;ParentProcessId=300},
++    [pscustomobject]@{ProcessId=200;ParentProcessId=100},
++    [pscustomobject]@{ProcessId=300;ParentProcessId=200},
++    [pscustomobject]@{ProcessId=[uint32]3000000000;ParentProcessId=200},
++    [pscustomobject]@{ProcessId=400;ParentProcessId=[uint32]4000000000},
++    [pscustomobject]@{ProcessId=$PID;ParentProcessId=0}
++)
++function Get-CimInstance {
++    param([string]$ClassName,[string]$Filter)
++    $script:calls++
++    if($Filter){
++        $parent=[int]($Filter -replace 'ParentProcessId=','')
++        return $script:rows|Where-Object ParentProcessId -eq $parent
++    }
++    return $script:rows
++}
++`
++        const output = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
++            setup + windowsProcessTreeCimCommand(100) + '\n"COUNT:$script:calls"'],
++        { encoding: 'utf8', windowsHide: true, timeout: 10_000 })
++        expect(output).toContain('OK:3000000000,300,200,100')
++        expect(output).toContain('COUNT:1')
++    })
++
++    it('never emits a success sentinel when CIM enumeration fails', () => {
++        const script = "function Get-CimInstance { throw 'fixture CIM failure' }\n" + windowsProcessTreeCimCommand(100)
++        let failure: { status?: number; stdout?: string } | undefined
++        try {
++            execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
++                { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: 'pipe' })
++        } catch (error) { failure = error as typeof failure }
++        expect(failure).toBeDefined()
++        expect(failure?.status).not.toBe(0)
++        expect(failure?.stdout ?? '').not.toContain('OK:')
++    })
++
++    it.each(['@()', '@([pscustomobject]@{ProcessId=100;ParentProcessId=0})'])(
++        'rejects an empty or partial enumeration without success: %s', (rows) => {
++            const script = `function Get-CimInstance { ${rows} }\n` + windowsProcessTreeCimCommand(100)
++            let failure: { status?: number; stdout?: string } | undefined
++            try {
++                execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
++                    { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: 'pipe' })
++            } catch (error) { failure = error as typeof failure }
++            expect(failure).toBeDefined()
++            expect(failure?.status).not.toBe(0)
++            expect(failure?.stdout ?? '').not.toContain('OK:')
++        }
++    )
++})

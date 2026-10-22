@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:49:31 +0800
+Subject: [PATCH 94/95] test(web): match current Codex sync action label
+
+---
+ web/src/components/SessionHeader.test.tsx | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 2a8d20ded..4379eac28 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -139,7 +139,7 @@ describe('SessionHeader', () => {
+         }), api)
+ 
+         fireEvent.click(screen.getByRole('button', { name: /More/ }))
+-        expect(screen.queryByRole('menuitem', { name: /Sync Codex/ })).toBeNull()
++        expect(screen.queryByRole('menuitem', { name: /Sync session/ })).toBeNull()
+     })
+ 
+     it('keeps manual Codex sync available for an inactive imported thread', () => {
+@@ -155,7 +155,7 @@ describe('SessionHeader', () => {
+         }), api)
+ 
+         fireEvent.click(screen.getByRole('button', { name: /More/ }))
+-        expect(screen.getByRole('menuitem', { name: /Sync Codex/ })).toBeInTheDocument()
++        expect(screen.getByRole('menuitem', { name: /Sync session/ })).toBeInTheDocument()
+     })
+ 
+     it('hides title generation when the Hub does not advertise the capability', () => {

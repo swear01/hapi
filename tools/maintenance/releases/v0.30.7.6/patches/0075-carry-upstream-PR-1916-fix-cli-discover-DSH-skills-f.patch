@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:25:40 +0000
+Subject: [PATCH 75/95] carry(upstream): PR #1916 fix(cli): discover DSH skills
+ from the DeepSeek Harness home
+
+---
+ cli/src/modules/common/skills.test.ts | 43 +++++++++++++++++++++++++++
+ cli/src/modules/common/skills.ts      |  2 ++
+ docs/guide/agents.md                  |  7 +++++
+ 3 files changed, 52 insertions(+)
+
+diff --git a/cli/src/modules/common/skills.test.ts b/cli/src/modules/common/skills.test.ts
+index 5057ecf0a..ba9e8dde5 100644
+--- a/cli/src/modules/common/skills.test.ts
++++ b/cli/src/modules/common/skills.test.ts
+@@ -20,6 +20,7 @@ describe('listSkills', () => {
+     const originalHome = process.env.HOME
+     const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
+     const originalCodexHome = process.env.CODEX_HOME
++    const originalDshHome = process.env.DSH_HOME
+     let sandboxDir: string
+     let homeDir: string
+ 
+@@ -29,6 +30,7 @@ describe('listSkills', () => {
+         process.env.HOME = homeDir
+         delete process.env.CLAUDE_CONFIG_DIR
+         delete process.env.CODEX_HOME
++        delete process.env.DSH_HOME
+         await mkdir(homeDir, { recursive: true })
+     })
+ 
+@@ -51,6 +53,12 @@ describe('listSkills', () => {
+             process.env.CODEX_HOME = originalCodexHome
+         }
+ 
++        if (originalDshHome === undefined) {
++            delete process.env.DSH_HOME
++        } else {
++            process.env.DSH_HOME = originalDshHome
++        }
++
+         await rm(sandboxDir, { recursive: true, force: true })
+     })
+ 
+@@ -134,6 +142,31 @@ describe('listSkills', () => {
+         expect(skills.map((skill) => skill.name)).toEqual(['copilot-user', 'github-skill', 'shared'])
+     })
+ 
++    it('lists DSH user and project skills alongside shared .agents skills', async () => {
++        const repoRoot = join(sandboxDir, 'dsh-repo')
++        await mkdir(join(repoRoot, '.git'), { recursive: true })
++        await writeSkill(join(homeDir, '.dsh', 'skills', 'dsh-user'), 'dsh-user', 'DSH user skill')
++        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
++        await writeSkill(join(repoRoot, '.dsh', 'skills', 'dsh-project'), 'dsh-project', 'DSH project skill')
++
++        const skills = await listSkills(repoRoot, { flavor: 'dsh' })
++
++        expect(skills.map((skill) => skill.name)).toEqual(['dsh-project', 'dsh-user', 'shared'])
++    })
++
++    it('uses a configured DSH_HOME for DSH user skills', async () => {
++        const dshHome = join(sandboxDir, 'custom-dsh')
++        process.env.DSH_HOME = dshHome
++
++        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
++        await writeSkill(join(homeDir, '.dsh', 'skills', 'default-dsh'), 'default-dsh', 'Default DSH skill')
++        await writeSkill(join(dshHome, 'skills', 'custom-dsh'), 'custom-dsh', 'Custom DSH skill')
++
++        const skills = await listSkills(undefined, { flavor: 'dsh' })
++
++        expect(skills.map((skill) => skill.name)).toEqual(['custom-dsh', 'shared'])
++    })
++
+     it('scopes user skills to the requested flavor', async () => {
+         await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
+         await writeSkill(join(homeDir, '.claude', 'skills', 'claude-only'), 'claude-only', 'Claude skill')
+@@ -381,6 +414,16 @@ describe('listSkills', () => {
+         })
+     })
+ 
++    it('resolves a DSH user skill from the DSH harness home', async () => {
++        await writeSkill(join(homeDir, '.dsh', 'skills', 'dsh-user'), 'dsh-user', 'DSH user skill')
++
++        await expect(resolveSkill('dsh-user', undefined, { flavor: 'dsh' })).resolves.toEqual({
++            name: 'dsh-user',
++            description: 'DSH user skill',
++            body: '# dsh-user'
++        })
++    })
++
+     it('returns null for an unknown exact skill name', async () => {
+         await writeSkill(join(homeDir, '.agents', 'skills', 'known'), 'known', 'Known skill')
+ 
+diff --git a/cli/src/modules/common/skills.ts b/cli/src/modules/common/skills.ts
+index d93675e61..f803ad67d 100644
+--- a/cli/src/modules/common/skills.ts
++++ b/cli/src/modules/common/skills.ts
+@@ -92,6 +92,7 @@ function getUserSkillsRoots(flavor?: string): string[] {
+         case 'kimi':
+         case 'agy':
+         case 'pi':
++        case 'dsh':
+             roots.push(join(getAgentConfigDir(flavor), 'skills'));
+             break;
+     }
+@@ -125,6 +126,7 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
+         case 'opencode':
+         case 'kimi':
+         case 'pi':
++        case 'dsh':
+             roots.push(join(directory, `.${normalizeFlavor(flavor)}`, 'skills'));
+             break;
+     }
+diff --git a/docs/guide/agents.md b/docs/guide/agents.md
+index 243f02574..4d5dc3733 100644
+--- a/docs/guide/agents.md
++++ b/docs/guide/agents.md
+@@ -291,6 +291,13 @@ those surfaces to the DSH composition. Pending one-shot permission requests
+ remain answerable in the standard HAPI UI, but the ACP composition owns the
+ overall permission policy.
+ 
++HAPI's `$` skill menu for DSH sessions reads the same skill roots DSH's own
++skill filesystem uses: `$DSH_HOME/skills` (`~/.dsh/skills` by default), the
++project's `.dsh/skills`, and the shared `~/.agents/skills` / `.agents/skills`
++directories. Since the ACP composition accepts no client-supplied MCP servers,
++HAPI's `skill_lookup` bridge is not available to DSH sessions; a skill named in
++the prompt is loaded by DSH through its own `skill` tool and catalog.
++
+ ## Other agents
+ 
+ - **Claude Code** (`hapi claude`) — local sessions wrap the native TUI, remote sessions drive the Claude Agent SDK. [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code)

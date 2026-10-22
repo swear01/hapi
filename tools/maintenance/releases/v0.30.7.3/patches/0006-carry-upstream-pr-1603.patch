@@ -1,0 +1,128 @@
+From 9b0c23e85bca311602187bfbc02568388977082d Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sat, 26 Sep 2026 16:22:10 +0800
+Subject: [PATCH] carry(upstream): PR #1603
+
+Upstream-PR-Head: 2fbdb4f1f4c5e89da4890e1244e9be93dd70bb71
+---
+ .../messages/MessageActions.test.tsx          | 25 ++++++++++++++++---
+ .../AssistantChat/messages/MessageActions.tsx |  2 ++
+ web/src/lib/locales/en.ts                     |  4 +--
+ web/src/lib/locales/zh-CN.ts                  |  4 +--
+ 4 files changed, 28 insertions(+), 7 deletions(-)
+
+diff --git a/web/src/components/AssistantChat/messages/MessageActions.test.tsx b/web/src/components/AssistantChat/messages/MessageActions.test.tsx
+index 87a8bca3f..29e40880f 100644
+--- a/web/src/components/AssistantChat/messages/MessageActions.test.tsx
++++ b/web/src/components/AssistantChat/messages/MessageActions.test.tsx
+@@ -32,8 +32,9 @@ vi.mock('@/components/ui/ConfirmDialog', () => ({
+         onConfirm: () => Promise<void>
+         onClose: () => void
+         isPending: boolean
++        centerTitle?: boolean
+     }) => props.isOpen ? (
+-        <div role="dialog">
++        <div role="dialog" data-center-title={props.centerTitle ? 'true' : 'false'}>
+             <div>{props.title}</div>
+             <div>{props.description}</div>
+             <button type="button" onClick={() => void props.onConfirm()}>
+@@ -227,7 +228,7 @@ describe('MessageActions', () => {
+         const dialog = screen.getByRole('dialog')
+         expect(dialog.textContent).toContain('分叉对话')
+         expect(dialog.textContent).toContain('从此处创建新会话？')
+-        expect(dialog.textContent).toContain('当前会话不会被修改。')
++        expect(dialog.textContent).toContain('从此处创建新会话？当前会话不会被修改。')
+ 
+         fireEvent.click(within(dialog).getByRole('button', { name: '分叉' }))
+         expect(onFork).toHaveBeenCalledTimes(1)
+@@ -255,7 +256,7 @@ describe('MessageActions', () => {
+         const dialog = screen.getByRole('dialog')
+         expect(dialog.textContent).toContain('回退对话')
+         expect(dialog.textContent).toContain('将此会话回退到此处？')
+-        expect(dialog.textContent).toContain('之后的对话历史将永久移除。文件不会被修改。')
++        expect(dialog.textContent).toContain('将此会话回退到此处？之后的对话历史将永久移除。文件不会被修改。')
+ 
+         fireEvent.click(within(dialog).getByRole('button', { name: '回退' }))
+         expect(onRewind).toHaveBeenCalledTimes(1)
+@@ -265,6 +266,24 @@ describe('MessageActions', () => {
+         await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+     })
+ 
++    it('centers Fork and Rewind confirmation titles like other ConfirmDialogs', () => {
++        renderActions({
++            align: 'end',
++            copyText: 'body',
++            showFork: true,
++            showRewind: true,
++            onFork: async () => {},
++            onRewind: async () => {}
++        })
++
++        fireEvent.click(screen.getByRole('button', { name: 'Fork' }))
++        expect(screen.getByRole('dialog')).toHaveAttribute('data-center-title', 'true')
++
++        fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }))
++        fireEvent.click(screen.getByRole('button', { name: 'Rewind' }))
++        expect(screen.getByRole('dialog')).toHaveAttribute('data-center-title', 'true')
++    })
++
+     it('hides Fork and Rewind while the thread is running', () => {
+         auiState.thread.isRunning = true
+ 
+diff --git a/web/src/components/AssistantChat/messages/MessageActions.tsx b/web/src/components/AssistantChat/messages/MessageActions.tsx
+index 8d750f61d..d06b63d5f 100644
+--- a/web/src/components/AssistantChat/messages/MessageActions.tsx
++++ b/web/src/components/AssistantChat/messages/MessageActions.tsx
+@@ -134,6 +134,7 @@ export function MessageActions({
+                 confirmLabel={t('message.fork')}
+                 confirmingLabel={t('message.fork.confirming')}
+                 isPending={forkPending}
++                centerTitle
+                 onConfirm={async () => {
+                     if (!onFork) return
+                     setForkPending(true)
+@@ -157,6 +158,7 @@ export function MessageActions({
+                 confirmingLabel={t('message.rewind.confirming')}
+                 isPending={rewindPending}
+                 destructive
++                centerTitle
+                 onConfirm={async () => {
+                     if (!onRewind) return
+                     setRewindPending(true)
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 12acfa938..71fd7952d 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -14,10 +14,10 @@ export default {
+   'message.fork': 'Fork',
+   'message.rewind': 'Rewind',
+   'message.fork.confirmTitle': 'Fork conversation',
+-  'message.fork.confirmDescription': 'Create a new session from this point?\nThe current session will not be changed.',
++  'message.fork.confirmDescription': 'Create a new session from this point? The current session will not be changed.',
+   'message.fork.confirming': 'Forking…',
+   'message.rewind.confirmTitle': 'Rewind conversation',
+-  'message.rewind.confirmDescription': 'Rewind this session to this point?\nLater conversation history will be permanently removed. Files will not be changed.',
++  'message.rewind.confirmDescription': 'Rewind this session to this point? Later conversation history will be permanently removed. Files will not be changed.',
+   'message.rewind.confirming': 'Rewinding…',
+   'message.rewind.fallbackTitle': 'Rewind unavailable',
+   'message.rewind.fallbackDescription': 'HAPI did not change this session because its native Codex boundary is ambiguous.\nCreate a new session before this point instead? The current session will not be changed.',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index eef0b3940..870bfe90d 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -14,10 +14,10 @@ export default {
+   'message.fork': '分叉',
+   'message.rewind': '回退',
+   'message.fork.confirmTitle': '分叉对话',
+-  'message.fork.confirmDescription': '从此处创建新会话？\n当前会话不会被修改。',
++  'message.fork.confirmDescription': '从此处创建新会话？当前会话不会被修改。',
+   'message.fork.confirming': '分叉中…',
+   'message.rewind.confirmTitle': '回退对话',
+-  'message.rewind.confirmDescription': '将此会话回退到此处？\n之后的对话历史将永久移除。文件不会被修改。',
++  'message.rewind.confirmDescription': '将此会话回退到此处？之后的对话历史将永久移除。文件不会被修改。',
+   'message.rewind.confirming': '回退中…',
+   'message.rewind.fallbackTitle': '暂时无法回退',
+   'message.rewind.fallbackDescription': '由于 Codex 原生对话边界存在歧义，HAPI 没有修改当前会话。\n是否改为在此处创建新会话？当前会话不会被修改。',
+-- 
+2.54.0 (Apple Git-157)
+

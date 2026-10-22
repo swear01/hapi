@@ -1,0 +1,869 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:18:05 +0000
+Subject: [PATCH 69/95] carry(upstream): PR #1718 fix(web,hub): friendly file
+ preview when session CLI is offline
+
+---
+ docs/api/client-contract/errors.md    |   4 +-
+ hub/src/web/routes/git.test.ts        |  63 ++++++++
+ hub/src/web/routes/git.ts             |  51 ++++--
+ shared/src/apiTypes.ts                |   2 +
+ web/src/lib/files-i18n.test.ts        |   5 +
+ web/src/lib/files-i18n.ts             |  10 ++
+ web/src/lib/locales/en.ts             |   2 +
+ web/src/lib/locales/zh-CN.ts          |   2 +
+ web/src/lib/rpc-target-missing.ts     |  34 ++++
+ web/src/routes/sessions/file.test.tsx | 213 +++++++++++++++++++++++++-
+ web/src/routes/sessions/file.tsx      | 157 +++++++++++++++++--
+ 11 files changed, 515 insertions(+), 28 deletions(-)
+ create mode 100644 web/src/lib/rpc-target-missing.ts
+
+diff --git a/docs/api/client-contract/errors.md b/docs/api/client-contract/errors.md
+index 558cfb693..a66749bd5 100644
+--- a/docs/api/client-contract/errors.md
++++ b/docs/api/client-contract/errors.md
+@@ -47,14 +47,14 @@ When no `code` is present, branch on status alone and treat the failure generica
+ | 503 | — | `guards.ts` `requireSyncEngine` → `{error: 'Not connected'}` — hub subsystems not up (startup/shutdown window); also Telegram-disabled on `/api/auth` initData path | Retry with backoff |
+ | 503 | `no_machine_online` | resume/reopen/spawn-flow result mapping (`sessions.ts`) | The machine that owns the session is offline — tell the user to start the runner |
+ | 503 | `machine_offline` | `machines.ts` restart-runner | Same |
+-| 503 | `rpc_target_missing` | `machines.ts` pi/codex model catalogs (`RPC_TARGET_MISSING_ERROR_CODE` in `shared/src/rpcMethods.ts` — RPC handler unregistered or socket disconnected) | CLI-side target gone — treat as offline |
++| 503 | `rpc_target_missing` | `machines.ts` pi/codex model catalogs; `git.ts` `/sessions/:id/file` and `/git-diff-file` (`RPC_TARGET_MISSING_ERROR_CODE` in `shared/src/rpcMethods.ts` — RPC handler unregistered or socket disconnected) | CLI-side target gone — treat as offline |
+ 
+ ## RPC-wrapped endpoints
+ 
+ Many endpoints do not answer from hub state — the hub relays the request over Socket.IO to the session's CLI process (or the machine's runner) and forwards the result: git/file/directory/search, generated images, uploads, model catalogs, Agent availability, slash-commands, skills, spawn, list-directory, paths/exists. (The mode/model/effort config endpoints are RPC-backed too, but map apply-failures to 409 with a message.) Their failure modes differ from plain endpoints:
+ 
+ 1. **CLI reachable, command failed** → HTTP **200** with `{success: false, error}` (e.g. `runRpc` in `hub/src/web/routes/git.ts` catches RPC errors, including the 30 s RPC timeout, and returns them as a JSON envelope). Clients must check the `success` field on every RPC-shaped response; HTTP 200 alone means nothing.
+-2. **CLI offline / handler missing** → depends on the route: the model-catalog routes in `machines.ts` map `RpcTargetMissingError` to **503 `rpc_target_missing`**; `git.ts`-style routes fold it into the 200 `{success: false}` envelope; resume/reopen surface **503 `no_machine_online`**.
++2. **CLI offline / handler missing** → depends on the route: the model-catalog routes in `machines.ts` and the session file read / git-diff-file routes in `git.ts` map `RpcTargetMissingError` to **503 `rpc_target_missing`**; other `git.ts` routes still fold RPC failures into the 200 `{success: false}` envelope; resume/reopen surface **503 `no_machine_online`**.
+ 3. **Hub subsystems not up** → **503 `Not connected`** from `requireSyncEngine` (brief startup/shutdown window).
+ 
+ Explicit `rpc_target_missing` / `no_machine_online` failures mean the execution
+diff --git a/hub/src/web/routes/git.test.ts b/hub/src/web/routes/git.test.ts
+index 5172e6a23..faa8268ab 100644
+--- a/hub/src/web/routes/git.test.ts
++++ b/hub/src/web/routes/git.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, it } from 'bun:test'
+ import { Hono } from 'hono'
+ import type { Session, SyncEngine } from '../../sync/syncEngine'
++import { RpcTargetMissingError } from '../../sync/rpcGateway'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { createGitRoutes } from './git'
+ 
+@@ -338,3 +339,65 @@ describe('file search route', () => {
+         })
+     })
+ })
++
++describe('session file routes', () => {
++    const session = {
++        id: 'session-1',
++        namespace: 'default',
++        active: false,
++        metadata: { path: '/project' }
++    } as unknown as Session
++
++    it('maps RpcTargetMissingError on /file to 503 rpc_target_missing', async () => {
++        const engine = {
++            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
++            readSessionFile: async () => {
++                throw new RpcTargetMissingError('readFile', 'handler-not-registered')
++            }
++        } as unknown as Partial<SyncEngine>
++
++        const response = await buildApp(engine).request('/api/sessions/session-1/file?path=README.md')
++
++        expect(response.status).toBe(503)
++        expect(await response.json()).toEqual({
++            success: false,
++            error: 'RPC handler not registered: readFile',
++            code: 'rpc_target_missing'
++        })
++    })
++
++    it('maps RpcTargetMissingError on /git-diff-file to 503 rpc_target_missing', async () => {
++        const engine = {
++            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
++            getGitDiffFile: async () => {
++                throw new RpcTargetMissingError('git-diff-file', 'socket-disconnected')
++            }
++        } as unknown as Partial<SyncEngine>
++
++        const response = await buildApp(engine).request('/api/sessions/session-1/git-diff-file?path=README.md')
++
++        expect(response.status).toBe(503)
++        expect(await response.json()).toEqual({
++            success: false,
++            error: 'RPC socket disconnected: git-diff-file',
++            code: 'rpc_target_missing'
++        })
++    })
++
++    it('keeps the 200 envelope for other git routes when the RPC target is missing', async () => {
++        const engine = {
++            resolveSessionAccess: () => ({ ok: true as const, sessionId: 'session-1', session }),
++            getGitStatus: async () => {
++                throw new RpcTargetMissingError('git-status', 'handler-not-registered')
++            }
++        } as unknown as Partial<SyncEngine>
++
++        const response = await buildApp(engine).request('/api/sessions/session-1/git-status')
++
++        expect(response.status).toBe(200)
++        expect(await response.json()).toEqual({
++            success: false,
++            error: 'RPC handler not registered: git-status'
++        })
++    })
++})
+diff --git a/hub/src/web/routes/git.ts b/hub/src/web/routes/git.ts
+index 83c95c6ee..c9618dc89 100644
+--- a/hub/src/web/routes/git.ts
++++ b/hub/src/web/routes/git.ts
+@@ -1,7 +1,9 @@
+ import { Hono } from 'hono'
+ import { isWildcardSearch, matchesSearchQuery, toSearchGlob } from '@hapi/protocol'
++import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+ import { z } from 'zod'
+ import type { SyncEngine } from '../../sync/syncEngine'
++import { RpcTargetMissingError } from '../../sync/rpcGateway'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { requireSessionFromParam, requireSyncEngine } from './guards'
+ 
+@@ -36,14 +38,28 @@ function parseBooleanParam(value: string | undefined): boolean | undefined {
+     return undefined
+ }
+ 
+-async function runRpc<T>(fn: () => Promise<T>): Promise<T | { success: false; error: string }> {
++async function runRpc<T>(
++    fn: () => Promise<T>,
++    options?: { rethrowTargetMissing?: boolean }
++): Promise<T | { success: false; error: string }> {
+     try {
+         return await fn()
+     } catch (error) {
++        if (options?.rethrowTargetMissing && error instanceof RpcTargetMissingError) {
++            throw error
++        }
+         return { success: false, error: error instanceof Error ? error.message : String(error) }
+     }
+ }
+ 
++function rpcTargetMissingJson(error: RpcTargetMissingError) {
++    return {
++        success: false as const,
++        error: error.message,
++        code: RPC_TARGET_MISSING_ERROR_CODE
++    }
++}
++
+ // Generated-image bytes for a given id never change, so they are cached for a year as immutable.
+ const GENERATED_IMAGE_CACHE_CONTROL = 'private, max-age=31536000, immutable'
+ 
+@@ -125,12 +141,19 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
+         }
+ 
+         const staged = parseBooleanParam(c.req.query('staged'))
+-        const result = await runRpc(() => engine.getGitDiffFile(sessionResult.sessionId, {
+-            cwd: sessionPath,
+-            filePath: parsed.data.path,
+-            staged
+-        }))
+-        return c.json(result)
++        try {
++            const result = await runRpc(() => engine.getGitDiffFile(sessionResult.sessionId, {
++                cwd: sessionPath,
++                filePath: parsed.data.path,
++                staged
++            }), { rethrowTargetMissing: true })
++            return c.json(result)
++        } catch (error) {
++            if (error instanceof RpcTargetMissingError) {
++                return c.json(rpcTargetMissingJson(error), 503)
++            }
++            throw error
++        }
+     })
+ 
+     app.get('/sessions/:id/file', async (c) => {
+@@ -154,8 +177,18 @@ export function createGitRoutes(getSyncEngine: () => SyncEngine | null): Hono<We
+             return c.json({ error: 'Invalid file path' }, 400)
+         }
+ 
+-        const result = await runRpc(() => engine.readSessionFile(sessionResult.sessionId, parsed.data.path))
+-        return c.json(result)
++        try {
++            const result = await runRpc(
++                () => engine.readSessionFile(sessionResult.sessionId, parsed.data.path),
++                { rethrowTargetMissing: true }
++            )
++            return c.json(result)
++        } catch (error) {
++            if (error instanceof RpcTargetMissingError) {
++                return c.json(rpcTargetMissingJson(error), 503)
++            }
++            throw error
++        }
+     })
+ 
+     app.get('/sessions/:id/generated-images/:imageId', async (c) => {
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 8755e8651..464459f74 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -711,6 +711,7 @@ export type CommandResponse = {
+     stderr?: string
+     exitCode?: number
+     error?: string
++    code?: string
+ }
+ 
+ export type GitCommandResponse = CommandResponse
+@@ -721,6 +722,7 @@ export type FileReadResponse = {
+     size?: number
+     modified?: number
+     error?: string
++    code?: string
+ }
+ 
+ export type GeneratedImageResponse = {
+diff --git a/web/src/lib/files-i18n.test.ts b/web/src/lib/files-i18n.test.ts
+index 79aa4c1fe..7acba7c84 100644
+--- a/web/src/lib/files-i18n.test.ts
++++ b/web/src/lib/files-i18n.test.ts
+@@ -3,6 +3,7 @@ import {
+     formatDiffError,
+     formatDirectoryError,
+     formatFileSearchError,
++    formatFileSessionOfflineError,
+     formatGitStatusError,
+     formatReadFileError,
+     getDetachedBranchLabel,
+@@ -24,6 +25,7 @@ const translations: Record<string, string> = {
+     'file.error.readFailedWithDetail': '读取文件失败：{error}',
+     'file.error.diffUnavailable': 'Diff 不可用',
+     'file.error.diffUnavailableWithDetail': 'Diff 不可用：{error}',
++    'file.error.sessionOffline': '会话离线',
+ }
+ 
+ function t(key: string, params?: Record<string, string | number>): string {
+@@ -63,7 +65,10 @@ describe('files i18n helpers', () => {
+     it('formats file read and diff errors', () => {
+         expect(formatReadFileError('Failed to read file', t)).toBe('读取文件失败')
+         expect(formatReadFileError('EACCES', t)).toBe('读取文件失败：EACCES')
++        expect(formatReadFileError('RPC handler not registered: readFile', t)).toBe('会话离线')
+         expect(formatDiffError('Failed to load diff', t)).toBe('Diff 不可用')
+         expect(formatDiffError('fatal: bad revision', t)).toBe('Diff 不可用：fatal: bad revision')
++        expect(formatDiffError('RPC socket disconnected: git-diff-file', t)).toBe('会话离线')
++        expect(formatFileSessionOfflineError(t)).toBe('会话离线')
+     })
+ })
+diff --git a/web/src/lib/files-i18n.ts b/web/src/lib/files-i18n.ts
+index 09be6867c..bf6ccc9d2 100644
+--- a/web/src/lib/files-i18n.ts
++++ b/web/src/lib/files-i18n.ts
+@@ -78,6 +78,9 @@ export function formatReadFileError(error: string | null | undefined, t: Transla
+     if (!detail || detail === 'Failed to read file' || detail === 'Missing session or path' || detail === 'Session unavailable') {
+         return t('file.error.readFailed')
+     }
++    if (detail.startsWith('RPC handler not registered:') || detail.startsWith('RPC socket disconnected:')) {
++        return t('file.error.sessionOffline')
++    }
+     return t('file.error.readFailedWithDetail', { error: detail })
+ }
+ 
+@@ -86,5 +89,12 @@ export function formatDiffError(error: string | null | undefined, t: Translate):
+     if (!detail || detail === 'Failed to load diff' || detail === 'Missing session or path' || detail === 'Session unavailable') {
+         return t('file.error.diffUnavailable')
+     }
++    if (detail.startsWith('RPC handler not registered:') || detail.startsWith('RPC socket disconnected:')) {
++        return t('file.error.sessionOffline')
++    }
+     return t('file.error.diffUnavailableWithDetail', { error: detail })
+ }
++
++export function formatFileSessionOfflineError(t: Translate): string {
++    return t('file.error.sessionOffline')
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 26de9235c..50ebf82e2 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -553,6 +553,8 @@ export default {
+   'file.error.readFailedWithDetail': 'Failed to read file: {error}',
+   'file.error.diffUnavailable': 'Diff unavailable.',
+   'file.error.diffUnavailableWithDetail': 'Diff unavailable: {error}',
++  'file.error.sessionOffline': 'This session is not connected to your computer right now. Reopen it to load this file.',
++  'file.action.reopen': 'Reopen session',
+ 
+   // Inline media
+   'media.displayed.image': 'Displayed image',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index b25367194..c02efabb9 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -551,6 +551,8 @@ export default {
+   'file.error.readFailedWithDetail': '读取文件失败：{error}',
+   'file.error.diffUnavailable': 'Diff 不可用。',
+   'file.error.diffUnavailableWithDetail': 'Diff 不可用：{error}',
++  'file.error.sessionOffline': '此会话当前未连接到您的电脑。请重新打开会话以加载此文件。',
++  'file.action.reopen': '重新打开会话',
+ 
+   // 内联媒体
+   'media.displayed.image': '展示图片',
+diff --git a/web/src/lib/rpc-target-missing.ts b/web/src/lib/rpc-target-missing.ts
+new file mode 100644
+index 000000000..5a3aef589
+--- /dev/null
++++ b/web/src/lib/rpc-target-missing.ts
+@@ -0,0 +1,34 @@
++import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
++import { ApiError } from '@/api/client'
++
++export function isRpcTargetMissingCode(code: string | undefined): boolean {
++    return code === RPC_TARGET_MISSING_ERROR_CODE
++}
++
++export function isRpcTargetMissingError(error: unknown): boolean {
++    return error instanceof ApiError && isRpcTargetMissingCode(error.code)
++}
++
++export function hasRpcTargetMissingResponse(
++    response: { success: boolean; code?: string } | undefined
++): boolean {
++    return response?.success === false && isRpcTargetMissingCode(response.code)
++}
++
++export async function catchRpcTargetMissing<T extends { success: boolean; code?: string; error?: string }>(
++    fn: () => Promise<T>
++): Promise<T> {
++    try {
++        return await fn()
++    } catch (error: unknown) {
++        const apiError = error instanceof ApiError ? error : null
++        if (apiError && isRpcTargetMissingCode(apiError.code)) {
++            return {
++                success: false,
++                error: apiError.message,
++                code: RPC_TARGET_MISSING_ERROR_CODE
++            } as unknown as T
++        }
++        throw error
++    }
++}
+diff --git a/web/src/routes/sessions/file.test.tsx b/web/src/routes/sessions/file.test.tsx
+index 0d2af8f72..0c476b242 100644
+--- a/web/src/routes/sessions/file.test.tsx
++++ b/web/src/routes/sessions/file.test.tsx
+@@ -1,6 +1,8 @@
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
++import { ApiError } from '@/api/client'
+ import { I18nProvider } from '@/lib/i18n-context'
+ import { formatFileMetadata } from '@/lib/file-metadata'
+ import { encodeBase64 } from '@/lib/utils'
+@@ -8,6 +10,17 @@ import FilePage from './file'
+ 
+ const goBackMock = vi.fn()
+ const copyMock = vi.hoisted(() => vi.fn())
++const navigateMock = vi.hoisted(() => vi.fn())
++const reopenSessionMock = vi.hoisted(() => vi.fn())
++const readSessionFileMock = vi.hoisted(() => vi.fn())
++const getGitDiffFileMock = vi.hoisted(() => vi.fn())
++const cursorStatusMock = vi.hoisted(() => ({
++    status: { onDisk: true as boolean | undefined },
++    isApplicable: true,
++    error: null as string | null,
++    isLoading: false,
++}))
++const sessionActiveMock = vi.hoisted(() => ({ active: false }))
+ 
+ const sampleMarkdown = '# Heading\n\n| Col A | Col B |\n| --- | --- |\n| one | two |'
+ const filePath = 'docs/README.md'
+@@ -18,22 +31,47 @@ const fileModified = 1_784_175_060_000
+ 
+ vi.mock('@tanstack/react-router', () => ({
+     useParams: () => ({ sessionId: 'session-1' }),
++    useNavigate: () => navigateMock,
+     useSearch: () => ({
+         path: encodedPath,
+         staged: undefined,
+     }),
+ }))
+ 
++vi.mock('@/hooks/queries/useSession', () => ({
++    useSession: () => ({
++        session: {
++            id: 'session-1',
++            active: sessionActiveMock.active,
++            metadata: {
++                path: '/project',
++                flavor: 'cursor',
++                cursorSessionId: 'cursor-thread-1',
++            },
++        },
++        isLoading: false,
++        error: null,
++        notFound: false,
++        refetch: vi.fn(),
++    }),
++}))
++
++vi.mock('@/hooks/queries/useCursorChatStoreStatus', () => ({
++    useCursorChatStoreStatus: () => cursorStatusMock,
++}))
++
++vi.mock('@/hooks/mutations/useSessionActions', () => ({
++    useSessionActions: () => ({
++        reopenSession: reopenSessionMock,
++        isPending: false,
++    }),
++}))
++
+ vi.mock('@/lib/app-context', () => ({
+     useAppContext: () => ({
+         api: {
+-            getGitDiffFile: vi.fn(async () => ({ success: true, stdout: '' })),
+-            readSessionFile: vi.fn(async () => ({
+-                success: true,
+-                content: encodedContent,
+-                size: fileSize,
+-                modified: fileModified,
+-            })),
++            getGitDiffFile: getGitDiffFileMock,
++            readSessionFile: readSessionFileMock,
+         },
+     }),
+ }))
+@@ -66,13 +104,18 @@ function renderWithProviders() {
+             queries: { retry: false },
+         },
+     })
+-    return render(
++    const tree = (
+         <QueryClientProvider client={queryClient}>
+             <I18nProvider>
+                 <FilePage />
+             </I18nProvider>
+         </QueryClientProvider>
+     )
++    const view = render(tree)
++    return {
++        ...view,
++        rerenderPage: () => view.rerender(tree),
++    }
+ }
+ 
+ describe('FilePage markdown preview', () => {
+@@ -80,6 +123,19 @@ describe('FilePage markdown preview', () => {
+         vi.clearAllMocks()
+         window.localStorage.clear()
+         window.sessionStorage.clear()
++        getGitDiffFileMock.mockResolvedValue({ success: true, stdout: '' })
++        readSessionFileMock.mockResolvedValue({
++            success: true,
++            content: encodedContent,
++            size: fileSize,
++            modified: fileModified,
++        })
++        reopenSessionMock.mockResolvedValue({ ok: true, sessionId: 'session-1', resumed: true })
++        cursorStatusMock.status = { onDisk: true }
++        cursorStatusMock.isApplicable = true
++        cursorStatusMock.error = null
++        cursorStatusMock.isLoading = false
++        sessionActiveMock.active = false
+     })
+ 
+     it('renders markdown preview by default and toggles to source', async () => {
+@@ -163,3 +219,144 @@ describe('FilePage markdown preview', () => {
+         expect(secondScrollRegion.scrollTop).toBe(123)
+     })
+ })
++
++describe('FilePage offline session', () => {
++    beforeEach(() => {
++        vi.clearAllMocks()
++        window.localStorage.clear()
++        window.sessionStorage.clear()
++        const rpcError = new ApiError(
++            'HTTP 503: rpc target missing',
++            503,
++            RPC_TARGET_MISSING_ERROR_CODE,
++            JSON.stringify({ success: false, code: RPC_TARGET_MISSING_ERROR_CODE })
++        )
++        getGitDiffFileMock.mockRejectedValue(rpcError)
++        readSessionFileMock.mockRejectedValue(rpcError)
++        reopenSessionMock.mockResolvedValue({ ok: true, sessionId: 'session-1', resumed: true })
++        cursorStatusMock.status = { onDisk: true }
++        cursorStatusMock.isApplicable = true
++        cursorStatusMock.error = null
++        cursorStatusMock.isLoading = false
++        sessionActiveMock.active = false
++    })
++
++    it('shows friendly offline copy and reopen affordance instead of raw RPC errors', async () => {
++        renderWithProviders()
++
++        await waitFor(() => {
++            expect(screen.getByText(/not connected to your computer right now/i)).toBeInTheDocument()
++        })
++        expect(screen.queryByText(/RPC handler not registered/i)).toBeNull()
++        expect(screen.getByRole('button', { name: 'Reopen session' })).toBeInTheDocument()
++    })
++
++    it('refetches file queries after reopen succeeds', async () => {
++        renderWithProviders()
++
++        await waitFor(() => {
++            expect(screen.getByRole('button', { name: 'Reopen session' })).toBeInTheDocument()
++        })
++
++        readSessionFileMock.mockResolvedValue({
++            success: true,
++            content: encodedContent,
++            size: fileSize,
++            modified: fileModified,
++        })
++        getGitDiffFileMock.mockResolvedValue({ success: true, stdout: '' })
++
++        fireEvent.click(screen.getByRole('button', { name: 'Reopen session' }))
++
++        await waitFor(() => {
++            expect(reopenSessionMock).toHaveBeenCalled()
++            expect(readSessionFileMock).toHaveBeenCalledTimes(2)
++        })
++    })
++
++    it('navigates to the replacement session when reopen returns a new id', async () => {
++        reopenSessionMock.mockResolvedValue({ ok: true, sessionId: 'session-2', resumed: true })
++        renderWithProviders()
++
++        await waitFor(() => {
++            expect(screen.getByRole('button', { name: 'Reopen session' })).toBeInTheDocument()
++        })
++        fireEvent.click(screen.getByRole('button', { name: 'Reopen session' }))
++
++        await waitFor(() => {
++            expect(navigateMock).toHaveBeenCalledWith(expect.objectContaining({
++                to: '/sessions/$sessionId/file',
++                params: { sessionId: 'session-2' },
++                replace: true,
++            }))
++        })
++    })
++
++    it('does not show the Cursor checking state when the probe is not applicable', async () => {
++        cursorStatusMock.isApplicable = false
++        cursorStatusMock.status = { onDisk: undefined }
++        renderWithProviders()
++
++        await waitFor(() => {
++            expect(screen.getByRole('button', { name: 'Reopen session' })).toBeInTheDocument()
++        })
++        expect(screen.queryByText(/Checking whether Cursor chat data/i)).toBeNull()
++    })
++
++    it('keeps loaded file content when only the diff request is offline', async () => {
++        const rpcError = new ApiError(
++            'HTTP 503: rpc target missing',
++            503,
++            RPC_TARGET_MISSING_ERROR_CODE,
++            JSON.stringify({ success: false, code: RPC_TARGET_MISSING_ERROR_CODE })
++        )
++        readSessionFileMock.mockResolvedValue({
++            success: true,
++            content: encodedContent,
++            size: fileSize,
++            modified: fileModified,
++        })
++        getGitDiffFileMock.mockRejectedValue(rpcError)
++
++        renderWithProviders()
++
++        await waitFor(() => {
++            expect(screen.getByTestId('markdown-preview')).toHaveTextContent('# Heading')
++        })
++        expect(screen.getByText(/not connected to your computer right now/i)).toBeInTheDocument()
++        expect(screen.queryByRole('button', { name: 'Reopen session' })).toBeNull()
++    })
++
++    it('refetches when the session becomes active before the offline responses arrive', async () => {
++        const rpcError = new ApiError(
++            'HTTP 503: rpc target missing',
++            503,
++            RPC_TARGET_MISSING_ERROR_CODE,
++            JSON.stringify({ success: false, code: RPC_TARGET_MISSING_ERROR_CODE })
++        )
++        let rejectRead: (error: unknown) => void = () => {}
++        let rejectDiff: (error: unknown) => void = () => {}
++        readSessionFileMock.mockImplementation(() => new Promise((_resolve, reject) => {
++            rejectRead = reject
++        }))
++        getGitDiffFileMock.mockImplementation(() => new Promise((_resolve, reject) => {
++            rejectDiff = reject
++        }))
++
++        const view = renderWithProviders()
++        await waitFor(() => {
++            expect(readSessionFileMock).toHaveBeenCalledTimes(1)
++            expect(getGitDiffFileMock).toHaveBeenCalledTimes(1)
++        })
++
++        sessionActiveMock.active = true
++        view.rerenderPage()
++        rejectRead(rpcError)
++        rejectDiff(rpcError)
++
++        await waitFor(() => {
++            expect(readSessionFileMock).toHaveBeenCalledTimes(2)
++            expect(getGitDiffFileMock).toHaveBeenCalledTimes(2)
++        })
++    })
++})
+diff --git a/web/src/routes/sessions/file.tsx b/web/src/routes/sessions/file.tsx
+index 053381462..19d90aa65 100644
+--- a/web/src/routes/sessions/file.tsx
++++ b/web/src/routes/sessions/file.tsx
+@@ -1,13 +1,17 @@
+ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+-import { useQuery } from '@tanstack/react-query'
+-import { useParams, useSearch } from '@tanstack/react-router'
++import { useQuery, useQueryClient } from '@tanstack/react-query'
++import { useNavigate, useParams, useSearch } from '@tanstack/react-router'
+ import type { GitCommandResponse } from '@/types/api'
+ import { FileIcon } from '@/components/FileIcon'
+ import { CopyIcon, CheckIcon, WrapIcon } from '@/components/icons'
++import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+ import { useAppContext } from '@/lib/app-context'
+ import { useAppGoBack } from '@/hooks/useAppGoBack'
+ import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+-import { formatDiffError, formatReadFileError } from '@/lib/files-i18n'
++import { useSessionActions } from '@/hooks/mutations/useSessionActions'
++import { useSession } from '@/hooks/queries/useSession'
++import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
++import { formatDiffError, formatFileSessionOfflineError, formatReadFileError } from '@/lib/files-i18n'
+ import { queryKeys } from '@/lib/query-keys'
+ import { langAlias, useShikiHighlighter } from '@/lib/shiki'
+ import { useTranslation } from '@/lib/use-translation'
+@@ -23,6 +27,11 @@ import {
+ } from '@/lib/file-markdown-preview'
+ import { downloadBase64File } from '@/lib/file-download'
+ import { useCodeWrap } from '@/hooks/useCodeWrap'
++import { catchRpcTargetMissing, hasRpcTargetMissingResponse } from '@/lib/rpc-target-missing'
++import { formatReopenError } from '@/lib/reopenError'
++import { inactiveSessionCanResume, resolveCursorReopenGate } from '@/lib/sessionResume'
++import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ 
+ const MAX_COPYABLE_FILE_BYTES = 1_000_000
+ const FILE_SCROLL_KEY_PREFIX = 'hapi-file-scroll-'
+@@ -234,14 +243,23 @@ function extractCommandError(result: GitCommandResponse | undefined): string | n
+ 
+ export default function FilePage() {
+     const { api } = useAppContext()
++    const queryClient = useQueryClient()
+     const { t, locale } = useTranslation()
+     const { copied: pathCopied, copy: copyPath } = useCopyToClipboard()
+     const { copied: contentCopied, copy: copyContent } = useCopyToClipboard()
+     const goBack = useAppGoBack()
++    const navigate = useNavigate()
+     const { sessionId } = useParams({ from: '/sessions/$sessionId/file' })
+     const search = useSearch({ from: '/sessions/$sessionId/file' })
+     const encodedPath = typeof search.path === 'string' ? search.path : ''
+     const staged = search.staged
++    const { session } = useSession(api, sessionId)
++    const { reopenSession, isPending: reopenPending } = useSessionActions(
++        api,
++        sessionId,
++        session?.metadata?.flavor ?? null
++    )
++    const [reopenError, setReopenError] = useState<string | null>(null)
+ 
+     const filePath = useMemo(() => decodePath(encodedPath), [encodedPath])
+     const fileName = filePath.split('/').pop() || filePath || t('file.page.fallbackName')
+@@ -254,7 +272,7 @@ export default function FilePage() {
+             if (!api || !sessionId || !filePath) {
+                 throw new Error('Missing session or path')
+             }
+-            return await api.getGitDiffFile(sessionId, filePath, staged)
++            return await catchRpcTargetMissing(() => api.getGitDiffFile(sessionId, filePath, staged))
+         },
+         enabled: Boolean(api && sessionId && filePath)
+     })
+@@ -265,11 +283,96 @@ export default function FilePage() {
+             if (!api || !sessionId || !filePath) {
+                 throw new Error('Missing session or path')
+             }
+-            return await api.readSessionFile(sessionId, filePath)
++            return await catchRpcTargetMissing(() => api.readSessionFile(sessionId, filePath))
+         },
+         enabled: Boolean(api && sessionId && filePath)
+     })
+ 
++    const {
++        status: cursorChatStoreStatus,
++        isApplicable: cursorChatStoreApplicable,
++        error: cursorChatStoreError,
++        isLoading: cursorChatStoreLoading,
++    } = useCursorChatStoreStatus({ api, session })
++    const cursorReopenGate = resolveCursorReopenGate({
++        applicable: cursorChatStoreApplicable,
++        onDisk: cursorChatStoreStatus?.onDisk,
++        error: cursorChatStoreError,
++        isLoading: cursorChatStoreLoading,
++    })
++    const canReopen = session && !session.active
++        ? inactiveSessionCanResume(session, 1, cursorChatStoreStatus?.onDisk)
++        : false
++    const reopenDisabledReason = cursorReopenGate.disabledReason === 'missing'
++        ? t('session.action.reopenCursorMissing')
++        : cursorReopenGate.disabledReason === 'checking'
++            ? t('session.action.reopenCursorChecking')
++            : undefined
++    const fileRpcOffline = hasRpcTargetMissingResponse(fileQuery.data)
++    const diffRpcOffline = hasRpcTargetMissingResponse(diffQuery.data)
++    const sessionRpcOffline = fileRpcOffline || diffRpcOffline
++
++    const invalidateFileQueries = useCallback(async () => {
++        if (!sessionId || !filePath) return
++        await Promise.all([
++            queryClient.invalidateQueries({ queryKey: queryKeys.sessionFile(sessionId, filePath) }),
++            queryClient.invalidateQueries({ queryKey: queryKeys.gitFileDiff(sessionId, filePath, staged) }),
++        ])
++    }, [filePath, queryClient, sessionId, staged])
++
++    const handleReopen = useCallback(async () => {
++        if (!canReopen || reopenDisabledReason) return
++        setReopenError(null)
++        try {
++            const result = await reopenSession()
++            if (result.sessionId && result.sessionId !== sessionId) {
++                retargetSharePendingTransfer(sessionId, result.sessionId)
++                await navigate({
++                    to: '/sessions/$sessionId/file',
++                    params: { sessionId: result.sessionId },
++                    search: {
++                        path: encodedPath,
++                        ...(staged !== undefined ? { staged } : {}),
++                        ...(search.tab ? { tab: search.tab } : {}),
++                        ...(search.query ? { query: search.query } : {}),
++                        ...(search.origin ? { origin: search.origin } : {}),
++                    },
++                    replace: true,
++                    ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++                })
++                return
++            }
++            await invalidateFileQueries()
++        } catch (error) {
++            setReopenError(formatReopenError(error))
++        }
++    }, [canReopen, encodedPath, invalidateFileQueries, navigate, reopenDisabledReason, reopenSession, search.origin, search.query, search.tab, sessionId, staged])
++
++    const prevSessionActiveRef = useRef(session?.active)
++    const pendingOfflineRecoveryRef = useRef(false)
++    useEffect(() => {
++        const wasInactive = prevSessionActiveRef.current === false
++        const nowActive = session?.active === true
++        prevSessionActiveRef.current = session?.active
++        if (wasInactive && nowActive) {
++            pendingOfflineRecoveryRef.current = true
++        }
++    }, [session?.active])
++    useEffect(() => {
++        if (!pendingOfflineRecoveryRef.current || session?.active !== true) return
++        if (diffQuery.isFetching || fileQuery.isFetching) return
++        pendingOfflineRecoveryRef.current = false
++        if (sessionRpcOffline) {
++            void invalidateFileQueries()
++        }
++    }, [
++        diffQuery.isFetching,
++        fileQuery.isFetching,
++        invalidateFileQueries,
++        session?.active,
++        sessionRpcOffline,
++    ])
++
+     const diffContent = diffQuery.data?.success ? (diffQuery.data.stdout ?? '') : ''
+     const diffError = extractCommandError(diffQuery.data)
+     const diffSuccess = diffQuery.data?.success === true
+@@ -401,12 +504,17 @@ export default function FilePage() {
+     }, [diffSuccess, diffFailed, diffContent, imageMimeType])
+ 
+     const loading = diffQuery.isLoading || fileQuery.isLoading
+-    const fileError = fileContentResult && !fileContentResult.success
++    const fileError = fileContentResult && !fileContentResult.success && !hasRpcTargetMissingResponse(fileContentResult)
+         ? (fileContentResult.error ?? 'Failed to read file')
+         : null
+     const missingPath = !filePath
+-    const diffErrorMessage = diffError ? formatDiffError(diffError, t) : null
+-    const fileErrorMessage = fileError ? formatReadFileError(fileError, t) : null
++    const fileOfflineMessage = fileRpcOffline ? formatFileSessionOfflineError(t) : null
++    const diffErrorMessage = diffRpcOffline
++        ? formatFileSessionOfflineError(t)
++        : diffError
++            ? formatDiffError(diffError, t)
++            : null
++    const fileErrorMessage = fileOfflineMessage ?? (fileError ? formatReadFileError(fileError, t) : null)
+     const fileMetadata = formatFileMetadata(fileContentResult?.size, fileContentResult?.modified, locale)
+ 
+     return (
+@@ -498,7 +606,7 @@ export default function FilePage() {
+ 
+             <div ref={fileScrollRef} data-hapi-file-scroll="true" className="app-scroll-y file-preview-scroll-y flex-1 min-h-0">
+                 <div className="file-preview-scroll-content mx-auto w-full max-w-content p-4">
+-                    {diffErrorMessage ? (
++                    {diffErrorMessage && !fileOfflineMessage ? (
+                         <div className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs text-[var(--app-hint)]">
+                             {diffErrorMessage}
+                         </div>
+@@ -507,6 +615,23 @@ export default function FilePage() {
+                         <div className="text-sm text-[var(--app-hint)]">{t('file.page.missingPath')}</div>
+                     ) : loading ? (
+                         <FileContentSkeleton label={t('loading.file')} />
++                    ) : fileOfflineMessage ? (
++                        <div className="space-y-3">
++                            <div className="text-sm text-[var(--app-hint)]">{fileOfflineMessage}</div>
++                            {canReopen ? (
++                                <button
++                                    type="button"
++                                    onClick={() => void handleReopen()}
++                                    disabled={Boolean(reopenDisabledReason) || reopenPending}
++                                    className="rounded-md bg-[var(--app-button)] px-3 py-2 text-sm font-semibold text-[var(--app-button-text)] disabled:cursor-not-allowed disabled:opacity-60"
++                                >
++                                    {t('file.action.reopen')}
++                                </button>
++                            ) : null}
++                            {reopenDisabledReason ? (
++                                <div className="text-xs text-[var(--app-hint)]">{reopenDisabledReason}</div>
++                            ) : null}
++                        </div>
+                     ) : fileErrorMessage ? (
+                         <div className="text-sm text-[var(--app-hint)]">{fileErrorMessage}</div>
+                     ) : displayMode === 'diff' && diffContent ? (
+@@ -575,6 +700,20 @@ export default function FilePage() {
+                     )}
+                 </div>
+             </div>
++
++            {reopenError ? (
++                <ConfirmDialog
++                    isOpen={true}
++                    onClose={() => setReopenError(null)}
++                    title={t('dialog.reopen.errorTitle')}
++                    description={reopenError}
++                    confirmLabel={t('dialog.reopen.dismiss')}
++                    confirmingLabel={t('dialog.reopen.dismiss')}
++                    onConfirm={async () => setReopenError(null)}
++                    isPending={false}
++                    centerTitle
++                />
++            ) : null}
+         </div>
+     )
+ }

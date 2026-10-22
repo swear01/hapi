@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 05:05:34 +0000
+Subject: [PATCH 46/95] carry(upstream): PR #2087 fix(cli): forward Claude API
+ error records with null service_tier (#1857)
+
+---
+ cli/src/claude/types.ts                       | 11 ++++--
+ .../claude/utils/sdkToLogConverter.test.ts    | 17 +++++++++
+ cli/src/claude/utils/sdkToLogConverter.ts     |  4 +-
+ cli/src/claude/utils/sessionScanner.test.ts   | 35 ++++++++++++++++++
+ web/src/chat/normalizeAgent.error.test.ts     | 37 +++++++++++++++++++
+ web/src/chat/normalizeAgent.ts                | 23 ++++++++++++
+ 6 files changed, 123 insertions(+), 4 deletions(-)
+
+diff --git a/cli/src/claude/types.ts b/cli/src/claude/types.ts
+index 2d8028941..c83c1822d 100644
+--- a/cli/src/claude/types.ts
++++ b/cli/src/claude/types.ts
+@@ -13,10 +13,12 @@ import { z } from "zod";
+ // back to a heuristic denominator for local sessions only.
+ export const UsageSchema = z.object({
+   input_tokens: z.number().int().nonnegative(),
+-  cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+-  cache_read_input_tokens: z.number().int().nonnegative().optional(),
++  // The Messages API types these as nullable; Claude Code's synthetic API
++  // error records write `service_tier: null`, which `.optional()` rejected.
++  cache_creation_input_tokens: z.number().int().nonnegative().nullish(),
++  cache_read_input_tokens: z.number().int().nonnegative().nullish(),
+   output_tokens: z.number().int().nonnegative(),
+-  service_tier: z.string().optional(),
++  service_tier: z.string().nullish(),
+ }).passthrough();
+ 
+ // `passthrough` keeps fields the SDK adds going forward (e.g. `model`, future
+@@ -68,6 +70,9 @@ export const RawJSONLinesSchema = z.discriminatedUnion("type", [
+     type: z.literal("assistant"),
+     message: RawMessageSchema.optional(),
+     requestId: z.string().optional(),
++    // Set on Claude Code's synthetic API error messages (e.g. "Prompt is too long").
++    isApiErrorMessage: z.boolean().optional(),
++    error: z.unknown().optional(),
+   }),
+ 
+   // Summary message - validates summary and leafUuid
+diff --git a/cli/src/claude/utils/sdkToLogConverter.test.ts b/cli/src/claude/utils/sdkToLogConverter.test.ts
+index 7ee1a016b..afe5c4848 100644
+--- a/cli/src/claude/utils/sdkToLogConverter.test.ts
++++ b/cli/src/claude/utils/sdkToLogConverter.test.ts
+@@ -159,6 +159,23 @@ describe('SDKToLogConverter', () => {
+ 
+             expect((logMessage as any).requestId).toBe('req_123')
+         })
++
++        it('keeps the top-level error on synthetic API error messages (#1857)', () => {
++            const sdkMessage: any = {
++                type: 'assistant',
++                message: {
++                    model: '<synthetic>',
++                    role: 'assistant',
++                    content: [{ type: 'text', text: 'Prompt is too long' }]
++                },
++                error: 'invalid_request',
++                is_api_error_message: true
++            }
++
++            const logMessage = converter.convert(sdkMessage)
++
++            expect((logMessage as any).error).toBe('invalid_request')
++        })
+     })
+ 
+     describe('System messages', () => {
+diff --git a/cli/src/claude/utils/sdkToLogConverter.ts b/cli/src/claude/utils/sdkToLogConverter.ts
+index bbe00875e..66a46bcfc 100644
+--- a/cli/src/claude/utils/sdkToLogConverter.ts
++++ b/cli/src/claude/utils/sdkToLogConverter.ts
+@@ -327,7 +327,9 @@ export class SDKToLogConverter {
+                     type: 'assistant',
+                     message: assistantMsg.message,
+                     // Assistant messages often have additional fields
+-                    requestId: (assistantMsg as any).requestId
++                    requestId: (assistantMsg as any).requestId,
++                    // Set on synthetic API error messages; the web renders these as errors
++                    error: (assistantMsg as any).error
+                 }
+                 // if (assistantMsg.message.content && Array.isArray(assistantMsg.message.content)) {
+                 //     for (const content of assistantMsg.message.content) {
+diff --git a/cli/src/claude/utils/sessionScanner.test.ts b/cli/src/claude/utils/sessionScanner.test.ts
+index e9f02181e..373825c23 100644
+--- a/cli/src/claude/utils/sessionScanner.test.ts
++++ b/cli/src/claude/utils/sessionScanner.test.ts
+@@ -211,6 +211,41 @@ describe('sessionScanner', () => {
+     expect(result.nextCursor).toBe(Buffer.byteLength(line1 + '\n' + line2))
+   })
+ 
++  it('forwards a Claude API error record with null usage fields and keeps its error flags (#1857)', async () => {
++    const filePath = join(testDir, 'api-error.jsonl')
++    const line = JSON.stringify({
++      type: 'assistant',
++      uuid: 'a1',
++      isSidechain: false,
++      isApiErrorMessage: true,
++      error: 'invalid_request',
++      message: {
++        model: '<synthetic>',
++        role: 'assistant',
++        content: [{ type: 'text', text: 'Prompt is too long' }],
++        usage: {
++          input_tokens: 0,
++          output_tokens: 0,
++          cache_creation_input_tokens: 0,
++          cache_read_input_tokens: 0,
++          service_tier: null,
++          inference_geo: null,
++          speed: null
++        }
++      }
++    })
++    await writeFile(filePath, line + '\n')
++
++    const result = await readSessionLog(filePath, 0)
++    expect(result.events).toHaveLength(1)
++    expect(result.events[0].event).toMatchObject({
++      type: 'assistant',
++      uuid: 'a1',
++      isApiErrorMessage: true,
++      error: 'invalid_request'
++    })
++  })
++
+   it('forwards a single complete record with no newline at all', async () => {
+     const filePath = join(testDir, 'single-no-newline.jsonl')
+     const only = JSON.stringify({ type: 'user', uuid: 'u1', message: { content: 'only' } })
+diff --git a/web/src/chat/normalizeAgent.error.test.ts b/web/src/chat/normalizeAgent.error.test.ts
+index 2bd2ab2ed..4abf8c5d0 100644
+--- a/web/src/chat/normalizeAgent.error.test.ts
++++ b/web/src/chat/normalizeAgent.error.test.ts
+@@ -29,4 +29,41 @@ describe('normalizeAgentRecord — agent error payloads', () => {
+             }
+         })
+     })
++
++    it('normalizes Claude API error assistant records into error events without usage (#1857)', () => {
++        const normalized = normalizeAgentRecord(
++            'msg-2',
++            null,
++            1_700_000_000_000,
++            {
++                type: 'output',
++                data: {
++                    type: 'assistant',
++                    uuid: 'a1',
++                    isSidechain: false,
++                    isApiErrorMessage: true,
++                    error: 'invalid_request',
++                    message: {
++                        model: '<synthetic>',
++                        role: 'assistant',
++                        content: [{ type: 'text', text: 'Prompt is too long' }],
++                        usage: { input_tokens: 0, output_tokens: 0, service_tier: null }
++                    }
++                }
++            }
++        )
++
++        expect(normalized).toEqual({
++            id: 'msg-2',
++            localId: null,
++            createdAt: 1_700_000_000_000,
++            role: 'event',
++            isSidechain: false,
++            parentToolUseId: null,
++            content: {
++                type: 'error',
++                message: 'Prompt is too long'
++            }
++        })
++    })
+ })
+diff --git a/web/src/chat/normalizeAgent.ts b/web/src/chat/normalizeAgent.ts
+index 528cc49a6..87643f843 100644
+--- a/web/src/chat/normalizeAgent.ts
++++ b/web/src/chat/normalizeAgent.ts
+@@ -733,6 +733,29 @@ export function normalizeAgentRecord(
+         if (data.isCompactSummary) return null
+         if (!isClaudeChatVisibleMessage({ type: data.type, subtype: data.subtype })) return null
+ 
++        // Claude Code reports a failed API call ("Prompt is too long", usage
++        // limits, logged out) as a synthetic assistant message with a top-level
++        // `error`. Render it as an error, and keep its all-zero usage out of
++        // the context gauge.
++        if (data.type === 'assistant' && typeof data.error === 'string') {
++            const message = isObject(data.message) ? data.message : null
++            const text = Array.isArray(message?.content)
++                ? message.content
++                    .flatMap((block) => isObject(block) && typeof block.text === 'string' ? [block.text] : [])
++                    .join('\n')
++                : asString(message?.content)
++            return {
++                id: messageId,
++                localId,
++                createdAt,
++                role: 'event',
++                content: { type: 'error', message: text?.trim() || data.error },
++                isSidechain: Boolean(data.isSidechain),
++                parentToolUseId: asString(data.parentToolUseId) ?? null,
++                meta
++            }
++        }
++
+         if (data.type === 'assistant') {
+             return normalizeAssistantOutput(messageId, localId, createdAt, data, meta)
+         }

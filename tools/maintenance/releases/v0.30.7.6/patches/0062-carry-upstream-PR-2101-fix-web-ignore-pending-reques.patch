@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Thu, 22 Oct 2026 12:06:01 +0000
+Subject: [PATCH 62/95] carry(upstream): PR #2101 fix(web): ignore pending
+ requests on archived sessions in the sidebar
+
+---
+ .../SessionList.directory-action.test.tsx         |  2 ++
+ web/src/components/SessionList.test.ts            | 15 +++++++++++++++
+ web/src/components/SessionList.tsx                |  2 +-
+ web/src/components/SessionRowSummary.tsx          |  2 +-
+ web/src/lib/sessionAttention.test.ts              | 14 ++++++++++++++
+ web/src/lib/sessionAttention.ts                   |  3 ++-
+ 6 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index a1eb1b0a5..6358e7fb7 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -1247,6 +1247,7 @@ describe('SessionList collapse behavior', () => {
+         const sessions = Array.from({ length: 4 }, (_, index) => makeSession({
+             id: `session-${index + 1}`,
+             updatedAt: 100 - index,
++            active: index > 0,
+             pendingRequestsCount: index > 0 ? 1 : 0,
+             metadata: {
+                 path: '/work/hapi',
+@@ -1277,6 +1278,7 @@ describe('SessionList collapse behavior', () => {
+         const sessions = Array.from({ length: 8 }, (_, index) => makeSession({
+             id: `session-${index + 1}`,
+             updatedAt: 100 - index,
++            active: index < 5,
+             pendingRequestsCount: index < 5 ? 1 : 0,
+             metadata: {
+                 path: '/work/hapi',
+diff --git a/web/src/components/SessionList.test.ts b/web/src/components/SessionList.test.ts
+index 4f61440e3..07fc869eb 100644
+--- a/web/src/components/SessionList.test.ts
++++ b/web/src/components/SessionList.test.ts
+@@ -461,6 +461,7 @@ describe('getVisibleSessionPreview', () => {
+     it('keeps selected and pending sessions inside the collapsed preview without promoting them', () => {
+         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
+             id: `s-${index + 1}`,
++            active: index === 4,
+             pendingRequestsCount: index === 4 ? 1 : 0,
+             metadata: { path: '/work/hapi' },
+             updatedAt: 100 - index
+@@ -474,6 +475,20 @@ describe('getVisibleSessionPreview', () => {
+         expect(preview.map(session => session.id)).toEqual(['s-1', 's-5', 's-6'])
+     })
+ 
++    it('does not let archived pending sessions displace active ones', () => {
++        const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
++            id: `s-${index + 1}`,
++            active: index < 3,
++            pendingRequestsCount: index >= 4 ? 1 : 0,
++            metadata: { path: '/work/hapi' },
++            updatedAt: 100 - index
++        }))
++
++        const preview = getVisibleSessionPreview(sessions, { limit: 3 })
++
++        expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3'])
++    })
++
+     it('does not exceed the limit just because many sessions are active', () => {
+         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
+             id: `s-${index + 1}`,
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index c5eec0789..5b0ba0103 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -790,7 +790,7 @@ export function getVisibleSessionPreview(
+ 
+     const requiredIds = new Set<string>()
+     for (const session of sessions) {
+-        if (session.pendingRequestsCount > 0) requiredIds.add(session.id)
++        if (session.active && session.pendingRequestsCount > 0) requiredIds.add(session.id)
+     }
+     if (options.selectedSessionId && sessions.some(session => session.id === options.selectedSessionId)) {
+         requiredIds.add(options.selectedSessionId)
+diff --git a/web/src/components/SessionRowSummary.tsx b/web/src/components/SessionRowSummary.tsx
+index 11d09b2e7..d1707de21 100644
+--- a/web/src/components/SessionRowSummary.tsx
++++ b/web/src/components/SessionRowSummary.tsx
+@@ -301,7 +301,7 @@ export function SessionRowSummary(props: {
+                             {todoProgress.completed}/{todoProgress.total}
+                         </span>
+                     ) : null}
+-                    {!attention && s.pendingRequestsCount > 0 ? (
++                    {!attention && s.active && s.pendingRequestsCount > 0 ? (
+                         <span className="shrink-0 text-[var(--app-badge-warning-text)]">
+                             {t('session.item.pending')} {s.pendingRequestsCount}
+                         </span>
+diff --git a/web/src/lib/sessionAttention.test.ts b/web/src/lib/sessionAttention.test.ts
+index acf95094b..0c114563e 100644
+--- a/web/src/lib/sessionAttention.test.ts
++++ b/web/src/lib/sessionAttention.test.ts
+@@ -82,6 +82,20 @@ describe('classifySessionAttention', () => {
+         expect(attention).toEqual({ kind: 'permission' })
+     })
+ 
++    it('ignores pending requests left on an archived session', () => {
++        const attention = classifySessionAttention(
++            makeSummary({
++                id: 'a',
++                active: false,
++                pendingRequestKinds: ['permission'],
++                pendingRequestsCount: 1,
++                updatedAt: 5000
++            }),
++            { selected: false, lastSeenAt: 5000 }
++        )
++        expect(attention).toBeNull()
++    })
++
+     it('handles summaries from older APIs without pendingRequestKinds', () => {
+         const legacySummary = makeSummary({ id: 'legacy', updatedAt: 5000 }) as unknown as SessionSummary
+         delete (legacySummary as Partial<SessionSummary>).pendingRequestKinds
+diff --git a/web/src/lib/sessionAttention.ts b/web/src/lib/sessionAttention.ts
+index a3260c9b4..be086bae2 100644
+--- a/web/src/lib/sessionAttention.ts
++++ b/web/src/lib/sessionAttention.ts
+@@ -28,7 +28,8 @@ export function classifySessionAttention(
+         return null
+     }
+ 
+-    const pendingRequestKinds = Array.isArray(summary.pendingRequestKinds)
++    // Requests left on an archived session can no longer be answered.
++    const pendingRequestKinds = summary.active && Array.isArray(summary.pendingRequestKinds)
+         ? summary.pendingRequestKinds
+         : []
+ 
