@@ -972,6 +972,8 @@ describe('session model', () => {
 
         snapshot([])
         expect(cache.getSession(session.id)?.backgroundTaskCount).toBe(0)
+        // Snapshots are session state, not chat rows; only the tool result is stored.
+        expect(store.messages.getMessages(session.id)).toHaveLength(1)
         expect(events
             .filter((event) => event.type === 'session-updated' && event.sessionId === session.id)
             .map((event) => (event as { data?: { backgroundTaskCount?: number } }).data?.backgroundTaskCount)

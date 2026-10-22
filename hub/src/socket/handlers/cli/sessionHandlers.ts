@@ -159,6 +159,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
+        // A background-task snapshot is session state, not chat: apply it
+        // without storing a hidden row.
+        const backgroundTaskCount = extractBackgroundTaskCount(content)
+        if (backgroundTaskCount !== null) {
+            onBackgroundTaskCount?.(sid, backgroundTaskCount)
+            return
+        }
+
         const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
 
         // A reasoning stream arrives as a series of growing snapshots under one
@@ -224,11 +232,6 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                     }
                 })
             }
-        }
-
-        const backgroundTaskCount = extractBackgroundTaskCount(content)
-        if (backgroundTaskCount !== null) {
-            onBackgroundTaskCount?.(sid, backgroundTaskCount)
         }
 
         const update = {
