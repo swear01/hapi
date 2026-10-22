@@ -57,6 +57,17 @@ describe('native gateway barriers', () => {
             expect(f.before).not.toHaveBeenCalled();
         } finally { await f.close(); }
     });
+    it('does not answer a notification rejected by rewind admission', async () => {
+        const f = await fixture(async () => {}, async () => { throw new Error('rewind pending'); });
+        try {
+            const client = await f.connect(); const replies: Envelope[] = [];
+            client.on('message', raw => replies.push(JSON.parse(raw.toString())));
+            client.send(JSON.stringify({ method: 'thread/note', params: { threadId: 'root' } }));
+            client.send(JSON.stringify({ id: 2, method: 'turn/start', params: { threadId: 'root' } }));
+            await vi.waitFor(() => expect(replies).toHaveLength(1));
+            expect(replies[0]).toMatchObject({ id: 2, error: { message: 'rewind pending' } });
+        } finally { await f.close(); }
+    });
     it('namespaces colliding native request IDs by connection and withholds replies until binding', async () => {
         let release!: () => void; const barrier = new Promise<void>(resolve => { release = resolve; });
         const after = vi.fn(async () => { await barrier; }); const f = await fixture(after);

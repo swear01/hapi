@@ -603,7 +603,12 @@ export class RpcGateway {
     }
 
     async completeConversationRewind(sessionId: string, rewindToken: string): Promise<void> {
-        await this.sessionRpc(sessionId, RPC_METHODS.CompleteConversationRewind, { rewindToken }, 120_000)
+        const response = await this.sessionRpc(sessionId, RPC_METHODS.CompleteConversationRewind, { rewindToken }, 120_000)
+        // The CLI answers handler failures with { error } instead of rejecting.
+        const error = (response as { error?: unknown } | null)?.error
+        if (error !== undefined) {
+            throw new Error(String(error))
+        }
     }
 
     async listOpencodeReasoningEffortOptionsForSession(sessionId: string): Promise<RpcListOpencodeReasoningEffortOptionsResponse> {

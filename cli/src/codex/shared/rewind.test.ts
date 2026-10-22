@@ -39,6 +39,12 @@ describe('shared rewind admission', () => {
         const replacement = new SharedRewindBarrier(file); await replacement.load();
         replacement.enter()();
     });
+    it('unlocks a proven rejection whose barrier file is already gone', async () => {
+        const { file, barrier } = await fixture();
+        await barrier.begin(); await rm(file);
+        await barrier.cancel();
+        barrier.enter()();
+    });
     it('treats new native methods as mutations by default', () => {
         expect(isNativeHistoryRead('thread/turns/list')).toBe(true);
         for (const method of ['turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start',
