@@ -341,8 +341,9 @@ function resolveCodexForkRecords(records: Record<string, unknown>[], seen = new 
     if (!parentFile) throw new Error(`Codex fork history is incomplete: parent rollout ${rolloutId} not found`)
     const inherited = resolveCodexForkRecords(parseCodexRecords(readCodexRolloutLines(parentFile)), seen)
         .filter((record) => typeof record.ordinal === 'number' && record.ordinal < end)
-    if (!inherited.some((record) => record.ordinal === end - 1)) {
-        throw new Error(`Codex fork history is incomplete: parent rollout ${rolloutId} ends before the fork point`)
+    // Ordinals are contiguous across the lineage, so a complete prefix is exactly 0..end-1.
+    if (inherited.length !== end || inherited.some((record, index) => record.ordinal !== index)) {
+        throw new Error(`Codex fork history is incomplete: parent rollout ${rolloutId} is missing records before the fork point`)
     }
     return [...inherited, ...records]
 }
