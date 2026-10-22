@@ -74,6 +74,11 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
         return this.promptFailure
     }
 
+    /** Resolves once the Claude Code process has exited, however it ended. */
+    waitForExit(): Promise<void> {
+        return this.processExitPromise.catch(() => {})
+    }
+
     /**
      * AsyncIterableIterator implementation
      */

@@ -47,13 +47,20 @@ async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void
 function startFakeClaude(initialMessage: string) {
     const prompts: SDKUserMessage[] = [];
     const output = new PushableAsyncIterable<SDKMessage>();
-    const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation((({ prompt }: { prompt: AsyncIterable<SDKUserMessage> }) => {
+    // Outcome of each steer, and process exits awaited, in the order they happened.
+    const outcomes: string[] = [];
+    const abortedTools = new Set<string>();
+    let processSignal: AbortSignal | undefined;
+    const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation((({ prompt, options }: { prompt: AsyncIterable<SDKUserMessage>, options: { abort?: AbortSignal } }) => {
+        processSignal = options.abort;
         void (async () => {
             for await (const message of prompt) {
                 prompts.push(message);
             }
         })();
-        return output;
+        return Object.assign(output, {
+            waitForExit: async () => { outcomes.push(`exit:${processSignal?.aborted ? 'killed' : 'running'}`); }
+        });
     }) as unknown as typeof claudeSdk.query);
 
     let nextCallCount = 0;
@@ -61,8 +68,6 @@ function startFakeClaude(initialMessage: string) {
     const readyEvents: number[] = [];
     const thinking: boolean[] = [];
     const steerable: boolean[] = [];
-    // Outcome of each steer, in the order they were reported.
-    const outcomes: string[] = [];
     let steer: SteerFunction | null = null;
 
     const run = claudeRemote({
@@ -82,7 +87,7 @@ function startFakeClaude(initialMessage: string) {
             return await new Promise((resolve) => { releaseNext = resolve; });
         },
         onReady: () => { readyEvents.push(Date.now()); },
-        isAborted: () => false,
+        isAborted: (toolUseId) => abortedTools.has(toolUseId),
         onSessionFound: () => {},
         onThinkingChange: (value) => { thinking.push(value); },
         onMessage: () => {},
@@ -106,6 +111,13 @@ function startFakeClaude(initialMessage: string) {
             onDropped: () => { outcomes.push(`dropped:${message}`); }
         }) ?? false,
         emit: (message: SDKMessage) => output.push(message),
+        /** The user denies a running tool, which makes claudeRemote return on its own. */
+        async abortTool(toolUseId: string) {
+            abortedTools.add(toolUseId);
+            output.push({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId }] } } as unknown as SDKMessage);
+            await run;
+            querySpy.mockRestore();
+        },
         /** Emit messages and let claudeRemote process them. */
         async play(...messages: SDKMessage[]) {
             for (const message of messages) {
@@ -249,22 +261,66 @@ describe('claudeRemote mid-turn steering', () => {
 
         await claude.crash();
 
-        expect(claude.outcomes).toEqual(['started:Taken', 'dropped:Still queued']);
+        expect(claude.outcomes).toEqual(['started:Taken', 'exit:killed', 'dropped:Still queued']);
         expect(claude.getSteer()).toBeNull();
     });
 
-    it('treats a steer as taken at once when Claude reports no command lifecycle', async () => {
+    it('treats a steer as taken once a turn ends without any command lifecycle', async () => {
         const claude = startFakeClaude('Run the three steps');
         await waitFor(() => claude.prompts.length === 1);
 
         expect(claude.steer('Skip step three')).toBe(true);
-        expect(claude.outcomes).toEqual(['started:Skip step three']);
+        expect(claude.outcomes).toEqual([]);
         await claude.play(result);
+        expect(claude.outcomes).toEqual(['started:Skip step three']);
 
         expect(claude.readyEvents).toHaveLength(1);
         expect(claude.getSteer()).toBeNull();
 
         await claude.finish();
+    });
+
+    it('keeps a steer sent before the first lifecycle report and drops it if the process fails', async () => {
+        const claude = startFakeClaude('Write an essay');
+        await waitFor(() => claude.prompts.length === 1);
+
+        expect(claude.steer('Early follow-up')).toBe(true);
+        await waitFor(() => claude.prompts.length === 2);
+        expect(claude.outcomes).toEqual([]);
+
+        await claude.crash();
+        expect(claude.outcomes).toEqual(['exit:killed', 'dropped:Early follow-up']);
+    });
+
+    it('stays busy for a steer sent before the first lifecycle report that runs as a follow-up turn', async () => {
+        const claude = startFakeClaude('Write an essay');
+        await waitFor(() => claude.prompts.length === 1);
+        const initialUuid = claude.prompts[0].uuid;
+
+        expect(claude.steer('Early follow-up')).toBe(true);
+        await waitFor(() => claude.prompts.length === 2);
+        const steerUuid = claude.prompts[1].uuid;
+
+        await claude.play(lifecycle(initialUuid, 'started'), lifecycle(steerUuid, 'queued'), result);
+        expect(claude.readyEvents).toHaveLength(0);
+        expect(claude.outcomes).toEqual([]);
+
+        await claude.play(lifecycle(steerUuid, 'started'), result);
+        expect(claude.outcomes).toEqual(['started:Early follow-up']);
+        expect(claude.readyEvents).toHaveLength(1);
+
+        await claude.finish();
+    });
+
+    it('stops the Claude process before dropping steers when a denied tool ends the run', async () => {
+        const { claude } = await startRunningTurn('Edit the file');
+
+        expect(claude.steer('Use tabs')).toBe(true);
+        await waitFor(() => claude.prompts.length === 2);
+        await claude.play(lifecycle(claude.prompts[1].uuid, 'queued'));
+
+        await claude.abortTool('tool-1');
+        expect(claude.outcomes).toEqual(['exit:killed', 'dropped:Use tabs']);
     });
 
     it('waits for a steer Claude never reports through one result only', async () => {

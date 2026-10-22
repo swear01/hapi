@@ -134,7 +134,8 @@ export async function claudeRemote(opts: {
     // is not the end of the work. Claude may run several of them as separate
     // follow-up turns, so each steer is tracked until it starts.
     let turnActive = false;
-    let lifecycleReported = false;
+    // Unknown until Claude reports a lifecycle or a result arrives without one.
+    let lifecycleSupported: boolean | null = null;
     type PendingSteer = SteerCallbacks & {
         /** Claude reported the prompt as queued. */
         queued: boolean;
@@ -186,7 +187,7 @@ export async function claudeRemote(opts: {
             logger.debug(`${debugPrefix} steer push failed`, e);
             return false;
         }
-        if (!lifecycleReported) {
+        if (lifecycleSupported === false) {
             // This CLI does not report when the prompt starts; treat it as
             // taken, as before lifecycle tracking.
             void Promise.resolve(callbacks.onStarted()).catch((e) => {
@@ -252,6 +253,13 @@ export async function claudeRemote(opts: {
         return next;
     };
 
+    // Also stops the process when this function returns early on its own, so
+    // it cannot run steers that are restored to the queue.
+    const processController = new AbortController();
+    const processSignal = opts.signal
+        ? AbortSignal.any([opts.signal, processController.signal])
+        : processController.signal;
+
     // Prepare SDK options. For --fork-session, start query() before waiting for the
     // first child prompt so the native fork materializes at the clicked source state.
     const sdkOptions: Options = {
@@ -271,7 +279,7 @@ export async function claudeRemote(opts: {
             : opts.allowedTools,
         disallowedTools: bootstrapMode.disallowedTools,
         canCallTool: (toolName: string, input: unknown, options: { signal: AbortSignal }) => opts.canCallTool(toolName, input, mode, options),
-        abort: opts.signal,
+        abort: processSignal,
         pathToClaudeCodeExecutable: getDefaultClaudeCodePath(),
         settingsPath: opts.hookSettingsPath,
         additionalDirectories: [getHapiBlobsDir()],
@@ -447,7 +455,7 @@ export async function claudeRemote(opts: {
 
             if (message.type === 'command_lifecycle') {
                 const lifecycle = message as SDKCommandLifecycleMessage;
-                lifecycleReported = true;
+                lifecycleSupported = true;
                 const pending = pendingSteers.get(lifecycle.command_uuid);
                 if (pending) {
                     if (lifecycle.state === 'queued') {
@@ -471,6 +479,15 @@ export async function claudeRemote(opts: {
 
                 if (resultSeq === 1 && specialCommand.type === null && initial) {
                     opts.onFirstResult?.(initial.message);
+                }
+
+                if (lifecycleSupported === null) {
+                    // A whole turn without lifecycle reports: this CLI has none,
+                    // so steers kept since startup count as taken.
+                    lifecycleSupported = false;
+                    for (const uuid of [...pendingSteers.keys()]) {
+                        await startSteer(uuid);
+                    }
                 }
 
                 // A steer Claude reported as queued runs in a later turn. One
@@ -546,8 +563,13 @@ export async function claudeRemote(opts: {
             `(streamMessages=${streamMessageSeq}, results=${resultSeq}, nextFetches=${nextMessageFetchSeq}, inputEnded=${inputEnded})`
         );
         setTurnActive(false);
-        // The process is gone or abandoned: prompts it never started are lost
-        // with it.
+        if (pendingSteers.size > 0) {
+            // An early return leaves the process running, and it could still
+            // run these prompts while their restored copies run again.
+            processController.abort();
+            await response.waitForExit();
+        }
+        // The process is gone: prompts it never started are lost with it.
         for (const uuid of [...pendingSteers.keys()]) {
             dropSteer(uuid);
         }

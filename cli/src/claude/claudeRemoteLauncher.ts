@@ -189,9 +189,12 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                     onStarted: async () => {
                         // Agent output produced before Claude took the prompt
                         // must reach the hub first, or it sorts below it.
-                        await messageQueue.flush();
-                        session.queue.commitReservation(taken);
-                        session.client.emitMessagesConsumed([localId], { steered: true });
+                        try {
+                            await messageQueue.flush();
+                        } finally {
+                            session.queue.commitReservation(taken);
+                            session.client.emitMessagesConsumed([localId], { steered: true });
+                        }
                     },
                     onDropped: () => {
                         session.client.discardPendingHubPromptEcho(localId);
