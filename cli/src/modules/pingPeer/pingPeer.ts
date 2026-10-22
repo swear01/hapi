@@ -48,6 +48,7 @@ export type PingPeerSessionSummary = {
         lifecycleState?: string | null
         piSessionId?: string
         summary?: { text?: string } | null
+        capabilities?: { concurrentClients?: boolean } | null
     } | null
 }
 
@@ -765,7 +766,9 @@ export async function setPeerPermissionMode(options: SetPeerPermissionModeOption
     const live = await getSession(apiUrl, jwt, matched.id, http)
     // Hub treats a missing flavor as claude; mirror it so the allowed list matches.
     const flavor = live.metadata?.flavor ?? matched.metadata?.flavor ?? 'claude'
-    const allowed: readonly string[] = getPermissionModesForFlavor(flavor)
+    // Shared (concurrentClients) sessions cannot launch with Safe Yolo; same filter as the web picker.
+    const shared = Boolean(live.metadata?.capabilities?.concurrentClients)
+    const allowed: readonly string[] = getPermissionModesForFlavor(flavor).filter((m) => !shared || m !== 'safe-yolo')
     if (allowed.length === 0) {
         throw new PingPeerError('bad_args', `${flavor} sessions do not support permission modes`)
     }

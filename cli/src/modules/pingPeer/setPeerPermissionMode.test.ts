@@ -3,8 +3,12 @@ import { PingPeerError, setPeerPermissionMode } from './pingPeer'
 
 const sessionId = '7d55ed21-8a9f-4309-b4f8-30069df36b4b'
 
-function createHttpMock(options: { flavor: string; active: boolean; modeResponse?: { status: number; data: unknown } }) {
-    const session = { id: sessionId, active: options.active, metadata: { name: 'worker', flavor: options.flavor } }
+function createHttpMock(options: { flavor: string; active: boolean; shared?: boolean; modeResponse?: { status: number; data: unknown } }) {
+    const session = {
+        id: sessionId,
+        active: options.active,
+        metadata: { name: 'worker', flavor: options.flavor, capabilities: { concurrentClients: options.shared ?? false } }
+    }
     return {
         post: vi.fn(async (url: string, _body?: unknown) => {
             if (url.endsWith('/api/auth')) {
@@ -52,6 +56,14 @@ describe('setPeerPermissionMode', () => {
         expect(error).toBeInstanceOf(PingPeerError)
         expect((error as PingPeerError).code).toBe('bad_args')
         expect((error as PingPeerError).message).toContain('allowed: default, read-only, safe-yolo, yolo')
+        expect(http.post).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects Safe Yolo for a shared session without calling the hub', async () => {
+        const http = createHttpMock({ flavor: 'codex', active: false, shared: true })
+
+        await expect(setPeerPermissionMode({ ...base, sessionIdPrefix: sessionId, mode: 'safe-yolo', http: http as never }))
+            .rejects.toMatchObject({ code: 'bad_args', message: "invalid mode 'safe-yolo' for codex; allowed: default, read-only, yolo" })
         expect(http.post).toHaveBeenCalledTimes(1)
     })
 
