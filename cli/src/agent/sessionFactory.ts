@@ -182,6 +182,9 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.conversationHistoryTurns !== undefined) {
         preserved.conversationHistoryTurns = metadata.conversationHistoryTurns
     }
+    if (metadata.codexHistoryBaseline !== undefined) {
+        preserved.codexHistoryBaseline = metadata.codexHistoryBaseline
+    }
     if (metadata.conversationHistoryEntryIds !== undefined) {
         preserved.conversationHistoryEntryIds = metadata.conversationHistoryEntryIds
     }

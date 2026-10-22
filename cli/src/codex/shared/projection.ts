@@ -32,6 +32,8 @@ function metadataHasDisplayTitle(metadata: { name?: string; summary?: { text: st
     return Boolean(metadata?.name?.trim() || metadata?.summary?.text?.trim());
 }
 
+export type HistoryBaseline = { turns: Set<string>; capture: boolean };
+
 /** Canonical V2 stream only. Stable message IDs also deduplicate snapshot replay at the hub. */
 export class SharedCodexProjection {
     private converter = new AppServerEventConverter();
@@ -190,7 +192,8 @@ export class SharedCodexProjection {
         }
     }
 
-    async history(thread: unknown): Promise<void> {
+    /** Baseline turns were stored by HAPI before stable replay ids (no local id to match), so never replay them. */
+    async history(thread: unknown, baseline?: HistoryBaseline): Promise<void> {
         const turns = record(thread).turns;
         if (!Array.isArray(turns)) return;
         const titleRevision = this.titleRevision;
@@ -198,6 +201,17 @@ export class SharedCodexProjection {
         for (const value of turns) {
             const turn = record(value);
             if (!Array.isArray(turn.items)) continue;
+            const turnId = string(turn.id);
+            if (turnId && baseline?.capture && turn.status !== 'inProgress') baseline.turns.add(turnId);
+            if (turnId && baseline?.turns.has(turnId)) {
+                // Still prove acceptance so a redelivered input never runs twice.
+                for (const value of turn.items) {
+                    const item = record(value);
+                    const id = string(item.clientId ?? item.clientUserMessageId);
+                    if (!this.parentThreadId && item.type === 'userMessage' && id) await this.committed(id);
+                }
+                continue;
+            }
             for (const item of turn.items) {
                 const params = { threadId: this.threadId, turnId: turn.id, item };
                 const titleKey = `${string(turn.id) ?? 'thread'}:${record(item).id}`;

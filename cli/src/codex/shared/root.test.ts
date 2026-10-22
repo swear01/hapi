@@ -53,10 +53,10 @@ afterEach(async () => {
     finally { vi.useRealTimers(); }
 });
 
-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) {
+async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; turns?: NativeTurn[] }) {
     const directory = await mkdtemp('/tmp/hapi-shared-root-');
     let state: AgentState = { steeringActive: true };
-    let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex' };
+    let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex', ...opts?.metadata };
     let reconnect: (() => void) | null = null;
     const updateState = vi.fn((fn: (value: AgentState) => AgentState) => { state = fn(state); });
     const rpc = new Map<string, (raw: unknown) => Promise<unknown>>();
@@ -85,6 +85,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
     } satisfies RootHost);
     cleanups.push(async () => { await root.close(false); await rm(directory, { recursive: true, force: true }); });
     await root.prepare();
+    (root.client as unknown as { thread: { turns: NativeTurn[] } }).thread.turns = opts?.turns ?? [];
     await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
     const native = root.client as unknown as {
         initialized: boolean;
@@ -151,6 +152,22 @@ describe('shared plan actions', () => {
         await completePlan(f, status);
         await f.root.refresh();
         expect(f.state().codexPlanProposalId).toBeNull();
+    });
+
+    it('does not replay history stored before stable ids, then replays new turns (#2086)', async () => {
+        const old = { id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'stored without local id' }] };
+        const f = await fixture({ metadata: { codexSessionId: 'thread' }, turns: [old] });
+        expect(f.send).not.toHaveBeenCalled();
+        expect(f.metadata().codexHistoryBaseline).toEqual(['old']);
+        f.native.thread.turns.push({ id: 'new', status: 'completed', items: [{ id: 'b', type: 'agentMessage', text: 'fresh' }] });
+        await f.root.refresh();
+        expect(f.send.mock.calls.map(([body]) => body.message)).toEqual(['fresh']);
+    });
+
+    it('imports native history into a newly bound session', async () => {
+        const f = await fixture({ turns: [{ id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'native only' }] }] });
+        expect(f.send.mock.calls.map(([body]) => body.message)).toEqual(['native only']);
+        expect(f.metadata().codexHistoryBaseline).toEqual([]);
     });
 
     it('uses only the latest root turn when replaying history', async () => {
