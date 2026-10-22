@@ -13,7 +13,7 @@ import { CodexAppServerClient, isIndeterminateError } from '../codexAppServerCli
 import { codexHome, saveRuntime, runtimeDirectory, runtimeAuthHash, findColdBinding, withThreadOwnership, type CodexRuntimeRecord } from './registry';
 import { startCodexGateway, record, string, type Envelope } from './gateway';
 import { resolveSharedCodex, sharedLaunchConfig, initializeSharedClient, checkSharedCapabilities, takeReservedSessionId, type SharedLaunchOptions } from './launch';
-import { SharedCodexRoot } from './root';
+import { SharedCodexRoot, legacyHistoryCapture } from './root';
 import { isNativeHistoryRead } from './rewind';
 
 export type RuntimeReady = { sessionId: string; runtime: CodexRuntimeRecord };
@@ -177,7 +177,7 @@ export async function runSharedRuntime(options: SharedLaunchOptions, onReady?: (
         // create()/fork must mint a fresh row, not re-adopt (#1911 Opus Major).
         const reservedSessionId = takeReservedSessionId(options);
         const bootstrap = existingSessionId
-            ? await bootstrapExistingSession({ ...shared, sessionId: existingSessionId })
+            ? await bootstrapExistingSession({ ...shared, sessionId: existingSessionId, deriveMetadata: legacyHistoryCapture })
             : await bootstrapSession({
                 ...shared,
                 reservedSessionId,
