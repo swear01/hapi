@@ -250,7 +250,111 @@ afterEach(() => {
     vi.restoreAllMocks()
 })
 
+function makeToolMessages(count: number, firstSeq: number): DecryptedMessage[] {
+    return Array.from({ length: count }, (_, index) => {
+        const seq = firstSeq + index
+        const callId = `call-${Math.floor(index / 2)}`
+        return {
+            id: `tool-${seq}`,
+            seq,
+            localId: null,
+            content: {
+                role: 'agent',
+                content: {
+                    type: 'codex',
+                    data: index % 2 === 0
+                        ? { type: 'tool-call', callId, name: 'Read', input: { file_path: `/f${index}` } }
+                        : { type: 'tool-call-result', callId, output: 'ok' }
+                }
+            },
+            createdAt: seq * 1_000,
+            invokedAt: seq * 1_000
+        } as DecryptedMessage
+    })
+}
+
 describe('message tail synchronization', () => {
+    it('fetches one older context page before first paint when the cold page is tool-only', async () => {
+        const id = sessionId('cold-tool-only-context')
+        const tools = makeToolMessages(INITIAL_PAGE_SIZE, 10)
+        const context = makeAgentMessage({ id: 'context', seq: 9, at: 9_000 })
+        const older = deferred<MessagesResponse>()
+        const getMessages = vi.fn()
+            .mockResolvedValueOnce(latestResponse(tools, {
+                epoch: 1,
+                hasMore: true,
+                nextBeforeAt: 10_000,
+                nextBeforeSeq: 10
+            }))
+            .mockReturnValueOnce(older.promise)
+
+        const syncing = syncTailMessages(createApi(getMessages), id)
+        await vi.waitFor(() => expect(getMessages).toHaveBeenCalledTimes(2))
+        expect(getMessages.mock.calls[1]?.[1]).toEqual({ beforeAt: 10_000, beforeSeq: 10, limit: 200 })
+        expect(getMessageWindowState(id)).toMatchObject({ isSyncingTail: true, messages: [] })
+
+        older.resolve(beforeResponse([context], {
+            epoch: 1,
+            hasMore: true,
+            nextBeforeAt: 9_000,
+            nextBeforeSeq: 9
+        }))
+        await syncing
+
+        const state = getMessageWindowState(id)
+        expect(state.isSyncingTail).toBe(false)
+        expect(state.hasMore).toBe(true)
+        expect(state.messages.map((message) => message.id)).toEqual([
+            'context',
+            ...tools.map((message) => message.id)
+        ])
+    })
+
+    it('releases a tool-only cold page when the context page exceeds the wait budget', async () => {
+        vi.useFakeTimers()
+        try {
+            const id = sessionId('cold-tool-only-timeout')
+            const tools = makeToolMessages(INITIAL_PAGE_SIZE, 10)
+            const getMessages = vi.fn()
+                .mockResolvedValueOnce(latestResponse(tools, {
+                    epoch: 1,
+                    hasMore: true,
+                    nextBeforeAt: 10_000,
+                    nextBeforeSeq: 10
+                }))
+                .mockReturnValueOnce(new Promise(() => {}))
+
+            const syncing = syncTailMessages(createApi(getMessages), id)
+            await vi.advanceTimersByTimeAsync(500)
+            await syncing
+
+            const state = getMessageWindowState(id)
+            expect(state.isSyncingTail).toBe(false)
+            expect(state.messages).toHaveLength(INITIAL_PAGE_SIZE)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('does not fetch context when the cold page has conversation text', async () => {
+        const id = sessionId('cold-text-no-context')
+        const messages = [
+            makeAgentMessage({ id: 'text', seq: 9, at: 9_000 }),
+            ...makeToolMessages(INITIAL_PAGE_SIZE - 1, 10)
+        ]
+        const getMessages = vi.fn().mockResolvedValueOnce(latestResponse(messages, {
+            epoch: 1,
+            hasMore: true,
+            nextBeforeAt: 9_000,
+            nextBeforeSeq: 9
+        }))
+
+        await syncTailMessages(createApi(getMessages), id)
+
+        expect(getMessages).toHaveBeenCalledTimes(1)
+        expect(getMessageWindowState(id).messages).toHaveLength(INITIAL_PAGE_SIZE)
+    })
+
     it('uses a small cold latest page while keeping older loads at full page size', async () => {
         const id = sessionId('cold-initial-page')
         const latestMessages = Array.from({ length: INITIAL_PAGE_SIZE }, (_, index) =>
