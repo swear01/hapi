@@ -277,4 +277,9 @@ describe('RpcGateway permission RPC error surfacing (tiann/hapi#1735)', () => {
         const { gateway } = createGateway()
         await expect(gateway.approvePermission('session-1', 'request-1')).resolves.toBeUndefined()
     })
+
+    it('rejects a rewind completion the CLI failed', async () => {
+        const gateway = createGatewayWithResponse('Invalid rewind transaction')
+        await expect(gateway.completeConversationRewind('session-1', 'token-1')).rejects.toThrow('Invalid rewind transaction')
+    })
 })

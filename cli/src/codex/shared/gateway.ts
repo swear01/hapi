@@ -99,7 +99,8 @@ export async function startCodexGateway(options: {
                     if (transformed.id === undefined) release?.();
                 } catch (error) {
                     release?.();
-                    send(downstream, { id: message.id, error: { code: -32600, message: error instanceof Error ? error.message : String(error) } });
+                    // A notification has no id to answer.
+                    if (message.id !== undefined) send(downstream, { id: message.id, error: { code: -32600, message: error instanceof Error ? error.message : String(error) } });
                 }
             }).catch(() => downstream.close(1011, 'Codex connection failed')).finally(() => { processing--; drained(); });
         });

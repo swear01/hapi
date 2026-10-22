@@ -36,7 +36,8 @@ export class SharedRewindBarrier {
     }
     /** Only before native dispatch: rejection is proven, so no reconciliation is needed. */
     async cancel(): Promise<void> {
-        await unlink(this.file); this.token = undefined;
+        this.token = undefined;
+        await unlink(this.file).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
     }
     async complete(token: string, reconcile: () => Promise<void>): Promise<void> {
         if (this.completing) await this.completing;
