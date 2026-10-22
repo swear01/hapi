@@ -336,6 +336,50 @@ describe('message tail synchronization', () => {
         }
     })
 
+    it('ignores queued prompts when classifying a tool-only cold page', async () => {
+        const id = sessionId('cold-tool-only-queued')
+        const tools = makeToolMessages(INITIAL_PAGE_SIZE, 10)
+        const queued = makeUserMessage({ id: 'queued', localId: 'queued', createdAt: 99_000, invokedAt: null })
+        const getMessages = vi.fn()
+            .mockResolvedValueOnce(latestResponse([...tools, queued], {
+                epoch: 1,
+                hasMore: true,
+                nextBeforeAt: 10_000,
+                nextBeforeSeq: 10
+            }))
+            .mockResolvedValueOnce(beforeResponse([], { epoch: 1, nextBeforeAt: null, nextBeforeSeq: null }))
+
+        await syncTailMessages(createApi(getMessages), id)
+
+        expect(getMessages).toHaveBeenCalledTimes(2)
+        expect(getMessageWindowState(id).messages.map((message) => message.id)).toContain('queued')
+    })
+
+    it('does not fetch context on cached re-entry with a tool-only latest page', async () => {
+        const id = sessionId('reentry-tool-only')
+        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
+            messages: [makeAgentMessage({ id: 'cached', seq: 5, at: 5_000 })],
+            hasMore: true,
+            oldestPositionAt: 5_000,
+            oldestPositionSeq: 5,
+            newestPositionAt: 5_000,
+            newestPositionSeq: 5,
+            epoch: 1
+        }))
+        activateMessageWindow(id)
+        const getMessages = vi.fn().mockResolvedValueOnce(latestResponse(makeToolMessages(INITIAL_PAGE_SIZE, 10), {
+            epoch: 1,
+            hasMore: true,
+            nextBeforeAt: 10_000,
+            nextBeforeSeq: 10
+        }))
+
+        await syncTailMessages(createApi(getMessages), id)
+
+        expect(getMessages).toHaveBeenCalledTimes(1)
+        expect(getMessages).toHaveBeenCalledWith(id, { limit: 20 })
+    })
+
     it('does not fetch context when the cold page has conversation text', async () => {
         const id = sessionId('cold-text-no-context')
         const messages = [

@@ -690,7 +690,8 @@ function finishTailSync(sessionId: string, generation: number, warning: string |
 function isToolOnlyPage(messages: DecryptedMessage[]): boolean {
     const normalized: NormalizedMessage[] = []
     for (const message of messages) {
-        if (!shouldRetainWindowMessage(message)) continue
+        // Queued prompts render above the composer, not in the thread.
+        if (!shouldRetainWindowMessage(message) || isQueuedForInvocation(message)) continue
         const next = normalizeDecryptedMessage(message)
         if (next) normalized.push(next)
     }
@@ -748,16 +749,19 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
             // messages for first paint. Structural resets and cursor-backed
             // non-activation synchronization use the full page so their
             // authoritative replacement remains unchanged.
+            const isColdWindow = !initial.requiresLatestReset
+                && !preferLatestOnActivation
+                && initialCursor === null
             const latestPageSize = initial.requiresLatestReset
                 ? PAGE_SIZE
                 : preferLatestOnActivation
                     ? CACHED_REENTRY_PAGE_SIZE
-                    : initialCursor === null
+                    : isColdWindow
                         ? INITIAL_PAGE_SIZE
                         : PAGE_SIZE
             const response = await api.getMessages(sessionId, { limit: latestPageSize })
             if (!isCurrentTailSync(sessionId, generation)) return
-            const context = latestPageSize === INITIAL_PAGE_SIZE
+            const context = isColdWindow
                 ? await fetchInitialContextPage(api, sessionId, response)
                 : null
             if (!isCurrentTailSync(sessionId, generation)) return
