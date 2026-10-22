@@ -31,6 +31,7 @@ Commands:
   hapi stop-peer <id>         Stop a session without archiving
   hapi archive-peer <id>      Stop and archive a session
   hapi delete-peer <id>       Delete an inactive session
+  hapi set-mode <id> <mode>   Change a session's permission mode
   hapi mcp                   Start the MCP stdio bridge
 
 Options:

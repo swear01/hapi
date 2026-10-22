@@ -1,15 +1,15 @@
 /**
- * Exact-id message, wait, inspect, stop, and archive operations.
+ * Exact-id message, wait, inspect, stop, archive, and set-mode operations.
  *
- * Shared by `hapi ping-peer` / `hapi inspect-peer` and MCP `ping_peer` /
- * `inspect_peer`. Uses the same hub JWT flow as the web app
+ * Shared by `hapi ping-peer` / `hapi inspect-peer` / `hapi set-mode` and MCP
+ * `ping_peer` / `inspect_peer`. Uses the same hub JWT flow as the web app
  * (`POST /api/auth` with CLI_API_TOKEN), scoped to the token's namespace.
  * Callers must not invent parallel auth or arbitrary hosts.
  */
 
 import axios, { type AxiosInstance, type AxiosResponse } from 'axios'
 import { randomUUID } from 'node:crypto'
-import { extractAssistantPlainText, isObject } from '@hapi/protocol'
+import { extractAssistantPlainText, getPermissionModesForFlavor, isObject } from '@hapi/protocol'
 import { normalizeSessionIdPrefix } from '@hapi/protocol/sessionCitation'
 import { configuration } from '@/configuration'
 import { getAuthToken } from '@/api/auth'
@@ -25,6 +25,7 @@ export type PingPeerErrorCode =
     | 'send_failed'
     | 'session_ended'
     | 'lifecycle_failed'
+    | 'apply_failed'
 
 export class PingPeerError extends Error {
     readonly code: PingPeerErrorCode
@@ -50,6 +51,7 @@ export type PingPeerSessionSummary = {
         lifecycleState?: string | null
         piSessionId?: string
         summary?: { text?: string } | null
+        capabilities?: { concurrentClients?: boolean } | null
     } | null
 }
 
@@ -421,6 +423,7 @@ export function exitCodeForPingPeerError(error: PingPeerError): number {
         case 'send_failed':
         case 'session_ended':
         case 'lifecycle_failed':
+        case 'apply_failed':
             return 4
         default:
             return 1
@@ -805,4 +808,79 @@ export function formatInspectPeerReport(result: InspectPeerResult): string {
         }
     }
     return lines.join('\n')
+}
+
+// ── set-mode (permission mode of an existing session) ──────────────────────
+
+export type SetPeerPermissionModeOptions = {
+    sessionId: string
+    mode: string
+    apiUrl?: string
+    accessToken?: string
+    http?: AxiosInstance
+}
+
+export type SetPeerPermissionModeResult = {
+    sessionId: string
+    name: string
+    flavor: string
+    mode: string
+    active: boolean
+}
+
+/**
+ * Same route the web permission picker uses. Active sessions apply it live;
+ * inactive ones keep it for the next resume (hub SyncEngine.applySessionConfig).
+ */
+export async function setPeerPermissionMode(options: SetPeerPermissionModeOptions): Promise<SetPeerPermissionModeResult> {
+    const sessionId = requireExactSessionId(options.sessionId)
+    const mode = (options.mode ?? '').trim()
+    if (!mode) {
+        throw new PingPeerError('bad_args', 'mode is required')
+    }
+
+    const apiUrl = resolveApiUrl(options.apiUrl)
+    const accessToken = resolveAccessToken(options.accessToken)
+    const http = options.http ?? axios
+
+    const jwt = await exchangeJwt(apiUrl, accessToken, http)
+    const live = await getSession(apiUrl, jwt, sessionId, http)
+    // Hub treats a missing flavor as claude; mirror it so the allowed list matches.
+    const flavor = live.metadata?.flavor ?? 'claude'
+    // Shared (concurrentClients) sessions cannot launch with Safe Yolo; same filter as the web picker.
+    const shared = Boolean(live.metadata?.capabilities?.concurrentClients)
+    const allowed: readonly string[] = getPermissionModesForFlavor(flavor).filter((m) => !shared || m !== 'safe-yolo')
+    if (allowed.length === 0) {
+        throw new PingPeerError('bad_args', `${flavor} sessions do not support permission modes`)
+    }
+    if (!allowed.includes(mode)) {
+        throw new PingPeerError(
+            'bad_args',
+            `invalid mode '${mode}' for ${flavor}; allowed: ${allowed.join(', ')}`
+        )
+    }
+
+    const response = await http.post(
+        `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/permission-mode`,
+        { mode },
+        {
+            headers: authHeaders(jwt),
+            timeout: 30_000,
+            validateStatus: () => true
+        }
+    )
+    if (response.status < 200 || response.status >= 300 || response.data?.ok !== true) {
+        const detail = typeof response.data?.error === 'string'
+            ? response.data.error
+            : `HTTP ${response.status}`
+        throw new PingPeerError('apply_failed', `set-mode failed: ${detail}`)
+    }
+
+    return {
+        sessionId,
+        name: resolvePeerSessionLabel(live),
+        flavor,
+        mode,
+        active: live.active
+    }
 }
