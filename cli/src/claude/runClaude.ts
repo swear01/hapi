@@ -511,10 +511,11 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             return true;
         }
         const removed = messageQueue.cancelByLocalId(localId);
-        if (removed) {
+        // 'in-flight' and 'consumed' prompts still reach Claude and echo back.
+        if (removed === true) {
             session.discardPendingHubPromptEcho(localId);
         }
-        logger.debug(`[claude] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
+        logger.debug(`[claude] cancelByLocalId(${localId}): ${removed === true ? 'removed' : removed || 'not found (best-effort)'}`);
         return removed;
     });
 
