@@ -50,6 +50,8 @@ export class SharedCodexRoot {
     private projection!: SharedCodexProjection;
     private readonly children = new Map<string, SharedCodexProjection>();
     private readonly historyBaseline: HistoryBaseline = { turns: new Set(), capture: false };
+    // Children whose history could not be read while capturing the baseline.
+    private readonly uncapturedChildren = new Set<string>();
     private readonly ancestry = new Map<string, string | null>();
     private heartbeat?: ReturnType<typeof setInterval>;
     private work: Promise<unknown> = Promise.resolve();
@@ -197,8 +199,12 @@ export class SharedCodexRoot {
         // already stored, so capture it once instead of inserting it again.
         const prior = this.session.getMetadata();
         for (const turn of prior?.codexHistoryBaseline ?? []) this.historyBaseline.turns.add(turn);
-        this.historyBaseline.capture = !prior?.codexHistoryBaseline && prior?.codexSessionId === threadId;
-        this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId, capabilities: {
+        const capturing = !prior?.codexHistoryBaseline && prior?.codexSessionId === threadId;
+        this.historyBaseline.capture = capturing;
+        // A fresh binding records its empty baseline atomically with the
+        // thread id, so an interrupted import is never mistaken for legacy.
+        this.session.updateMetadata(metadata => ({ ...metadata, codexSessionId: threadId,
+            ...(!prior?.codexHistoryBaseline && !capturing ? { codexHistoryBaseline: [] } : {}), capabilities: {
             ...metadata.capabilities, concurrentClients: true, terminal: true,
             // In-place rewind needs a native + hub commit barrier. Do not
             // advertise a destructive operation we cannot make atomic yet.
@@ -212,10 +218,13 @@ export class SharedCodexRoot {
         this.acceptSettings(response); this.acceptSettings(this.host.settingsFor(threadId) ?? {});
         await this.projection.history(response.thread, this.historyBaseline); await this.refresh(); await this.refreshChildren(true);
         this.historyBaseline.capture = false;
-        if (!prior?.codexHistoryBaseline) {
-            const turns = [...this.historyBaseline.turns];
-            this.session.updateMetadata(metadata => ({ ...metadata, codexHistoryBaseline: turns }));
-        }
+        if (capturing) this.persistBaseline();
+    }
+    private persistBaseline(): void {
+        // Unpersisted, the next bind recaptures everything.
+        if (this.uncapturedChildren.size) return;
+        const turns = [...this.historyBaseline.turns];
+        this.session.updateMetadata(metadata => ({ ...metadata, codexHistoryBaseline: turns }));
     }
     async activate(options: SharedLaunchOptions = {}): Promise<void> {
         // Restored input cannot run before the cold-resume settings are applied.
@@ -338,13 +347,20 @@ export class SharedCodexRoot {
             for (const id of Array.isArray(page.data) ? page.data : []) if (typeof id === 'string') loaded.add(id);
             cursor = string(page.nextCursor);
         } while (cursor);
+        const pending = this.uncapturedChildren.size > 0;
         for (const [id, projection] of this.children) {
+            const capture = this.historyBaseline.capture || this.uncapturedChildren.has(id);
             // Replaying a completed/unloaded child must not start its engine.
             try {
                 if (subscribe && loaded.has(id)) await this.client.request('thread/resume', { threadId: id });
-                projection.reset(); await projection.history(await this.readThread(id), this.historyBaseline);
-            } catch (error) { logger.debug('[Codex shared] child history unavailable', { id, error }); }
+                projection.reset(); await projection.history(await this.readThread(id), { turns: this.historyBaseline.turns, capture });
+                this.uncapturedChildren.delete(id);
+            } catch (error) {
+                if (capture) this.uncapturedChildren.add(id);
+                logger.debug('[Codex shared] child history unavailable', { id, error });
+            }
         }
+        if (pending) this.persistBaseline();
     }
     nativeQueueDeleted(nativeId: string): Promise<void> { return this.queue.deleted(nativeId); }
     replaySettings(): Array<{ method: string; params: unknown }> {

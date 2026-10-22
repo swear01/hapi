@@ -13,6 +13,9 @@ vi.mock('../codexAppServerClient', () => ({
     CodexAppServerClient: class {
         initialized = false;
         thread = { id: 'thread', turns: [] as NativeTurn[] };
+        children: Record<string, NativeTurn[]> = {};
+        failReads = false;
+        failChildren = false;
         settings: Record<string, unknown> = { model: 'mock', collaborationMode: { mode: 'default' } };
         queue: Array<{ id: string; clientUserMessageId: unknown; input: unknown }> = [];
         notify?: (method: string, params: unknown) => void;
@@ -25,8 +28,13 @@ vi.mock('../codexAppServerClient', () => ({
         isInitialized() { return this.initialized; }
         async disconnect() { this.initialized = false; }
         async request(method: string, params: Record<string, unknown> = {}) {
+            const child = typeof params.threadId === 'string' ? this.children[params.threadId] : undefined;
+            if (method === 'thread/read' && params.includeTurns && this.failReads) throw new Error('read failed');
+            if (method === 'thread/read' && child && params.includeTurns && this.failChildren) throw new Error('child read failed');
+            if (method === 'thread/read' && child) return { thread: { id: params.threadId, parentThreadId: 'thread', turns: structuredClone(child) } };
             if (method === 'thread/read' || method === 'thread/resume') return { ...this.settings, thread: structuredClone(this.thread) };
-            if (method === 'thread/list') return { data: [] };
+            if (method === 'thread/list') return { data: Object.keys(this.children).map(id => ({ id, parentThreadId: 'thread' })) };
+            if (method === 'thread/loaded/list') return { data: [] };
             if (method === 'thread/queue/list') return { data: this.queue };
             if (method === 'thread/settings/update') {
                 this.settings = { ...this.settings, ...params };
@@ -53,7 +61,8 @@ afterEach(async () => {
     finally { vi.useRealTimers(); }
 });
 
-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; turns?: NativeTurn[] }) {
+type NativeSetup = { turns?: NativeTurn[]; children?: Record<string, NativeTurn[]>; failReads?: boolean; failChildren?: boolean };
+async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; metadata?: Partial<Metadata>; native?: NativeSetup; bindMayFail?: boolean }) {
     const directory = await mkdtemp('/tmp/hapi-shared-root-');
     let state: AgentState = { steeringActive: true };
     let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex', ...opts?.metadata };
@@ -85,15 +94,18 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; me
     } satisfies RootHost);
     cleanups.push(async () => { await root.close(false); await rm(directory, { recursive: true, force: true }); });
     await root.prepare();
-    (root.client as unknown as { thread: { turns: NativeTurn[] } }).thread.turns = opts?.turns ?? [];
-    await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
     const native = root.client as unknown as {
         initialized: boolean;
         thread: { id: string; turns: NativeTurn[] };
+        children: Record<string, NativeTurn[]>;
+        failReads: boolean;
+        failChildren: boolean;
         queue: Array<{ id: string; clientUserMessageId: string; input: unknown }>;
         notify(method: string, params: unknown): void;
         abandoned(): void;
     };
+    native.thread.turns = opts?.native?.turns ?? []; native.children = opts?.native?.children ?? {}; native.failReads = opts?.native?.failReads ?? false; native.failChildren = opts?.native?.failChildren ?? false;
+    await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false).catch(error => { if (!opts?.bindMayFail) throw error; });
     return {
         root, native, rpc, send, metadata: () => metadata, state: () => state, updateState,
         reconnect: () => reconnect?.(),
@@ -156,7 +168,7 @@ describe('shared plan actions', () => {
 
     it('does not replay history stored before stable ids, then replays new turns (#2086)', async () => {
         const old = { id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'stored without local id' }] };
-        const f = await fixture({ metadata: { codexSessionId: 'thread' }, turns: [old] });
+        const f = await fixture({ metadata: { codexSessionId: 'thread' }, native: { turns: [old] } });
         expect(f.send).not.toHaveBeenCalled();
         expect(f.metadata().codexHistoryBaseline).toEqual(['old']);
         f.native.thread.turns.push({ id: 'new', status: 'completed', items: [{ id: 'b', type: 'agentMessage', text: 'fresh' }] });
@@ -165,9 +177,23 @@ describe('shared plan actions', () => {
     });
 
     it('imports native history into a newly bound session', async () => {
-        const f = await fixture({ turns: [{ id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'native only' }] }] });
+        const f = await fixture({ native: { turns: [{ id: 'old', status: 'completed', items: [{ id: 'a', type: 'agentMessage', text: 'native only' }] }] } });
         expect(f.send.mock.calls.map(([body]) => body.message)).toEqual(['native only']);
         expect(f.metadata().codexHistoryBaseline).toEqual([]);
+    });
+
+    it('records the empty baseline with the thread before an interruptible first import', async () => {
+        const f = await fixture({ native: { failReads: true }, bindMayFail: true });
+        expect(f.metadata()).toMatchObject({ codexSessionId: 'thread', codexHistoryBaseline: [] });
+    });
+
+    it('keeps capturing a legacy child whose history read failed', async () => {
+        const childTurns = [{ id: 'child-turn', status: 'completed', items: [{ id: 'c', type: 'agentMessage', text: 'stored child' }] }];
+        const f = await fixture({ metadata: { codexSessionId: 'thread' }, native: { children: { child: childTurns }, failChildren: true } });
+        expect(f.metadata().codexHistoryBaseline).toBeUndefined();
+        f.native.failChildren = false; f.native.initialized = false; f.native.abandoned();
+        await vi.waitFor(() => expect(f.metadata().codexHistoryBaseline).toEqual(['child-turn']));
+        expect(f.send).not.toHaveBeenCalled();
     });
 
     it('uses only the latest root turn when replaying history', async () => {
