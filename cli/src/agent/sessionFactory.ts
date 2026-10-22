@@ -381,6 +381,8 @@ export async function bootstrapExistingSession(options: {
     startedBy?: SessionStartedBy
     workingDirectory: string
     metadataOverrides?: Partial<Metadata>
+    /** Derived from the persisted row before `metadataOverrides` replace it. */
+    deriveMetadata?: (current: Metadata | null | undefined) => Partial<Metadata>
 }): Promise<SessionBootstrapResult> {
     const startedBy = options.startedBy ?? 'terminal'
     const api = await ApiClient.create()
@@ -416,6 +418,7 @@ export async function bootstrapExistingSession(options: {
             ...baseMetadata,
             ...preserved,
             ...options.metadataOverrides,
+            ...options.deriveMetadata?.(current),
             capabilities: {
                 ...baseMetadata.capabilities,
                 ...preserved.capabilities,

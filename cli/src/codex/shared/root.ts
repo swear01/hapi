@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { SessionBootstrapResult } from '@/agent/sessionFactory';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { Metadata } from '@/api/types';
 import { logger } from '@/ui/logger';
 import { listSlashCommands } from '@/modules/common/slashCommands';
 import { normalizeCodexModel } from '@/modules/common/codexModels';
@@ -40,6 +41,15 @@ const SettingsSchema = z.object({
 });
 
 /** One immutable HAPI identity + independent subscription for one root. */
+/**
+ * The pre-shared launcher stored history without local ids (#2086). Mark the
+ * one-time capture in bootstrap's own write, before it claims concurrentClients.
+ */
+export function legacyHistoryCapture(current: Metadata | null | undefined): Partial<Metadata> {
+    if (current?.codexHistoryBaseline || !current?.codexSessionId || current.capabilities?.concurrentClients) return {};
+    return { codexHistoryBaseline: { turns: [], before: Math.floor(Date.now() / 1000), pending: [], capture: true } };
+}
+
 export class SharedCodexRoot {
     readonly client: CodexAppServerClient;
     readonly session: ApiSessionClient;
@@ -194,12 +204,9 @@ export class SharedCodexRoot {
             ids => this.session.setSteerDeliveryState(ids, 'queued'));
         await this.queue.load();
         this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
-        // The pre-shared launcher stored this thread's history without local
-        // ids (#2086), so capture it once instead of inserting it again. Its
-        // persisted row (before bootstrap overrides) never had concurrentClients.
-        const prior = this.session.getMetadata()?.codexHistoryBaseline;
-        const original = this.bootstrap.sessionInfo?.metadata;
-        const capturing = !prior && original?.codexSessionId === threadId && !original.capabilities?.concurrentClients;
+        const bootstrapped = this.bootstrap.metadata;
+        const capturing = bootstrapped?.codexHistoryBaseline?.capture === true && bootstrapped.codexSessionId === threadId;
+        const prior = capturing || !bootstrapped?.codexHistoryBaseline?.capture ? bootstrapped?.codexHistoryBaseline : undefined;
         for (const turn of prior?.turns ?? []) this.historyBaseline.turns.add(turn);
         for (const id of prior?.pending ?? []) this.uncapturedChildren.add(id);
         this.historyBaseline.capture = capturing;
@@ -225,7 +232,7 @@ export class SharedCodexRoot {
         if (capturing) this.persistBaseline();
     }
     private persistBaseline(): void {
-        const baseline = { turns: [...this.historyBaseline.turns], before: this.historyBaseline.before, pending: [...this.uncapturedChildren] };
+        const baseline = { turns: [...this.historyBaseline.turns], before: this.historyBaseline.before, pending: [...this.uncapturedChildren], capture: false };
         this.session.updateMetadata(metadata => ({ ...metadata, codexHistoryBaseline: baseline }));
     }
     async activate(options: SharedLaunchOptions = {}): Promise<void> {
