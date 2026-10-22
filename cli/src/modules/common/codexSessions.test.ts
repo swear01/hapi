@@ -283,4 +283,22 @@ describe('listLocalCodexSessionSummaries', () => {
         expect(() => listLocalCodexSessionsWithMessagesByIds(new Set(['fork-session-id']))).toThrow(missingId)
         rmSync(root, { recursive: true, force: true })
     })
+
+    it('refuses to load a fork whose ancestor rollout ends before the fork point', () => {
+        const root = mkdtempSync(join(tmpdir(), 'codex-home-'))
+        process.env.CODEX_HOME = root
+        const sessionsDir = join(root, 'sessions', '2026', '06', '27')
+        mkdirSync(sessionsDir, { recursive: true })
+        const parentId = '55555555-5555-5555-5555-555555555555'
+        writeFileSync(join(sessionsDir, `rollout-2026-06-27T11-00-00-${parentId}.jsonl`), [
+            JSON.stringify({ ordinal: 0, type: 'session_meta', payload: { id: parentId, cwd: '/tmp/project' } })
+        ].join('\n'))
+        writeFileSync(join(sessionsDir, 'fork.jsonl'), [
+            JSON.stringify({ ordinal: 3, type: 'session_meta', payload: { id: 'fork-session-id', cwd: '/tmp/project', history_base: { thread_id: parentId, end_ordinal_exclusive: 3 } } }),
+            JSON.stringify({ ordinal: 4, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'later' }] } })
+        ].join('\n'))
+
+        expect(() => listLocalCodexSessionsWithMessagesByIds(new Set(['fork-session-id']))).toThrow('ends before the fork point')
+        rmSync(root, { recursive: true, force: true })
+    })
 })

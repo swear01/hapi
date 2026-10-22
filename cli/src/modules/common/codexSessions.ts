@@ -341,6 +341,9 @@ function resolveCodexForkRecords(records: Record<string, unknown>[], seen = new 
     if (!parentFile) throw new Error(`Codex fork history is incomplete: parent rollout ${rolloutId} not found`)
     const inherited = resolveCodexForkRecords(parseCodexRecords(readCodexRolloutLines(parentFile)), seen)
         .filter((record) => typeof record.ordinal === 'number' && record.ordinal < end)
+    if (!inherited.some((record) => record.ordinal === end - 1)) {
+        throw new Error(`Codex fork history is incomplete: parent rollout ${rolloutId} ends before the fork point`)
+    }
     return [...inherited, ...records]
 }
 
