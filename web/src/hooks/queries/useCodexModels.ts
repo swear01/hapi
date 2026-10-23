@@ -3,6 +3,7 @@ import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
 import { ApiError, type ApiClient } from '@/api/client'
 import type { CodexModelSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import type { CodexAccountUsage } from '@hapi/protocol/apiTypes'
 
 export function useCodexModels(args: {
     api: ApiClient | null
@@ -14,6 +15,8 @@ export function useCodexModels(args: {
     models: CodexModelSummary[]
     isLoading: boolean
     error: string | null
+    usage: CodexAccountUsage | null
+    refresh: () => void
 } {
     const { api, sessionId, machineId } = args
     const enabled = Boolean(args.enabled && api && (sessionId || machineId))
@@ -70,6 +73,8 @@ export function useCodexModels(args: {
 
     return {
         models: query.data?.models ?? [],
+        usage: query.data?.usage ?? null,
+        refresh: () => { if (enabled) void query.refetch({ cancelRefetch: false }) },
         isLoading: query.isLoading,
         error: query.data?.success === false
             ? (query.data.error ?? 'Failed to load Codex models')

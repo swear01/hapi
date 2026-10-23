@@ -49,7 +49,8 @@ export class SharedCodexProjection {
     private readonly completedTitles = new Set<string>();
     private titleRevision = 0;
     constructor(private readonly session: ApiSessionClient, readonly threadId: string,
-        private readonly committed: (id: string) => Promise<void>, private readonly parentThreadId?: string, restoreLocators = true) {
+        private readonly committed: (id: string) => Promise<void>, private readonly parentThreadId?: string, restoreLocators = true,
+        private readonly quotaHint?: () => Promise<string>) {
         if (!parentThreadId && restoreLocators) for (const [id, turn] of Object.entries(session.getMetadata()?.conversationHistoryTurns ?? {})) this.turns.set(id, turn);
         if (!restoreLocators) session.updateMetadata(metadata => ({ ...metadata, conversationHistoryTurns: {}, conversationHistoryPoints: {} }));
     }
@@ -205,6 +206,13 @@ export class SharedCodexProjection {
                 if (image) send({ type: 'generated-image', imageId: image.id, fileName: image.fileName, mimeType: image.mimeType }, key);
             } else if (event.type === 'task_failed') {
                 send({ type: 'message', message: `Codex error: ${event.error ?? event.message ?? 'Turn failed'}` }, key);
+                const hintKey = `reserve-hint:${turnId ?? key}`;
+                if (event.codex_error_info === 'usageLimitExceeded' && this.quotaHint && !this.emitted.has(`${hintKey}:requested`)) {
+                    this.emitted.add(`${hintKey}:requested`);
+                    void this.quotaHint().then(hint => {
+                        if (hint) this.send({ type: 'message', message: hint }, hintKey);
+                    }).catch(() => {});
+                }
             }
         }
         if (item.type === 'collabAgentToolCall') {

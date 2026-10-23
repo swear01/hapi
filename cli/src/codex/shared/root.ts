@@ -23,6 +23,8 @@ import { CodexSessionTitles } from '../utils/codexSessionTitles';
 import { record, string } from './gateway';
 import { initializeSharedClient, type SharedLaunchOptions } from './launch';
 import { inheritedSandbox, settingsMatch } from './settings';
+import { LunaReserve, LUNA_RESERVE_MODEL } from './lunaReserve';
+import type { CodexModelsResponse } from '@hapi/protocol/apiTypes';
 import { planImplementationMessageId, planProposalForItem, planProposalForTurn } from './plan';
 import { SharedRewindBarrier, isNativeHistoryRead } from './rewind';
 
@@ -57,6 +59,16 @@ export class SharedCodexRoot {
     readonly session: ApiSessionClient;
     private readonly titles: CodexSessionTitles;
     private titleRequest = '';
+    private readonly reserve: LunaReserve;
+    private modelRead?: Promise<CodexModelsResponse>;
+    private configWork: Promise<unknown> = Promise.resolve();
+    // Suggest Luna Reserve after a quota failure when the account can use it.
+    private readonly quotaHint = async (): Promise<string> => {
+        const usage = this.settingsNative.modelProvider && this.settingsNative.modelProvider !== 'openai'
+            ? null : await this.reserve.usage(this.settings.model);
+        return usage?.reserveAvailable && this.settings.model !== LUNA_RESERVE_MODEL
+            ? 'Luna Reserve is available in the model menu.' : '';
+    };
     bridge!: HapiMcpBridge;
     threadId = '';
     private permissions!: SharedCodexPermissions;
@@ -101,6 +113,7 @@ export class SharedCodexRoot {
             { endpoint: host.endpoint, token: host.token });
         this.rewindBarrier = new SharedRewindBarrier(join(host.directory, `${this.session.sessionId}.rewind.json`));
         this.client = new CodexAppServerClient({ endpoint: host.endpoint, token: host.token, cwd: bootstrap.workingDirectory });
+        this.reserve = new LunaReserve(this.client);
         this.client.setNotificationHandler((method, params) => {
             if (method === 'serverRequest/resolved') {
                 this.permissions?.resolved(string(record(params).threadId) ?? '', record(params).requestId); return;
@@ -240,7 +253,7 @@ export class SharedCodexRoot {
             (id, input) => this.session.syncNativeQueuedMessage(id, input === null ? null : inputText(input)),
             ids => this.session.setSteerDeliveryState(ids, 'queued'));
         await this.queue.load();
-        this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id));
+        this.projection = new SharedCodexProjection(this.session, threadId, id => this.queue.committed(id), undefined, true, this.quotaHint);
         const bootstrapped = this.bootstrap.metadata;
         const capturing = bootstrapped?.codexHistoryBaseline?.capture === true && bootstrapped.codexSessionId === threadId;
         const prior = capturing || !bootstrapped?.codexHistoryBaseline?.capture ? bootstrapped?.codexHistoryBaseline : undefined;
@@ -470,8 +483,36 @@ export class SharedCodexRoot {
             }
         } finally { this.reconnecting = false; this.publishSteering(); this.publishPlan(); }
     }
-    async applySettings(raw: unknown): Promise<{ applied: RuntimeSettings }> {
+    applySettings(raw: unknown): Promise<{ applied: RuntimeSettings }> {
+        // Leave 20 seconds for the native request inside the hub's 30-second RPC budget.
+        const dispatchDeadline = Date.now() + 8_000;
+        const pending = this.configWork.catch(() => {}).then(() => this.applySettingsNow(raw, dispatchDeadline));
+        this.configWork = pending;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Settings selection expired; reopen the model menu')), 28_000);
+        });
+        return Promise.race([pending, timeout]).catch(error => {
+            if (record(raw).model === LUNA_RESERVE_MODEL) this.notice(`Reserve selection was not confirmed: ${error instanceof Error ? error.message : String(error)}`);
+            throw error;
+        }).finally(() => clearTimeout(timer));
+    }
+    private async applySettingsNow(raw: unknown, dispatchDeadline: number): Promise<{ applied: RuntimeSettings }> {
+        if (this.closed || this.stopping) throw new Error('Codex execution is stopping');
         const config = SettingsSchema.parse(raw);
+        if (config.model === LUNA_RESERVE_MODEL && this.settings.model !== LUNA_RESERVE_MODEL) {
+            const revision = this.settingsRevision;
+            // A selection must revalidate entitlement; never reuse the model picker's read.
+            if (this.modelRead) await this.modelRead;
+            const available = await this.listModels();
+            if (this.stopping || this.closed || revision !== this.settingsRevision) throw new Error('Session settings changed; reopen the model menu before switching');
+            const model = available.models?.find(model => model.id === LUNA_RESERVE_MODEL);
+            if (!available.usage?.reserveAvailable || !model) throw new Error('Luna Reserve is not available for this session');
+            const effort = config.modelReasoningEffort ?? this.settings.modelReasoningEffort;
+            config.modelReasoningEffort = effort && model.supportedReasoningEfforts?.includes(effort) ? effort : model.defaultReasoningEffort;
+            if (!model.serviceTiers?.includes('priority')) config.serviceTier = 'standard';
+            config.collaborationMode ??= this.settings.collaborationMode ?? 'default';
+        }
         if (config.permissionMode === 'safe-yolo') throw new Error('safe-yolo is not a native shared permission mode; choose default, read-only, autoReview, or yolo');
         if (Object.keys(config).length === 0) return { applied: this.settings };
         if (typeof config.modelReasoningEffort === 'string') config.modelReasoningEffort = parseReasoningEffortValue(config.modelReasoningEffort);
@@ -498,9 +539,12 @@ export class SharedCodexRoot {
                 approvalsReviewer: config.permissionMode === 'autoReview' ? 'auto_review' : 'user' } : {}),
             ...(config.collaborationMode ? { collaborationMode: { mode: config.collaborationMode, settings: {
                 model: config.model ?? this.settings.model, reasoning_effort: config.modelReasoningEffort ?? this.settings.modelReasoningEffort,
-                developer_instructions: null
+                developer_instructions: record(raw).collaborationMode === undefined
+                    ? string(record(record(this.settingsNative.collaborationMode).settings).developer_instructions) ?? null
+                    : null
             } } } : {})
         };
+        if (Date.now() >= dispatchDeadline) throw new Error('Settings selection expired; reopen the model menu');
         let changed!: () => void;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const accepted = new Promise<void>((resolve, reject) => {
@@ -518,6 +562,27 @@ export class SharedCodexRoot {
     }
     async initialSettings(options: SharedLaunchOptions): Promise<void> {
         if (options.collaborationMode) await this.applySettings({ collaborationMode: options.collaborationMode });
+    }
+    listModels(): Promise<CodexModelsResponse> {
+        return this.modelRead ??= (async () => {
+            const revision = this.settingsRevision;
+            const usage = this.settingsNative.modelProvider && this.settingsNative.modelProvider !== 'openai'
+                ? null : await this.reserve.usage(this.settings.model);
+            const models = []; let cursor: string | undefined;
+            do {
+                const page = await this.client.listModels({ includeHidden: true, cursor });
+                for (const entry of page.data ?? []) {
+                    const isReserve = (entry.model ?? entry.id) === LUNA_RESERVE_MODEL;
+                    if (isReserve ? !(usage?.reserveAvailable || this.settings.model === LUNA_RESERVE_MODEL) : entry.hidden === true) continue;
+                    const model = normalizeCodexModel(isReserve ? { ...entry, id: LUNA_RESERVE_MODEL, displayName: 'Luna Reserve', isDefault: false } : entry);
+                    if (model) models.push(model);
+                }
+                cursor = page.nextCursor ?? undefined;
+            } while (cursor);
+            // Do not offer eligibility calculated for a model that a concurrent frontend replaced.
+            if (revision !== this.settingsRevision) return { success: true, models: models.filter(model => model.id !== LUNA_RESERVE_MODEL), usage: null };
+            return { success: true, models, usage };
+        })().finally(() => { this.modelRead = undefined; });
     }
     private async implementPlan(planId: string): Promise<ImplementCodexPlanResult> {
         const unavailable = (): ImplementCodexPlanResult => ({ ok: false, code: 'unavailable', error: 'Codex is disconnected or stopping. Reconnect before implementing the plan.' });
@@ -560,14 +625,7 @@ export class SharedCodexRoot {
                 } finally { release(); }
             });
         } };
-        rpc.registerHandler(RPC_METHODS.ListCodexModels, async raw => {
-            const models = []; let cursor: string | undefined;
-            do {
-                const response = await this.client.listModels({ includeHidden: record(raw).includeHidden === true, cursor });
-                models.push(...(response.data ?? []).map(normalizeCodexModel).filter(model => model !== null)); cursor = response.nextCursor ?? undefined;
-            } while (cursor);
-            return { success: true, models };
-        });
+        rpc.registerHandler(RPC_METHODS.ListCodexModels, () => this.listModels());
         rpc.registerHandler(RPC_METHODS.Switch, async () => { throw new Error('control_mode_not_applicable'); });
         rpc.registerHandler(RPC_METHODS.HandoffLocal, async () => { throw new Error('control_mode_not_applicable'); });
         rpc.registerHandler(RPC_METHODS.Abort, async () => {
@@ -701,7 +759,7 @@ export class SharedCodexRoot {
             await this.notifications;
             const response = record(await this.client.request('thread/read', { threadId: this.threadId, includeTurns: false }));
             this.acceptSettings(response);
-            this.projection = new SharedCodexProjection(this.session, this.threadId, id => this.queue.committed(id), undefined, false);
+            this.projection = new SharedCodexProjection(this.session, this.threadId, id => this.queue.committed(id), undefined, false, this.quotaHint);
             const last = Array.isArray(thread.turns) ? record(thread.turns.at(-1)) : {};
             const lastId = string(last.id);
             this.currentTurn = undefined;
