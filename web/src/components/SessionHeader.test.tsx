@@ -6,6 +6,7 @@ import type { CodexModelSummary, Session } from '@/types/api'
 import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
 import { resolveSessionHeaderMachineLabel, SessionHeader } from './SessionHeader'
+import { applySessionReadStates, configureSessionReadSync, disconnectSessionReadSync } from '@/lib/sessionLastSeen'
 
 const mocks = vi.hoisted(() => ({
     telegramApp: false,
@@ -27,6 +28,7 @@ vi.mock('@/hooks/queries/useCodexModels', () => ({
 
 afterEach(() => {
     cleanup()
+    disconnectSessionReadSync()
     localStorage.clear()
     mocks.telegramApp = false
     mocks.useCodexModels.mockClear()
@@ -92,6 +94,14 @@ function renderHeaderWithApi(session: Session, api: ApiClient) {
 }
 
 describe('resolveSessionHeaderMachineLabel', () => {
+    it('waits for the initial Hub snapshot before offering the header unread action', () => {
+        configureSessionReadSync('pending-hub', vi.fn())
+        renderHeader(baseSession({ updatedAt: 100 }))
+        fireEvent.click(screen.getByTitle('More actions'))
+        expect(screen.queryByRole('menuitem', { name: 'Mark as unread' })).toBeNull()
+        act(() => applySessionReadStates([{ sessionId: 'session-1', lastSeenAt: 100, manualUnreadAt: null, version: 1 }]))
+        expect(screen.getByRole('menuitem', { name: 'Mark as unread' })).toBeTruthy()
+    })
     it('prefers cached/display labels, then host, then short machine id', () => {
         expect(resolveSessionHeaderMachineLabel(
             baseSession({ metadata: { flavor: 'cursor', path: '/r', host: 'host.local', machineId: 'abc123456789' } }),

@@ -60,7 +60,7 @@ describe('Store V27→V28 migration: ACP usage columns', () => {
             )
             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
 
-            expect(version.user_version).toBe(28)
+            expect(version.user_version).toBe(29)
             expect(columns.has('context_only')).toBe(true)
             expect(columns.has('cost')).toBe(true)
             expect(columns.has('cost_currency')).toBe(true)
@@ -112,7 +112,7 @@ describe('Store V27→V28 migration: ACP usage columns', () => {
             const internalDb = (store as unknown as { db: Database }).db
             const version = internalDb.prepare('PRAGMA user_version').get() as { user_version: number }
 
-            expect(version.user_version).toBe(28)
+            expect(version.user_version).toBe(29)
             expect((internalDb.prepare('SELECT COUNT(*) AS count FROM usage_events').get() as { count: number }).count).toBe(0)
             expect((internalDb.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get() as { count: number }).count).toBe(0)
         } finally {
