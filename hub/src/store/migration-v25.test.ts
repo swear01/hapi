@@ -42,7 +42,7 @@ describe('schema migration v25/v26', () => {
             ORDER BY seq ASC
         `).all('session-id') as Array<{ detail: string }>
 
-        expect(version.user_version).toBe(28)
+        expect(version.user_version).toBe(29)
         const columns = internalDb.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string; dflt_value: string }>
         expect(columns.find(column => column.name === 'steered')?.dflt_value).toBe('0')
         expect(plan.some((row) => row.detail.includes('idx_messages_immediate_queued'))).toBe(true)
