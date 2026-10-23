@@ -10,6 +10,7 @@ import {
 } from '@hapi/protocol/apiTypes'
 import type {
     AgyModelsResponse,
+    ClaudeModelsResponse,
     AgentAvailabilityResponse,
     CodexModelSummary,
     CodexModelsResponse,
@@ -122,6 +123,7 @@ export type RpcListGrokReasoningEffortOptionsResponse = GrokReasoningEffortRespo
 export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
 export type RpcListAgyModelsResponse = AgyModelsResponse
 export type RpcListPiModelsResponse = PiModelsResponse
+export type RpcListClaudeModelsResponse = ClaudeModelsResponse
 
 export class RpcGateway {
     constructor(
@@ -622,6 +624,10 @@ export class RpcGateway {
 
     async listPiModelsForMachine(machineId: string): Promise<RpcListPiModelsResponse> {
         return await this.machineRpc(machineId, RPC_METHODS.ListPiModelsForMachine, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListPiModelsResponse
+    }
+
+    async listClaudeModelsForMachine(machineId: string): Promise<RpcListClaudeModelsResponse> {
+        return await this.machineRpc(machineId, RPC_METHODS.ListClaudeModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListClaudeModelsResponse
     }
 
     private async sessionRpc(
