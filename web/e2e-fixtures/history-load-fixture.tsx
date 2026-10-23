@@ -40,9 +40,10 @@ type Probe = {
         newestSeq: number | null
         isLoadingMore: boolean
     }
-    startStreaming: (intervalMs?: number) => void
+    startStreaming: (intervalMs?: number, maxMessages?: number) => void
     stopStreaming: () => void
     streamedCount: () => number
+    streamedDuringNavigation: () => number
 }
 
 declare global {
@@ -59,6 +60,7 @@ let liveMessages: DecryptedMessage[] = []
 let streamTimer: ReturnType<typeof setInterval> | null = null
 let streamSeq = TOTAL_MESSAGES + 1
 let streamedMessages = 0
+let navigationStreamedMessages = 0
 
 window.__probe = {
     requests: [],
@@ -83,11 +85,15 @@ window.__probe = {
             isLoadingMore: state.isLoadingMore
         }
     },
-    startStreaming: (intervalMs = 150) => {
+    startStreaming: (intervalMs = 150, maxMessages = Infinity) => {
         if (streamTimer) return
+        const stopAt = streamedMessages + maxMessages
         streamTimer = window.setInterval(() => {
             const seq = streamSeq++
             streamedMessages += 1
+            if (getMessageWindowState(SESSION_ID).navigationLeaseCount > 0) {
+                navigationStreamedMessages += 1
+            }
             const message: DecryptedMessage = {
                 id: `m-${seq}`,
                 seq,
@@ -101,6 +107,7 @@ window.__probe = {
             }
             liveMessages = [...liveMessages, message]
             ingestIncomingMessages(SESSION_ID, [message])
+            if (streamedMessages >= stopAt) window.__probe.stopStreaming()
         }, intervalMs)
     },
     stopStreaming: () => {
@@ -109,7 +116,8 @@ window.__probe = {
             streamTimer = null
         }
     },
-    streamedCount: () => streamedMessages
+    streamedCount: () => streamedMessages,
+    streamedDuringNavigation: () => navigationStreamedMessages
 }
 
 // Test knobs via query params:
@@ -157,6 +165,20 @@ const allMessages: DecryptedMessage[] = Array.from({ length: TOTAL_MESSAGES }, (
         localId: null,
         content: filtered
             ? { role: 'agent', content: { type: 'output', data: { isMeta: true } } }
+            : fixtureParams.has('responseNavigation') && seq === 702
+                ? {
+                    role: 'agent',
+                    content: {
+                        type: 'output',
+                        data: {
+                            type: 'assistant',
+                            message: {
+                                role: 'assistant',
+                                content: [{ type: 'text', text: 'Fixture assistant reply 702' }]
+                            }
+                        }
+                    }
+                }
             : { role: 'user', content: { type: 'text', text: `Fixture message ${seq}` } },
         createdAt: BASE_AT + seq,
         invokedAt: BASE_AT + seq
