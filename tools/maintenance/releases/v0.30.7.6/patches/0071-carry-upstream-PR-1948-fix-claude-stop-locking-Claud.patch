@@ -1,0 +1,2240 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Fri, 23 Oct 2026 18:18:42 +0000
+Subject: [PATCH 71/95] carry(upstream): PR #1948 fix(claude): stop locking
+ Claude sessions to three hard-coded model aliases
+
+---
+ cli/src/modules/common/claudeModels.test.ts   | 298 ++++++++++++++++++
+ cli/src/modules/common/claudeModels.ts        | 241 ++++++++++++++
+ .../common/handlers/claudeModels.test.ts      |  52 +++
+ .../modules/common/handlers/claudeModels.ts   |  25 ++
+ .../modules/common/registerCommonHandlers.ts  |   2 +
+ hub/src/sync/rpcGateway.ts                    |   6 +
+ hub/src/sync/syncEngine.ts                    |   6 +
+ hub/src/web/routes/machines.test.ts           |  56 +++-
+ hub/src/web/routes/machines.ts                |  30 ++
+ hub/src/web/routes/sessions.test.ts           |  47 +++
+ hub/src/web/routes/sessions.ts                |  10 +-
+ shared/src/apiTypes.ts                        |  19 +-
+ shared/src/models.test.ts                     |  82 +++++
+ shared/src/models.ts                          |  60 ++++
+ shared/src/rpcMethods.ts                      |   1 +
+ web/src/api/client.ts                         |  15 +-
+ .../HappyComposer.modelEffortButtons.test.tsx |   8 +
+ .../AssistantChat/HappyComposer.tsx           |   2 +-
+ .../AssistantChat/claudeEffortOptions.test.ts |  24 ++
+ .../AssistantChat/claudeEffortOptions.ts      |  16 +-
+ .../AssistantChat/modelOptions.test.ts        |  68 +++-
+ .../components/AssistantChat/modelOptions.ts  |  62 ++--
+ .../NewSession/EffortField.test.tsx           |  13 +
+ web/src/components/NewSession/EffortField.tsx |   6 +-
+ web/src/components/NewSession/index.test.tsx  | 108 ++++++-
+ web/src/components/NewSession/index.tsx       |  37 ++-
+ .../components/NewSession/preferences.test.ts |   8 +-
+ web/src/components/NewSession/preferences.ts  |   4 +-
+ web/src/components/SessionChat.test.ts        |  28 ++
+ web/src/components/SessionChat.tsx            |  56 +++-
+ web/src/hooks/mutations/useSessionActions.ts  |  18 +-
+ .../hooks/queries/useClaudeModels.test.tsx    |  75 +++++
+ web/src/hooks/queries/useClaudeModels.ts      |  49 +++
+ web/src/lib/locales/en.ts                     |   1 +
+ web/src/lib/locales/zh-CN.ts                  |   1 +
+ web/src/lib/query-keys.ts                     |   1 +
+ web/src/types/api.ts                          |   2 +
+ 37 files changed, 1488 insertions(+), 49 deletions(-)
+ create mode 100644 cli/src/modules/common/claudeModels.test.ts
+ create mode 100644 cli/src/modules/common/claudeModels.ts
+ create mode 100644 cli/src/modules/common/handlers/claudeModels.test.ts
+ create mode 100644 cli/src/modules/common/handlers/claudeModels.ts
+ create mode 100644 web/src/hooks/queries/useClaudeModels.test.tsx
+ create mode 100644 web/src/hooks/queries/useClaudeModels.ts
+
+diff --git a/cli/src/modules/common/claudeModels.test.ts b/cli/src/modules/common/claudeModels.test.ts
+new file mode 100644
+index 000000000..578ac322f
+--- /dev/null
++++ b/cli/src/modules/common/claudeModels.test.ts
+@@ -0,0 +1,298 @@
++import { EventEmitter } from 'node:events'
++import { homedir } from 'node:os'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++const { spawnMock, killMock, claudePathMock } = vi.hoisted(() => ({
++    spawnMock: vi.fn(),
++    killMock: vi.fn(),
++    claudePathMock: vi.fn(),
++}))
++
++vi.mock('node:child_process', async (importOriginal) => {
++    const actual = await importOriginal<typeof import('node:child_process')>()
++    return { ...actual, spawn: spawnMock }
++})
++
++vi.mock('../../utils/process', () => ({
++    killProcessByChildProcess: killMock,
++}))
++
++vi.mock('@/claude/sdk/utils', () => ({
++    getDefaultClaudeCodePath: claudePathMock,
++}))
++
++import {
++    _resetClaudeModelsCacheForTests,
++    listClaudeModels,
++    parseClaudeModelsProbeLine,
++} from './claudeModels'
++
++const PROBE_REQUEST_ID = 'hapi-claude-models-probe'
++
++class FakeChild extends EventEmitter {
++    stdout = new EventEmitter()
++    stderr = new EventEmitter()
++    stdin = Object.assign(new EventEmitter(), { write: vi.fn() })
++    pid: number | undefined = 4242
++
++    respond(models: unknown): void {
++        this.stdout.emit('data', `${JSON.stringify({
++            type: 'control_response',
++            response: { subtype: 'success', request_id: PROBE_REQUEST_ID, response: { models } },
++        })}\n`)
++    }
++}
++
++function successLine(models: unknown, requestId = PROBE_REQUEST_ID): string {
++    return JSON.stringify({
++        type: 'control_response',
++        response: { subtype: 'success', request_id: requestId, response: { models } },
++    })
++}
++
++const OPUS_ROW = {
++    value: 'opus',
++    resolvedModel: 'claude-opus-5-5',
++    displayName: 'Opus 5.5',
++    description: 'For complex work',
++    supportsEffort: true,
++    supportedEffortLevels: ['low', 'high'],
++    supportsFastMode: true,
++}
++
++let children: FakeChild[]
++
++function lastChild(): FakeChild {
++    const child = children.at(-1)
++    if (!child) throw new Error('probe was not spawned')
++    return child
++}
++
++beforeEach(() => {
++    _resetClaudeModelsCacheForTests()
++    children = []
++    spawnMock.mockReset()
++    spawnMock.mockImplementation(() => {
++        const child = new FakeChild()
++        children.push(child)
++        return child
++    })
++    killMock.mockReset()
++    killMock.mockResolvedValue(true)
++    claudePathMock.mockReset()
++    claudePathMock.mockReturnValue('/usr/local/bin/claude')
++})
++
++afterEach(() => {
++    vi.useRealTimers()
++})
++
++describe('parseClaudeModelsProbeLine', () => {
++    it('keeps only the fields HAPI uses and folds effort support into levels', () => {
++        const result = parseClaudeModelsProbeLine(successLine([
++            OPUS_ROW,
++            { value: 'haiku', resolvedModel: 'claude-haiku-4-5', displayName: 'Haiku 4.5' },
++            { value: 'legacy', supportsEffort: null },
++        ]))
++
++        expect(result).toEqual({
++            kind: 'models',
++            models: [
++                { value: 'opus', displayName: 'Opus 5.5', effortLevels: ['low', 'high'] },
++                { value: 'haiku', displayName: 'Haiku 4.5', effortLevels: [] },
++                { value: 'legacy', effortLevels: [] },
++            ],
++        })
++    })
++
++    it('leaves effort support unknown when the CLI reports it for no model at all', () => {
++        const result = parseClaudeModelsProbeLine(successLine([
++            { value: 'opus', resolvedModel: 'claude-opus-5-5' },
++        ]))
++
++        expect(result).toEqual({ kind: 'models', models: [{ value: 'opus' }] })
++    })
++
++    it('leaves the levels unknown when the CLI supports effort but lists no levels', () => {
++        const result = parseClaudeModelsProbeLine(successLine([
++            { value: 'opus', supportsEffort: true },
++        ]))
++
++        expect(result).toEqual({ kind: 'models', models: [{ value: 'opus' }] })
++    })
++
++    it('trusts supportsEffort over a level list the row still carries', () => {
++        const result = parseClaudeModelsProbeLine(successLine([
++            { value: 'haiku', supportsEffort: false, supportedEffortLevels: ['low'] },
++        ]))
++
++        expect(result).toEqual({ kind: 'models', models: [{ value: 'haiku', effortLevels: [] }] })
++    })
++
++    it('drops rows without a usable value and non-string fields', () => {
++        const result = parseClaudeModelsProbeLine(successLine([
++            { value: '' },
++            { displayName: 'No value' },
++            'opus',
++            { value: 'sonnet', displayName: 42, supportsEffort: true, supportedEffortLevels: ['low', 7] },
++        ]))
++
++        expect(result).toEqual({ kind: 'models', models: [{ value: 'sonnet', effortLevels: ['low'] }] })
++    })
++
++    it('reports an explicit control error with the CLI message', () => {
++        const line = JSON.stringify({
++            type: 'control_response',
++            response: { subtype: 'error', request_id: PROBE_REQUEST_ID, error: 'Not logged in' },
++        })
++
++        expect(parseClaudeModelsProbeLine(line)).toEqual({ kind: 'error', error: 'Not logged in' })
++    })
++
++    it('ignores hook events, other requests and non-JSON output', () => {
++        expect(parseClaudeModelsProbeLine(JSON.stringify({ type: 'system', subtype: 'hook_started' }))).toBeNull()
++        expect(parseClaudeModelsProbeLine(successLine([OPUS_ROW], 'someone-else'))).toBeNull()
++        expect(parseClaudeModelsProbeLine('Welcome to Claude Code')).toBeNull()
++    })
++})
++
++describe('listClaudeModels', () => {
++    it('spawns the session executable isolated from project settings, hooks and MCP servers', async () => {
++        const pending = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await pending
++
++        const [command, args, options] = spawnMock.mock.calls[0] as [string, string[], { cwd: string }]
++        expect(command).toBe('/usr/local/bin/claude')
++        expect(args).toEqual(expect.arrayContaining(['--print', '--strict-mcp-config']))
++        expect(args[args.indexOf('--setting-sources') + 1]).toBe('user')
++        expect(JSON.parse(args[args.indexOf('--settings') + 1] ?? 'null')).toEqual({ disableAllHooks: true })
++        expect(args[args.indexOf('--input-format') + 1]).toBe('stream-json')
++        expect(args[args.indexOf('--output-format') + 1]).toBe('stream-json')
++        expect(options.cwd).toBe(homedir())
++    })
++
++    it('asks for the catalog with an initialize control request and no prompt', async () => {
++        const pending = listClaudeModels()
++        const child = lastChild()
++        child.respond([OPUS_ROW])
++        await pending
++
++        expect(child.stdin.write).toHaveBeenCalledTimes(1)
++        expect(JSON.parse(String(child.stdin.write.mock.calls[0]?.[0]))).toEqual({
++            type: 'control_request',
++            request_id: PROBE_REQUEST_ID,
++            request: { subtype: 'initialize' },
++        })
++    })
++
++    it('returns the catalog and stops the probe process', async () => {
++        const pending = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++
++        await expect(pending).resolves.toMatchObject({
++            success: true,
++            availableModels: [{ value: 'opus', displayName: 'Opus 5.5' }],
++        })
++        expect(killMock).toHaveBeenCalledTimes(1)
++    })
++
++    it('shares one probe between concurrent requests', async () => {
++        const first = listClaudeModels()
++        const second = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++
++        await expect(Promise.all([first, second])).resolves.toHaveLength(2)
++        expect(spawnMock).toHaveBeenCalledTimes(1)
++    })
++
++    it('serves a cached catalog for five minutes, then probes again', async () => {
++        vi.useFakeTimers()
++        const first = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await first
++
++        vi.advanceTimersByTime(5 * 60_000 - 1)
++        await listClaudeModels()
++        expect(spawnMock).toHaveBeenCalledTimes(1)
++
++        vi.advanceTimersByTime(1)
++        const refreshed = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await refreshed
++        expect(spawnMock).toHaveBeenCalledTimes(2)
++    })
++
++    it('keeps a separate cache per claude executable', async () => {
++        const first = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await first
++
++        claudePathMock.mockReturnValue('/opt/other/claude')
++        const second = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await second
++
++        expect(spawnMock).toHaveBeenCalledTimes(2)
++        expect(spawnMock.mock.calls[1]?.[0]).toBe('/opt/other/claude')
++    })
++
++    it('does not cache a failure, so the next request probes again', async () => {
++        const failed = listClaudeModels()
++        lastChild().emit('error', new Error('spawn claude ENOENT'))
++        await expect(failed).rejects.toThrow('spawn claude ENOENT')
++
++        const retried = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await expect(retried).resolves.toMatchObject({ success: true })
++        expect(spawnMock).toHaveBeenCalledTimes(2)
++    })
++
++    it('rejects an empty catalog instead of caching it', async () => {
++        const pending = listClaudeModels()
++        lastChild().respond([])
++        await expect(pending).rejects.toThrow('no models')
++
++        const retried = listClaudeModels()
++        lastChild().respond([OPUS_ROW])
++        await retried
++        expect(spawnMock).toHaveBeenCalledTimes(2)
++    })
++
++    it('surfaces the CLI error and exit output when it quits before answering', async () => {
++        const pending = listClaudeModels()
++        const child = lastChild()
++        child.stderr.emit('data', 'Invalid API key')
++        child.emit('close', 1)
++
++        await expect(pending).rejects.toThrow('Invalid API key')
++    })
++
++    it('times out a probe that never answers and stops it', async () => {
++        vi.useFakeTimers()
++        const pending = listClaudeModels()
++        const assertion = expect(pending).rejects.toThrow('timed out')
++
++        await vi.advanceTimersByTimeAsync(15_000)
++        await assertion
++        expect(killMock).toHaveBeenCalled()
++    })
++
++    it('reports a missing claude executable without spawning', async () => {
++        claudePathMock.mockImplementation(() => {
++            throw new Error('Claude Code CLI not found on PATH')
++        })
++
++        await expect(listClaudeModels()).rejects.toThrow('Claude Code CLI not found on PATH')
++        expect(spawnMock).not.toHaveBeenCalled()
++    })
++
++    it('does not let a stdin write failure escape as an unhandled error', async () => {
++        const pending = listClaudeModels()
++        const child = lastChild()
++
++        expect(() => child.stdin.emit('error', new Error('write EPIPE'))).not.toThrow()
++        child.emit('close', null)
++        await expect(pending).rejects.toThrow()
++    })
++})
+diff --git a/cli/src/modules/common/claudeModels.ts b/cli/src/modules/common/claudeModels.ts
+new file mode 100644
+index 000000000..40918357e
+--- /dev/null
++++ b/cli/src/modules/common/claudeModels.ts
+@@ -0,0 +1,241 @@
++import { spawn } from 'node:child_process'
++import { homedir } from 'node:os'
++import type { ClaudeModelSummary, ClaudeModelsResponse } from '@hapi/protocol/apiTypes'
++import { getDefaultClaudeCodePath } from '@/claude/sdk/utils'
++import { withBunRuntimeEnv } from '@/utils/bunRuntime'
++import { killProcessByChildProcess } from '../../utils/process'
++import { getErrorMessage } from './rpcResponses'
++
++export type ListClaudeModelsRequest = Record<string, never>
++
++export type ListClaudeModelsResponse = ClaudeModelsResponse
++
++interface CacheEntry {
++    expiresAt: number
++    response: ListClaudeModelsResponse
++}
++
++// The catalog changes rarely (a CLI update, a different login, an alias the
++// service moves to a newer model) and each probe starts a full claude process
++// (~0.75s), so a successful answer is kept for a few minutes. Failures are not
++// cached: a user who just logged in should not wait out the TTL.
++const CACHE_TTL_MS = 5 * 60_000
++const PROBE_TIMEOUT_MS = 15_000
++const PROBE_REQUEST_ID = 'hapi-claude-models-probe'
++const cache = new Map<string, CacheEntry>()
++const inflight = new Map<string, Promise<ListClaudeModelsResponse>>()
++
++/**
++ * Machine-level discovery of the models the `claude` CLI offers, read from the
++ * `models` field of its `initialize` control response. No prompt is sent, so
++ * the probe starts no turn and writes no transcript.
++ *
++ * `claude --print` loads the working directory's `.claude/settings*.json` and
++ * `.mcp.json` without a workspace trust prompt, so any project hook or MCP
++ * server there would run. The probe therefore runs from the home directory
++ * and loads only user settings, no MCP servers, and no hooks at all (the
++ * user's own hooks would otherwise fire on every catalog refresh).
++ *
++ * User settings stay loaded so the probe sees the same `env` a session does
++ * (e.g. `ANTHROPIC_DEFAULT_OPUS_MODEL` changes what `opus` resolves to).
++ * Project settings that redefine model aliases are ignored here, so in such
++ * a directory the catalog can differ from what the session resolves.
++ */
++const CLAUDE_MODELS_PROBE_ARGS = [
++    '--print',
++    '--input-format', 'stream-json',
++    '--output-format', 'stream-json',
++    '--verbose',
++    '--setting-sources', 'user',
++    '--strict-mcp-config',
++    '--settings', JSON.stringify({ disableAllHooks: true }),
++] as const
++
++export type ClaudeModelsProbeLineResult =
++    | { kind: 'models'; models: ClaudeModelSummary[] }
++    | { kind: 'error'; error: string }
++
++function asRecord(value: unknown): Record<string, unknown> | null {
++    return typeof value === 'object' && value !== null && !Array.isArray(value)
++        ? value as Record<string, unknown>
++        : null
++}
++
++function optionalString(value: unknown): string | undefined {
++    return typeof value === 'string' && value.trim() ? value : undefined
++}
++
++/**
++ * A row without `supportsEffort` (or with `null`) has no effort control, but
++ * only when the CLI reports effort support at all: a CLI that predates the
++ * field would otherwise hide effort for every model. A model that supports
++ * effort without listing levels keeps them unknown.
++ */
++function parseClaudeCatalog(rawModels: unknown): ClaudeModelSummary[] {
++    if (!Array.isArray(rawModels)) {
++        return []
++    }
++    const rows = rawModels.map(asRecord).filter((row): row is Record<string, unknown> => row !== null)
++    const reportsEffortSupport = rows.some((row) => 'supportsEffort' in row)
++    const models: ClaudeModelSummary[] = []
++    for (const row of rows) {
++        const value = optionalString(row.value)
++        if (!value) {
++            continue
++        }
++        const model: ClaudeModelSummary = { value }
++        const displayName = optionalString(row.displayName)
++        if (displayName) model.displayName = displayName
++        if (reportsEffortSupport && row.supportsEffort !== true) {
++            model.effortLevels = []
++        } else if (Array.isArray(row.supportedEffortLevels)) {
++            model.effortLevels = row.supportedEffortLevels.filter((level): level is string => typeof level === 'string')
++        }
++        models.push(model)
++    }
++    return models
++}
++
++/** Scans one stdout line for the answer to the probe's initialize request. */
++export function parseClaudeModelsProbeLine(line: string): ClaudeModelsProbeLineResult | null {
++    const trimmed = line.trim()
++    if (!trimmed.startsWith('{')) return null
++    let parsed: unknown
++    try {
++        parsed = JSON.parse(trimmed)
++    } catch {
++        return null
++    }
++    const message = asRecord(parsed)
++    if (message?.type !== 'control_response') return null
++    const response = asRecord(message.response)
++    if (response?.request_id !== PROBE_REQUEST_ID) return null
++    if (response.subtype !== 'success') {
++        return { kind: 'error', error: optionalString(response.error) ?? 'Claude rejected the model probe request' }
++    }
++    return { kind: 'models', models: parseClaudeCatalog(asRecord(response.response)?.models) }
++}
++
++function runClaudeModelsProbe(executable: string): Promise<ListClaudeModelsResponse> {
++    return new Promise((resolve, reject) => {
++        const child = spawn(executable, [...CLAUDE_MODELS_PROBE_ARGS], {
++            cwd: homedir(),
++            env: withBunRuntimeEnv(process.env, { allowBunBeBun: false }),
++            stdio: ['pipe', 'pipe', 'pipe'],
++            // getDefaultClaudeCodePath resolves an absolute path (claude.exe on
++            // Windows), matching how sessions spawn it.
++            shell: false,
++            windowsHide: process.platform === 'win32',
++        })
++        let stdoutBuffer = ''
++        let stderr = ''
++        let settled = false
++
++        // The claude process stays up waiting for input, so every outcome
++        // stops it before the caller sees a result.
++        const finish = (settle: () => void) => {
++            if (settled) return
++            settled = true
++            clearTimeout(timeout)
++            void (async () => {
++                if (!child.pid) {
++                    settle()
++                    return
++                }
++                let stopped = false
++                try {
++                    stopped = await killProcessByChildProcess(child, false)
++                        || await killProcessByChildProcess(child, true)
++                } catch {
++                    stopped = false
++                }
++                if (!stopped) {
++                    reject(new Error(`Claude model probe could not be stopped (pid ${child.pid})`))
++                    return
++                }
++                settle()
++            })()
++        }
++
++        const timeout = setTimeout(() => {
++            finish(() => reject(new Error('Claude model discovery timed out')))
++        }, PROBE_TIMEOUT_MS)
++
++        child.stdout?.on('data', (chunk) => {
++            stdoutBuffer += chunk.toString()
++            let newlineIndex = stdoutBuffer.indexOf('\n')
++            while (newlineIndex !== -1 && !settled) {
++                const line = stdoutBuffer.slice(0, newlineIndex)
++                stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1)
++                newlineIndex = stdoutBuffer.indexOf('\n')
++                const result = parseClaudeModelsProbeLine(line)
++                if (result === null) continue
++                if (result.kind === 'error') {
++                    finish(() => reject(new Error(result.error)))
++                    return
++                }
++                if (result.models.length === 0) {
++                    finish(() => reject(new Error('Claude reported no models')))
++                    return
++                }
++                finish(() => resolve({ success: true, availableModels: result.models }))
++                return
++            }
++        })
++        child.stderr?.on('data', (chunk) => {
++            stderr += chunk.toString()
++        })
++        child.on('error', (error) => {
++            finish(() => reject(error))
++        })
++        child.on('close', (code) => {
++            finish(() => reject(new Error(
++                stderr.trim() || `claude exited with code ${code ?? 'unknown'} before answering the model probe`
++            )))
++        })
++        // An early exit surfaces through 'close', not as an unhandled EPIPE.
++        child.stdin?.on('error', () => { /* handled via close */ })
++        child.stdin?.write(`${JSON.stringify({
++            type: 'control_request',
++            request_id: PROBE_REQUEST_ID,
++            request: { subtype: 'initialize' },
++        })}\n`)
++    })
++}
++
++/** Clear the module-level probe cache and in-flight map between tests. */
++export function _resetClaudeModelsCacheForTests(): void {
++    cache.clear()
++    inflight.clear()
++}
++
++/** Throws on failure; the RPC handler turns that into an error response. */
++export async function listClaudeModels(): Promise<ListClaudeModelsResponse> {
++    // Keyed by executable: HAPI_CLAUDE_PATH can point a runner at a different
++    // claude install, whose catalog is its own.
++    const executable = getDefaultClaudeCodePath()
++    const now = Date.now()
++    const cached = cache.get(executable)
++    if (cached && cached.expiresAt > now) {
++        return cached.response
++    }
++
++    const existing = inflight.get(executable)
++    if (existing) {
++        return existing
++    }
++
++    const pending = runClaudeModelsProbe(executable)
++        .then((response) => {
++            cache.set(executable, { expiresAt: Date.now() + CACHE_TTL_MS, response })
++            return response
++        })
++        .catch((error) => {
++            throw new Error(getErrorMessage(error, 'Failed to list Claude models'))
++        })
++        .finally(() => {
++            inflight.delete(executable)
++        })
++    inflight.set(executable, pending)
++    return pending
++}
+diff --git a/cli/src/modules/common/handlers/claudeModels.test.ts b/cli/src/modules/common/handlers/claudeModels.test.ts
+new file mode 100644
+index 000000000..16b554e97
+--- /dev/null
++++ b/cli/src/modules/common/handlers/claudeModels.test.ts
+@@ -0,0 +1,52 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
++import { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
++
++const { listClaudeModelsMock } = vi.hoisted(() => ({
++    listClaudeModelsMock: vi.fn(),
++}))
++
++vi.mock('../claudeModels', () => ({
++    listClaudeModels: listClaudeModelsMock,
++}))
++
++import { registerClaudeModelHandlers } from './claudeModels'
++
++describe('listClaudeModels machine RPC handler', () => {
++    let rpc: RpcHandlerManager
++
++    beforeEach(() => {
++        listClaudeModelsMock.mockReset()
++        rpc = new RpcHandlerManager({ scopePrefix: 'machine-test' })
++        registerClaudeModelHandlers(rpc)
++    })
++
++    async function listViaRpc(): Promise<unknown> {
++        const raw = await rpc.handleRequest({
++            method: `machine-test:${RPC_METHODS.ListClaudeModels}`,
++            params: '{}'
++        })
++        return JSON.parse(raw)
++    }
++
++    it('returns the discovered catalog', async () => {
++        listClaudeModelsMock.mockResolvedValue({
++            success: true,
++            availableModels: [{ value: 'opus' }]
++        })
++
++        await expect(listViaRpc()).resolves.toEqual({
++            success: true,
++            availableModels: [{ value: 'opus' }]
++        })
++    })
++
++    it('answers a failed probe with an error response instead of throwing', async () => {
++        listClaudeModelsMock.mockRejectedValue(new Error('Claude model discovery timed out'))
++
++        await expect(listViaRpc()).resolves.toEqual({
++            success: false,
++            error: 'Claude model discovery timed out'
++        })
++    })
++})
+diff --git a/cli/src/modules/common/handlers/claudeModels.ts b/cli/src/modules/common/handlers/claudeModels.ts
+new file mode 100644
+index 000000000..a3931fa74
+--- /dev/null
++++ b/cli/src/modules/common/handlers/claudeModels.ts
+@@ -0,0 +1,25 @@
++import { logger } from '@/ui/logger';
++import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
++import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager';
++import {
++    listClaudeModels,
++    type ListClaudeModelsRequest,
++    type ListClaudeModelsResponse
++} from '../claudeModels';
++import { getErrorMessage, rpcError } from '../rpcResponses';
++
++export function registerClaudeModelHandlers(rpcHandlerManager: RpcHandlerManager): void {
++    rpcHandlerManager.registerHandler<ListClaudeModelsRequest, ListClaudeModelsResponse>(
++        RPC_METHODS.ListClaudeModels,
++        async () => {
++            logger.debug('List Claude models request');
++
++            try {
++                return await listClaudeModels();
++            } catch (error) {
++                logger.debug('Failed to list Claude models:', error);
++                return rpcError(getErrorMessage(error, 'Failed to list Claude models'));
++            }
++        }
++    );
++}
+diff --git a/cli/src/modules/common/registerCommonHandlers.ts b/cli/src/modules/common/registerCommonHandlers.ts
+index d00826b86..647a63321 100644
+--- a/cli/src/modules/common/registerCommonHandlers.ts
++++ b/cli/src/modules/common/registerCommonHandlers.ts
+@@ -1,6 +1,7 @@
+ import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
+ import { registerAgyModelHandlers } from './handlers/agyModels'
+ import { registerBashHandlers } from './handlers/bash'
++import { registerClaudeModelHandlers } from './handlers/claudeModels'
+ import { registerCodexModelHandlers } from './handlers/codexModels'
+ import { registerCursorModelHandlers } from './handlers/cursorModels'
+ import { registerOpencodeModelHandlers } from './handlers/opencodeModels'
+@@ -21,6 +22,7 @@ import { registerUploadHandlers } from './handlers/uploads'
+ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string): void {
+     registerAgyModelHandlers(rpcHandlerManager)
+     registerBashHandlers(rpcHandlerManager, workingDirectory)
++    registerClaudeModelHandlers(rpcHandlerManager)
+     registerCodexModelHandlers(rpcHandlerManager)
+     registerCursorModelHandlers(rpcHandlerManager)
+     registerOpencodeModelHandlers(rpcHandlerManager)
+diff --git a/hub/src/sync/rpcGateway.ts b/hub/src/sync/rpcGateway.ts
+index 374b92495..e2296c532 100644
+--- a/hub/src/sync/rpcGateway.ts
++++ b/hub/src/sync/rpcGateway.ts
+@@ -10,6 +10,7 @@ import {
+ } from '@hapi/protocol/apiTypes'
+ import type {
+     AgyModelsResponse,
++    ClaudeModelsResponse,
+     AgentAvailabilityResponse,
+     CodexModelSummary,
+     CodexModelsResponse,
+@@ -122,6 +123,7 @@ export type RpcListGrokReasoningEffortOptionsResponse = GrokReasoningEffortRespo
+ export type RpcListOpencodeReasoningEffortOptionsResponse = OpencodeReasoningEffortResponse
+ export type RpcListAgyModelsResponse = AgyModelsResponse
+ export type RpcListPiModelsResponse = PiModelsResponse
++export type RpcListClaudeModelsResponse = ClaudeModelsResponse
+ 
+ export class RpcGateway {
+     constructor(
+@@ -624,6 +626,10 @@ export class RpcGateway {
+         return await this.machineRpc(machineId, RPC_METHODS.ListPiModelsForMachine, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListPiModelsResponse
+     }
+ 
++    async listClaudeModelsForMachine(machineId: string): Promise<RpcListClaudeModelsResponse> {
++        return await this.machineRpc(machineId, RPC_METHODS.ListClaudeModels, {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListClaudeModelsResponse
++    }
++
+     private async sessionRpc(
+         sessionId: string,
+         method: string,
+diff --git a/hub/src/sync/syncEngine.ts b/hub/src/sync/syncEngine.ts
+index bf88898c8..b64903a59 100644
+--- a/hub/src/sync/syncEngine.ts
++++ b/hub/src/sync/syncEngine.ts
+@@ -46,6 +46,7 @@ import {
+     type RpcStatFilesResponse,
+     type RpcListAgyModelsResponse,
+     type RpcListPiModelsResponse,
++    type RpcListClaudeModelsResponse,
+     type RpcListCodexModelsResponse,
+     type RpcListPiSessionsResponse,
+     type RpcArchiveCodexSessionResponse,
+@@ -83,6 +84,7 @@ export type {
+     RpcStatFilesResponse,
+     RpcListAgyModelsResponse,
+     RpcListPiModelsResponse,
++    RpcListClaudeModelsResponse,
+     RpcListCodexModelsResponse,
+     RpcListPiSessionsResponse,
+     RpcListCursorModelsResponse,
+@@ -4921,6 +4923,10 @@ export class SyncEngine {
+         return await this.rpcGateway.listPiModelsForMachine(machineId)
+     }
+ 
++    async listClaudeModelsForMachine(machineId: string): Promise<RpcListClaudeModelsResponse> {
++        return await this.rpcGateway.listClaudeModelsForMachine(machineId)
++    }
++
+     async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {
+         return await this.rpcGateway.listCodexModelsForMachine(machineId)
+     }
+diff --git a/hub/src/web/routes/machines.test.ts b/hub/src/web/routes/machines.test.ts
+index 51a4b09af..8ca529169 100644
+--- a/hub/src/web/routes/machines.test.ts
++++ b/hub/src/web/routes/machines.test.ts
+@@ -4,7 +4,7 @@ import type { Machine, SyncEngine } from '../../sync/syncEngine'
+ import type { WebAppEnv } from '../middleware/auth'
+ import { createMachinesRoutes } from './machines'
+ import { RpcTargetMissingError } from '../../sync/rpcGateway'
+-import { MACHINE_CAPABILITIES } from '@hapi/protocol'
++import { MACHINE_CAPABILITIES, RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol'
+ 
+ function createMachine(overrides?: Partial<Machine>): Machine {
+     return {
+@@ -414,6 +414,60 @@ describe('machines routes', () => {
+         })
+     })
+ 
++    it('returns Claude models for an online machine', async () => {
++        const machine = createMachine()
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            listClaudeModelsForMachine: async () => ({
++                success: true,
++                availableModels: [
++                    { value: 'opus', displayName: 'Opus 5.5', effortLevels: ['low'] }
++                ]
++            })
++        } as Partial<SyncEngine>
++
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => {
++            c.set('namespace', 'default')
++            await next()
++        })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++
++        const response = await app.request('/api/machines/machine-1/claude-models')
++
++        expect(response.status).toBe(200)
++        expect(await response.json()).toEqual({
++            success: true,
++            availableModels: [
++                { value: 'opus', displayName: 'Opus 5.5', effortLevels: ['low'] }
++            ]
++        })
++    })
++
++    it('returns a stable code when a runner predates Claude model discovery', async () => {
++        const machine = createMachine()
++        const engine = {
++            getMachine: () => machine,
++            getMachineByNamespace: () => machine,
++            listClaudeModelsForMachine: async () => {
++                throw new RpcTargetMissingError('machine-1:listClaudeModels', 'handler-not-registered')
++            }
++        } as Partial<SyncEngine>
++
++        const app = new Hono<WebAppEnv>()
++        app.use('*', async (c, next) => {
++            c.set('namespace', 'default')
++            await next()
++        })
++        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
++
++        const response = await app.request('/api/machines/machine-1/claude-models')
++
++        expect(response.status).toBe(503)
++        expect(await response.json()).toMatchObject({ success: false, code: RPC_TARGET_MISSING_ERROR_CODE })
++    })
++
+     it('returns a stable code when the Codex machine RPC target is absent', async () => {
+         const machine = createMachine()
+         const engine = {
+diff --git a/hub/src/web/routes/machines.ts b/hub/src/web/routes/machines.ts
+index 2bc652ffe..649f63e89 100644
+--- a/hub/src/web/routes/machines.ts
++++ b/hub/src/web/routes/machines.ts
+@@ -329,6 +329,36 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
+         }
+     })
+ 
++    app.get('/machines/:id/claude-models', async (c) => {
++        const engine = getSyncEngine()
++        if (!engine) {
++            return c.json({ success: false, error: 'Not connected' }, 503)
++        }
++
++        const machineId = c.req.param('id')
++        const machine = requireMachine(c, engine, machineId)
++        if (machine instanceof Response) {
++            return machine
++        }
++
++        try {
++            const result = await engine.listClaudeModelsForMachine(machineId)
++            return c.json(result)
++        } catch (error) {
++            if (error instanceof RpcTargetMissingError) {
++                return c.json({
++                    success: false,
++                    error: error.message,
++                    code: RPC_TARGET_MISSING_ERROR_CODE
++                }, 503)
++            }
++            return c.json({
++                success: false,
++                error: error instanceof Error ? error.message : 'Failed to list Claude models'
++            }, 500)
++        }
++    })
++
+     app.get('/machines/:id/codex-models', async (c) => {
+         const engine = getSyncEngine()
+         if (!engine) {
+diff --git a/hub/src/web/routes/sessions.test.ts b/hub/src/web/routes/sessions.test.ts
+index 002d08be6..308fd0b4f 100644
+--- a/hub/src/web/routes/sessions.test.ts
++++ b/hub/src/web/routes/sessions.test.ts
+@@ -770,6 +770,53 @@ describe('sessions routes', () => {
+         ])
+     })
+ 
++    it('applies a Claude model and the effort it keeps in one session config change', async () => {
++        const session = createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'claude' }
++        })
++        const { app, applySessionConfigCalls } = createApp(session)
++
++        const response = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model: 'haiku', effort: null })
++        })
++
++        expect(response.status).toBe(200)
++        expect(applySessionConfigCalls).toEqual([
++            ['session-1', { model: 'haiku', effort: null }]
++        ])
++    })
++
++    it('rejects an effort sent with a model change for Pi, which applies the two separately', async () => {
++        const session = createSession({
++            metadata: { path: '/tmp/project', host: 'localhost', flavor: 'pi' }
++        })
++        const { app, applySessionConfigCalls } = createApp(session)
++
++        const response = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model: 'gpt-5.6-sol', effort: null })
++        })
++
++        expect(response.status).toBe(400)
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
++    it('rejects an effort sent with a model change for a flavor without effort', async () => {
++        const { app, applySessionConfigCalls } = createApp(createSession())
++
++        const response = await app.request('/api/sessions/session-1/model', {
++            method: 'POST',
++            headers: { 'content-type': 'application/json' },
++            body: JSON.stringify({ model: 'gpt-5.5', effort: 'high' })
++        })
++
++        expect(response.status).toBe(400)
++        expect(applySessionConfigCalls).toEqual([])
++    })
++
+     it('rejects model changes for local Codex sessions', async () => {
+         const session = createSession({
+             agentState: {
+diff --git a/hub/src/web/routes/sessions.ts b/hub/src/web/routes/sessions.ts
+index e2f385fbd..e2b1ff0da 100644
+--- a/hub/src/web/routes/sessions.ts
++++ b/hub/src/web/routes/sessions.ts
+@@ -729,8 +729,16 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
+             }
+         }
+ 
++        // Only Claude applies a model and an effort as one config change; Pi
++        // commits the model before setting its thinking level, so a failure in
++        // between would leave half of the request applied.
++        const { model, effort } = parsed.data
++        if (effort !== undefined && flavor !== 'claude') {
++            return c.json({ error: 'Effort can only be sent with a model change for Claude sessions' }, 400)
++        }
++
+         try {
+-            await engine.applySessionConfig(sessionResult.sessionId, { model: parsed.data.model })
++            await engine.applySessionConfig(sessionResult.sessionId, effort === undefined ? { model } : { model, effort })
+             return c.json({ ok: true })
+         } catch (error) {
+             const message = error instanceof Error ? error.message : 'Failed to apply model'
+diff --git a/shared/src/apiTypes.ts b/shared/src/apiTypes.ts
+index 464459f74..503b6f22c 100644
+--- a/shared/src/apiTypes.ts
++++ b/shared/src/apiTypes.ts
+@@ -302,7 +302,9 @@ export const SessionModelRequestSchema = z.object({
+             provider: z.string().trim().min(1),
+             modelId: z.string().trim().min(1),
+         }),
+-    ]).nullable()
++    ]).nullable(),
++    /** Effort to apply together with the model, e.g. cleared when the new model does not offer it. */
++    effort: z.string().trim().min(1).nullable().optional()
+ })
+ 
+ export type SessionModelRequest = z.infer<typeof SessionModelRequestSchema>
+@@ -956,6 +958,21 @@ export type PiModelsResponse = {
+ 
+ export type ListPiModelsResponse = PiModelsResponse
+ 
++/** One row of the `claude` CLI's own model picker, as reported by its `initialize` control response. */
++export type ClaudeModelSummary = {
++    /** What `claude --model` accepts: an alias that follows the family (`opus`) or a full model id. */
++    value: string
++    displayName?: string
++    /** Effort levels the model accepts: `[]` = no effort control, undefined = unknown. */
++    effortLevels?: string[]
++}
++
++export type ClaudeModelsResponse = {
++    success: boolean
++    availableModels?: ClaudeModelSummary[]
++    error?: string
++}
++
+ export type PiCommandSummary = {
+     name: string
+     description?: string
+diff --git a/shared/src/models.test.ts b/shared/src/models.test.ts
+index 69d08be99..53e7a5d31 100644
+--- a/shared/src/models.test.ts
++++ b/shared/src/models.test.ts
+@@ -5,9 +5,13 @@ import {
+     DEFAULT_GEMINI_MODEL,
+     GEMINI_MODEL_LABELS,
+     GEMINI_MODEL_PRESETS,
++    getClaudeEffortLevelsForModel,
++    getClaudeModelChoices,
+     getClaudeModelLabel,
+     isClaudeModelPreset,
++    resolveClaudeEffortForModel,
+ } from './models'
++import type { ClaudeModelSummary } from './apiTypes'
+ 
+ describe('isClaudeModelPreset', () => {
+     test('accepts valid presets', () => {
+@@ -64,3 +68,81 @@ describe('model constants consistency', () => {
+         expect(GEMINI_MODEL_PRESETS).toContain(DEFAULT_GEMINI_MODEL)
+     })
+ })
++
++const FULL = ['low', 'medium', 'high', 'xhigh', 'max']
++const NO_XHIGH = ['low', 'medium', 'high', 'max']
++
++// Shape of a subscription account's catalog: an alias per family, older
++// versions under their full ids.
++const SUBSCRIPTION_CATALOG: ClaudeModelSummary[] = [
++    { value: 'default', displayName: 'Default (recommended)', effortLevels: FULL },
++    { value: 'opus', displayName: 'Opus 5.5', effortLevels: FULL },
++    { value: 'claude-fable-5-1', displayName: 'Fable 5.1', effortLevels: FULL },
++    { value: 'sonnet', displayName: 'Sonnet 5', effortLevels: FULL },
++    { value: 'haiku', displayName: 'Haiku 4.5', effortLevels: [] },
++    { value: 'claude-opus-4-7', displayName: 'Opus 4.7', effortLevels: FULL },
++    { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', effortLevels: NO_XHIGH },
++]
++
++describe('getClaudeModelChoices', () => {
++    test('lists the CLI picker rows as they are, labelled with their display names', () => {
++        expect(getClaudeModelChoices(SUBSCRIPTION_CATALOG)).toEqual([
++            { value: 'opus', label: 'Opus 5.5' },
++            { value: 'claude-fable-5-1', label: 'Fable 5.1' },
++            { value: 'sonnet', label: 'Sonnet 5' },
++            { value: 'haiku', label: 'Haiku 4.5' },
++            { value: 'claude-opus-4-7', label: 'Opus 4.7' },
++            { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
++        ])
++    })
++
++    test('leaves the default row to the caller, which stores it as no model', () => {
++        const choices = getClaudeModelChoices(SUBSCRIPTION_CATALOG)
++        expect(choices.some((choice) => choice.value === 'default')).toBe(false)
++    })
++
++    test('falls back to the value when the CLI gives no display name', () => {
++        expect(getClaudeModelChoices([{ value: 'claude-custom' }])).toEqual([
++            { value: 'claude-custom', label: 'claude-custom' },
++        ])
++    })
++})
++
++describe('getClaudeEffortLevelsForModel', () => {
++    test('reads the default row for the session default', () => {
++        expect(getClaudeEffortLevelsForModel(null, SUBSCRIPTION_CATALOG)).toEqual(FULL)
++    })
++
++    test('reads the listed row for an alias or a full id', () => {
++        expect(getClaudeEffortLevelsForModel('haiku', SUBSCRIPTION_CATALOG)).toEqual([])
++        expect(getClaudeEffortLevelsForModel('claude-sonnet-4-6', SUBSCRIPTION_CATALOG)).toEqual(NO_XHIGH)
++    })
++
++    test('is unknown for a model the catalog does not list, or without a catalog', () => {
++        expect(getClaudeEffortLevelsForModel('claude-opus-4-1', SUBSCRIPTION_CATALOG)).toBeUndefined()
++        expect(getClaudeEffortLevelsForModel('opus', null)).toBeUndefined()
++    })
++})
++
++describe('resolveClaudeEffortForModel', () => {
++    test('keeps an effort the next model supports', () => {
++        expect(resolveClaudeEffortForModel('max', 'claude-sonnet-4-6', SUBSCRIPTION_CATALOG)).toBe('max')
++    })
++
++    test('clears an effort level the next model does not offer', () => {
++        expect(resolveClaudeEffortForModel('xhigh', 'claude-sonnet-4-6', SUBSCRIPTION_CATALOG)).toBeNull()
++    })
++
++    test('clears any effort when the next model has no effort control', () => {
++        expect(resolveClaudeEffortForModel('low', 'haiku', SUBSCRIPTION_CATALOG)).toBeNull()
++    })
++
++    test('keeps the effort when support is unknown', () => {
++        expect(resolveClaudeEffortForModel('xhigh', 'claude-opus-4-1', SUBSCRIPTION_CATALOG)).toBe('xhigh')
++        expect(resolveClaudeEffortForModel('xhigh', 'haiku', null)).toBe('xhigh')
++    })
++
++    test('leaves an unset effort unset', () => {
++        expect(resolveClaudeEffortForModel(null, 'haiku', SUBSCRIPTION_CATALOG)).toBeNull()
++    })
++})
+diff --git a/shared/src/models.ts b/shared/src/models.ts
+index 544fb5dde..fca33749b 100644
+--- a/shared/src/models.ts
++++ b/shared/src/models.ts
+@@ -1,3 +1,5 @@
++import type { ClaudeModelSummary } from './apiTypes'
++
+ export const CLAUDE_MODEL_LABELS = {
+     sonnet: 'Sonnet',
+     'sonnet[1m]': 'Sonnet 1M',
+@@ -66,3 +68,61 @@ export function getClaudeModelLabel(model: string): string | null {
+ 
+     return CLAUDE_MODEL_LABELS[trimmedModel as ClaudeModelPreset] ?? null
+ }
++
++/**
++ * A Claude model the user can pick.
++ *
++ * `value` is stored on the session and passed to `claude --model` unchanged.
++ * An alias (`opus`) is resolved by the CLI each time the session's claude
++ * process starts, so the session moves to a newer model on its next start;
++ * a full id (`claude-opus-4-7`) stays on that model.
++ */
++export type ClaudeModelChoice = {
++    value: string
++    label: string
++}
++
++/**
++ * Picker choices for a catalog reported by the `claude` CLI: its own `/model`
++ * rows, in its order and with its display names. The `default` row is omitted;
++ * callers represent it as "no model".
++ */
++export function getClaudeModelChoices(catalog: readonly ClaudeModelSummary[]): ClaudeModelChoice[] {
++    return catalog
++        .filter((model) => model.value !== 'default')
++        .map((model) => ({ value: model.value, label: model.displayName ?? model.value }))
++}
++
++/**
++ * Effort levels the CLI offers for `model` (`null` = the session default).
++ * Undefined when the catalog is missing or does not list the model.
++ */
++export function getClaudeEffortLevelsForModel(
++    model: string | null,
++    catalog: readonly ClaudeModelSummary[] | null | undefined
++): readonly string[] | undefined {
++    if (!catalog) {
++        return undefined
++    }
++    if (model === null) {
++        return catalog.find((row) => row.value === 'default')?.effortLevels
++    }
++    return catalog.find((row) => row.value === model)?.effortLevels
++}
++
++/**
++ * The effort to keep when switching to `model`: an effort the model does not
++ * offer is cleared rather than left for the CLI to reject or ignore. Unknown
++ * support keeps the current effort.
++ */
++export function resolveClaudeEffortForModel(
++    effort: string | null,
++    model: string | null,
++    catalog: readonly ClaudeModelSummary[] | null | undefined
++): string | null {
++    const levels = getClaudeEffortLevelsForModel(model, catalog)
++    if (effort === null || levels === undefined || levels.includes(effort)) {
++        return effort
++    }
++    return null
++}
+diff --git a/shared/src/rpcMethods.ts b/shared/src/rpcMethods.ts
+index 6ae8e0ebc..6235ddaf7 100644
+--- a/shared/src/rpcMethods.ts
++++ b/shared/src/rpcMethods.ts
+@@ -47,6 +47,7 @@ export const RPC_METHODS = {
+     ListKimiModels: 'listKimiModels',
+     ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+     ListAgyModels: 'listAgyModels',
++    ListClaudeModels: 'listClaudeModels',
+     /** Deliver one queued message into the active Pi turn (native steer). */
+     SteerQueuedMessage: 'steer-queued-message',
+     ForkConversation: 'fork-conversation',
+diff --git a/web/src/api/client.ts b/web/src/api/client.ts
+index 69864e323..72e1047c3 100644
+--- a/web/src/api/client.ts
++++ b/web/src/api/client.ts
+@@ -52,6 +52,7 @@ import type {
+     OpencodeModelVariantsResponse,
+     OpencodeReasoningEffortResponse,
+     PiModelsResponse,
++    ClaudeModelsResponse,
+     QueuedStateResponse,
+     ReopenSessionResponse,
+     SqliteStorageUsageResponse,
+@@ -707,10 +708,14 @@ export class ApiClient {
+         })
+     }
+ 
+-    async setModel(sessionId: string, model: { provider: string; modelId: string } | string | null): Promise<void> {
++    async setModel(
++        sessionId: string,
++        model: { provider: string; modelId: string } | string | null,
++        options?: { effort: string | null }
++    ): Promise<void> {
+         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+             method: 'POST',
+-            body: JSON.stringify({ model })
++            body: JSON.stringify(options ? { model, effort: options.effort } : { model })
+         })
+     }
+ 
+@@ -892,6 +897,12 @@ export class ApiClient {
+         )
+     }
+ 
++    async getMachineClaudeModels(machineId: string): Promise<ClaudeModelsResponse> {
++        return await this.request<ClaudeModelsResponse>(
++            `/api/machines/${encodeURIComponent(machineId)}/claude-models`
++        )
++    }
++
+     async getMachinePiModels(machineId: string): Promise<PiModelsResponse> {
+         return await this.request<PiModelsResponse>(
+             `/api/machines/${encodeURIComponent(machineId)}/pi-models`
+diff --git a/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx b/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx
+index d9d8032d0..3382aec06 100644
+--- a/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.modelEffortButtons.test.tsx
+@@ -153,6 +153,14 @@ describe('HappyComposer generic model/effort value buttons', () => {
+         expect(screen.getByRole('button', { name: 'Settings' })).toBeTruthy()
+     })
+ 
++    it('offers only the effort levels the current Claude model accepts', () => {
++        renderComposer('claude', { availableEffortOptions: [{ value: 'low' }, { value: 'high' }] })
++        fireEvent.click(screen.getByRole('button', { name: 'High' }))
++        expect(screen.getByRole('button', { name: 'Low' })).toBeTruthy()
++        expect(screen.queryByRole('button', { name: 'Max' })).toBeNull()
++        expect(screen.queryByRole('button', { name: 'XHigh' })).toBeNull()
++    })
++
+     it('shows only the model button for flavors without effort support', () => {
+         renderComposer('codex')
+         expect(screen.getByRole('button', { name: 'Sonnet 4' })).toBeTruthy()
+diff --git a/web/src/components/AssistantChat/HappyComposer.tsx b/web/src/components/AssistantChat/HappyComposer.tsx
+index 178db0c7f..72d4d513e 100644
+--- a/web/src/components/AssistantChat/HappyComposer.tsx
++++ b/web/src/components/AssistantChat/HappyComposer.tsx
+@@ -1159,7 +1159,7 @@ export function HappyComposer(props: {
+                         label: option.name ?? option.value
+                     }))
+                 ]
+-            : getClaudeComposerEffortOptions(effort),
++            : getClaudeComposerEffortOptions(effort, availableEffortOptions?.map((option) => option.value)),
+         [agentFlavor, effort, selectedPiModel, availableEffortOptions]
+     )
+     const permissionModes = useMemo(
+diff --git a/web/src/components/AssistantChat/claudeEffortOptions.test.ts b/web/src/components/AssistantChat/claudeEffortOptions.test.ts
+index a4e41ed91..d38dcb1c3 100644
+--- a/web/src/components/AssistantChat/claudeEffortOptions.test.ts
++++ b/web/src/components/AssistantChat/claudeEffortOptions.test.ts
+@@ -25,3 +25,27 @@ describe('getClaudeComposerEffortOptions', () => {
+         ])
+     })
+ })
++
++describe('getClaudeComposerEffortOptions with the model\'s levels', () => {
++    it('offers only the levels the current model accepts', () => {
++        expect(getClaudeComposerEffortOptions(null, ['low', 'medium', 'high', 'max'])).toEqual([
++            { value: null, label: 'Auto' },
++            { value: 'low', label: 'Low' },
++            { value: 'medium', label: 'Medium' },
++            { value: 'high', label: 'High' },
++            { value: 'max', label: 'Max' },
++        ])
++    })
++
++    it('offers only Auto for a model without effort control', () => {
++        expect(getClaudeComposerEffortOptions(null, [])).toEqual([{ value: null, label: 'Auto' }])
++    })
++
++    it('still shows an active effort the model does not list', () => {
++        expect(getClaudeComposerEffortOptions('xhigh', ['low'])).toEqual([
++            { value: null, label: 'Auto' },
++            { value: 'xhigh', label: 'XHigh' },
++            { value: 'low', label: 'Low' },
++        ])
++    })
++})
+diff --git a/web/src/components/AssistantChat/claudeEffortOptions.ts b/web/src/components/AssistantChat/claudeEffortOptions.ts
+index f73e13cc6..b228bca4a 100644
+--- a/web/src/components/AssistantChat/claudeEffortOptions.ts
++++ b/web/src/components/AssistantChat/claudeEffortOptions.ts
+@@ -19,15 +19,25 @@ function formatEffortLabel(effort: string): string {
+         ?? `${effort.charAt(0).toUpperCase()}${effort.slice(1)}`
+ }
+ 
+-export function getClaudeComposerEffortOptions(currentEffort?: string | null): ClaudeComposerEffortOption[] {
++/**
++ * `supportedLevels` narrows the list to what the current model accepts
++ * (`[]` = no effort control); undefined offers every level.
++ */
++export function getClaudeComposerEffortOptions(
++    currentEffort?: string | null,
++    supportedLevels?: readonly string[]
++): ClaudeComposerEffortOption[] {
+     const normalizedCurrentEffort = normalizeClaudeComposerEffort(currentEffort)
++    const levels: readonly ClaudeEffortLevel[] = supportedLevels
++        ? CLAUDE_EFFORT_LEVELS.filter((effort) => supportedLevels.includes(effort))
++        : CLAUDE_EFFORT_LEVELS
+     const options: ClaudeComposerEffortOption[] = [
+         { value: null, label: 'Auto' }
+     ]
+ 
+     if (
+         normalizedCurrentEffort
+-        && !CLAUDE_EFFORT_LEVELS.includes(normalizedCurrentEffort as ClaudeEffortLevel)
++        && !levels.includes(normalizedCurrentEffort as ClaudeEffortLevel)
+     ) {
+         options.push({
+             value: normalizedCurrentEffort,
+@@ -35,7 +45,7 @@ export function getClaudeComposerEffortOptions(currentEffort?: string | null): C
+         })
+     }
+ 
+-    options.push(...CLAUDE_EFFORT_LEVELS.map((effort) => ({
++    options.push(...levels.map((effort) => ({
+         value: effort,
+         label: CLAUDE_EFFORT_LABELS[effort]
+     })))
+diff --git a/web/src/components/AssistantChat/modelOptions.test.ts b/web/src/components/AssistantChat/modelOptions.test.ts
+index 1360f04ac..318affc20 100644
+--- a/web/src/components/AssistantChat/modelOptions.test.ts
++++ b/web/src/components/AssistantChat/modelOptions.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from 'vitest'
+-import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
++import { getClaudeLaunchModelOptions, getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
+ 
+ describe('getModelOptionsForFlavor', () => {
+     it('never offers the unsupported default reset in an active AGY session', () => {
+@@ -97,6 +97,35 @@ describe('getModelOptionsForFlavor', () => {
+         ])
+     })
+ 
++    it('leads with the Claude catalog in its order and keeps presets it does not list', () => {
++        const options = getModelOptionsForFlavor('claude', null, [
++            { value: 'opus', label: 'Opus 5.5' },
++            { value: 'claude-opus-4-7', label: 'Opus 4.7' },
++            { value: 'sonnet', label: 'Sonnet 5' },
++        ])
++        expect(options).toEqual([
++            { value: null, label: 'Default' },
++            { value: 'opus', label: 'Opus 5.5' },
++            { value: 'claude-opus-4-7', label: 'Opus 4.7' },
++            { value: 'sonnet', label: 'Sonnet 5' },
++            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
++            { value: 'opus[1m]', label: 'Opus 1M' },
++            { value: 'fable', label: 'Fable' },
++            { value: 'fable[1m]', label: 'Fable 1M' }
++        ])
++    })
++
++    it('keeps a pinned Claude model the catalog no longer lists selected', () => {
++        const options = getModelOptionsForFlavor('claude', 'claude-opus-4-1', [
++            { value: 'opus', label: 'Opus 5.5' },
++        ])
++        expect(options.slice(0, 3)).toEqual([
++            { value: null, label: 'Default' },
++            { value: 'claude-opus-4-1', label: 'claude-opus-4-1' },
++            { value: 'opus', label: 'Opus 5.5' },
++        ])
++    })
++
+     it('includes custom Gemini model from env/config in options', () => {
+         const options = getModelOptionsForFlavor('gemini', 'gemini-custom-experiment')
+         expect(options.some((o) => o.value === 'gemini-custom-experiment')).toBe(true)
+@@ -227,6 +256,43 @@ describe('getModelOptionsForFlavor', () => {
+     })
+ })
+ 
++describe('getClaudeLaunchModelOptions', () => {
++    const catalog = [
++        { value: 'default', displayName: 'Default (recommended)' },
++        { value: 'opus', displayName: 'Opus 5.5' },
++        { value: 'claude-opus-4-7', displayName: 'Opus 4.7' },
++    ]
++
++    it('offers the catalog choices with Default as auto', () => {
++        expect(getClaudeLaunchModelOptions(catalog, 'auto', 'no longer listed').slice(0, 3)).toEqual([
++            { value: 'auto', label: 'Default' },
++            { value: 'opus', label: 'Opus 5.5' },
++            { value: 'claude-opus-4-7', label: 'Opus 4.7' },
++        ])
++    })
++
++    it('marks a saved model the catalog no longer lists instead of dropping it', () => {
++        const options = getClaudeLaunchModelOptions(catalog, 'claude-opus-4-1', 'no longer listed')
++        expect(options[1]).toEqual({ value: 'claude-opus-4-1', label: 'claude-opus-4-1 (no longer listed)' })
++    })
++
++    it('does not mark a legacy preset the catalog omits, since it stays offered', () => {
++        const options = getClaudeLaunchModelOptions(catalog, 'opus[1m]', 'no longer listed')
++        expect(options.filter((option) => option.value === 'opus[1m]')).toEqual([
++            { value: 'opus[1m]', label: 'Opus 1M' },
++        ])
++    })
++
++    it('keeps a saved model selectable before the catalog arrives, without claiming it is gone', () => {
++        const options = getClaudeLaunchModelOptions([], 'claude-opus-4-1', 'no longer listed')
++        expect(options.slice(0, 3)).toEqual([
++            { value: 'auto', label: 'Default' },
++            { value: 'claude-opus-4-1', label: 'claude-opus-4-1' },
++            { value: 'sonnet', label: 'Sonnet' },
++        ])
++    })
++})
++
+ describe('getNextModelForFlavor', () => {
+     it('cycles AGY null, auto, and unknown current values only to concrete models', () => {
+         const firstConcrete = getModelOptionsForFlavor('agy').find((option) => option.value !== null)?.value
+diff --git a/web/src/components/AssistantChat/modelOptions.ts b/web/src/components/AssistantChat/modelOptions.ts
+index f40e42ef5..a576e3f98 100644
+--- a/web/src/components/AssistantChat/modelOptions.ts
++++ b/web/src/components/AssistantChat/modelOptions.ts
+@@ -1,4 +1,5 @@
+-import { getAgyModelLabel } from '@hapi/protocol'
++import { getAgyModelLabel, getClaudeModelChoices, getClaudeModelLabel } from '@hapi/protocol'
++import type { ClaudeModelSummary } from '@hapi/protocol/apiTypes'
+ import { MODEL_OPTIONS } from '@/components/NewSession/types'
+ import { CURSOR_AUTO_MODEL_LABEL } from '@/lib/cursorModelOptions'
+ import { getClaudeComposerModelOptions, getNextClaudeComposerModel } from './claudeModelOptions'
+@@ -53,32 +54,47 @@ function getClaudeModelOptions(currentModel?: string | null, customOptions?: Mod
+         return getClaudeComposerModelOptions(currentModel)
+     }
+ 
+-    const options = getClaudeComposerModelOptions(currentModel)
+-    const nextOptions = [...options]
+-    let insertIndex = Math.max(1, nextOptions.findIndex((option) => option.value !== null))
+-
++    // Supplied options lead in their own order. Presets they do not list stay
++    // selectable after them: a partial list must not hide Opus (#718).
++    const listed: ModelOption[] = []
+     for (const option of customOptions) {
+-        const normalizedValue = normalizeCurrentModel(option.value)
+-        if (!normalizedValue) {
+-            continue
+-        }
+-
+-        const existingIndex = nextOptions.findIndex((nextOption) => nextOption.value === normalizedValue)
+-        if (existingIndex >= 0) {
+-            if (nextOptions[existingIndex]?.label === normalizedValue) {
+-                nextOptions[existingIndex] = option
+-            }
+-            continue
++        const value = normalizeCurrentModel(option.value)
++        if (value && !listed.some((existing) => existing.value === value)) {
++            listed.push({ value, label: option.label })
+         }
+-
+-        nextOptions.splice(insertIndex, 0, {
+-            value: normalizedValue,
+-            label: option.label
+-        })
+-        insertIndex += 1
+     }
++    const presets = getClaudeComposerModelOptions(null)
++        .filter((option) => option.value !== null && !listed.some((existing) => existing.value === option.value))
+ 
+-    return nextOptions
++    return withCurrentModelOption(
++        [{ value: null, label: 'Default' }, ...listed, ...presets],
++        currentModel,
++        getClaudeModelLabel
++    )
++}
++
++/**
++ * Create-session model options for Claude (`auto` = Default). A saved model the
++ * loaded catalog no longer offers stays selectable, labelled as such, so the
++ * form never silently switches it to another model.
++ */
++export function getClaudeLaunchModelOptions(
++    catalog: readonly ClaudeModelSummary[],
++    selectedModel: string,
++    notListedSuffix: string
++): Array<{ value: string; label: string }> {
++    const catalogOptions = getClaudeModelChoices(catalog)
++    const presetValues = new Set(getClaudeComposerModelOptions(null).map((option) => option.value))
++    const selected = normalizeCurrentModel(selectedModel)
++    const isGone = catalog.length > 0
++        && selected !== null
++        && !presetValues.has(selected)
++        && !catalogOptions.some((option) => option.value === selected)
++
++    return getClaudeModelOptions(selectedModel, catalogOptions).map((option) => ({
++        value: option.value ?? 'auto',
++        label: isGone && option.value === selected ? `${option.label} (${notListedSuffix})` : option.label
++    }))
+ }
+ 
+ function getAgyModelOptions(currentModel?: string | null, customOptions?: ModelOption[]): ModelOption[] {
+diff --git a/web/src/components/NewSession/EffortField.test.tsx b/web/src/components/NewSession/EffortField.test.tsx
+index e9fca8115..3aa270d45 100644
+--- a/web/src/components/NewSession/EffortField.test.tsx
++++ b/web/src/components/NewSession/EffortField.test.tsx
+@@ -54,6 +54,19 @@ describe('EffortField', () => {
+         expect(values).toContain('high')
+     })
+ 
++    it('renders the Claude levels the selected model accepts when provided', () => {
++        const { container } = render(
++            <EffortField
++                {...baseProps}
++                agent="claude"
++                claudeOptions={[{ value: 'auto', label: 'Auto' }, { value: 'low', label: 'Low' }]}
++            />
++        )
++        const select = container.querySelector('select') as HTMLSelectElement
++
++        expect(Array.from(select.options).map((option) => option.value)).toEqual(['auto', 'low'])
++    })
++
+     it('renders Pi thinking levels and forwards the selection', () => {
+         const onChange = vi.fn()
+         const { container } = render(
+diff --git a/web/src/components/NewSession/EffortField.tsx b/web/src/components/NewSession/EffortField.tsx
+index f684fac09..b5d674eb2 100644
+--- a/web/src/components/NewSession/EffortField.tsx
++++ b/web/src/components/NewSession/EffortField.tsx
+@@ -17,6 +17,8 @@ export type EffortFieldProps = {
+     isDisabled: boolean
+     /** Model-dependent launch-effort options (Grok). */
+     grokOptions?: Array<{ value: string; label: string }>
++    /** Launch-effort options the selected Claude model accepts; undefined = every level. */
++    claudeOptions?: Array<{ value: string; label: string }>
+     /** Model-dependent reasoning-effort options (Codex). */
+     codexReasoningOptions?: Array<{ value: string; name?: string }>
+     /** Model-dependent variant values from the OpenCode catalog (OpenCode). Array = dynamic list, [] = hide field, null/undefined = static fallback. */
+@@ -30,7 +32,7 @@ export type EffortFieldProps = {
+  * configuration descriptor (see shared/src/agentConfig.ts).
+  *
+  * One component serves every flavor with an `effort` field:
+- * - Claude: static launch-effort levels.
++ * - Claude: the selected model's launch-effort levels, or every level when unknown.
+  * - Grok: model-dependent launch-effort levels.
+  * - Pi: model-dependent thinking levels (filtered by the selected model's
+  *   thinkingLevelMap; hidden when the model cannot reason).
+@@ -84,7 +86,7 @@ export function EffortField(props: EffortFieldProps) {
+             )
+         }
+     } else {
+-        options = CLAUDE_EFFORT_OPTIONS
++        options = props.claudeOptions ?? CLAUDE_EFFORT_OPTIONS
+     }
+ 
+     const value = isReasoningEffort ? props.reasoningEffort : props.effort
+diff --git a/web/src/components/NewSession/index.test.tsx b/web/src/components/NewSession/index.test.tsx
+index e6d0c2edb..678ad8f52 100644
+--- a/web/src/components/NewSession/index.test.tsx
++++ b/web/src/components/NewSession/index.test.tsx
+@@ -1,7 +1,7 @@
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import type { ApiClient } from '@/api/client'
+-import type { Machine, PiModelSummary } from '@/types/api'
++import type { ClaudeModelSummary, Machine, PiModelSummary } from '@/types/api'
+ import { saveNewSessionFormDraft } from './newSessionFormDraft'
+ import {
+     loadPreferredLaunchSettings,
+@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => ({
+     piModels: [] as PiModelSummary[],
+     piModelsLoading: false,
+     piModelsError: null as string | null,
++    claudeModels: [] as ClaudeModelSummary[],
+     nextModelValue: 'gpt-5.6-terra',
+     refetchSessions: vi.fn(),
+     addToast: vi.fn()
+@@ -120,6 +121,9 @@ vi.mock('@/hooks/queries/useAgyModels', () => ({
+         refetch: vi.fn()
+     })
+ }))
++vi.mock('@/hooks/queries/useClaudeModels', () => ({
++    useClaudeModels: () => ({ availableModels: mocks.claudeModels })
++}))
+ vi.mock('@/hooks/queries/useCursorModelsForMachine', () => ({
+     useCursorModelsForMachine: () => ({
+         availableModels: [],
+@@ -324,6 +328,7 @@ describe('NewSession launch preferences', () => {
+         mocks.piModels = []
+         mocks.piModelsLoading = false
+         mocks.piModelsError = null
++        mocks.claudeModels = []
+         mocks.nextModelValue = 'gpt-5.6-terra'
+         mocks.refetchSessions.mockReset()
+         mocks.refetchSessions.mockResolvedValue(undefined)
+@@ -524,6 +529,107 @@ describe('NewSession launch preferences', () => {
+         })
+     })
+ 
++    it('offers the machine Claude catalog and keeps a remembered model it no longer lists', async () => {
++        mocks.claudeModels = [
++            { value: 'default', displayName: 'Default (recommended)' },
++            { value: 'opus', displayName: 'Opus 5.5' },
++            { value: 'claude-opus-4-7', displayName: 'Opus 4.7' },
++        ]
++        savePreferredAgent('claude')
++        savePreferredLaunchSettings('machine-1', 'claude', {
++            model: 'claude-opus-4-1',
++            cursorSelectedBase: 'auto',
++            effort: 'auto',
++            modelReasoningEffort: 'default'
++        })
++
++        render(
++            <NewSession
++                api={api}
++                machines={[machine]}
++                initialMachineId="machine-1"
++                initialDirectory={'C:\\repo'}
++                onSuccess={mocks.onSuccess}
++                onCancel={() => {}}
++            />
++        )
++
++        await waitFor(() => {
++            expect(screen.getByTestId('model')).toHaveTextContent('claude-opus-4-1')
++        })
++        expect(screen.getByTestId('model-options').textContent?.split(',').slice(0, 4)).toEqual([
++            'Default',
++            'claude-opus-4-1 (newSession.claudeModel.notListed)',
++            'Opus 5.5',
++            'Opus 4.7',
++        ])
++    })
++
++    it('drops a launch effort the newly picked Claude model does not offer', async () => {
++        mocks.claudeModels = [
++            { value: 'opus', displayName: 'Opus 5.5', effortLevels: ['high', 'xhigh'] },
++            { value: 'haiku', displayName: 'Haiku 4.5', effortLevels: [] },
++        ]
++        mocks.nextModelValue = 'haiku'
++        savePreferredAgent('claude')
++        savePreferredLaunchSettings('machine-1', 'claude', {
++            model: 'opus',
++            cursorSelectedBase: 'auto',
++            effort: 'xhigh',
++            modelReasoningEffort: 'default'
++        })
++
++        render(
++            <NewSession
++                api={api}
++                machines={[machine]}
++                initialMachineId="machine-1"
++                initialDirectory={'C:\\repo'}
++                onSuccess={mocks.onSuccess}
++                onCancel={() => {}}
++            />
++        )
++
++        await waitFor(() => {
++            expect(screen.getByTestId('launch-effort')).toHaveTextContent('xhigh')
++        })
++        fireEvent.click(screen.getByTestId('model'))
++
++        await waitFor(() => {
++            expect(screen.getByTestId('model')).toHaveTextContent('haiku')
++            expect(screen.getByTestId('launch-effort')).toHaveTextContent('auto')
++        })
++    })
++
++    it('drops a remembered launch effort the remembered Claude model does not offer', async () => {
++        mocks.claudeModels = [
++            { value: 'haiku', displayName: 'Haiku 4.5', effortLevels: [] },
++        ]
++        savePreferredAgent('claude')
++        savePreferredLaunchSettings('machine-1', 'claude', {
++            model: 'haiku',
++            cursorSelectedBase: 'auto',
++            effort: 'high',
++            modelReasoningEffort: 'default'
++        })
++
++        render(
++            <NewSession
++                api={api}
++                machines={[machine]}
++                initialMachineId="machine-1"
++                initialDirectory={'C:\\repo'}
++                onSuccess={mocks.onSuccess}
++                onCancel={() => {}}
++            />
++        )
++
++        await waitFor(() => {
++            expect(screen.getByTestId('model')).toHaveTextContent('haiku')
++            expect(screen.getByTestId('launch-effort')).toHaveTextContent('auto')
++        })
++    })
++
+     it('restores a remembered Kimi alias instead of resetting it to Default', async () => {
+         mocks.kimiModels = [
+             { modelId: 'GLM-5.3-flash', provider: 'thehive' }
+diff --git a/web/src/components/NewSession/index.tsx b/web/src/components/NewSession/index.tsx
+index 4b80f7c5c..15b7154e4 100644
+--- a/web/src/components/NewSession/index.tsx
++++ b/web/src/components/NewSession/index.tsx
+@@ -2,6 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, ty
+ import type { ApiClient } from '@/api/client'
+ import type { CodexDuplicateSessionGroup, CodexLocalSessionSummary, Machine, PiLocalSessionSummary } from '@/types/api'
+ import type { CodexCollaborationMode, GrokPermissionMode, PermissionMode, CopilotAgentMode } from '@hapi/protocol'
++import { getClaudeEffortLevelsForModel, resolveClaudeEffortForModel } from '@hapi/protocol'
+ import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
+ import { usePlatform } from '@/hooks/usePlatform'
+ import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
+@@ -9,6 +10,9 @@ import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
+ import { useCodexModels } from '@/hooks/queries/useCodexModels'
+ import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
+ import { useAgyModels } from '@/hooks/queries/useAgyModels'
++import { useClaudeModels } from '@/hooks/queries/useClaudeModels'
++import { getClaudeLaunchModelOptions } from '@/components/AssistantChat/modelOptions'
++import { getClaudeComposerEffortOptions } from '@/components/AssistantChat/claudeEffortOptions'
+ import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd'
+ import { useOpencodeModelVariants } from '@/hooks/queries/useOpencodeModelVariants'
+ import { useGrokModelsForCwd } from '@/hooks/queries/useGrokModelsForCwd'
+@@ -699,6 +703,36 @@ export function NewSession(props: {
+         machineId,
+         enabled: agent === 'pi' && Boolean(machineId)
+     })
++    const claudeModelsState = useClaudeModels({
++        api: props.api,
++        machineId,
++        enabled: agent === 'claude' && Boolean(machineId)
++    })
++    const claudeModelOptions = useMemo(() => (
++        agent === 'claude'
++            ? getClaudeLaunchModelOptions(claudeModelsState.availableModels, model, t('newSession.claudeModel.notListed'))
++            : undefined
++    ), [agent, claudeModelsState.availableModels, model, t])
++    const claudeEffortOptions = useMemo(() => {
++        const levels = getClaudeEffortLevelsForModel(model === 'auto' ? null : model, claudeModelsState.availableModels)
++        return levels
++            ? getClaudeComposerEffortOptions(effort, levels).map((option) => ({ value: option.value ?? 'auto', label: option.label }))
++            : undefined
++    }, [claudeModelsState.availableModels, model, effort])
++    // However the model got here (picked, restored from a preference or a
++    // draft, or the catalog arriving after it), an effort that model does not
++    // offer is dropped. Only the Claude catalog carries effort levels, so other
++    // agents keep their effort.
++    useEffect(() => {
++        const nextEffort = resolveClaudeEffortForModel(
++            effort === 'auto' ? null : effort,
++            model === 'auto' ? null : model,
++            claudeModelsState.availableModels
++        )
++        if ((nextEffort ?? 'auto') !== effort) {
++            setEffort('auto')
++        }
++    }, [claudeModelsState.availableModels, model, effort])
+     // Pi models are grouped by provider (optionSource: 'machine' in the agent
+     // config descriptor). Option values are provider-qualified
+     // (`provider/modelId`) so two providers sharing a modelId stay distinct;
+@@ -1935,7 +1969,7 @@ export function NewSession(props: {
+                                             ? kimiModelOptions
+                                             : agent === 'pi'
+                                                 ? (showPiLaunchConfig ? piModelOptions : undefined)
+-                                        : undefined
++                                        : claudeModelOptions
+                         }
+                         isDisabled={
+                             isFormDisabled
+@@ -1974,6 +2008,7 @@ export function NewSession(props: {
+                     onReasoningEffortChange={setModelReasoningEffort}
+                     isDisabled={isFormDisabled || (agent === 'codex' && codexModelsState.isLoading)}
+                     grokOptions={agent === 'grok' ? grokEffortOptions : undefined}
++                    claudeOptions={claudeEffortOptions}
+                     codexReasoningOptions={agent === 'codex' ? codexReasoningEffortOptions : undefined}
+                     opencodeVariantOptions={agent === 'opencode' ? opencodeVariantOptions : undefined}
+                     piSelectedModel={agent === 'pi' ? piSelectedModel : null}
+diff --git a/web/src/components/NewSession/preferences.test.ts b/web/src/components/NewSession/preferences.test.ts
+index a2a03bb26..0cf3cb7a3 100644
+--- a/web/src/components/NewSession/preferences.test.ts
++++ b/web/src/components/NewSession/preferences.test.ts
+@@ -133,14 +133,16 @@ describe('NewSession preferences', () => {
+         expect(loadPreferredLaunchSettings('machine-1', 'codex')).toBeNull()
+     })
+ 
+-    it('falls back when remembered static Claude options are no longer available', () => {
++    it('keeps a remembered Claude model the built-in list lacks, but drops an unknown effort', () => {
++        // Claude models come from the machine's catalog; a pinned model it no
++        // longer lists is shown as such rather than silently replaced.
+         expect(resolvePreferredLaunchSettings('claude', {
+-            model: 'retired-model',
++            model: 'claude-opus-4-1',
+             cursorSelectedBase: 'auto',
+             effort: 'ultra',
+             modelReasoningEffort: 'default'
+         })).toEqual({
+-            model: 'auto',
++            model: 'claude-opus-4-1',
+             cursorSelectedBase: 'auto',
+             effort: 'auto',
+             modelReasoningEffort: 'default',
+diff --git a/web/src/components/NewSession/preferences.ts b/web/src/components/NewSession/preferences.ts
+index 05a770a11..896cc4a37 100644
+--- a/web/src/components/NewSession/preferences.ts
++++ b/web/src/components/NewSession/preferences.ts
+@@ -137,7 +137,9 @@ export function resolvePreferredLaunchSettings(
+     // Kimi's catalog is dynamic (machine discovery); validating a saved alias
+     // against the static list would reset it to 'auto'. The settled-catalog
+     // effect in NewSession validates it once the real catalog has arrived.
+-    const model = staticModelValues.length > 0 && agent !== 'codex' && agent !== 'copilot' && agent !== 'kimi'
++    // Claude's catalog is dynamic too, and a saved Claude model is kept even
++    // when the catalog drops it (it is offered as "no longer listed").
++    const model = staticModelValues.length > 0 && agent !== 'codex' && agent !== 'copilot' && agent !== 'kimi' && agent !== 'claude'
+         ? resolvePreferredOptionValue(preferredModel, staticModelValues, 'auto')
+         : preferredModel
+     const effort = agent === 'claude'
+diff --git a/web/src/components/SessionChat.test.ts b/web/src/components/SessionChat.test.ts
+index 2bd48bacd..b11626cce 100644
+--- a/web/src/components/SessionChat.test.ts
++++ b/web/src/components/SessionChat.test.ts
+@@ -10,6 +10,7 @@ import {
+     mergeStagedAttachmentsInOrder,
+     opencodeEffortOptionsInvalidationKey,
+     resolvePiContextWindow,
++    resolveEffortForModelChange,
+     resolveLatestCompletedBoundaryIdForView,
+     shouldAutoClearPendingSchedule,
+     shouldClearReasoningEffortForModelChange,
+@@ -582,3 +583,30 @@ describe('buildAgyComposerModelOptions', () => {
+         expect(buildAgyComposerModelOptions([])).toBeUndefined()
+     })
+ })
++
++describe('resolveEffortForModelChange', () => {
++    const claudeModels = [
++        { value: 'opus', effortLevels: ['low', 'high', 'xhigh'] },
++        { value: 'haiku', effortLevels: [] },
++    ]
++
++    it('clears an effort the next Claude model does not offer', () => {
++        expect(resolveEffortForModelChange({ currentEffort: 'xhigh', model: 'haiku', claudeModels })).toEqual({ effort: null })
++    })
++
++    it('leaves the effort alone when the next model keeps it', () => {
++        expect(resolveEffortForModelChange({ currentEffort: 'high', model: 'claude-opus-5-5', claudeModels })).toBeUndefined()
++    })
++
++    it('leaves the effort alone without a catalog (non-Claude sessions, or discovery unavailable)', () => {
++        expect(resolveEffortForModelChange({ currentEffort: 'xhigh', model: 'haiku', claudeModels: [] })).toBeUndefined()
++    })
++
++    it('ignores provider-qualified selections', () => {
++        expect(resolveEffortForModelChange({
++            currentEffort: 'xhigh',
++            model: { provider: 'p', modelId: 'haiku' },
++            claudeModels
++        })).toBeUndefined()
++    })
++})
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index 3476d2fe6..8d15a609d 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -9,6 +9,7 @@ import { ApiError, type ApiClient } from '@/api/client'
+ import type {
+     AgyModelSummary,
+     AttachmentMetadata,
++    ClaudeModelSummary,
+     CodexCollaborationMode,
+     CodexModelSummary,
+     CopilotAgentMode,
+@@ -62,6 +63,7 @@ import {
+ } from '@/lib/messageDelivery'
+ import type { MessageDeliveryMode } from '@hapi/protocol'
+ import { isSteeringSupportedForSession } from '@hapi/protocol'
++import { getClaudeEffortLevelsForModel, getClaudeModelChoices, resolveClaudeEffortForModel } from '@hapi/protocol'
+ import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
+ import { rewindMessageWindow, type OlderLoadOutcome } from '@/lib/message-window-store'
+ import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
+@@ -97,6 +99,7 @@ import { useCodexModels } from '@/hooks/queries/useCodexModels'
+ import { useCursorModels } from '@/hooks/queries/useCursorModels'
+ import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
+ import { useAgyModels } from '@/hooks/queries/useAgyModels'
++import { useClaudeModels } from '@/hooks/queries/useClaudeModels'
+ import {
+     mergeCursorCliModelSkus,
+     resolveCursorBaseFromWire
+@@ -181,6 +184,23 @@ export function buildAgyComposerModelOptions(
+     }))
+ }
+ 
++/**
++ * The effort to send along with a model change, or undefined to leave it.
++ * Only a Claude catalog carries per-model effort levels, so other flavors
++ * (whose catalog here is empty) never get one.
++ */
++export function resolveEffortForModelChange(args: {
++    currentEffort: string | null
++    model: SessionModelSelection
++    claudeModels: readonly ClaudeModelSummary[]
++}): { effort: string | null } | undefined {
++    if (typeof args.model === 'object' && args.model !== null) {
++        return undefined
++    }
++    const effort = resolveClaudeEffortForModel(args.currentEffort, args.model, args.claudeModels)
++    return effort === args.currentEffort ? undefined : { effort }
++}
++
+ export async function applyModelChangeWithReasoningRollback(args: {
+     model: SessionModelSelection
+     previousModelReasoningEffort: string | null
+@@ -1162,6 +1182,24 @@ function SessionChatInner(props: SessionChatProps) {
+             ? buildAgyComposerModelOptions(agyModelsState.availableModels)
+             : undefined
+     ), [agentFlavor, agyModelsState.availableModels])
++    const claudeModelsState = useClaudeModels({
++        api: props.api,
++        machineId: sessionMachineId,
++        enabled: agentFlavor === 'claude' && props.session.active && Boolean(sessionMachineId)
++    })
++    // Until the catalog arrives (or on a runner without discovery) this stays
++    // undefined and the composer keeps its built-in Claude presets.
++    const claudeModelOptions = useMemo(() => (
++        agentFlavor === 'claude' && claudeModelsState.availableModels.length > 0
++            ? getClaudeModelChoices(claudeModelsState.availableModels)
++            : undefined
++    ), [agentFlavor, claudeModelsState.availableModels])
++    // Levels the current Claude model accepts; undefined when unknown (no
++    // catalog, or a model it does not list), which keeps every level.
++    const claudeEffortOptions = useMemo(() => (
++        getClaudeEffortLevelsForModel(props.session.model ?? null, claudeModelsState.availableModels)
++            ?.map((level) => ({ value: level }))
++    ), [props.session.model, claudeModelsState.availableModels])
+     const piModelsState = usePiModels({
+         api: props.api,
+         sessionId: props.session.id,
+@@ -1614,13 +1652,20 @@ function SessionChatInner(props: SessionChatProps) {
+             codexModels: codexModelsState.models,
+             model
+         })
++        // Sent in the same request so the session never runs the new model
++        // with an effort it does not offer.
++        const effortChange = resolveEffortForModelChange({
++            currentEffort: props.session.effort ?? null,
++            model,
++            claudeModels: claudeModelsState.availableModels
++        })
+ 
+         try {
+             await applyModelChangeWithReasoningRollback({
+                 model,
+                 previousModelReasoningEffort,
+                 shouldClearReasoningEffort,
+-                setModel,
++                setModel: (nextModel) => setModel(nextModel, effortChange),
+                 setModelReasoningEffort
+             })
+             haptic.notification('success')
+@@ -1632,6 +1677,8 @@ function SessionChatInner(props: SessionChatProps) {
+     }, [
+         agentFlavor,
+         codexModelsState.models,
++        claudeModelsState.availableModels,
++        props.session.effort,
+         props.session.modelReasoningEffort,
+         setModelReasoningEffort,
+         setModel,
+@@ -2128,8 +2175,9 @@ function SessionChatInner(props: SessionChatProps) {
+                                         // cycler (getNextModelForFlavor) post a bare modelId string,
+                                         // which loses the provider and can pick the wrong cached
+                                         // match or throw in runPi. undefined makes the shortcut a no-op
+-                                        // so Pi model changes go through the settings sheet only.
+-                                        : undefined
++                                        // so Pi model changes go through the settings sheet only;
++                                        // claudeModelOptions is undefined for every non-Claude flavor.
++                                        : claudeModelOptions
+                         }
+                         piModels={piModels}
+                         piSelectedModel={agentFlavor === 'pi' ? piSelectedModel : undefined}
+@@ -2143,7 +2191,7 @@ function SessionChatInner(props: SessionChatProps) {
+                         availableEffortOptions={
+                             agentFlavor === 'grok' && grokEffortState.options.length > 0
+                                 ? grokEffortState.options
+-                                : undefined
++                                : claudeEffortOptions
+                         }
+                         active={props.session.active}
+                         allowSendWhenInactive
+diff --git a/web/src/hooks/mutations/useSessionActions.ts b/web/src/hooks/mutations/useSessionActions.ts
+index 2afa35c9e..778db524f 100644
+--- a/web/src/hooks/mutations/useSessionActions.ts
++++ b/web/src/hooks/mutations/useSessionActions.ts
+@@ -1,3 +1,4 @@
++import { useCallback } from 'react'
+ import { useIsMutating, useMutation, useQueryClient } from '@tanstack/react-query'
+ import { isPermissionModeAllowedForFlavor } from '@hapi/protocol'
+ import type { ApiClient } from '@/api/client'
+@@ -25,7 +26,7 @@ export function useSessionActions(
+     setPermissionMode: (mode: PermissionMode) => Promise<void>
+     setCollaborationMode: (mode: CodexCollaborationMode) => Promise<void>
+     setCopilotAgentMode: (mode: CopilotAgentMode) => Promise<void>
+-    setModel: (model: { provider: string; modelId: string } | string | null) => Promise<void>
++    setModel: (model: { provider: string; modelId: string } | string | null, options?: { effort: string | null }) => Promise<void>
+     setModelReasoningEffort: (modelReasoningEffort: string | null) => Promise<void>
+     setEffort: (effort: string | null) => Promise<void>
+     setServiceTier: (serviceTier: string | null) => Promise<void>
+@@ -181,11 +182,14 @@ export function useSessionActions(
+ 
+     const modelMutation = useMutation({
+         mutationKey: sessionModelMutationKey(sessionId ?? ''),
+-        mutationFn: async (model: { provider: string; modelId: string } | string | null) => {
++        mutationFn: async (args: {
++            model: { provider: string; modelId: string } | string | null
++            options?: { effort: string | null }
++        }) => {
+             if (!api || !sessionId) {
+                 throw new Error('Session unavailable')
+             }
+-            await api.setModel(sessionId, model)
++            await api.setModel(sessionId, args.model, args.options)
+         },
+         onSuccess: async () => {
+             await invalidateSession()
+@@ -193,6 +197,12 @@ export function useSessionActions(
+         },
+     })
+ 
++    const setModel = useCallback(
++        (model: { provider: string; modelId: string } | string | null, options?: { effort: string | null }) =>
++            modelMutation.mutateAsync({ model, options }),
++        [modelMutation.mutateAsync]
++    )
++
+     const modelReasoningEffortMutation = useMutation({
+         mutationFn: async (modelReasoningEffort: string | null) => {
+             if (!api || !sessionId) {
+@@ -298,7 +308,7 @@ export function useSessionActions(
+         setPermissionMode: permissionMutation.mutateAsync,
+         setCollaborationMode: collaborationMutation.mutateAsync,
+         setCopilotAgentMode: copilotAgentModeMutation.mutateAsync,
+-        setModel: modelMutation.mutateAsync,
++        setModel,
+         setModelReasoningEffort: modelReasoningEffortMutation.mutateAsync,
+         setEffort: effortMutation.mutateAsync,
+         setServiceTier: serviceTierMutation.mutateAsync,
+diff --git a/web/src/hooks/queries/useClaudeModels.test.tsx b/web/src/hooks/queries/useClaudeModels.test.tsx
+new file mode 100644
+index 000000000..43a204677
+--- /dev/null
++++ b/web/src/hooks/queries/useClaudeModels.test.tsx
+@@ -0,0 +1,75 @@
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { renderHook, waitFor } from '@testing-library/react'
++import type { PropsWithChildren } from 'react'
++import { describe, expect, it, vi } from 'vitest'
++import type { ApiClient } from '@/api/client'
++import { queryKeys } from '@/lib/query-keys'
++import { useClaudeModels } from './useClaudeModels'
++
++function wrapper(queryClient: QueryClient) {
++    return ({ children }: PropsWithChildren) => (
++        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
++    )
++}
++
++const catalog = {
++    success: true,
++    availableModels: [{ value: 'opus', effortLevels: ['low'] }]
++}
++
++describe('useClaudeModels', () => {
++    it('returns the machine catalog while enabled', async () => {
++        const getMachineClaudeModels = vi.fn(async () => catalog)
++        const api = { getMachineClaudeModels } as unknown as ApiClient
++        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++
++        const { result } = renderHook(() => useClaudeModels({ api, machineId: 'machine-1', enabled: true }), {
++            wrapper: wrapper(queryClient)
++        })
++
++        await waitFor(() => expect(result.current.availableModels).toHaveLength(1))
++    })
++
++    it('does not hand a cached Claude catalog to a session of another agent on the same machine', () => {
++        const getMachineClaudeModels = vi.fn(async () => catalog)
++        const api = { getMachineClaudeModels } as unknown as ApiClient
++        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++        queryClient.setQueryData(queryKeys.machineClaudeModels('machine-1'), catalog)
++
++        const { result } = renderHook(() => useClaudeModels({ api, machineId: 'machine-1', enabled: false }), {
++            wrapper: wrapper(queryClient)
++        })
++
++        expect(result.current.availableModels).toEqual([])
++        expect(getMachineClaudeModels).not.toHaveBeenCalled()
++    })
++
++    it('retries a failed discovery the next time a picker mounts', async () => {
++        // The machine answers a failed probe with success:false; caching that as
++        // a successful result would keep the built-in list for the stale time
++        // even after the user signs in.
++        const getMachineClaudeModels = vi.fn()
++            .mockResolvedValueOnce({
++                success: false,
++                error: 'Claude model discovery timed out',
++                availableModels: catalog.availableModels
++            })
++            .mockResolvedValueOnce(catalog)
++        const api = { getMachineClaudeModels } as unknown as ApiClient
++        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
++
++        const first = renderHook(() => useClaudeModels({ api, machineId: 'machine-1', enabled: true }), {
++            wrapper: wrapper(queryClient)
++        })
++        await waitFor(() => expect(getMachineClaudeModels).toHaveBeenCalledTimes(1))
++        await waitFor(() => expect(queryClient.getQueryState(queryKeys.machineClaudeModels('machine-1'))?.fetchStatus).toBe('idle'))
++        expect(first.result.current.availableModels).toEqual([])
++        first.unmount()
++
++        const second = renderHook(() => useClaudeModels({ api, machineId: 'machine-1', enabled: true }), {
++            wrapper: wrapper(queryClient)
++        })
++        await waitFor(() => expect(second.result.current.availableModels).toHaveLength(1))
++        expect(getMachineClaudeModels).toHaveBeenCalledTimes(2)
++    })
++})
+diff --git a/web/src/hooks/queries/useClaudeModels.ts b/web/src/hooks/queries/useClaudeModels.ts
+new file mode 100644
+index 000000000..d148691a5
+--- /dev/null
++++ b/web/src/hooks/queries/useClaudeModels.ts
+@@ -0,0 +1,49 @@
++import { useQuery } from '@tanstack/react-query'
++import type { ApiClient } from '@/api/client'
++import type { ClaudeModelSummary } from '@/types/api'
++import { queryKeys } from '@/lib/query-keys'
++
++const NO_MODELS: ClaudeModelSummary[] = []
++
++/**
++ * The models a machine's `claude` CLI offers. While loading, on failure, or on
++ * a runner without discovery the list is empty and callers keep their
++ * built-in presets, so a selection is never lost to a missing catalog.
++ */
++export function useClaudeModels(args: {
++    api: ApiClient | null
++    machineId?: string | null
++    enabled?: boolean
++}): {
++    availableModels: ClaudeModelSummary[]
++} {
++    const { api, machineId } = args
++    const enabled = Boolean(args.enabled && api && machineId)
++
++    const query = useQuery({
++        queryKey: machineId
++            ? queryKeys.machineClaudeModels(machineId)
++            : ['machine-claude-models', 'unknown'] as const,
++        queryFn: async () => {
++            if (!api || !machineId) {
++                throw new Error('Claude models target unavailable')
++            }
++            const response = await api.getMachineClaudeModels(machineId)
++            // A failed probe arrives as success:false; as a query error it is
++            // not cached as an answer, so the next picker to open asks again.
++            if (!response.success) {
++                throw new Error(response.error ?? 'Failed to load Claude models')
++            }
++            return response
++        },
++        enabled,
++        staleTime: 60_000,
++        retry: false,
++    })
++
++    return {
++        // Gated on `enabled` too: the query key is per machine, so a catalog
++        // cached by a Claude session would otherwise reach other agents' sessions.
++        availableModels: enabled ? (query.data?.availableModels ?? NO_MODELS) : NO_MODELS,
++    }
++}
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 50ebf82e2..7839945e9 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -383,6 +383,7 @@ export default {
+   'newSession.agyModel.retry': 'Retry',
+   'newSession.agyModel.notListed': 'no longer listed',
+   'newSession.agyModel.noModels': 'No Antigravity models available',
++  'newSession.claudeModel.notListed': 'no longer listed',
+   'newSession.opencodeModel.loading': 'Discovering OpenCode models…',
+   'newSession.opencodeModel.loadFailed': 'Failed to load OpenCode models',
+   'newSession.opencodeModel.retry': 'Retry',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index c02efabb9..a03d83c68 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -379,6 +379,7 @@ export default {
+   'newSession.model.optional': '可选',
+   'newSession.model.default': '默认',
+   'newSession.model.loadFailed': '加载模型失败',
++  'newSession.claudeModel.notListed': '已不在列表中',
+   'newSession.model.selectVariant': '选择变体',
+   'newSession.model.cursorUnavailable': '暂无 Cursor 模型列表。请先运行一次 Cursor 会话，或使用 Auto。',
+   'newSession.opencodeModel.loading': '正在发现 OpenCode 模型…',
+diff --git a/web/src/lib/query-keys.ts b/web/src/lib/query-keys.ts
+index 4fff52af7..c32b653c1 100644
+--- a/web/src/lib/query-keys.ts
++++ b/web/src/lib/query-keys.ts
+@@ -37,6 +37,7 @@ export const queryKeys = {
+     sessionGrokReasoningEffortOptions: (sessionId: string) => ['session-grok-reasoning-effort-options', sessionId] as const,
+     machineAgyModels: (machineId: string) => ['machine-agy-models', machineId] as const,
+     machinePiModels: (machineId: string) => ['machine-pi-models', machineId] as const,
++    machineClaudeModels: (machineId: string) => ['machine-claude-models', machineId] as const,
+     skills: (sessionId: string) => ['skills', sessionId] as const,
+     scratchlist: (sessionId: string) => ['scratchlist', sessionId] as const,
+ }
+diff --git a/web/src/types/api.ts b/web/src/types/api.ts
+index 1b1c6610c..e03e8937f 100644
+--- a/web/src/types/api.ts
++++ b/web/src/types/api.ts
+@@ -38,6 +38,8 @@ export type {
+     MachineListDirectoryResponse,
+     MachinePathsExistsResponse,
+     AuthResponse,
++    ClaudeModelSummary,
++    ClaudeModelsResponse,
+     MachinesResponse,
+     MessagesResponse,
+     OpencodeModelsResponse,
