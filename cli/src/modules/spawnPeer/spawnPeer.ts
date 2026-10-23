@@ -12,9 +12,11 @@ import { configuration } from '@/configuration'
 import { getAuthToken } from '@/api/auth'
 import { buildHubRequestHeaders } from '@/api/hubExtraHeaders'
 import { readSettings } from '@/persistence'
+import { isPeerToolsDisabled } from '@/modules/common/peerTools'
 
 export type SpawnPeerErrorCode =
     | 'bad_args'
+    | 'disabled'
     | 'auth_failed'
     | 'spawn_failed'
     | 'cleanup_failed'
@@ -32,6 +34,8 @@ export class SpawnPeerError extends Error {
 }
 
 export type SpawnPeerOptions = {
+    /** Create-time session snapshot; MCP handlers pass it so a later bootstrap cannot flip it. */
+    peerToolsDisabled?: boolean
     directory: string
     message: string
     name?: string
@@ -126,6 +130,9 @@ async function exchangeJwt(apiUrl: string, accessToken: string, http: AxiosInsta
 }
 
 export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerResult> {
+    if (options.peerToolsDisabled ?? isPeerToolsDisabled()) {
+        throw new SpawnPeerError('disabled', 'peer session tools are disabled (disabled by your hub administrator, or HAPI_DISABLE_PEER_TOOLS is set)')
+    }
     const rawDirectory = (options.directory ?? '').trim()
     const message = options.message ?? ''
     const name = (options.name ?? '').trim()
@@ -291,7 +298,7 @@ export async function listMachineTargets(options: {
 }
 
 export function exitCodeForSpawnPeerError(error: SpawnPeerError): number {
-    if (error.code === 'bad_args' || error.code === 'auth_failed') return 2
+    if (error.code === 'bad_args' || error.code === 'disabled' || error.code === 'auth_failed') return 2
     if (error.code === 'cleanup_failed') return 5
     return 3
 }

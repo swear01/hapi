@@ -21,6 +21,7 @@ import { GrokPermissionHandler } from './utils/permissionHandler'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { GrokConversationHistory } from './conversationHistory'
 import { isObject } from '@hapi/protocol'
+import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools'
 
 type GrokRemoteLauncherOptions = {
     model?: string
@@ -70,6 +71,7 @@ class GrokRemoteLauncher extends RemoteLauncherBase {
 
         const backend = createGrokBackend({
             cwd: session.path,
+            env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled()),
             ...this.opts
         })
         this.backend = backend

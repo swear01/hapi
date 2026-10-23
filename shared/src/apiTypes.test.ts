@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
     ClearOpencodeSessionCallbackRequestSchema,
     ClearOpencodeSessionResponseSchema,
+    CreateSessionResponseSchema,
+    HubSettingsResponseSchema,
     ListCodexSessionsRpcResponseSchema,
     ListPiSessionsRpcResponseSchema,
     MessagesQuerySchema,
     SendMessageRequestSchema,
-    SpawnSessionWithRemitRequestSchema
+    SpawnSessionWithRemitRequestSchema,
+    UpdateHubSettingsRequestSchema
 } from './apiTypes'
 
 describe('ListCodexSessionsRpcResponseSchema', () => {
@@ -162,5 +165,42 @@ describe('SpawnSessionWithRemitRequestSchema', () => {
             message: ' \n\t',
             remitId: '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
         }).success).toBe(false)
+    })
+})
+
+describe('disablePeerTools hub setting wire shapes', () => {
+    it('UpdateHubSettingsRequestSchema accepts a lone disablePeerTools payload but still rejects empty bodies', () => {
+        expect(UpdateHubSettingsRequestSchema.safeParse({ disablePeerTools: true }).success).toBe(true)
+        expect(UpdateHubSettingsRequestSchema.safeParse({}).success).toBe(false)
+        expect(UpdateHubSettingsRequestSchema.safeParse({ disablePeerTools: 'yes' }).success).toBe(false)
+    })
+
+    it('HubSettingsResponseSchema requires disablePeerTools as a boolean', () => {
+        const parsed = HubSettingsResponseSchema.safeParse({ sessionSummaryInChat: false, disablePeerTools: true })
+        expect(parsed.success).toBe(true)
+        if (parsed.success) expect(parsed.data.disablePeerTools).toBe(true)
+        expect(HubSettingsResponseSchema.safeParse({ sessionSummaryInChat: false }).success).toBe(false)
+    })
+
+    it('CreateSessionResponseSchema leaves disablePeerTools optional for older hubs', () => {
+        const session = {
+            id: 's1',
+            namespace: 'default',
+            seq: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            active: false,
+            activeAt: null,
+            metadata: null,
+            metadataVersion: 0,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0
+        }
+        expect(CreateSessionResponseSchema.safeParse({ session }).success).toBe(true)
+        const parsed = CreateSessionResponseSchema.safeParse({ session, disablePeerTools: true })
+        expect(parsed.success).toBe(true)
+        if (parsed.success) expect(parsed.data.disablePeerTools).toBe(true)
     })
 })

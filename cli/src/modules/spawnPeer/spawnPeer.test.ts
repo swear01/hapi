@@ -346,3 +346,18 @@ describe('spawnPeer', () => {
         })).rejects.toMatchObject({ code: 'bad_args' })
     })
 })
+
+describe('spawnPeer peer-tools switch', () => {
+    it('refuses before any network call when HAPI_DISABLE_PEER_TOOLS is set', async () => {
+        const original = process.env.HAPI_DISABLE_PEER_TOOLS
+        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
+        try {
+            await expect(spawnPeer({ directory: '/tmp/project', message: 'work' }))
+                .rejects.toMatchObject({ code: 'disabled' })
+            expect(exitCodeForSpawnPeerError(new SpawnPeerError('disabled', 'disabled'))).toBe(2)
+        } finally {
+            if (original === undefined) delete process.env.HAPI_DISABLE_PEER_TOOLS
+            else process.env.HAPI_DISABLE_PEER_TOOLS = original
+        }
+    })
+})

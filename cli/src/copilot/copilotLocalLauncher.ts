@@ -57,7 +57,8 @@ export async function copilotLocalLauncher(
                 model: opts.model,
                 effort: opts.effort,
                 yolo: approval.yolo,
-                agentMode: session.getAgentMode()
+                agentMode: session.getAgentMode(),
+                peerToolsDisabled: session.client.peerToolsDisabled
             });
         },
         sendFailureMessage: (message) => {

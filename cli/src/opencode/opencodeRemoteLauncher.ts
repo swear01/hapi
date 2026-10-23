@@ -176,7 +176,8 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         const backend = createOpencodeBackend({
             cwd: session.path,
             port,
-            hostname
+            hostname,
+            peerToolsDisabled: session.client.peerToolsDisabled
         });
         this.backend = backend;
         registerAcpSessionTitleSync(backend, session.client);

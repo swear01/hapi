@@ -8,6 +8,7 @@ import {
     requireExactSessionId,
     waitPeer
 } from './pingPeer'
+import { applyHubPeerToolsDisabled, resetPeerToolsForTests } from '@/modules/common/peerTools'
 
 const SESSION_ID = '05d9f0f2-9273-4137-933c-07459a1146a2'
 const REMIT_ID = '7ee03698-0fe7-4f76-b8a8-d84f4eddbf5c'
@@ -486,5 +487,39 @@ describe('HAPI_DISABLE_PEER_TOOLS kill switch', () => {
 
     it('maps the disabled code to the usage exit code', () => {
         expect(exitCodeForPingPeerError(new PingPeerError('disabled', 'disabled on this machine'))).toBe(2)
+    })
+})
+
+describe('hub disablePeerTools preference', () => {
+    const original = process.env.HAPI_DISABLE_PEER_TOOLS
+
+    beforeEach(() => {
+        delete process.env.HAPI_DISABLE_PEER_TOOLS
+        applyHubPeerToolsDisabled(true)
+    })
+
+    afterEach(() => {
+        if (original === undefined) {
+            delete process.env.HAPI_DISABLE_PEER_TOOLS
+        } else {
+            process.env.HAPI_DISABLE_PEER_TOOLS = original
+        }
+        resetPeerToolsForTests()
+    })
+
+    it('pingPeer refuses before any network call', async () => {
+        await expect(pingPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hi' }))
+            .rejects.toMatchObject({ code: 'disabled' })
+    })
+
+    it('inspectPeer refuses before any network call', async () => {
+        await expect(inspectPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2' }))
+            .rejects.toMatchObject({ code: 'disabled' })
+    })
+
+    it('mentions the hub administrator in the refusal message', async () => {
+        const failure = await pingPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hi' }).catch((error) => error)
+        expect(failure).toMatchObject({ code: 'disabled' })
+        expect(String(failure.message)).toContain('hub administrator')
     })
 })

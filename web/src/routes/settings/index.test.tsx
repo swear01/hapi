@@ -24,8 +24,8 @@ const { context, navigate, setAppearance, setColorTheme, setFontScale, setTermin
     setAppBadgeEnabled: vi.fn(),
 }))
 
-const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false })
-const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false })
+const getHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
+const updateHubSettings = vi.fn().mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
 
 vi.mock('@/hooks/useColorTheme', () => ({
     useColorTheme: () => ({ colorTheme: 'default', setColorTheme }),
@@ -222,8 +222,8 @@ describe('responsive settings pages', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
-        getHubSettings.mockResolvedValue({ sessionSummaryInChat: false })
-        updateHubSettings.mockResolvedValue({ sessionSummaryInChat: false })
+        getHubSettings.mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
+        updateHubSettings.mockResolvedValue({ sessionSummaryInChat: false, disablePeerTools: false })
         context.token = `x.${btoa(JSON.stringify({ ns: 'default' }))}.x`
     })
 
@@ -258,8 +258,9 @@ describe('responsive settings pages', () => {
     })
 
     it('offers summary display without restoring agent prompt controls', async () => {
-        updateHubSettings.mockImplementation(async (patch: { sessionSummaryInChat?: boolean }) => ({
+        updateHubSettings.mockImplementation(async (patch: { sessionSummaryInChat?: boolean; disablePeerTools?: boolean }) => ({
             sessionSummaryInChat: patch.sessionSummaryInChat ?? false,
+            disablePeerTools: patch.disablePeerTools ?? false,
         }))
 
         renderPage(<SettingsGeneralPage />)
@@ -271,6 +272,23 @@ describe('responsive settings pages', () => {
         fireEvent.click(displayToggle)
         await waitFor(() => {
             expect(updateHubSettings).toHaveBeenCalledWith({ sessionSummaryInChat: true })
+        })
+    })
+
+    it('toggles the hub-wide peer-tools opt-out from the general page', async () => {
+        updateHubSettings.mockImplementation(async (patch: { sessionSummaryInChat?: boolean; disablePeerTools?: boolean }) => ({
+            sessionSummaryInChat: patch.sessionSummaryInChat ?? false,
+            disablePeerTools: patch.disablePeerTools ?? false,
+        }))
+
+        renderPage(<SettingsGeneralPage />)
+
+        expect(await screen.findByRole('heading', { name: 'Peer session tools' })).toBeInTheDocument()
+        const toggle = await screen.findByRole('checkbox', { name: 'Disable peer session tools' })
+        expect(toggle).not.toBeChecked()
+        fireEvent.click(toggle)
+        await waitFor(() => {
+            expect(updateHubSettings).toHaveBeenCalledWith({ disablePeerTools: true })
         })
     })
 

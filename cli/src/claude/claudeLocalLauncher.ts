@@ -82,6 +82,7 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
                     sessionId: session.sessionId,
                     abort: abortSignal,
                     claudeEnvVars: session.claudeEnvVars,
+                    peerToolsDisabled: session.peerToolsDisabled,
                     claudeArgs: session.claudeArgs,
                     model: session.getModel(),
                     mcpServers: session.mcpServers,

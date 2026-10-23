@@ -27,6 +27,7 @@ vi.mock('@/modules/spawnPeer/spawnPeer', async () => {
 import type { ApiSessionClient } from '@/api/apiSession'
 import { PingPeerError } from '@/modules/pingPeer/pingPeer'
 import { SpawnPeerError } from '@/modules/spawnPeer/spawnPeer'
+import { applyHubPeerToolsDisabled, resetPeerToolsForTests } from '@/modules/common/peerTools'
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from './startHappyServer'
 
 type ToolResult = {
@@ -418,6 +419,7 @@ describe('startHappyServer peer tools kill switch', () => {
         } else {
             process.env.HAPI_DISABLE_PEER_TOOLS = originalFlag
         }
+        resetPeerToolsForTests()
     })
 
     async function startServer(): Promise<{ url: string; toolNames: string[] }> {
@@ -455,5 +457,55 @@ describe('startHappyServer peer tools kill switch', () => {
         expect(names).not.toContain('inspect_peer')
         expect(names).not.toContain('spawn_peer')
         expect(names).toEqual(expect.arrayContaining(['display_image', 'display_video', 'display_media']))
+    })
+
+    it('omits peer tools from registration and toolNames when the hub preference disables them', async () => {
+        delete process.env.HAPI_DISABLE_PEER_TOOLS
+        applyHubPeerToolsDisabled(true)
+        const { toolNames } = await startServer()
+        expect(toolNames).toEqual(['change_title', 'display_image', 'display_video', 'display_media'])
+        const tools = await client!.listTools()
+        const names = tools.tools.map((tool) => tool.name)
+        expect(names).not.toContain('ping_peer')
+        expect(names).not.toContain('inspect_peer')
+        expect(names).not.toContain('spawn_peer')
+    })
+
+    it('keeps handlers registered by an enabled session working after a later session flips the global switch (#2056)', async () => {
+        delete process.env.HAPI_DISABLE_PEER_TOOLS
+        const { pingPeer } = await import('@/modules/pingPeer/pingPeer')
+        vi.mocked(pingPeer).mockRejectedValueOnce(new Error('offline in test'))
+
+        // Session A bootstraps with peer tools enabled (create-time snapshot).
+        const sessionClient = {
+            peerToolsDisabled: false,
+            updateMetadata: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            sendClaudeSessionMessage: vi.fn()
+        } as unknown as ApiSessionClient
+        const server = await startHappyServer(sessionClient, {})
+        stopServer = server.stop
+        client = new Client(
+            { name: 'hapi-peer-flip-test', version: '1.0.0' },
+            { capabilities: {} }
+        )
+        await client.connect(new StreamableHTTPClientTransport(new URL(server.url)))
+
+        // Session B bootstraps elsewhere in the same process and flips the
+        // module-wide preference. A's registered handlers must keep working.
+        applyHubPeerToolsDisabled(true)
+
+        const result = await client.callTool({
+            name: 'ping_peer',
+            arguments: { sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hello' }
+        }) as ToolResult
+        expect(result.isError).toBe(true)
+        expect(JSON.stringify(result.content)).not.toContain('peer session tools are disabled')
+        // The handler resolved the guard from A's captured snapshot, not the
+        // flipped module state.
+        expect(pingPeer).toHaveBeenCalledWith(expect.objectContaining({
+            sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2',
+            peerToolsDisabled: false
+        }))
     })
 })

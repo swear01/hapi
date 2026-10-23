@@ -5,6 +5,7 @@ import { ensureOpencodeHookPlugin } from './utils/hookPlugin';
 import { buildOpencodeEnv } from './utils/config';
 import { ensureOpencodeConfig } from './utils/opencodeConfig';
 import { buildHapiMcpBridge } from '@/codex/utils/buildHapiMcpBridge';
+import { isPeerToolsDisabled, peerToolsEnvOverlay } from '@/modules/common/peerTools';
 import type { OpencodeHookEvent } from './types';
 import type { OpencodeHookServer } from './utils/startOpencodeHookServer';
 import { createOpencodeStorageScanner, type OpencodeStorageScannerHandle } from './utils/opencodeStorageScanner';
@@ -205,6 +206,9 @@ export async function opencodeLocalLauncher(
         startingMode: session.startingMode,
         launch: async (abortSignal) => {
             const env = buildOpencodeEnv();
+            // Propagate the resolved peer-tools switch onto the local agent
+            // process (see createOpencodeBackend for rationale).
+            Object.assign(env, peerToolsEnvOverlay(session.client.peerToolsDisabled ?? isPeerToolsDisabled()));
             env.HAPI_OPENCODE_HOOK_URL = hookUrl;
             env.HAPI_OPENCODE_HOOK_TOKEN = opts.hookServer.token;
             if (!env.OPENCODE_CONFIG_DIR) {

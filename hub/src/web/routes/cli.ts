@@ -8,6 +8,7 @@ import {
     PROTOCOL_VERSION
 } from '@hapi/protocol'
 import { getConfiguration } from '../../configuration'
+import { readDisablePeerToolsEnabled } from '../../config/disablePeerTools'
 import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
 import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
@@ -139,7 +140,10 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
                     parsed.data.modelReasoningEffort,
                     parsed.data.id
                 )
-            return c.json({ session })
+            const disablePeerTools = await readDisablePeerToolsEnabled(
+                getConfiguration().dataDir
+            )
+            return c.json({ session, disablePeerTools })
         } catch (error) {
             if (error instanceof SessionIdentityConflictError) {
                 return c.json({ error: error.message }, 409)
@@ -260,7 +264,10 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
         if (!resolved.ok) {
             return c.json({ error: resolved.error }, resolved.status)
         }
-        return c.json({ session: resolved.session })
+        const disablePeerTools = await readDisablePeerToolsEnabled(
+            getConfiguration().dataDir
+        )
+        return c.json({ session: resolved.session, disablePeerTools })
     })
 
     app.get('/sessions/:id/messages', (c) => {

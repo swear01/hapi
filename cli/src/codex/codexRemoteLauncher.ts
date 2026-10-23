@@ -17,6 +17,7 @@ import type { QueueReservation } from '@/utils/MessageQueue2';
 import { hasCodexCliOverrides } from './utils/codexCliOverrides';
 import { AppServerEventConverter } from './utils/appServerEventConverter';
 import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
+import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import {
     buildThreadStartParams,
@@ -253,7 +254,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     constructor(session: CodexSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
-        this.appServerClient = new CodexAppServerClient();
+        this.appServerClient = new CodexAppServerClient({
+            // Session-pinned peer-tools overlay: the app-server child resolves
+            // the switch from this session's create-time snapshot, not the
+            // runner process's latest module state.
+            env: withPeerToolsPreference(session.client.peerToolsDisabled ?? isPeerToolsDisabled())
+        });
     }
 
     protected createDisplay(context: RemoteLauncherDisplayContext): React.ReactElement {

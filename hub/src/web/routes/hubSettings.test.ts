@@ -24,7 +24,7 @@ async function createApp(namespace = 'default') {
 describe('GET/PUT /api/hub-settings', () => {
     it('persists the chat display toggle', async () => {
         const app = await createApp()
-        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: false })
+        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: false, disablePeerTools: false })
 
         const put = await app.request('/api/hub-settings', {
             method: 'PUT',
@@ -32,8 +32,20 @@ describe('GET/PUT /api/hub-settings', () => {
             body: JSON.stringify({ sessionSummaryInChat: true })
         })
         expect(put.status).toBe(200)
-        expect(await put.json()).toEqual({ sessionSummaryInChat: true })
-        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: true })
+        expect(await put.json()).toEqual({ sessionSummaryInChat: true, disablePeerTools: false })
+        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: true, disablePeerTools: false })
+    })
+
+    it('persists the peer-tools toggle alone without touching chat display', async () => {
+        const app = await createApp()
+        const put = await app.request('/api/hub-settings', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ disablePeerTools: true })
+        })
+        expect(put.status).toBe(200)
+        expect(await put.json()).toEqual({ sessionSummaryInChat: false, disablePeerTools: true })
+        expect(await (await app.request('/api/hub-settings')).json()).toEqual({ sessionSummaryInChat: false, disablePeerTools: true })
     })
 
     it('rejects removed prompt injection settings', async () => {
