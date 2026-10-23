@@ -1244,7 +1244,7 @@ export class SyncEngine {
 
     /**
      * Ask the CLI to deliver one waiting-queue message into the active turn
-     * (native steer). Supported for Claude, Pi, Codex, and Cursor ACP sessions; the
+     * (native steer). Supported for Claude, Pi, Codex, OpenCode, and Cursor ACP sessions; the
      * CLI's `steer-queued-message` handler is registered per flavor. Legacy
      * stream-json Cursor sessions and other flavors are rejected by the
      * capability gate.
@@ -1258,31 +1258,31 @@ export class SyncEngine {
             return { status: 'failed', error: 'Session not found', localId: null }
         }
         if (!isSteeringSupportedForSession(session.metadata)) {
-            return { status: 'failed', error: 'Steering is only supported for Claude, Pi, Codex, and Cursor ACP sessions', localId: null }
+            return { status: 'failed', error: 'Steering is only supported for Claude, Pi, Codex, OpenCode, and Cursor ACP sessions', localId: null }
         }
         if (session.agentState?.controlledByUser === true && !session.metadata?.capabilities?.concurrentClients) {
             return { status: 'failed', error: 'Steering is only available for remote sessions', localId: null }
         }
 
+        const invokedResponse = (message: DecryptedMessage): SteerQueuedMessageResponse => ({
+            status: 'invoked',
+            message: {
+                id: message.id,
+                seq: message.seq,
+                localId: message.localId,
+                content: message.content,
+                createdAt: message.createdAt,
+                invokedAt: message.invokedAt,
+                scheduledAt: message.scheduledAt,
+                ...(message.steered ? { steered: true } : {})
+            }
+        })
         const lookup = this.store.messages.lookupQueuedMessage(sessionId, messageId)
         if (lookup.status === 'absent') {
             return { status: 'failed', error: 'Message not found', localId: null }
         }
         if (lookup.status === 'invoked') {
-            const message = lookup.message
-            return {
-                status: 'invoked',
-                message: {
-                    id: message.id,
-                    seq: message.seq,
-                    localId: message.localId,
-                    content: message.content,
-                    createdAt: message.createdAt,
-                    invokedAt: message.invokedAt,
-                    scheduledAt: message.scheduledAt,
-                    ...(message.steered ? { steered: true } : {})
-                }
-            }
+            return invokedResponse(lookup.message)
         }
         const { localId, scheduledAt } = lookup
         if (!localId) {
@@ -1295,20 +1295,21 @@ export class SyncEngine {
             return { status: 'failed', error: 'Scheduled messages cannot be steered', localId }
         }
 
+        let failure: string
         try {
             const result = await this.rpcGateway.steerQueuedMessage(sessionId, localId)
             if (result.steered) {
                 return { status: 'steered', localId }
             }
-            return {
-                status: 'failed',
-                error: result.error ?? 'Steer failed',
-                localId
-            }
+            failure = result.error ?? 'Steer failed'
         } catch (error) {
-            const message = error instanceof Error ? error.message : 'Steer failed'
-            return { status: 'failed', error: message, localId }
+            failure = error instanceof Error ? error.message : 'Steer failed'
         }
+        // The consumed event can win the race against an RPC error or stale
+        // negative reply. Persisted invocation is authoritative in either case.
+        const current = this.store.messages.lookupQueuedMessage(sessionId, messageId)
+        if (current.status === 'invoked') return invokedResponse(current.message)
+        return { status: 'failed', error: failure, localId }
     }
 
     sweepImmediateQueuedOnSessionEnd(sessionId: string, invokedAt: number): void {
