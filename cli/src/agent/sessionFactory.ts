@@ -406,6 +406,7 @@ export async function bootstrapExistingSession(options: {
     metadataOverrides?: Partial<Metadata>
     /** Derived from the persisted row before `metadataOverrides` replace it. */
     deriveMetadata?: (current: Metadata | null | undefined) => Partial<Metadata>
+    requireMetadataFlush?: (metadata: Metadata | null | undefined) => boolean
 }): Promise<SessionBootstrapResult> {
     await ensureHapiSessionControlSkill(options.flavor, options.workingDirectory)
     const startedBy = options.startedBy ?? 'terminal'
@@ -454,6 +455,9 @@ export async function bootstrapExistingSession(options: {
 
     const session = api.sessionSyncClient(sessionInfo)
     session.updateMetadata(buildUpdatedMetadata)
+    if (options.requireMetadataFlush?.(sessionInfo.metadata) && !await session.flushMetadata()) {
+        throw new Error('Unable to persist existing-session metadata')
+    }
 
     if (options.exportSessionEnv !== false) exportHapiSessionEnv(sessionInfo.id)
 
