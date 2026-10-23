@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     PingPeerError,
     controlPeer,
@@ -455,5 +455,36 @@ describe('peer lifecycle operations', () => {
         expect(exitCodeForPingPeerError(new PingPeerError('remit_conflict', 'x'))).toBe(2)
         expect(exitCodeForPingPeerError(new PingPeerError('resume_failed', 'x'))).toBe(3)
         expect(exitCodeForPingPeerError(new PingPeerError('timeout', 'x'))).toBe(4)
+    })
+})
+
+
+describe('HAPI_DISABLE_PEER_TOOLS kill switch', () => {
+    const original = process.env.HAPI_DISABLE_PEER_TOOLS
+
+    beforeEach(() => {
+        process.env.HAPI_DISABLE_PEER_TOOLS = '1'
+    })
+
+    afterEach(() => {
+        if (original === undefined) {
+            delete process.env.HAPI_DISABLE_PEER_TOOLS
+        } else {
+            process.env.HAPI_DISABLE_PEER_TOOLS = original
+        }
+    })
+
+    it('pingPeer refuses before any network call', async () => {
+        await expect(pingPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2', message: 'hi' }))
+            .rejects.toMatchObject({ code: 'disabled' })
+    })
+
+    it('inspectPeer refuses before any network call', async () => {
+        await expect(inspectPeer({ sessionId: '05d9f0f2-9273-4137-933c-07459a1146a2' }))
+            .rejects.toMatchObject({ code: 'disabled' })
+    })
+
+    it('maps the disabled code to the usage exit code', () => {
+        expect(exitCodeForPingPeerError(new PingPeerError('disabled', 'disabled on this machine'))).toBe(2)
     })
 })
