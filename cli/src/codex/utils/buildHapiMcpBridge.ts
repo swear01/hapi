@@ -107,8 +107,10 @@ export async function buildHapiMcpBridge(
             approval_mode: 'prompt'
         }
     };
-    // Skipped under HAPI_DISABLE_PEER_TOOLS (tool is not registered then).
-    if (!isPeerToolsDisabled()) {
+    // Skipped when this session's peer tools are disabled (create-time
+    // snapshot first: later bootstraps in the same process must not flip an
+    // already-built bridge).
+    if (!(client.peerToolsDisabled ?? isPeerToolsDisabled())) {
         tools.spawn_peer = {
             approval_mode: 'prompt'
         };

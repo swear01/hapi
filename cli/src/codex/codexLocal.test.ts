@@ -149,6 +149,69 @@ describe('codexLocal', () => {
         expect(args.some((arg) => arg.includes('developer_instructions'))).toBe(false);
     });
 
+    it('pins the session peer-tools snapshot into the child env (#2056)', async () => {
+        const controller = new AbortController();
+
+        await codexLocal({
+            abort: controller.signal,
+            sessionId: null,
+            path: workspacePath,
+            onSessionFound: vi.fn(),
+            peerToolsDisabled: true
+        });
+
+        expect(spawnWithTerminalGuardMock).toHaveBeenCalledOnce();
+        const spawnOptions = spawnWithTerminalGuardMock.mock.calls[0][0] as {
+            env: Record<string, string | undefined>;
+            args: string[];
+        };
+        // A fresh `hapi ping-peer` in the agent's shell resolves the pinned
+        // value, not the wrapper process's module memory.
+        expect(spawnOptions.env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
+    });
+
+    it('pins enabled sessions explicitly so a later global flip cannot rewrite their child (#2056)', async () => {
+        const controller = new AbortController();
+
+        await codexLocal({
+            abort: controller.signal,
+            sessionId: null,
+            path: workspacePath,
+            onSessionFound: vi.fn(),
+            peerToolsDisabled: false
+        });
+
+        const spawnOptions = spawnWithTerminalGuardMock.mock.calls[0][0] as {
+            env: Record<string, string | undefined>;
+            args: string[];
+        };
+        expect(spawnOptions.env.HAPI_DISABLE_PEER_TOOLS).toBe('0');
+    });
+
+    it('keeps a machine-level env override authoritative over the session snapshot (#2056)', async () => {
+        const original = process.env.HAPI_DISABLE_PEER_TOOLS;
+        process.env.HAPI_DISABLE_PEER_TOOLS = '1';
+        try {
+            const controller = new AbortController();
+            await codexLocal({
+                abort: controller.signal,
+                sessionId: null,
+                path: workspacePath,
+                onSessionFound: vi.fn(),
+                peerToolsDisabled: false
+            });
+            const spawnOptions = spawnWithTerminalGuardMock.mock.calls[0][0] as {
+                env: Record<string, string | undefined>;
+                args: string[];
+            };
+            // No session overlay: the deploy-time env inherits unchanged.
+            expect(spawnOptions.env.HAPI_DISABLE_PEER_TOOLS).toBe('1');
+        } finally {
+            if (original === undefined) delete process.env.HAPI_DISABLE_PEER_TOOLS;
+            else process.env.HAPI_DISABLE_PEER_TOOLS = original;
+        }
+    });
+
     it('passes reasoning effort through Codex config instead of an unsupported CLI flag', async () => {
         const controller = new AbortController();
 

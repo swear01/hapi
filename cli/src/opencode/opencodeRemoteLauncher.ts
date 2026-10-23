@@ -214,12 +214,14 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         const backend = isV2
             ? createOpencodeBackend({
                 cwd: session.path,
-                majorVersion: 'v2' as OpencodeFlavorVersion
+                majorVersion: 'v2' as OpencodeFlavorVersion,
+                peerToolsDisabled: session.client.peerToolsDisabled
             })
             : createOpencodeBackend({
                 cwd: session.path,
                 port: v1Port!,
-                hostname
+                hostname,
+                peerToolsDisabled: session.client.peerToolsDisabled
             });
         this.backend = backend;
         registerAcpSessionTitleSync(backend, session.client);

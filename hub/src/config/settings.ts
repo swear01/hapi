@@ -47,6 +47,12 @@ export interface Settings {
      */
     sessionSummaryInChat?: boolean
     /**
+     * When true, CLI hides the peer-session MCP tools (`inspect_peer` /
+     * `ping_peer` / `spawn_peer`) from wrapped agents in new sessions.
+     * Default off.
+     */
+    disablePeerTools?: boolean
+    /**
      * Hub-side provider API keys / endpoints managed from Settings.
      * Env vars still win when set at process start (ops override).
      */

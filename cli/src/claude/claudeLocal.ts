@@ -3,6 +3,7 @@ import { logger } from "@/ui/logger";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
 import { getProjectPath } from "./utils/path";
 import { appendMcpConfigArg } from "./utils/mcpConfig";
+import { isPeerToolsDisabled, peerToolsEnvOverlay } from '@/modules/common/peerTools';
 import { withBunRuntimeEnv } from "@/utils/bunRuntime";
 import { spawnWithTerminalGuard } from "@/utils/spawnWithTerminalGuard";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
@@ -35,6 +36,7 @@ export async function claudeLocal(opts: {
     mcpServers?: Record<string, any>,
     path: string,
     claudeEnvVars?: Record<string, string>,
+    peerToolsDisabled?: boolean
     claudeArgs?: string[]
     model?: SessionModel
     allowedTools?: string[]
@@ -107,9 +109,16 @@ export async function claudeLocal(opts: {
     // excludes the session from `claude --resume`. Destructure it out
     // so the child uses its own default entrypoint.
     const { CLAUDE_CODE_ENTRYPOINT: _, ...cleanEnv } = process.env
+    const peerToolsDisabled = opts.peerToolsDisabled ?? isPeerToolsDisabled();
     const env = {
         ...cleanEnv,
         DISABLE_AUTOUPDATER: '1',
+        // Propagate the resolved peer-tools switch into the wrapped-agent env:
+        // shells spawning `hapi ping-peer` lose the wrapper's module memory,
+        // so the preference must travel as an explicit env value. Explicit
+        // claudeEnvVars still win; machine-level HAPI_DISABLE_PEER_TOOLS stays
+        // authoritative inside peerToolsEnvOverlay.
+        ...peerToolsEnvOverlay(peerToolsDisabled),
         ...opts.claudeEnvVars
     }
 

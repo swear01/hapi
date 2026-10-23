@@ -326,9 +326,13 @@ hapi runner start
 
 Session CLI may export an **explicit** non-default `HAPI_API_URL` (from env or settings) into child env so shell helpers hit the same remote hub. It does **not** mirror `CLI_API_TOKEN` into wrapped agents (a fresh `hapi` re-reads `~/.hapi/settings.json`, and systemd/env tokens already inherit). Web terminal PTYs still strip hub secrets.
 
-##### Disabling peer tools on a runner
+##### Disabling peer tools
 
-Set `HAPI_DISABLE_PEER_TOOLS=1` (also `true`/`yes`) in the runner environment to stop wrapped agents from reading or messaging other HAPI sessions. The `inspect_peer` / `ping_peer` / `spawn_peer` MCP tools are then not registered and not passed to `--allowedTools` / `--tools`, and `hapi ping-peer` / `hapi inspect-peer` fail with a `disabled` error, including from an agent's shell. Scope the variable to the runner (systemd unit, launchd plist, or runner guard script); an interactive terminal without it keeps full CLI access.
+Hub owners can hide the peer tools for new sessions on every runner from **Settings → General → Peer session tools**. Running sessions keep their tool set; no restart is needed.
+
+To pin one runner regardless of the hub setting, set `HAPI_DISABLE_PEER_TOOLS` in its environment (systemd unit, launchd plist, or runner guard script). Any non-empty value decides for that runner: `0` / `false` / `off` / `no` keeps the tools; any other value disables them. When it is unset or empty, the hub setting decides; the default is tools available.
+
+When disabled, the `inspect_peer` / `ping_peer` / `spawn_peer` MCP tools are not registered or passed to `--allowedTools` / `--tools`, and `hapi ping-peer` / `inspect-peer` / `spawn-peer` fail with a `disabled` error from an agent's shell. The hub setting never reaches an operator's interactive terminal, so terminal commands keep working there unless the variable is exported globally.
 
 Additional runner commands:
 

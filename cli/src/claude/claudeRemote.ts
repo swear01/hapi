@@ -8,6 +8,7 @@ import { logger } from "@/lib";
 import { PushableAsyncIterable } from "@/utils/PushableAsyncIterable";
 import { getProjectPath } from "./utils/path";
 import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
+import { isPeerToolsDisabled, withPeerToolsPreference } from '@/modules/common/peerTools';
 import { PermissionResult } from "./sdk/types";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
@@ -30,6 +31,7 @@ export async function claudeRemote(opts: {
     path: string,
     mcpServers?: Record<string, any>,
     claudeEnvVars?: Record<string, string>,
+    peerToolsDisabled?: boolean,
     claudeArgs?: string[],
     allowedTools: string[],
     hookSettingsPath: string,
@@ -262,7 +264,16 @@ export async function claudeRemote(opts: {
 
     // Prepare SDK options. For --fork-session, start query() before waiting for the
     // first child prompt so the native fork materializes at the clicked source state.
+    // Snapshot (env > this session's bootstrap): must not flip when a later
+    // session in this process bootstraps with another preference.
+    const peerToolsDisabled = opts.peerToolsDisabled ?? isPeerToolsDisabled();
     const sdkOptions: Options = {
+        // Propagate the resolved peer-tools switch onto the spawned Claude
+        // process so shells running `hapi ping-peer` resolve it without the
+        // wrapper's module memory. Machine-level env overrides stay
+        // authoritative inside peerToolsEnvOverlay; claudeEnvVars (applied to
+        // this process below) may still win explicitly.
+        env: withPeerToolsPreference(peerToolsDisabled),
         additionalArgs: filterCatalogAffectingClaudeArgs(opts.claudeArgs),
         cwd: opts.path,
         resume: startFrom ?? undefined,
