@@ -12,11 +12,13 @@ import { randomUUID } from 'node:crypto'
 import { extractAssistantPlainText, getPermissionModesForFlavor, isObject } from '@hapi/protocol'
 import { normalizeSessionIdPrefix } from '@hapi/protocol/sessionCitation'
 import { configuration } from '@/configuration'
+import { isPeerToolsDisabled } from '@/modules/common/peerTools'
 import { getAuthToken } from '@/api/auth'
 import { buildHubRequestHeaders } from '@/api/hubExtraHeaders'
 
 export type PingPeerErrorCode =
     | 'bad_args'
+    | 'disabled'
     | 'auth_failed'
     | 'not_found'
     | 'resume_failed'
@@ -36,6 +38,20 @@ export class PingPeerError extends Error {
         this.name = 'PingPeerError'
         this.code = code
         this.remitId = remitId
+    }
+}
+
+/**
+ * Defense-in-depth gate for HAPI_DISABLE_PEER_TOOLS: the MCP server and CLI
+ * surface refuse earlier, but any other caller (stale --tools bridge, shell
+ * `hapi ping-peer` from a wrapped agent) lands here and fails loudly.
+ */
+function assertPeerToolsEnabled(): void {
+    if (isPeerToolsDisabled()) {
+        throw new PingPeerError(
+            'disabled',
+            'peer session tools are disabled on this machine (HAPI_DISABLE_PEER_TOOLS is set)'
+        )
     }
 }
 
@@ -337,6 +353,7 @@ export function resolvePeerSessionLabel(session: PingPeerSessionSummary): string
 }
 
 export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult> {
+    assertPeerToolsEnabled()
     const sessionId = requireExactSessionId(options.sessionId)
     const message = options.message ?? ''
     if (!message) {
@@ -413,6 +430,7 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
 export function exitCodeForPingPeerError(error: PingPeerError): number {
     switch (error.code) {
         case 'bad_args':
+        case 'disabled':
         case 'auth_failed':
         case 'not_found':
         case 'remit_conflict':
@@ -569,6 +587,7 @@ async function fetchSessionMessages(
  * Read-only: never resumes inactive sessions (unlike `pingPeer`).
  */
 export async function inspectPeer(options: InspectPeerOptions): Promise<InspectPeerResult> {
+    assertPeerToolsEnabled()
     const sessionId = requireExactSessionId(options.sessionId)
     const messageLimit = clampInspectMessageLimit(options.messageLimit)
 

@@ -9,6 +9,7 @@ import { startHappyServer } from '@/claude/utils/startHappyServer';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv';
+import { isPeerToolsDisabled } from '@/modules/common/peerTools';
 import type { CodexMcpServerConfig } from './codexMcpServers';
 
 /**
@@ -104,11 +105,14 @@ export async function buildHapiMcpBridge(
         },
         display_media: {
             approval_mode: 'prompt'
-        },
-        spawn_peer: {
-            approval_mode: 'prompt'
         }
     };
+    // Skipped under HAPI_DISABLE_PEER_TOOLS (tool is not registered then).
+    if (!isPeerToolsDisabled()) {
+        tools.spawn_peer = {
+            approval_mode: 'prompt'
+        };
+    }
     if (options.enableChangeTitle !== false) {
         tools.change_title = {
             approval_mode: 'approve'

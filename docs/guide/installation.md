@@ -326,6 +326,10 @@ hapi runner start
 
 Session CLI may export an **explicit** non-default `HAPI_API_URL` (from env or settings) into child env so shell helpers hit the same remote hub. It does **not** mirror `CLI_API_TOKEN` into wrapped agents (a fresh `hapi` re-reads `~/.hapi/settings.json`, and systemd/env tokens already inherit). Web terminal PTYs still strip hub secrets.
 
+##### Disabling peer tools on a runner
+
+Set `HAPI_DISABLE_PEER_TOOLS=1` (also `true`/`yes`) in the runner environment to stop wrapped agents from reading or messaging other HAPI sessions. The `inspect_peer` / `ping_peer` / `spawn_peer` MCP tools are then not registered and not passed to `--allowedTools` / `--tools`, and `hapi ping-peer` / `hapi inspect-peer` fail with a `disabled` error, including from an agent's shell. Scope the variable to the runner (systemd unit, launchd plist, or runner guard script); an interactive terminal without it keeps full CLI access.
+
 Additional runner commands:
 
 ```bash

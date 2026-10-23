@@ -21,6 +21,7 @@ import {
 import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
 import { resolveSkill } from "@/modules/common/skills";
 import { SESSION_NAME_MAX_LENGTH } from '@hapi/protocol'
+import { isPeerToolsDisabled, PEER_TOOL_NAMES } from "@/modules/common/peerTools";
 import {
     INSPECT_PEER_TOOL_DESCRIPTION,
     PING_PEER_TOOL_DESCRIPTION,
@@ -142,6 +143,10 @@ function createHapiMcpServer(
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
+
+    // HAPI_DISABLE_PEER_TOOLS=1: peer tools are neither registered nor
+    // advertised, so wrapped agents cannot browse or message other sessions.
+    const peerToolsDisabled = isPeerToolsDisabled();
 
     const inspectPeerInputSchema: z.ZodTypeAny = z.object({
         sessionId: z.string().uuid().describe(SESSION_ID_PARAM_DESCRIPTION),
@@ -314,148 +319,150 @@ function createHapiMcpServer(
         }
     });
 
-    mcp.registerTool<any, any>('ping_peer', {
-        description: PING_PEER_TOOL_DESCRIPTION,
-        title: 'Ping Peer Session',
-        inputSchema: pingPeerInputSchema,
-    }, async (args: { sessionId: string; message: string; remitId?: string }) => {
-        logger.debug('[hapiMCP] ping_peer:', args.sessionId);
-        try {
-            const result = await pingPeer({
-                sessionId: args.sessionId,
-                message: args.message,
-                remitId: args.remitId,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Delivered to ${result.sessionId} remit=${result.remitId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof PingPeerError
-                ? error.message
-                : error instanceof Error
+    if (!peerToolsDisabled) {
+        mcp.registerTool<any, any>('ping_peer', {
+            description: PING_PEER_TOOL_DESCRIPTION,
+            title: 'Ping Peer Session',
+            inputSchema: pingPeerInputSchema,
+        }, async (args: { sessionId: string; message: string; remitId?: string }) => {
+            logger.debug('[hapiMCP] ping_peer:', args.sessionId);
+            try {
+                const result = await pingPeer({
+                    sessionId: args.sessionId,
+                    message: args.message,
+                    remitId: args.remitId,
+                });
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: `Delivered to ${result.sessionId} remit=${result.remitId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
+                        },
+                    ],
+                    isError: false,
+                };
+            } catch (error) {
+                const message = error instanceof PingPeerError
                     ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] ping_peer failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: error instanceof PingPeerError
-                            && error.remitId
-                            && error.code !== 'remit_conflict'
-                            ? `Failed to ping peer: ${message}; retry ping_peer with remitId=${error.remitId}`
-                            : `Failed to ping peer: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
+                    : error instanceof Error
+                        ? error.message
+                        : String(error);
+                logger.debug('[hapiMCP] ping_peer failed:', message);
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: error instanceof PingPeerError
+                                && error.remitId
+                                && error.code !== 'remit_conflict'
+                                ? `Failed to ping peer: ${message}; retry ping_peer with remitId=${error.remitId}`
+                                : `Failed to ping peer: ${message}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        });
 
-    mcp.registerTool<any, any>('spawn_peer', {
-        description: SPAWN_PEER_TOOL_DESCRIPTION,
-        title: 'Spawn Peer Session',
-        inputSchema: spawnPeerInputSchema,
-    }, async (args: {
-        directory: string
-        message: string
-        name?: string
-        machineId?: string
-        agent?: string
-        model?: string
-        effort?: string
-        sessionType?: 'simple' | 'worktree'
-        permissionMode?: string
-        remitId?: string
-    }) => {
-        logger.debug('[hapiMCP] spawn_peer:', args.directory);
-        try {
-            const result = await spawnPeer({
-                directory: args.directory,
-                message: args.message,
-                name: args.name,
-                machineId: args.machineId,
-                agent: args.agent as Parameters<typeof spawnPeer>[0]['agent'],
-                model: args.model,
-                effort: args.effort,
-                sessionType: args.sessionType,
-                permissionMode: args.permissionMode as Parameters<typeof spawnPeer>[0]['permissionMode'],
-                remitId: args.remitId,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Spawned ${result.sessionId} remit=${result.remitId} (${result.name})`,
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof SpawnPeerError
-                ? error.message
-                : error instanceof Error
+        mcp.registerTool<any, any>('spawn_peer', {
+            description: SPAWN_PEER_TOOL_DESCRIPTION,
+            title: 'Spawn Peer Session',
+            inputSchema: spawnPeerInputSchema,
+        }, async (args: {
+            directory: string
+            message: string
+            name?: string
+            machineId?: string
+            agent?: string
+            model?: string
+            effort?: string
+            sessionType?: 'simple' | 'worktree'
+            permissionMode?: string
+            remitId?: string
+        }) => {
+            logger.debug('[hapiMCP] spawn_peer:', args.directory);
+            try {
+                const result = await spawnPeer({
+                    directory: args.directory,
+                    message: args.message,
+                    name: args.name,
+                    machineId: args.machineId,
+                    agent: args.agent as Parameters<typeof spawnPeer>[0]['agent'],
+                    model: args.model,
+                    effort: args.effort,
+                    sessionType: args.sessionType,
+                    permissionMode: args.permissionMode as Parameters<typeof spawnPeer>[0]['permissionMode'],
+                    remitId: args.remitId,
+                });
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: `Spawned ${result.sessionId} remit=${result.remitId} (${result.name})`,
+                        },
+                    ],
+                    isError: false,
+                };
+            } catch (error) {
+                const message = error instanceof SpawnPeerError
                     ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] spawn_peer failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: error instanceof SpawnPeerError && error.remitId
-                            ? `Failed to spawn peer: ${message}; retry spawn_peer with remitId=${error.remitId}`
-                            : `Failed to spawn peer: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
+                    : error instanceof Error
+                        ? error.message
+                        : String(error);
+                logger.debug('[hapiMCP] spawn_peer failed:', message);
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: error instanceof SpawnPeerError && error.remitId
+                                ? `Failed to spawn peer: ${message}; retry spawn_peer with remitId=${error.remitId}`
+                                : `Failed to spawn peer: ${message}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        });
 
-    mcp.registerTool<any, any>('inspect_peer', {
-        description: INSPECT_PEER_TOOL_DESCRIPTION,
-        title: 'Inspect Peer Session',
-        inputSchema: inspectPeerInputSchema,
-    }, async (args: { sessionId: string; messageLimit?: number }) => {
-        logger.debug('[hapiMCP] inspect_peer:', args.sessionId);
-        try {
-            const result = await inspectPeer({
-                sessionId: args.sessionId,
-                messageLimit: args.messageLimit,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: formatInspectPeerReport(result),
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof PingPeerError
-                ? error.message
-                : error instanceof Error
+        mcp.registerTool<any, any>('inspect_peer', {
+            description: INSPECT_PEER_TOOL_DESCRIPTION,
+            title: 'Inspect Peer Session',
+            inputSchema: inspectPeerInputSchema,
+        }, async (args: { sessionId: string; messageLimit?: number }) => {
+            logger.debug('[hapiMCP] inspect_peer:', args.sessionId);
+            try {
+                const result = await inspectPeer({
+                    sessionId: args.sessionId,
+                    messageLimit: args.messageLimit,
+                });
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: formatInspectPeerReport(result),
+                        },
+                    ],
+                    isError: false,
+                };
+            } catch (error) {
+                const message = error instanceof PingPeerError
                     ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] inspect_peer failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Failed to inspect peer: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
+                    : error instanceof Error
+                        ? error.message
+                        : String(error);
+                logger.debug('[hapiMCP] inspect_peer failed:', message);
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: `Failed to inspect peer: ${message}`,
+                        },
+                    ],
+                    isError: true,
+                };
+            }
+        });
+    }
 
     if (skillLookup) {
         mcp.registerTool<any, any>('skill_lookup', {
@@ -576,9 +583,13 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
         hapiMcpUrl: mcpUrl,
     }));
 
-    const toolNames = enableChangeTitle
-        ? ['change_title', 'display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer']
-        : ['display_image', 'display_video', 'display_media', 'ping_peer', 'inspect_peer', 'spawn_peer'];
+    const toolNames = [
+        ...(enableChangeTitle ? ['change_title'] : []),
+        'display_image',
+        'display_video',
+        'display_media',
+        ...(isPeerToolsDisabled() ? [] : PEER_TOOL_NAMES),
+    ];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
     }

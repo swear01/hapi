@@ -39,7 +39,7 @@ hapi wait-peer <session-id> --remit-id <remit-id> --json
 
 The Hub owns namespace, freshness, and lifecycle invariants. `spawn-peer` always creates a new session and delivers its first message through one atomic Hub operation; failures trigger compensating stop/archive cleanup. Existing-session commands accept only exact UUIDs. HAPI ships the session-control skill and installs it on the runtime's execution host before session registration; no HAPI workflow prose is injected into launch prompts.
 
-Use `hapi machines --json` to discover runner targets. MCP `inspect_peer`, `ping_peer`, and `spawn_peer` work within the session's hub and namespace, including from remote runner hosts. See [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-session-control).
+Use `hapi machines --json` to discover runner targets. MCP `inspect_peer`, `ping_peer`, and `spawn_peer` work within the session's hub and namespace, including from remote runner hosts. See [Installation → Split hub + remote runner](./installation.md#split-hub-remote-runner-session-control). Runners that must keep agents out of other sessions can hide all three with `HAPI_DISABLE_PEER_TOOLS=1` - see [Installation → Disabling peer tools](./installation.md#disabling-peer-tools-on-a-runner).
 
 ### HAPI Hub
 
