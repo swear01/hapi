@@ -34,6 +34,7 @@ import {
 } from '@/lib/sessionReference'
 import { SessionRowSummary } from '@/components/SessionRowSummary'
 import type { SessionSummary } from '@/types/api'
+import { parseSessionMentionDrag, SESSION_MENTION_DRAG_MIME } from '@/lib/sessionMentionDrag'
 
 export type RichComposerInputHandle = {
     focus: () => void
@@ -76,6 +77,7 @@ type Props = {
     onPaste?: (e: ReactClipboardEvent<HTMLDivElement>) => void
     onFocus?: (e: ReactFocusEvent<HTMLDivElement>) => void
     onEdit?: () => void
+    onSessionMentionDrop?: (mention: { id: string; title: string }) => void
     /** Live session meta for chip hover / aria-label (from useSessions). */
     resolveSessionMentionTooltip?: ResolveSessionMentionTooltip
 }
@@ -687,6 +689,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         onPaste,
         onFocus,
         onEdit,
+        onSessionMentionDrop,
         resolveSessionMentionTooltip,
     },
     ref
@@ -1028,6 +1031,19 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         insertPlainClipboardText(e.clipboardData?.getData('text/plain') ?? '')
     }, [insertPlainClipboardText, onPaste])
 
+    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        if (disabled || !e.dataTransfer.types.includes(SESSION_MENTION_DRAG_MIME)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+    }, [disabled])
+
+    const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        const mention = parseSessionMentionDrag(e.dataTransfer)
+        if (!mention || disabled) return
+        e.preventDefault()
+        onSessionMentionDrop?.(mention)
+    }, [disabled, onSessionMentionDrop])
+
     const applyBackwardDelete = useCallback((
         root: HTMLElement,
         segments: readonly ComposerSegment[],
@@ -1068,8 +1084,7 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
         return () => root.removeEventListener('beforeinput', handleBeforeInput)
     }, [applyBackwardDelete, applyHistory, recordNativeEdit])
 
-    // No onDrop: intercepting without caretRangeFromPoint appends at EOF / no-ops
-    // in-editor moves. Native CE drop + plaintext-only / paste path is enough for #1215.
+    // Session drops use the current editor selection; without one, insertion falls back to EOF.
 
     const placeholderRef = useRef<HTMLDivElement>(null)
 
@@ -1200,6 +1215,8 @@ export const RichComposerInput = forwardRef<RichComposerInputHandle, Props>(func
                 onCopy={(e) => handleCopyOrCut(e, false)}
                 onCut={(e) => handleCopyOrCut(e, true)}
                 onPaste={handlePaste}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
                 onCompositionStart={() => {
                     const root = rootRef.current
                     if (root) recordUndo(segmentsFromEditor(root), getMirrorSelection(root))
