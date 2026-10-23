@@ -1551,6 +1551,8 @@ function SessionItem(props: {
                     isOpen={true}
                     onClose={() => setRenameOpen(false)}
                     currentName={sessionName}
+                    currentTitleLocked={s.metadata?.titleLocked === true}
+                    sessionId={s.id}
                     onRename={renameSession}
                     onSuggestTitle={api && titleSuggestionAvailable ? suggestSessionTitle : undefined}
                     onUpdateSummary={api && titleSuggestionAvailable ? updateSessionSummary : undefined}
