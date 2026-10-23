@@ -92,6 +92,7 @@ function getUserSkillsRoots(flavor?: string): string[] {
         case 'kimi':
         case 'agy':
         case 'pi':
+        case 'dsh':
             roots.push(join(getAgentConfigDir(flavor), 'skills'));
             break;
     }
@@ -125,6 +126,7 @@ function getProjectSkillsRoots(directory: string, flavor?: string): string[] {
         case 'opencode':
         case 'kimi':
         case 'pi':
+        case 'dsh':
             roots.push(join(directory, `.${normalizeFlavor(flavor)}`, 'skills'));
             break;
     }
