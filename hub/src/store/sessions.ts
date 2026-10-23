@@ -3,6 +3,7 @@ import { prepareCached } from './statementCache'
 import { bumpSessionDeletionEpoch } from './sessionInvalidation'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { preserveSessionTitle } from './sessionTitleLock'
 
 import type { StoredSession, VersionedUpdateResult } from './types'
 import { safeJsonParse } from './json'
@@ -224,7 +225,7 @@ export function getOrCreateSession(
         }
     }
 
-    const metadataJson = JSON.stringify(metadata)
+    const metadataJson = JSON.stringify(preserveSessionTitle(null, metadata))
     const agentStateJson = agentState === null || agentState === undefined ? null : JSON.stringify(agentState)
 
     prepareCached(db, `
@@ -365,7 +366,7 @@ export function adoptPreallocatedSession(
         }
 
         const now = Date.now()
-        const metadataJson = JSON.stringify(metadata)
+        const metadataJson = JSON.stringify(preserveSessionTitle(existing.metadata, mergeSessionMetadata(existing.metadata, metadata)))
         const agentStateJson = agentState === null || agentState === undefined ? null : JSON.stringify(agentState)
         const stubTag = machineSpawnPreallocTag(id)
 
@@ -425,7 +426,7 @@ export function updateSessionMetadata(
     metadata: unknown,
     expectedVersion: number,
     namespace: string,
-    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean }
+    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; allowTitleUpdate?: boolean; titleLocked?: boolean; inheritTitleLockFrom?: string }
 ): VersionedUpdateResult<unknown | null> {
     const now = Date.now()
     const allowUnarchive = options?.allowUnarchive === true
@@ -438,7 +439,11 @@ export function updateSessionMetadata(
             }
 
             const prior = existing.metadata
-            let merged = mergeSessionMetadata(prior, metadata)
+            const sourceTitle = options?.inheritTitleLockFrom
+                ? getSessionByNamespace(db, options.inheritTitleLockFrom, namespace)?.metadata : null
+            const titleOwner = isPlainObject(prior) && prior.titleLocked === true ? prior
+                : isPlainObject(sourceTitle) && sourceTitle.titleLocked === true ? sourceTitle : prior
+            let merged = preserveSessionTitle(titleOwner, mergeSessionMetadata(prior, metadata), options)
 
             // #1911 M1: unauthorized un-archive of hub-archived rows.
             // Return success + merge-preserved archive fields — NOT version-mismatch
@@ -491,6 +496,7 @@ export function updateSessionMetadata(
             // that is refuse-in-place, not live adopt (#1911 M1).
             if (
                 result.result === 'success'
+                && !options?.allowTitleUpdate
                 && isMachineSpawnPreallocatedStub(existing)
                 && !isHubArchivedSessionMetadata(merged)
             ) {
