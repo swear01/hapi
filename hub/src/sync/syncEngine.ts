@@ -2306,6 +2306,10 @@ export class SyncEngine {
         this.releaseSessionEnumerations(sessionId)
     }
 
+    async deleteArchivedSessions(sessionIds: string[], namespace: string): Promise<void> {
+        await this.sessionCache.deleteArchivedSessions(sessionIds, namespace)
+    }
+
     async applySessionConfig(
         sessionId: string,
         config: {
