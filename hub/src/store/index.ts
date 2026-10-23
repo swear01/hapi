@@ -42,7 +42,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 27
+const SCHEMA_VERSION: number = 28
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -365,6 +365,7 @@ export class Store {
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
             26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
         })
 
         if (currentVersion === 0) {
@@ -553,6 +554,9 @@ export class Store {
                 last_output_tokens INTEGER,
                 last_cache_read_tokens INTEGER,
                 last_cache_creation_tokens INTEGER,
+                context_only INTEGER NOT NULL DEFAULT 0,
+                cost REAL,
+                cost_currency TEXT,
                 PRIMARY KEY (session_id, source_key),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -1000,6 +1004,27 @@ export class Store {
         if (messageColumns.size > 0 && !messageColumns.has('delivery_state')) {
             this.db.exec("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'")
         }
+    }
+
+    /** v27→v28 (#1468): ACP cost columns; usage is rebuilt from transcripts. */
+    private migrateFromV27ToV28(): void {
+        const usageColumns = new Set(
+            (this.db.prepare('PRAGMA table_info(usage_events)').all() as Array<{ name: string }>)
+                .map((column) => column.name)
+        )
+        if (!usageColumns.has('context_only')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN context_only INTEGER NOT NULL DEFAULT 0')
+        }
+        if (!usageColumns.has('cost')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost REAL')
+        }
+        if (!usageColumns.has('cost_currency')) {
+            this.db.exec('ALTER TABLE usage_events ADD COLUMN cost_currency TEXT')
+        }
+        this.db.exec(`
+            DELETE FROM usage_events;
+            DELETE FROM usage_scan_state;
+        `)
     }
 
     /** v25→v26: make empty immediate-queue heartbeat replay an indexed lookup. */
