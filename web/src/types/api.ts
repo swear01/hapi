@@ -44,6 +44,8 @@ export type {
     MessagesResponse,
     OpencodeModelsResponse,
     OpencodeModelSummary,
+    SessionReasoningEffortOption,
+    SessionReasoningEffortResponse,
     OpencodeModelVariantsResponse,
     PathExistsResponse,
     PiModelSummary,

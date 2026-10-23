@@ -51,6 +51,7 @@ import type {
     OpencodeModelsResponse,
     OpencodeModelVariantsResponse,
     OpencodeReasoningEffortResponse,
+    SessionReasoningEffortResponse,
     PiModelsResponse,
     ClaudeModelsResponse,
     QueuedStateResponse,
@@ -930,6 +931,12 @@ export class ApiClient {
     async getSessionOpencodeReasoningEffortOptions(sessionId: string): Promise<OpencodeReasoningEffortResponse> {
         return await this.request<OpencodeReasoningEffortResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/opencode-reasoning-effort-options`
+        )
+    }
+
+    async getSessionReasoningEffortOptions(sessionId: string): Promise<SessionReasoningEffortResponse> {
+        return await this.request<SessionReasoningEffortResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/reasoning-effort-options`
         )
     }
 
