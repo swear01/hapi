@@ -937,6 +937,7 @@ describe('archiveSession', () => {
                     markSessionArchivedFromHub: () => { events.push('archived') }
                 },
                 emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
+            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} },
                 handleSessionEnd: () => { events.push('ended') }
             }
             const result = SyncEngine.prototype.archiveSession.call(harness as unknown as SyncEngine, SESSION_ID)
@@ -959,6 +960,7 @@ describe('archiveSession', () => {
             rpcGateway: { killSession: async () => {} },
             sessionCache: { getSession: () => ({ metadata: {} }), markSessionArchivedFromHub },
             emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
+            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} },
             handleSessionEnd
         } as unknown as SyncEngine, SESSION_ID)
 
@@ -979,7 +981,8 @@ describe('deleteSession', () => {
             archiveSession: SyncEngine.prototype.archiveSession,
             rpcGateway: { killSession: async () => { throw new RpcTargetMissingError('killSession', 'socket-disconnected') }, stopRunnerSession },
             sessionCache: { deleteSession, getSession: () => ({ metadata: { machineId: 'machine-1', startedBy: 'runner', hostPid: 4242 } }), markSessionArchivedFromHub: () => {} },
-            emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {}, handleSessionEnd: () => {}
+            emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
+            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} }, handleSessionEnd: () => {}
         } as unknown as SyncEngine, SESSION_ID)
 
         expect(deleteSession).toHaveBeenCalledWith(SESSION_ID)
@@ -1008,7 +1011,8 @@ describe('deleteSession', () => {
                         deleteSession: mock(async () => { events.push('deleted') }),
                         getSession: () => ({ metadata: { machineId: 'machine-1', ...runnerMetadata } }), markSessionArchivedFromHub: () => {},
                     },
-                    emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {}, handleSessionEnd: () => {},
+                    emitCliSessionMetadataUpdate: () => {}, releaseSessionEnumerations: () => {},
+            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} }, handleSessionEnd: () => {},
                     store: { sessions: { getSession: () => undefined } }
                 }
                 const result = SyncEngine.prototype.deleteSession.call(harness as unknown as SyncEngine, SESSION_ID)
@@ -1033,7 +1037,8 @@ describe('deleteSession', () => {
             getSession: () => ({ active, metadata: { startedBy: active ? 'runner' : 'terminal' } }),
             stopSession,
             sessionCache: { deleteSession },
-            releaseSessionEnumerations: () => {}
+            releaseSessionEnumerations: () => {},
+            titleTurnCompletedIds: new Set(), automaticTitleSuggestionService: { forgetSession: () => {} }
         } as unknown as SyncEngine, SESSION_ID)
 
         if (active) {
