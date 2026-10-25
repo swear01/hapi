@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { SessionListScrollAnchor } from './SessionListScrollAnchor'
 import type { SessionSummary } from '@/types/api'
@@ -1070,12 +1070,17 @@ export function SessionListSearch(props: {
     )
 }
 
+// A row with an open menu or dialog holds its collapsed panel mounted.
+const CollapsiblePanelHoldContext = createContext<((held: boolean) => void) | null>(null)
+
 // Collapsed rows unmount after the close transition; mounted-but-hidden rows
 // would otherwise re-render on every session or machine update.
 function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
-    const [mounted, setMounted] = useState(props.open)
-    if (props.open && !mounted) {
-        setMounted(true)
+    const [settled, setSettled] = useState(!props.open)
+    const [holds, setHolds] = useState(0)
+    const hold = useCallback((held: boolean) => setHolds((count) => count + (held ? 1 : -1)), [])
+    if (props.open && settled) {
+        setSettled(false)
     }
     return (
         <div
@@ -1083,11 +1088,15 @@ function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
             data-open={props.open || undefined}
             onTransitionEnd={(event) => {
                 if (!props.open && event.target === event.currentTarget) {
-                    setMounted(false)
+                    setSettled(true)
                 }
             }}
         >
-            <div className="collapsible-inner">{mounted ? props.children : null}</div>
+            <div className="collapsible-inner">
+                <CollapsiblePanelHoldContext.Provider value={hold}>
+                    {!settled || holds > 0 ? props.children : null}
+                </CollapsiblePanelHoldContext.Provider>
+            </div>
         </div>
     )
 }
@@ -1158,6 +1167,13 @@ const SessionItem = memo(function SessionItem(props: {
         s.metadata?.flavor ?? null
     )
     const [reopenError, setReopenError] = useState<string | null>(null)
+    const holdPanel = useContext(CollapsiblePanelHoldContext)
+    const overlayOpen = menuOpen || renameOpen || exportOpen || archiveOpen || deleteOpen || reopenError !== null
+    useEffect(() => {
+        if (!overlayOpen || !holdPanel) return
+        holdPanel(true)
+        return () => holdPanel(false)
+    }, [overlayOpen, holdPanel])
 
     const handleSetPinMode = async (mode: 'none' | 'project' | 'global') => {
         try {

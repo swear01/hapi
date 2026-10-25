@@ -892,6 +892,30 @@ describe('SessionList collapse behavior', () => {
         expect(screen.queryByRole('button', { name: /Closed task/ })).toBeNull()
     })
 
+    it('keeps a collapsing row mounted while its rename dialog is open', () => {
+        const sessions = [makeSession({
+            id: 'session-closed',
+            updatedAt: 100,
+            metadata: { path: '/work/hapi', name: 'Closed task', flavor: 'codex' },
+        })]
+        render(renderSessionList(sessions, null))
+
+        const header = screen.getByTitle('/work/hapi')
+        fireEvent.click(header)
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Closed task/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+        expect(screen.getByRole('dialog', { name: 'Rename Session' })).toBeInTheDocument()
+
+        fireEvent.click(header)
+        const panel = document.querySelector('.collapsible-panel')!
+        fireEvent.transitionEnd(panel)
+        expect(screen.getByRole('dialog', { name: 'Rename Session' })).toBeInTheDocument()
+
+        fireEvent.keyDown(screen.getByRole('dialog', { name: 'Rename Session' }), { key: 'Escape' })
+        expect(screen.queryByRole('dialog', { name: 'Rename Session' })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Closed task/ })).toBeNull()
+    })
+
     it('expands and collapses the session preview one batch at a time', () => {
         localStorage.setItem('hapi-session-preview-limit', '2')
         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
