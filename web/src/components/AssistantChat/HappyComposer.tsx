@@ -55,6 +55,8 @@ import { ComposerParkingContext } from '@/components/AssistantChat/composerParki
 import type { ScratchlistParkResult } from '@/lib/scratchlistAttachmentFlow'
 import { useTranslation } from '@/lib/use-translation'
 import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
+import type { ModelOption } from './modelOptions'
+import { ChevronRightIcon } from '@/components/settings/SettingsPrimitives'
 import { getClaudeComposerEffortOptions } from './claudeEffortOptions'
 import { getCodexComposerReasoningEffortOptions } from './codexReasoningEffortOptions'
 import { getDisplayedCodexServiceTier } from './codexFastMode'
@@ -306,7 +308,7 @@ export function HappyComposer(props: {
     controlledByUser?: boolean
     concurrentClients?: boolean
     agentFlavor?: string | null
-    availableModelOptions?: Array<{ value: string | null; label: string }>
+    availableModelOptions?: ModelOption[]
     /** Full Pi model data with thinkingLevelMap for provider grouping + thinking level filtering */
     piModels?: PiModelSummary[]
     /** Pi: provider-qualified selected model from metadata (survives reload;
@@ -1030,6 +1032,50 @@ export function HappyComposer(props: {
         () => getModelOptionsForFlavor(agentFlavor, model, availableModelOptions),
         [agentFlavor, model, availableModelOptions]
     )
+    const [showOlderModels, setShowOlderModels] = useState(false)
+    const isModelOptionSelected = (option: ModelOption) => selectedModelBase !== undefined
+        ? selectedModelBase === option.value
+        : model === option.value
+    // Older Claude versions fold under a toggle, like the CLI catalog's overflow section.
+    const foldedModelOptions = modelOptions.filter((option) => option.older && !isModelOptionSelected(option))
+    const renderModelRow = (option: ModelOption) => {
+        const isSelected = isModelOptionSelected(option)
+        return (
+            <button
+                key={option.value ?? 'auto'}
+                type="button"
+                disabled={modelEffortControlsDisabled}
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
+                    modelEffortControlsDisabled
+                        ? 'cursor-not-allowed opacity-50'
+                        : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
+                }`}
+                onClick={() => {
+                    if (resolveModelVariantsForBase) {
+                        handleCursorModelRowClick(option.value)
+                    } else {
+                        handleModelChange(option.value)
+                    }
+                }}
+                onMouseDown={(e) => e.preventDefault()}
+            >
+                <div
+                    className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
+                        isSelected
+                            ? 'border-[var(--app-link)]'
+                            : 'border-[var(--app-hint)]'
+                    }`}
+                >
+                    {isSelected && (
+                        <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
+                    )}
+                </div>
+                <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
+                    {option.label}
+                </span>
+            </button>
+        )
+    }
 
     // Cursor dual picker: after choosing a multi-variant base, drill into variant
     // rows in-place (picker stays open). Variant pick dismisses; back returns to
@@ -1793,46 +1839,29 @@ export function HappyComposer(props: {
                                             })}
                                         </div>
                                     ))
-                                    : modelOptions.map((option) => {
-                                        const isSelected = selectedModelBase !== undefined
-                                            ? selectedModelBase === option.value
-                                            : model === option.value
-                                        return (
-                                        <button
-                                            key={option.value ?? 'auto'}
-                                            type="button"
-                                            disabled={modelEffortControlsDisabled}
-                                            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                                                modelEffortControlsDisabled
-                                                    ? 'cursor-not-allowed opacity-50'
-                                                    : 'cursor-pointer hover:bg-[var(--app-secondary-bg)]'
-                                            }`}
-                                            onClick={() => {
-                                                if (resolveModelVariantsForBase) {
-                                                    handleCursorModelRowClick(option.value)
-                                                } else {
-                                                    handleModelChange(option.value)
-                                                }
-                                            }}
-                                            onMouseDown={(e) => e.preventDefault()}
-                                        >
-                                            <div
-                                                className={`flex h-4 w-4 items-center justify-center rounded-full border-2 ${
-                                                    isSelected
-                                                        ? 'border-[var(--app-link)]'
-                                                        : 'border-[var(--app-hint)]'
-                                                }`}
+                                    : <>
+                                        {modelOptions.filter((option) => !option.older || isModelOptionSelected(option)).map(renderModelRow)}
+                                        {foldedModelOptions.length > 0 ? (
+                                            <button
+                                                type="button"
+                                                aria-expanded={showOlderModels}
+                                                className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-sm text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)]"
+                                                onClick={(e) => {
+                                                    const toggle = e.currentTarget
+                                                    if (!showOlderModels) {
+                                                        // The sheet is height-capped; bring the revealed rows into view.
+                                                        requestAnimationFrame(() => toggle.scrollIntoView?.({ block: 'start' }))
+                                                    }
+                                                    setShowOlderModels((shown) => !shown)
+                                                }}
+                                                onMouseDown={(e) => e.preventDefault()}
                                             >
-                                                {isSelected && (
-                                                    <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
-                                                )}
-                                            </div>
-                                            <span className={isSelected ? 'text-[var(--app-link)]' : ''}>
-                                                {option.label}
-                                            </span>
-                                        </button>
-                                        )
-                                    })}
+                                                <ChevronRightIcon className={`h-4 w-4 transition-transform ${showOlderModels ? 'rotate-90' : ''}`} />
+                                                <span>{t('misc.olderModels')}</span>
+                                            </button>
+                                        ) : null}
+                                        {showOlderModels ? foldedModelOptions.map(renderModelRow) : null}
+                                    </>}
                             </div>
                         ) : null}
 

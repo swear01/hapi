@@ -60,7 +60,7 @@ function getClaudeModelOptions(currentModel?: string | null, customOptions?: Mod
     for (const option of customOptions) {
         const value = normalizeCurrentModel(option.value)
         if (value && !listed.some((existing) => existing.value === value)) {
-            listed.push({ value, label: option.label })
+            listed.push(option.older ? { value, label: option.label, older: true } : { value, label: option.label })
         }
     }
     const presets = getClaudeComposerModelOptions(null)
@@ -81,8 +81,9 @@ function getClaudeModelOptions(currentModel?: string | null, customOptions?: Mod
 export function getClaudeLaunchModelOptions(
     catalog: readonly ClaudeModelSummary[],
     selectedModel: string,
-    notListedSuffix: string
-): Array<{ value: string; label: string }> {
+    notListedSuffix: string,
+    olderGroup: string
+): Array<{ value: string; label: string; group?: string }> {
     const catalogOptions = getClaudeModelChoices(catalog)
     const presetValues = new Set(getClaudeComposerModelOptions(null).map((option) => option.value))
     const selected = normalizeCurrentModel(selectedModel)
@@ -93,7 +94,8 @@ export function getClaudeLaunchModelOptions(
 
     return getClaudeModelOptions(selectedModel, catalogOptions).map((option) => ({
         value: option.value ?? 'auto',
-        label: isGone && option.value === selected ? `${option.label} (${notListedSuffix})` : option.label
+        label: isGone && option.value === selected ? `${option.label} (${notListedSuffix})` : option.label,
+        ...(option.older ? { group: olderGroup } : {})
     }))
 }
 
@@ -200,8 +202,11 @@ export function getNextModelForFlavor(
         return options[(currentIndex + 1) % options.length]?.value ?? null
     }
     if (flavor === 'claude') {
+        // Cycling stays on the unfolded rows; an older current model is a start point.
+        const current = normalizeCurrentModel(currentModel) ?? null
         const options = getClaudeModelOptions(currentModel, customOptions)
-        const currentIndex = options.findIndex((option) => option.value === (normalizeCurrentModel(currentModel) ?? null))
+            .filter((option) => !option.older || option.value === current)
+        const currentIndex = options.findIndex((option) => option.value === current)
         if (currentIndex === -1) {
             return options[0]?.value ?? null
         }

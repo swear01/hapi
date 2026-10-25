@@ -3,6 +3,8 @@ import { CLAUDE_MODEL_PRESETS, getClaudeModelLabel } from '@hapi/protocol'
 export type ClaudeComposerModelOption = {
     value: string | null
     label: string
+    /** Folded away in the picker until expanded; see getClaudeModelChoices. */
+    older?: boolean
 }
 
 function normalizeClaudeComposerModel(model?: string | null): string | null {

@@ -161,6 +161,26 @@ describe('HappyComposer generic model/effort value buttons', () => {
         expect(screen.queryByRole('button', { name: 'XHigh' })).toBeNull()
     })
 
+    it('folds older Claude models behind a toggle, keeping the current one visible', () => {
+        renderComposer('claude', {
+            model: 'claude-opus-4-7',
+            availableModelOptions: [
+                { value: 'opus', label: 'Opus 5.5' },
+                { value: 'claude-opus-4-7', label: 'Opus 4.7', older: true },
+                { value: 'claude-opus-4-6', label: 'Opus 4.6', older: true },
+            ],
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'Opus 4.7' }))
+        expect(screen.getByRole('button', { name: 'Opus 5.5' })).toBeTruthy()
+        expect(screen.getAllByRole('button', { name: 'Opus 4.7' }).length).toBe(2)
+        expect(screen.queryByRole('button', { name: 'Opus 4.6' })).toBeNull()
+        const toggle = screen.getByRole('button', { name: 'Older models' })
+        expect(toggle.getAttribute('aria-expanded')).toBe('false')
+        fireEvent.click(toggle)
+        expect(screen.getByRole('button', { name: 'Opus 4.6' })).toBeTruthy()
+        expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    })
+
     it('shows only the model button for flavors without effort support', () => {
         renderComposer('codex')
         expect(screen.getByRole('button', { name: 'Sonnet 4' })).toBeTruthy()

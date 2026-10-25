@@ -80,17 +80,35 @@ export function getClaudeModelLabel(model: string): string | null {
 export type ClaudeModelChoice = {
     value: string
     label: string
+    /** An earlier version of a family listed above it; pickers fold these away. */
+    older?: true
+}
+
+function claudeModelFamily(value: string): string {
+    return value.replace(/^claude-/, '').split(/[-[]/)[0] ?? value
 }
 
 /**
  * Picker choices for a catalog reported by the `claude` CLI: its own `/model`
  * rows, in its order and with its display names. The `default` row is omitted;
  * callers represent it as "no model".
+ *
+ * The CLI lists the newest model of each family first and earlier versions
+ * after them (its catalog's "overflow" section, which `initialize` does not
+ * expose), so a row whose family already appeared is marked `older`.
  */
 export function getClaudeModelChoices(catalog: readonly ClaudeModelSummary[]): ClaudeModelChoice[] {
+    const families = new Set<string>()
     return catalog
         .filter((model) => model.value !== 'default')
-        .map((model) => ({ value: model.value, label: model.displayName ?? model.value }))
+        .map((model) => {
+            const family = claudeModelFamily(model.value)
+            const older = families.has(family)
+            families.add(family)
+            const choice: ClaudeModelChoice = { value: model.value, label: model.displayName ?? model.value }
+            if (older) choice.older = true
+            return choice
+        })
 }
 
 /**

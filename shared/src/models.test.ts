@@ -91,9 +91,20 @@ describe('getClaudeModelChoices', () => {
             { value: 'claude-fable-5-1', label: 'Fable 5.1' },
             { value: 'sonnet', label: 'Sonnet 5' },
             { value: 'haiku', label: 'Haiku 4.5' },
-            { value: 'claude-opus-4-7', label: 'Opus 4.7' },
-            { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+            { value: 'claude-opus-4-7', label: 'Opus 4.7', older: true },
+            { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', older: true },
         ])
+    })
+
+    test('marks a row older only when its family is already listed above it', () => {
+        const older = getClaudeModelChoices([
+            { value: 'opus' },
+            { value: 'claude-fable-5-1' },
+            { value: 'claude-opus-5' },
+            { value: 'claude-fable-5' },
+            { value: 'claude-haiku-4-5-20251001' },
+        ]).filter((choice) => choice.older).map((choice) => choice.value)
+        expect(older).toEqual(['claude-opus-5', 'claude-fable-5'])
     })
 
     test('leaves the default row to the caller, which stores it as no model', () => {

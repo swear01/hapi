@@ -264,27 +264,27 @@ describe('getClaudeLaunchModelOptions', () => {
     ]
 
     it('offers the catalog choices with Default as auto', () => {
-        expect(getClaudeLaunchModelOptions(catalog, 'auto', 'no longer listed').slice(0, 3)).toEqual([
+        expect(getClaudeLaunchModelOptions(catalog, 'auto', 'no longer listed', 'Older models').slice(0, 3)).toEqual([
             { value: 'auto', label: 'Default' },
             { value: 'opus', label: 'Opus 5.5' },
-            { value: 'claude-opus-4-7', label: 'Opus 4.7' },
+            { value: 'claude-opus-4-7', label: 'Opus 4.7', group: 'Older models' },
         ])
     })
 
     it('marks a saved model the catalog no longer lists instead of dropping it', () => {
-        const options = getClaudeLaunchModelOptions(catalog, 'claude-opus-4-1', 'no longer listed')
+        const options = getClaudeLaunchModelOptions(catalog, 'claude-opus-4-1', 'no longer listed', 'Older models')
         expect(options[1]).toEqual({ value: 'claude-opus-4-1', label: 'claude-opus-4-1 (no longer listed)' })
     })
 
     it('does not mark a legacy preset the catalog omits, since it stays offered', () => {
-        const options = getClaudeLaunchModelOptions(catalog, 'opus[1m]', 'no longer listed')
+        const options = getClaudeLaunchModelOptions(catalog, 'opus[1m]', 'no longer listed', 'Older models')
         expect(options.filter((option) => option.value === 'opus[1m]')).toEqual([
             { value: 'opus[1m]', label: 'Opus 1M' },
         ])
     })
 
     it('keeps a saved model selectable before the catalog arrives, without claiming it is gone', () => {
-        const options = getClaudeLaunchModelOptions([], 'claude-opus-4-1', 'no longer listed')
+        const options = getClaudeLaunchModelOptions([], 'claude-opus-4-1', 'no longer listed', 'Older models')
         expect(options.slice(0, 3)).toEqual([
             { value: 'auto', label: 'Default' },
             { value: 'claude-opus-4-1', label: 'claude-opus-4-1' },
@@ -294,6 +294,16 @@ describe('getClaudeLaunchModelOptions', () => {
 })
 
 describe('getNextModelForFlavor', () => {
+    it('cycles Claude past folded older rows, but can start from one', () => {
+        const options = [
+            { value: 'opus', label: 'Opus 5.5' },
+            { value: 'claude-opus-4-7', label: 'Opus 4.7', older: true },
+            { value: 'sonnet', label: 'Sonnet 5.5' },
+        ]
+        expect(getNextModelForFlavor('claude', 'opus', options)).toBe('sonnet')
+        expect(getNextModelForFlavor('claude', 'claude-opus-4-7', options)).toBe('sonnet')
+    })
+
     it('cycles AGY null, auto, and unknown current values only to concrete models', () => {
         const firstConcrete = getModelOptionsForFlavor('agy').find((option) => option.value !== null)?.value
         expect(firstConcrete).toBeTruthy()
