@@ -19,8 +19,11 @@ describe('shared history projection', () => {
         for (const item of items) {
             await projection.notification('item/completed', { threadId: 'thread', turnId: 'turn', item });
         }
+        // History replays the turn's completion, so the live stream must end the turn too.
+        await projection.notification('turn/completed', { threadId: 'thread', turnId: 'turn', turn: { id: 'turn', status: 'completed' } });
         const live = send.mock.calls.slice();
-        const bodies = live.map(([body]) => parentThreadId ? body.message : body);
+        const bodies = live.map(([body]) => parentThreadId ? body.message : body)
+            .filter(body => typeof body?.message === 'string');
         expect(bodies.map(body => body.message)).toEqual(['Still working.', 'More work.', `Finished.\n${footer}`]);
         expect(bodies.filter(body => extractNotifySummary(body.message))).toHaveLength(1);
         projection.reset(); send.mockClear();
