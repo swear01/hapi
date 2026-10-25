@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { SessionListScrollAnchor } from './SessionListScrollAnchor'
 import type { SessionSummary } from '@/types/api'
@@ -1071,7 +1071,29 @@ export function SessionListSearch(props: {
     )
 }
 
-function SessionItem(props: {
+// Collapsed rows unmount after the close transition; mounted-but-hidden rows
+// would otherwise re-render on every session or machine update.
+function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
+    const [mounted, setMounted] = useState(props.open)
+    if (props.open && !mounted) {
+        setMounted(true)
+    }
+    return (
+        <div
+            className="collapsible-panel"
+            data-open={props.open || undefined}
+            onTransitionEnd={(event) => {
+                if (!props.open && event.target === event.currentTarget) {
+                    setMounted(false)
+                }
+            }}
+        >
+            <div className="collapsible-inner">{mounted ? props.children : null}</div>
+        </div>
+    )
+}
+
+const SessionItem = memo(function SessionItem(props: {
     session: SessionSummary
     onSelect: (sessionId: string) => void
     showPath?: boolean
@@ -1312,7 +1334,7 @@ function SessionItem(props: {
             ) : null}
         </>
     )
-}
+})
 
 type PullToRefreshState = 'idle' | 'pulling' | 'ready'
 
@@ -1751,8 +1773,7 @@ export function SessionList(props: {
                         ({count})
                     </span>
                 </div>
-                <div className="collapsible-panel" data-open={(!collapsed || isFiltering) || undefined}>
-                    <div className="collapsible-inner">
+                <CollapsiblePanel open={!collapsed || isFiltering}>
                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
                         {bucketKeys.map((bucketKey) => {
                             const bucket = RUNNING_BUCKETS.find((b) => b.key === bucketKey)
@@ -1786,8 +1807,7 @@ export function SessionList(props: {
                             )
                         })}
                     </div>
-                    </div>
-                </div>
+                </CollapsiblePanel>
             </div>
         )
     }
@@ -1887,8 +1907,7 @@ export function SessionList(props: {
                 </div>
 
                 {/* Sessions */}
-                <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
-                    <div className="collapsible-inner">
+                <CollapsiblePanel open={!isCollapsed}>
                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
                         {visibleGroupSessions.map((s, index) => (
                             <div key={s.id} className="contents">
@@ -1936,8 +1955,7 @@ export function SessionList(props: {
                             </div>
                         ) : null}
                     </div>
-                    </div>
-                </div>
+                </CollapsiblePanel>
             </div>
         )
     }
@@ -2440,8 +2458,7 @@ export function SessionList(props: {
                                 ({globalPinnedSessions.length})
                             </span>
                         </div>
-                        <div className="collapsible-panel" data-open={(!pinnedSectionCollapsed || isFiltering) || undefined}>
-                            <div className="collapsible-inner">
+                        <CollapsiblePanel open={!pinnedSectionCollapsed || isFiltering}>
                                 <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
                                     {globalPinnedSessions.map((s) => (
                                         <SessionItem
@@ -2460,8 +2477,7 @@ export function SessionList(props: {
                                         />
                                     ))}
                                 </div>
-                            </div>
-                        </div>
+                        </CollapsiblePanel>
                     </div>
                 ) : null}
 
