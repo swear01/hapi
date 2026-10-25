@@ -719,3 +719,89 @@ export function formatInspectPeerReport(result: InspectPeerResult): string {
     }
     return lines.join('\n')
 }
+
+// ── spawn_peer + reply forwarding ───────────────────────────────────────────
+
+const REPLY_POLL_MS = 10_000
+const REPLY_TIMEOUT_MS = 6 * 60 * 60 * 1000
+
+export type SpawnPeerOptions = {
+    machineId: string
+    directory: string
+    agent?: string
+    message: string
+    apiUrl?: string
+    accessToken?: string
+    http?: AxiosInstance
+}
+
+/** Start a fresh session on the caller's machine, then deliver its first message via `pingPeer`. */
+export async function spawnPeer(options: SpawnPeerOptions): Promise<PingPeerResult> {
+    const apiUrl = resolveApiUrl(options.apiUrl)
+    const accessToken = resolveAccessToken(options.accessToken)
+    const http = options.http ?? axios
+    const jwt = await exchangeJwt(apiUrl, accessToken, http)
+    const response = await http.post(
+        `${apiUrl}/api/machines/${encodeURIComponent(options.machineId)}/spawn`,
+        { directory: options.directory, agent: options.agent },
+        { headers: authHeaders(jwt), timeout: 120_000, validateStatus: () => true }
+    )
+    const sessionId = response.data?.type === 'success' ? response.data.sessionId : null
+    if (typeof sessionId !== 'string') {
+        const detail = response.data?.message ?? response.data?.error ?? `HTTP ${response.status}`
+        throw new PingPeerError('send_failed', `spawn failed: ${detail}`)
+    }
+    return pingPeer({ sessionIdPrefix: sessionId, message: options.message, apiUrl, accessToken, http })
+}
+
+export type ForwardPeerReplyOptions = {
+    peerSessionId: string
+    callerSessionId: string
+    apiUrl?: string
+    accessToken?: string
+    http?: AxiosInstance
+    sleep?: (ms: number) => Promise<void>
+    now?: () => number
+}
+
+/**
+ * Wait for the peer to finish its turn, then post its latest reply into the
+ * caller session. The caller wakes with the answer instead of polling.
+ * ponytail: polls from this CLI process, so a pending reply is lost if it exits.
+ */
+export async function forwardPeerReply(options: ForwardPeerReplyOptions): Promise<void> {
+    const apiUrl = resolveApiUrl(options.apiUrl)
+    const accessToken = resolveAccessToken(options.accessToken)
+    const http = options.http ?? axios
+    const sleep = options.sleep ?? defaultSleep
+    const now = options.now ?? Date.now
+    const deadline = now() + REPLY_TIMEOUT_MS
+    let name = options.peerSessionId.slice(0, 8)
+    let reply: InspectPeerMessage | undefined
+    // Two idle polls in a row: a queued message starts right after the previous turn ends.
+    let idlePolls = 0
+    while (idlePolls < 2 && now() < deadline) {
+        await sleep(REPLY_POLL_MS)
+        try {
+            const jwt = await exchangeJwt(apiUrl, accessToken, http)
+            const session = await getSession(apiUrl, jwt, options.peerSessionId, http)
+            name = resolvePeerSessionLabel(session)
+            reply = session.thinking
+                ? undefined
+                : (await fetchSessionMessages(apiUrl, jwt, options.peerSessionId, 20, http)).at(-1)
+            // Until the peer answers, the newest row is the message we sent.
+            const done = !session.thinking && (!session.active || reply?.role !== 'user')
+            idlePolls = done ? idlePolls + 1 : 0
+        } catch {
+            idlePolls = 0
+        }
+    }
+    const link = `[${name}](/sessions/${options.peerSessionId})`
+    const text = idlePolls < 2
+        ? `Peer ${link} has not finished after ${REPLY_TIMEOUT_MS / 3_600_000}h; check it with inspect_peer.`
+        : reply && reply.role !== 'user'
+            ? `Reply from peer ${link}:\n\n${reply.text}`
+            : `Peer ${link} stopped without replying.`
+    const jwt = await exchangeJwt(apiUrl, accessToken, http)
+    await sendMessage(apiUrl, jwt, options.callerSessionId, text, http)
+}

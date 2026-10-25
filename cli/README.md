@@ -223,6 +223,10 @@ controls for DSH.
 
 For peer discovery and messaging, use the session's MCP `list_peers`,
 `inspect_peer`, and `ping_peer` tools, or the corresponding CLI commands.
+MCP `spawn_peer` starts a new session on the same machine and sends it a task.
+Its reply, and the reply to `ping_peer` with `waitForReply`, is posted back into
+the calling session when the peer's turn ends. The CLI process polls for that
+reply, so a reply still pending when the caller's CLI exits is lost.
 On a remote runner host, configure the matching hub URL and token so shell
 commands reach the same hub (`hapi auth login` saves the token).
 

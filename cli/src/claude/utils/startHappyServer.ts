@@ -26,7 +26,7 @@ import {
     PING_PEER_TOOL_DESCRIPTION,
     SESSION_ID_PREFIX_PARAM_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation'
-import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
+import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, forwardPeerReply, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer, spawnPeer } from "@/modules/pingPeer/pingPeer";
 import { applySessionDisplayRename, normalizeSessionDisplayTitle } from "@/agent/sessionDisplayRename";
 
 type StartHappyServerOptions = {
@@ -48,7 +48,8 @@ const CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS = new Set([
     'display_media',
     'display_video',
     'ping_peer',
-    'inspect_peer'
+    'inspect_peer',
+    'spawn_peer'
 ]);
 
 /**
@@ -114,9 +115,23 @@ function createHapiMcpServer(
         title: z.string().trim().min(1).max(255).optional().describe('Optional display title or filename'),
     });
 
+    const forwardReply = (peerSessionId: string) => {
+        forwardPeerReply({ peerSessionId, callerSessionId: client.sessionId })
+            .catch((error) => logger.debug('[hapiMCP] peer reply forwarding failed:', error));
+    };
+
     const pingPeerInputSchema: z.ZodTypeAny = z.object({
         sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
         message: z.string().min(1).describe('Message text to deliver to the target session'),
+        waitForReply: z.boolean().optional().describe(
+            'Post the peer\'s reply into this session when its turn ends. End your turn after calling; do not poll.'
+        ),
+    });
+
+    const spawnPeerInputSchema: z.ZodTypeAny = z.object({
+        message: z.string().min(1).describe('Task for the new session'),
+        directory: z.string().trim().min(1).optional().describe('Absolute working directory (default: this session\'s)'),
+        agent: z.string().trim().min(1).optional().describe('Agent flavor such as claude or codex (default: this session\'s)'),
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
@@ -302,18 +317,21 @@ function createHapiMcpServer(
         description: PING_PEER_TOOL_DESCRIPTION,
         title: 'Ping Peer Session',
         inputSchema: pingPeerInputSchema,
-    }, async (args: { sessionIdPrefix: string; message: string }) => {
+    }, async (args: { sessionIdPrefix: string; message: string; waitForReply?: boolean }) => {
         logger.debug('[hapiMCP] ping_peer:', args.sessionIdPrefix);
         try {
             const result = await pingPeer({
                 sessionIdPrefix: args.sessionIdPrefix,
                 message: args.message,
             });
+            if (args.waitForReply) {
+                forwardReply(result.sessionId);
+            }
             return {
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Delivered to ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
+                        text: `Delivered to ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name})${args.waitForReply ? '; its reply will be posted here' : ''}`,
                     },
                 ],
                 isError: false,
@@ -332,6 +350,37 @@ function createHapiMcpServer(
                         text: `Failed to ping peer: ${message}`,
                     },
                 ],
+                isError: true,
+            };
+        }
+    });
+
+    mcp.registerTool<any, any>('spawn_peer', {
+        description: 'Start a new HAPI session on this machine and send it a task. Its reply is posted into this session when its turn ends, so end your turn after calling instead of polling.',
+        title: 'Spawn Peer Session',
+        inputSchema: spawnPeerInputSchema,
+    }, async (args: { message: string; directory?: string; agent?: string }) => {
+        const metadata = client.getMetadata();
+        try {
+            if (!metadata?.machineId) {
+                throw new PingPeerError('bad_args', 'this session has no machine id');
+            }
+            const result = await spawnPeer({
+                machineId: metadata.machineId,
+                directory: args.directory ?? metadata.path,
+                agent: args.agent ?? metadata.flavor ?? undefined,
+                message: args.message,
+            });
+            forwardReply(result.sessionId);
+            return {
+                content: [{ type: 'text' as const, text: `Started ${result.sessionId} (${result.name}); its reply will be posted here.` }],
+                isError: false,
+            };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.debug('[hapiMCP] spawn_peer failed:', message);
+            return {
+                content: [{ type: 'text' as const, text: `Failed to spawn peer: ${message}` }],
                 isError: true,
             };
         }
@@ -541,8 +590,8 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
     }));
 
     const toolNames = enableChangeTitle
-        ? ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer']
-        : ['display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer'];
+        ? ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer', 'spawn_peer']
+        : ['display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer', 'spawn_peer'];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
     }
