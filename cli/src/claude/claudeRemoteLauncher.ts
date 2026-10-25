@@ -489,6 +489,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         claudeEnvVars: session.claudeEnvVars,
                         claudeArgs: session.claudeArgs,
                         onMessage,
+                        onContextUsage: (usage) => sdkToLogConverter.applyContextUsage(usage.model, usage.maxTokens),
                         onFirstResult: (initialMessage) => {
                             applySessionTitleFallback(session.client, initialMessage);
                         },

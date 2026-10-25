@@ -599,6 +599,39 @@ describe('SDKToLogConverter', () => {
             expect(turn1?.message?.usage?.context_window).toBe(1_000_000)
         })
 
+        it('uses get_context_usage over the alias seed and over a later result (1M disabled / autoCompactWindow)', () => {
+            const seededConverter = new SDKToLogConverter({
+                ...context,
+                selectedModel: 'fable'
+            } as any)
+
+            seededConverter.convert({
+                type: 'system',
+                subtype: 'init',
+                session_id: 'session-7c',
+                model: 'claude-fable-5-1'
+            } as SDKSystemMessage)
+
+            seededConverter.applyContextUsage('claude-sonnet-5-5', 100_000)
+            expect((seededConverter.convert(makeAssistantMessage()) as any)?.message?.usage?.context_window).toBe(1_000_000)
+
+            seededConverter.applyContextUsage('claude-fable-5-1', 200_000)
+            expect((seededConverter.convert(makeAssistantMessage()) as any)?.message?.usage?.context_window).toBe(200_000)
+
+            seededConverter.convert({
+                type: 'result',
+                subtype: 'success',
+                num_turns: 1,
+                total_cost_usd: 0,
+                duration_ms: 1,
+                duration_api_ms: 1,
+                is_error: false,
+                session_id: 'session-7c',
+                modelUsage: { 'claude-fable-5-1': { contextWindow: 1_000_000 } }
+            } as SDKResultMessage)
+            expect((seededConverter.convert(makeAssistantMessage()) as any)?.message?.usage?.context_window).toBe(200_000)
+        })
+
         it('seeds a conservative 200k when neither the bare init model nor a selectedModel hint indicates 1M, until result confirms it', () => {
             // Bare init model + no selectedModel hint: neither signal says "1M", so we can't
             // know the real window on turn 1 and seed 200k conservatively rather than

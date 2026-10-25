@@ -104,6 +104,10 @@ export class SDKToLogConverter {
     // — rather than a single sticky number — means a mid-session model switch picks up the
     // new model's own window immediately instead of inheriting the previous model's.
     private modelContextWindows = new Map<string, number>()
+    // Keys whose window came from Claude's get_context_usage. That value is the effective
+    // window (capped by DISABLE_1M / autoCompactWindow), so a result's raw contextWindow
+    // must not overwrite it.
+    private contextUsageKeys = new Set<string>()
 
     constructor(
         context: Omit<ConversionContext, 'parentUuid'>,
@@ -149,6 +153,21 @@ export class SDKToLogConverter {
      */
     updateSelectedModel(model: string | null | undefined): void {
         this.context.selectedModel = model ?? null
+    }
+
+    /**
+     * Apply Claude's get_context_usage answer for the current session model.
+     */
+    applyContextUsage(model: string | undefined, maxTokens: number | undefined): void {
+        const key = this.resolvedContextWindowKey
+        if (!key || !this.resolvedModel || !model || typeof maxTokens !== 'number' || maxTokens <= 0) {
+            return
+        }
+        if (this.resolvedModel.replace(/\[1m\]$/, '') !== model.replace(/\[1m\]$/, '')) {
+            return
+        }
+        this.modelContextWindows.set(key, maxTokens)
+        this.contextUsageKeys.add(key)
     }
 
     /**
@@ -412,7 +431,9 @@ export class SDKToLogConverter {
                             const key = (this.resolvedModel && model === this.resolvedModel)
                                 ? (this.resolvedContextWindowKey ?? model)
                                 : model
-                            this.modelContextWindows.set(key, cw)
+                            if (!this.contextUsageKeys.has(key)) {
+                                this.modelContextWindows.set(key, cw)
+                            }
                         }
                     }
                 }
