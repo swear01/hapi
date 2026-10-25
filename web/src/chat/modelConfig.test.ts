@@ -10,6 +10,7 @@ describe('getContextBudgetTokens', () => {
     it('uses the large budget for the aliases, which now resolve to native 1M models', () => {
         expect(getContextBudgetTokens('opus', 'claude')).toBe(990_000)
         expect(getContextBudgetTokens('sonnet', 'claude')).toBe(990_000)
+        expect(getContextBudgetTokens('haiku', 'claude')).toBe(990_000)
     })
 
     it('uses the default Claude budget for full Claude model names', () => {

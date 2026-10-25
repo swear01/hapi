@@ -12,15 +12,17 @@ import Foundation
 public enum ClaudeModels {
     /// Preset ids in declaration (picker) order.
     public static let presets: [String] = [
-        "sonnet",
         "opus",
         "fable",
+        "sonnet",
+        "haiku",
     ]
 
     private static let labels: [String: String] = [
-        "sonnet": "Sonnet",
         "opus": "Opus",
         "fable": "Fable",
+        "sonnet": "Sonnet",
+        "haiku": "Haiku",
     ]
 
     /// `getClaudeModelLabel`: trimmed lookup; unknown/blank → nil.

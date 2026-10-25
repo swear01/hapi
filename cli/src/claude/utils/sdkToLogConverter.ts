@@ -371,7 +371,7 @@ export class SDKToLogConverter {
                         // first result lands. Guarding/seeding on resolvedContextWindowKey
                         // (not the bare init id) is what forces a re-seed when switching
                         // fable[1m] <-> fable, whose bare ids would otherwise be identical.
-                        // The bare preset aliases (opus/sonnet/fable) now resolve to models
+                        // The bare preset aliases (opus/fable/sonnet/haiku) now resolve to models
                         // with a native 1M window, so selecting one seeds 1M as well.
                         const seedIs1m = (this.context.selectedModel?.endsWith('[1m]') ?? false)
                             || isClaudeModelPreset(this.context.selectedModel)

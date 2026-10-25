@@ -11,9 +11,10 @@ package app.hapi.protocol.catalog
 object ClaudeModels {
     /** `CLAUDE_MODEL_LABELS` — declaration order preserved (picker order). */
     val LABELS: Map<String, String> = linkedMapOf(
-        "sonnet" to "Sonnet",
         "opus" to "Opus",
         "fable" to "Fable",
+        "sonnet" to "Sonnet",
+        "haiku" to "Haiku",
     )
 
     /** `CLAUDE_MODEL_PRESETS`. */

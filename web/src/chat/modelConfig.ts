@@ -75,7 +75,7 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
             return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
         }
         if (isClaudeModelPreset(trimmedModel) || trimmedModel.startsWith('claude-') || trimmedModel.endsWith('[1m]')) {
-            // The preset aliases (sonnet/opus/fable) resolve to models with a
+            // The preset aliases (opus/fable/sonnet/haiku) resolve to models with a
             // native 1M window, and Fable ships 1M even under its bare id (the
             // SDK result reports modelUsage["claude-fable-5"].contextWindow =
             // 1,000,000). Local-mode transcript usage carries no

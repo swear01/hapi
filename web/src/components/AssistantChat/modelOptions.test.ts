@@ -71,9 +71,10 @@ describe('getModelOptionsForFlavor', () => {
         ])
         expect(options).toEqual([
             { value: null, label: 'Default' },
-            { value: 'sonnet', label: 'Sonnet' },
             { value: 'opus', label: 'Opus' },
-            { value: 'fable', label: 'Fable' }
+            { value: 'fable', label: 'Fable' },
+            { value: 'sonnet', label: 'Sonnet' },
+            { value: 'haiku', label: 'Haiku' }
         ])
     })
 
@@ -84,9 +85,10 @@ describe('getModelOptionsForFlavor', () => {
         expect(options).toEqual([
             { value: null, label: 'Default' },
             { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' },
-            { value: 'sonnet', label: 'Sonnet' },
             { value: 'opus', label: 'Opus' },
-            { value: 'fable', label: 'Fable' }
+            { value: 'fable', label: 'Fable' },
+            { value: 'sonnet', label: 'Sonnet' },
+            { value: 'haiku', label: 'Haiku' }
         ])
     })
 
@@ -254,7 +256,7 @@ describe('getNextModelForFlavor', () => {
         const next = getNextModelForFlavor('claude', 'sonnet', [
             { value: 'sonnet', label: 'Sonnet' }
         ])
-        expect(next).toBe('opus')
+        expect(next).toBe('haiku')
     })
 
     it('cycles explicit model options', () => {

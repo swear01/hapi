@@ -14,8 +14,8 @@ describe('Claude model options', () => {
     })
 
     it('exposes friendly labels for Claude model presets', () => {
-        expect(CLAUDE_MODEL_PRESETS).toEqual(['sonnet', 'opus', 'fable'])
-        expect(getClaudeModelLabel('fable')).toBe('Fable')
+        expect(CLAUDE_MODEL_PRESETS).toEqual(['opus', 'fable', 'sonnet', 'haiku'])
+        expect(getClaudeModelLabel('haiku')).toBe('Haiku')
     })
 })
 

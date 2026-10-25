@@ -16,9 +16,10 @@ object NewSessionCatalogs {
     /** `'auto'` sentinel rows use the web's "Default" label. */
     val CLAUDE_MODELS: List<OptionItem> = listOf(
         OptionItem("auto", "Default"),
-        OptionItem("sonnet", "Sonnet"),
         OptionItem("opus", "Opus"),
         OptionItem("fable", "Fable"),
+        OptionItem("sonnet", "Sonnet"),
+        OptionItem("haiku", "Haiku"),
     )
 
     val CLAUDE_EFFORTS: List<OptionItem> = listOf(

@@ -1,7 +1,10 @@
+// Claude Code's own aliases, in its /model order. Each resolves to the
+// newest model of its family; pinned older versions are not offered here.
 export const CLAUDE_MODEL_LABELS = {
-    sonnet: 'Sonnet',
     opus: 'Opus',
-    fable: 'Fable'
+    fable: 'Fable',
+    sonnet: 'Sonnet',
+    haiku: 'Haiku'
 } as const
 
 export type ClaudeModelPreset = keyof typeof CLAUDE_MODEL_LABELS
