@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
@@ -104,13 +104,6 @@ describe('SessionList keepalive-idle lifecycle', () => {
     it('marks an idle row in the default view and ranks its group below a live one', () => {
         renderSessionList([zombie, live])
 
-        // Not pinned: both rows sit in their directory groups, and the idle
-        // one is labelled rather than dressed up as ready.
-        const idleRow = screen.getByTitle('Zombie task').closest('button')!
-        expect(within(idleRow).getByTestId('session-row-idle').textContent).toContain('Idle (keepalive only)')
-        const liveRow = screen.getByTitle('Live task').closest('button')!
-        expect(within(liveRow).queryByTestId('session-row-idle')).toBeNull()
-
         // Group order follows liveness, not the newer updatedAt of the zombie.
         const headers = screen.getAllByTitle(/^\/work\/(zombie|live)$/)
         expect(headers.map((header) => header.getAttribute('title'))).toEqual(['/work/live', '/work/zombie'])
@@ -118,6 +111,14 @@ describe('SessionList keepalive-idle lifecycle', () => {
         const panelOf = (header: HTMLElement) => header.parentElement!.querySelector('.collapsible-panel')!
         expect(panelOf(headers[0]).getAttribute('data-open')).toBe('true')
         expect(panelOf(headers[1]).getAttribute('data-open')).toBeNull()
+
+        // Not pinned: both rows sit in their directory groups, and the idle
+        // one is labelled rather than dressed up as ready.
+        fireEvent.click(headers[1])
+        const idleRow = screen.getByTitle('Zombie task').closest('button')!
+        expect(within(idleRow).getByTestId('session-row-idle').textContent).toContain('Idle (keepalive only)')
+        const liveRow = screen.getByTitle('Live task').closest('button')!
+        expect(within(liveRow).queryByTestId('session-row-idle')).toBeNull()
     })
 
     it('reads an idle row that is thinking again as live, like the pinned buckets do', () => {

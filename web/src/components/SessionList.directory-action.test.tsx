@@ -86,6 +86,7 @@ describe('SessionList directory action', () => {
             />
         )
 
+        fireEvent.click(screen.getByTitle('/work'))
         const rows = document.querySelectorAll<HTMLButtonElement>('.session-list-item')
         expect(rows[0].draggable).toBe(true)
         expect(rows[1].draggable).toBe(false)
