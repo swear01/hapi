@@ -107,7 +107,7 @@ describe('SyncEngine keepalive-idle tick', () => {
         try {
             const session = engine.getOrCreateSession('abort', RUNNING, null, 'default')
             engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: true })
-            engine.handleBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
+            engine.handleBackgroundTaskCount(session.id, 1)
             engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: false })
             expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
             const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
