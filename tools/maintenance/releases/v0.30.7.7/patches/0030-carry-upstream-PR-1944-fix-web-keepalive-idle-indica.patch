@@ -1,0 +1,769 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:37:15 +0000
+Subject: [PATCH 30/94] carry(upstream): PR #1944 fix(web): keepalive-idle
+ indicators in the sidebar and retirement of lost subagent traces
+
+Upstream-head: 530ce5982ba7eb50575ebb34f359d3ce6a7580e8
+---
+ web/src/chat/sessionStatus.test.ts            |  61 ++++++++
+ web/src/chat/sessionStatus.ts                 |  49 +++++++
+ web/src/components/SessionChat.tsx            |   4 +-
+ web/src/components/SessionHeader.test.tsx     |  13 ++
+ web/src/components/SessionHeader.tsx          |  20 ++-
+ .../SessionList.idle-lifecycle.test.tsx       | 138 ++++++++++++++++++
+ web/src/components/SessionList.test.ts        |  15 ++
+ web/src/components/SessionList.tsx            |  29 +++-
+ web/src/components/SessionRowSummary.test.tsx |  78 ++++++++++
+ web/src/components/SessionRowSummary.tsx      |  27 +++-
+ web/src/lib/sessionLiveness.test.ts           |  30 ++++
+ web/src/lib/sessionLiveness.ts                |  46 ++++++
+ 12 files changed, 498 insertions(+), 12 deletions(-)
+ create mode 100644 web/src/components/SessionList.idle-lifecycle.test.tsx
+ create mode 100644 web/src/lib/sessionLiveness.test.ts
+ create mode 100644 web/src/lib/sessionLiveness.ts
+
+diff --git a/web/src/chat/sessionStatus.test.ts b/web/src/chat/sessionStatus.test.ts
+index febb458a0..93d8cf1ea 100644
+--- a/web/src/chat/sessionStatus.test.ts
++++ b/web/src/chat/sessionStatus.test.ts
+@@ -46,6 +46,22 @@ function taskNotification(taskId?: string): NormalizedMessage {
+     }
+ }
+ 
++function userMessage(
++    createdAt: number,
++    overrides: Partial<Pick<NormalizedMessage, 'invokedAt' | 'isSidechain' | 'steered'>> = {}
++): NormalizedMessage {
++    return {
++        id: `user-${createdAt}`,
++        localId: null,
++        createdAt,
++        role: 'user',
++        isSidechain: false,
++        content: { type: 'text', text: 'Next prompt' },
++        invokedAt: createdAt,
++        ...overrides
++    }
++}
++
+ describe('buildSessionStatusData', () => {
+     it('returns null when the session has no hidden status', () => {
+         expect(buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages: [] })).toBeNull()
+@@ -92,6 +108,51 @@ describe('buildSessionStatusData', () => {
+         ])
+     })
+ 
++    it('retires unfinished Claude subagent traces once no turn is running, but keeps Codex child agents', () => {
++        // A Task block without a result after the turn ended is an aborted or
++        // lost trace; nothing can still be driving it. Errors stay visible. A
++        // Codex child agent outlives the parent turn and is closed by its own
++        // agent-run-update, so it must survive `thinking: false` — SessionChat
++        // still offers abort for it via hasAbortableAgentRun.
++        const blocks: ChatBlock[] = [
++            toolBlock({ name: 'Agent', tool: { id: 'agent-running', state: 'running', input: { description: 'Still tracing' } } }),
++            toolBlock({ name: 'Agent', tool: { id: 'agent-failed', state: 'error', input: { description: 'Broke' } } }),
++            toolBlock({ name: 'CodexAgent', tool: { id: 'codex-child', state: 'running', input: { summary: 'Child thread' } } })
++        ]
++
++        expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [], thinking: true })?.subagents.map((s) => s.id))
++            .toEqual(['agent-running', 'agent-failed', 'codex-child'])
++        expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [], thinking: false })?.subagents.map((s) => s.id))
++            .toEqual(['agent-failed', 'codex-child'])
++        // Callers without a turn signal keep the previous behaviour.
++        expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toHaveLength(3)
++    })
++
++    it('retires a Claude subagent trace from an earlier turn even while a new turn is running', () => {
++        // `thinking` is a session flag: a lost trace hidden between turns
++        // would come back as "Running · 37h" with every new prompt. A Task
++        // call cannot outlive the turn that made it, so a prompt the CLI
++        // consumed later closes it. Queued, sidechain and steered prompts do
++        // not start a turn; Codex children are not turn-bound at all.
++        const blocks: ChatBlock[] = [
++            toolBlock({ name: 'Task', id: 'block-lost', createdAt: 1_000, tool: { id: 'task-lost', state: 'running', input: { description: 'Old lost trace' } } }),
++            toolBlock({ name: 'CodexAgent', id: 'block-codex', createdAt: 1_000, tool: { id: 'codex-child', state: 'running', input: { summary: 'Child thread' } } }),
++            toolBlock({ name: 'Task', id: 'block-current', createdAt: 6_000, tool: { id: 'task-current', state: 'running', input: { description: 'Current work' } } })
++        ]
++        const subagentIds = (messages: NormalizedMessage[]) =>
++            buildSessionStatusData({ goal: null, tasks: [], blocks, messages, thinking: true })?.subagents.map((s) => s.id)
++
++        expect(subagentIds([userMessage(500)])).toEqual(['task-lost', 'codex-child', 'task-current'])
++        expect(subagentIds([userMessage(500), userMessage(5_000)])).toEqual(['codex-child', 'task-current'])
++        // Rows from a hub that predates `invokedAt` fall back to `createdAt`.
++        expect(subagentIds([userMessage(5_000, { invokedAt: undefined })])).toEqual(['codex-child', 'task-current'])
++        expect(subagentIds([
++            userMessage(5_000, { invokedAt: null }),
++            userMessage(5_000, { isSidechain: true }),
++            userMessage(5_000, { steered: true })
++        ])).toEqual(['task-lost', 'codex-child', 'task-current'])
++    })
++
+     it('tracks Claude background terminals until their task notification arrives', () => {
+         const blocks: ChatBlock[] = [toolBlock({
+             name: 'Agent',
+diff --git a/web/src/chat/sessionStatus.ts b/web/src/chat/sessionStatus.ts
+index 88f9f4aec..26d8c1450 100644
+--- a/web/src/chat/sessionStatus.ts
++++ b/web/src/chat/sessionStatus.ts
+@@ -148,14 +148,62 @@ function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
+     }
+ }
+ 
++/**
++ * Start of the latest turn the agent has actually picked up: the newest user
++ * prompt the CLI consumed (`invokedAt`; `createdAt` for rows from hubs that
++ * predate the field). A queued prompt has not started a turn, a sidechain
++ * prompt belongs to a subagent, and a steered prompt joined a turn that was
++ * already running.
++ */
++function latestTurnStartedAt(messages: readonly NormalizedMessage[]): number | null {
++    let latest: number | null = null
++    for (const message of messages) {
++        if (message.role !== 'user' || message.isSidechain || message.steered) continue
++        if (message.invokedAt === null) continue
++        const startedAt = message.invokedAt ?? message.createdAt
++        if (latest === null || startedAt > latest) latest = startedAt
++    }
++    return latest
++}
++
++/**
++ * A Claude Task/Agent call runs inside one turn: its closing tool result
++ * lands before the turn ends. A block still `running` once its turn is over
++ * (the turn was aborted, the CLI restarted mid-Task or the closing result
++ * never reached the hub) is a lost trace, not live work. `thinking === false`
++ * ends the latest turn; a later consumed prompt ends every earlier one, so
++ * the trace does not come back with each new turn.
++ *
++ * Codex child agents are never retired here: they outlive the parent turn
++ * and are closed by their own agent-run-update terminal event, which is why
++ * SessionChat keeps the abort button armed for them independently of
++ * `thinking` (`hasAbortableAgentRun`).
++ */
++function isLostSubagentTrace(
++    block: ToolCallBlock,
++    thinking: boolean | undefined,
++    turnStartedAt: number | null
++): boolean {
++    if (!isSubagentToolName(block.tool.name) || block.tool.state !== 'running') return false
++    if (thinking === false) return true
++    return turnStartedAt !== null && block.createdAt < turnStartedAt
++}
++
+ export function buildSessionStatusData(args: {
+     goal: ThreadGoal | null | undefined
+     tasks: readonly TodoItem[] | null | undefined
+     blocks: readonly ChatBlock[]
+     messages: readonly NormalizedMessage[]
+     backgroundTaskCount?: number
++    /**
++     * Whether a turn is running. `false` retires every unfinished Claude
++     * subagent trace; otherwise only traces left behind by an earlier turn
++     * are retired. See `isLostSubagentTrace`.
++     */
++    thinking?: boolean
+ }): SessionStatusData | null {
+     const tools = collectToolBlocks(args.blocks)
++    const turnStartedAt = latestTurnStartedAt(args.messages)
+     const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
+     const terminals = args.backgroundTaskCount === undefined
+         ? [...detectedTerminals.confirmed, ...detectedTerminals.uncertain]
+@@ -172,6 +220,7 @@ export function buildSessionStatusData(args: {
+         goal: args.goal ?? null,
+         tasks: args.tasks ? [...args.tasks] : [],
+         subagents: tools
++            .filter((block) => !isLostSubagentTrace(block, args.thinking, turnStartedAt))
+             .map(subagentFromBlock)
+             .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
+         terminals,
+diff --git a/web/src/components/SessionChat.tsx b/web/src/components/SessionChat.tsx
+index b9e360939..d3b52db7f 100644
+--- a/web/src/components/SessionChat.tsx
++++ b/web/src/components/SessionChat.tsx
+@@ -1488,12 +1488,14 @@ function SessionChatInner(props: SessionChatProps) {
+             tasks: props.session.todos,
+             blocks: reconciled.blocks,
+             messages: normalizedMessages,
+-            backgroundTaskCount: props.session.backgroundTaskCount
++            backgroundTaskCount: props.session.backgroundTaskCount,
++            thinking: props.session.thinking
+         }),
+         [
+             reduced.latestGoal,
+             props.session.todos,
+             props.session.backgroundTaskCount,
++            props.session.thinking,
+             reconciled.blocks,
+             normalizedMessages
+         ]
+diff --git a/web/src/components/SessionHeader.test.tsx b/web/src/components/SessionHeader.test.tsx
+index 3d9c9987e..786f59f21 100644
+--- a/web/src/components/SessionHeader.test.tsx
++++ b/web/src/components/SessionHeader.test.tsx
+@@ -543,3 +543,16 @@ describe('SessionHeader', () => {
+         expect(await screen.findByText('Could not update pin: Network unavailable')).toBeInTheDocument()
+     })
+ })
++
++describe('SessionHeader keepalive-idle badge (tiann/hapi#1820)', () => {
++    it('shows the idle badge only when the hub marked the lifecycle idle', () => {
++        renderHeader(baseSession({ metadata: { flavor: 'claude', path: '/repo', host: 'machine', lifecycleState: 'idle' } }))
++        const badge = screen.getByTestId('session-header-idle')
++        expect(badge.textContent).toContain('Idle (keepalive only)')
++        cleanup()
++
++        // `active` alone says nothing about the agent: a running row has no badge.
++        renderHeader(baseSession({ metadata: { flavor: 'claude', path: '/repo', host: 'machine', lifecycleState: 'running' } }))
++        expect(screen.queryByTestId('session-header-idle')).toBeNull()
++    })
++})
+diff --git a/web/src/components/SessionHeader.tsx b/web/src/components/SessionHeader.tsx
+index a3c096a55..0685557f6 100644
+--- a/web/src/components/SessionHeader.tsx
++++ b/web/src/components/SessionHeader.tsx
+@@ -16,6 +16,7 @@ import { resolveCodexModel } from '@/lib/codexModelCapabilities'
+ import { useCodexModels } from '@/hooks/queries/useCodexModels'
+ import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
+ import { useTranslation } from '@/lib/use-translation'
++import { isKeepaliveIdle } from '@/lib/sessionLiveness'
+ import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+ import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
+ import { getSessionTitle } from '@/lib/sessionTitle'
+@@ -415,8 +416,23 @@ export function SessionHeader(props: {
+ 
+                     {/* Session info - two lines: title and path */}
+                     <div className="min-w-0 flex-1">
+-                        <div className="truncate font-semibold">
+-                            {title}
++                        <div className="flex min-w-0 items-center gap-2">
++                            <span className="truncate font-semibold">
++                                {title}
++                            </span>
++                            {isKeepaliveIdle(session) ? (
++                                // tiann/hapi#1820: the socket is up but the agent
++                                // has been silent for the idle window. `active`
++                                // still gates the actions below (archive, sync).
++                                <span
++                                    data-testid="session-header-idle"
++                                    className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--app-border)] px-1.5 py-0.5 text-[11px] font-medium leading-none text-[var(--app-hint)]"
++                                    title={t('session.item.idle')}
++                                >
++                                    <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
++                                    {t('session.item.idle')}
++                                </span>
++                            ) : null}
+                         </div>
+                         {showMobileMetadata ? (
+                             <div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden text-xs text-[var(--app-hint)] sm:hidden">
+diff --git a/web/src/components/SessionList.idle-lifecycle.test.tsx b/web/src/components/SessionList.idle-lifecycle.test.tsx
+new file mode 100644
+index 000000000..8b4fb4015
+--- /dev/null
++++ b/web/src/components/SessionList.idle-lifecycle.test.tsx
+@@ -0,0 +1,138 @@
++import { cleanup, render, screen, within } from '@testing-library/react'
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { ReactNode } from 'react'
++import type { SessionSummary } from '@/types/api'
++import { I18nProvider } from '@/lib/i18n-context'
++import { markSessionSeen } from '@/lib/sessionLastSeen'
++import { ToastProvider } from '@/lib/toast-context'
++import { SessionList } from './SessionList'
++
++/**
++ * tiann/hapi#1820: a keepalive-idle session keeps `active: true` (the socket
++ * really is up), so every "is it alive?" derivation in the list has to read
++ * `lifecycleState` instead. These render the real component: the pure
++ * bucketing helper is covered in SessionList.test.ts, but nothing there
++ * proves the idle bucket is actually drawn or that the default view tells
++ * idle apart from running.
++ */
++
++afterEach(() => {
++    cleanup()
++    localStorage.clear()
++})
++
++function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
++    return {
++        active: false,
++        thinking: false,
++        activeAt: 0,
++        updatedAt: 0,
++        metadata: null,
++        metadataVersion: 0,
++        agentStateVersion: 0,
++        todosUpdatedAt: 0,
++        todoProgress: null,
++        pendingRequestsCount: 0,
++        pendingRequestKinds: [],
++        pendingRequests: [],
++        backgroundTaskCount: 0,
++        futureScheduledMessageCount: 0,
++        nextScheduledAt: null,
++        model: null,
++        effort: null,
++        ...overrides
++    }
++}
++
++function renderSessionList(sessions: SessionSummary[], children?: ReactNode) {
++    // The steady state: the operator has looked at these already, so no
++    // unread marker outranks the lifecycle indicator.
++    for (const session of sessions) markSessionSeen(session.id, session.updatedAt)
++    const queryClient = new QueryClient({
++        defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
++    })
++    return render(
++        <QueryClientProvider client={queryClient}>
++            <ToastProvider>
++                <I18nProvider>
++                    <SessionList
++                        sessions={sessions}
++                        selectedSessionId={null}
++                        onSelect={vi.fn()}
++                        onNewSession={vi.fn()}
++                        onRefresh={vi.fn()}
++                        isLoading={false}
++                        renderHeader={false}
++                        api={null}
++                    />
++                    {children}
++                </I18nProvider>
++            </ToastProvider>
++        </QueryClientProvider>
++    )
++}
++
++const zombie = makeSession({
++    id: 'zombie',
++    active: true,
++    updatedAt: 200,
++    metadata: { path: '/work/zombie', host: 'h', lifecycleState: 'idle', summary: { text: 'Zombie task' } } as SessionSummary['metadata']
++})
++const live = makeSession({
++    id: 'live',
++    active: true,
++    updatedAt: 100,
++    metadata: { path: '/work/live', host: 'h', lifecycleState: 'running', summary: { text: 'Live task' } } as SessionSummary['metadata']
++})
++
++describe('SessionList keepalive-idle lifecycle', () => {
++    it('renders the idle bucket inside the pinned Active section', () => {
++        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
++        renderSessionList([zombie])
++
++        // The row left its directory group for the pinned section; if that
++        // section forgot the idle bucket the session would be nowhere.
++        const section = screen.getByTitle('Active sessions').parentElement!
++        expect(within(section).getByText('Idle (keepalive only) (1)')).toBeTruthy()
++        expect(within(section).getByTitle('Zombie task')).toBeTruthy()
++        // The bucket header already says "Idle (keepalive only)"; the row in
++        // it carries the dot alone, not the label a second time.
++        expect(within(section).getByTestId('session-row-idle').textContent).not.toContain('Idle (keepalive only)')
++    })
++
++    it('marks an idle row in the default view and ranks its group below a live one', () => {
++        renderSessionList([zombie, live])
++
++        // Not pinned: both rows sit in their directory groups, and the idle
++        // one is labelled rather than dressed up as ready.
++        const idleRow = screen.getByTitle('Zombie task').closest('button')!
++        expect(within(idleRow).getByTestId('session-row-idle').textContent).toContain('Idle (keepalive only)')
++        const liveRow = screen.getByTitle('Live task').closest('button')!
++        expect(within(liveRow).queryByTestId('session-row-idle')).toBeNull()
++
++        // Group order follows liveness, not the newer updatedAt of the zombie.
++        const headers = screen.getAllByTitle(/^\/work\/(zombie|live)$/)
++        expect(headers.map((header) => header.getAttribute('title'))).toEqual(['/work/live', '/work/zombie'])
++        // ...and only the live group auto-expands.
++        const panelOf = (header: HTMLElement) => header.parentElement!.querySelector('.collapsible-panel')!
++        expect(panelOf(headers[0]).getAttribute('data-open')).toBe('true')
++        expect(panelOf(headers[1]).getAttribute('data-open')).toBeNull()
++    })
++
++    it('reads an idle row that is thinking again as live, like the pinned buckets do', () => {
++        // The hub keeps the idle mark through ambient thinking churn
++        // (tiann/hapi#1553), and bucketRunningSessions files such a row under
++        // Working. The default view has to agree: spinner, full contrast, and
++        // the group ranks with the live ones instead of below them.
++        renderSessionList([{ ...zombie, thinking: true }, live])
++
++        const row = screen.getByTitle('Zombie task').closest('button')!
++        expect(within(row).queryByTestId('session-row-idle')).toBeNull()
++        expect(row.querySelector('.animate-spin-slow')).not.toBeNull()
++        expect(screen.getByTitle('Zombie task').className).toContain('text-[var(--app-fg)]')
++
++        const headers = screen.getAllByTitle(/^\/work\/(zombie|live)$/)
++        expect(headers.map((header) => header.getAttribute('title'))).toEqual(['/work/zombie', '/work/live'])
++    })
++})
+diff --git a/web/src/components/SessionList.test.ts b/web/src/components/SessionList.test.ts
+index 769603131..07fc869eb 100644
+--- a/web/src/components/SessionList.test.ts
++++ b/web/src/components/SessionList.test.ts
+@@ -137,6 +137,21 @@ describe('deduplicateSessionsByAgentId', () => {
+         expect(result[0].id).toBe('a') // active wins despite older updatedAt
+     })
+ 
++    it('keeps a live session over a keepalive-idle duplicate, and idle over disconnected (tiann/hapi#1820)', () => {
++        const idleMetadata = { path: '/p', agentSessionId: 'thread-1', lifecycleState: 'idle' } as SessionSummary['metadata']
++        const liveOverIdle = deduplicateSessionsByAgentId([
++            makeSession({ id: 'idle', active: true, metadata: idleMetadata, updatedAt: 300 }),
++            makeSession({ id: 'live', active: true, metadata: { path: '/p', agentSessionId: 'thread-1', lifecycleState: 'running' } as SessionSummary['metadata'], updatedAt: 100 })
++        ])
++        expect(liveOverIdle.map((s) => s.id)).toEqual(['live'])
++
++        const idleOverInactive = deduplicateSessionsByAgentId([
++            makeSession({ id: 'inactive', metadata: { path: '/p', agentSessionId: 'thread-1' }, updatedAt: 300 }),
++            makeSession({ id: 'idle', active: true, metadata: idleMetadata, updatedAt: 100 })
++        ])
++        expect(idleOverInactive.map((s) => s.id)).toEqual(['idle'])
++    })
++
+     it('prefers selected session among inactive duplicates', () => {
+         const sessions = [
+             makeSession({ id: 'a', metadata: { path: '/p', agentSessionId: 'thread-1' }, updatedAt: 100 }),
+diff --git a/web/src/components/SessionList.tsx b/web/src/components/SessionList.tsx
+index 006ceab69..f0f5458f8 100644
+--- a/web/src/components/SessionList.tsx
++++ b/web/src/components/SessionList.tsx
+@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
+ import * as Popover from '@radix-ui/react-popover'
+ import { SessionListScrollAnchor } from './SessionListScrollAnchor'
+ import type { SessionSummary } from '@/types/api'
+-import { SESSION_LIFECYCLE_IDLE } from '@hapi/protocol'
++import { isKeepaliveIdle, isLiveSession, sessionLivenessRank } from '@/lib/sessionLiveness'
+ import type { ApiClient } from '@/api/client'
+ import {
+     buildSessionSearchScoreIndex,
+@@ -196,7 +196,7 @@ export function bucketRunningSessions(
+             buckets.working.push(session)
+         } else if ((session.pendingRequestsCount ?? 0) > 0) {
+             buckets.pending.push(session)
+-        } else if (session.metadata?.lifecycleState === SESSION_LIFECYCLE_IDLE) {
++        } else if (isKeepaliveIdle(session)) {
+             // Keepalive-only: socket up, no agent progress for hours.
+             buckets.idle.push(session)
+         } else {
+@@ -450,8 +450,11 @@ export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selecte
+ 
+     for (const group of byAgentId.values()) {
+         group.sort((a, b) => {
+-            // Active session always wins — it's the live connection
+-            if (a.active !== b.active) return a.active ? -1 : 1
++            // Live session always wins — it's the live connection; a
++            // keepalive-idle one still beats a disconnected duplicate.
++            const rankA = sessionLivenessRank(a)
++            const rankB = sessionLivenessRank(b)
++            if (rankA !== rankB) return rankA - rankB
+             // Among inactive duplicates, keep the selected one visible
+             if (a.id === selectedSessionId) return -1
+             if (b.id === selectedSessionId) return 1
+@@ -539,10 +542,15 @@ export function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGro
+ 
+     return Array.from(groups.entries())
+         .map(([key, group]) => {
++            // Keepalive-idle rows (tiann/hapi#1820) rank between live and
++            // disconnected: still connected, but not something to act on.
++            const rank = (s: SessionSummary): number => isLiveSession(s)
++                ? (s.pendingRequestsCount > 0 ? 0 : 1)
++                : s.active ? 2 : 3
+             const sortedSessions = [...group.sessions].sort((a, b) => {
+                 if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1
+-                const rankA = a.active ? (a.pendingRequestsCount > 0 ? 0 : 1) : 2
+-                const rankB = b.active ? (b.pendingRequestsCount > 0 ? 0 : 1) : 2
++                const rankA = rank(a)
++                const rankB = rank(b)
+                 if (rankA !== rankB) return rankA - rankB
+                 return b.updatedAt - a.updatedAt
+             })
+@@ -550,7 +558,10 @@ export function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGro
+                 (max, s) => (s.updatedAt > max ? s.updatedAt : max),
+                 -Infinity
+             )
+-            const hasActiveSession = group.sessions.some(s => s.active)
++            // Drives group order and auto-expand: a directory whose only
++            // connected session is a keepalive zombie should not float up
++            // or stay open on that account.
++            const hasActiveSession = group.sessions.some(isLiveSession)
+             const hasPinnedSession = group.sessions.some(s => s.pinned)
+             const displayName = getSessionProjectLabel(group.directory)
+ 
+@@ -1190,6 +1201,7 @@ function SessionItem(props: {
+     selected?: boolean
+     showDetailedStatus?: boolean
+     inRunningSection?: boolean
++    inIdleBucket?: boolean
+     projectLabel?: string
+     machineLabel?: string
+     lastSeenVersion: number
+@@ -1205,6 +1217,7 @@ function SessionItem(props: {
+         selected = false,
+         showDetailedStatus = false,
+         inRunningSection = false,
++        inIdleBucket = false,
+         projectLabel,
+         machineLabel,
+         lastSeenVersion
+@@ -1331,6 +1344,7 @@ function SessionItem(props: {
+                     lastSeenVersion={lastSeenVersion}
+                     scheduleTooltipId={scheduleId}
+                     inRunningSection={inRunningSection}
++                    inIdleBucket={inIdleBucket}
+                     projectLabel={projectLabel}
+                     machineLabel={machineLabel}
+                 />
+@@ -1900,6 +1914,7 @@ export function SessionList(props: {
+                                             selected={s.id === selectedSessionId}
+                                             showDetailedStatus={showDetailedStatus}
+                                             inRunningSection
++                                            inIdleBucket={bucketKey === 'idle'}
+                                             projectLabel={getSessionProjectLabel(resolveSessionGroupDirectory(s.metadata ?? {}))}
+                                             machineLabel={showMachineFilterBar && activeMachineFilter === null
+                                                 ? resolveMachineLabel(s.metadata?.machineId ?? null)
+diff --git a/web/src/components/SessionRowSummary.test.tsx b/web/src/components/SessionRowSummary.test.tsx
+index d45999ccf..a936cbd35 100644
+--- a/web/src/components/SessionRowSummary.test.tsx
++++ b/web/src/components/SessionRowSummary.test.tsx
+@@ -162,3 +162,81 @@ describe('SessionRowSummary background status', () => {
+         expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('New activity')
+     })
+ })
++
++describe('SessionRowSummary keepalive-idle (tiann/hapi#1820)', () => {
++    const idle = (overrides: Partial<SessionSummary> = {}) => makeSummary({
++        id: 'idle-row',
++        backgroundTaskCount: 0,
++        metadata: { path: '/demo/idle', name: 'Idle demo', flavor: 'claude', lifecycleState: 'idle' },
++        ...overrides
++    })
++
++    it('draws the idle marker in hint colour while nothing is in flight', () => {
++        render(
++            <I18nProvider>
++                <SessionRowSummary session={idle()} showDetailedStatus={false} />
++            </I18nProvider>
++        )
++
++        expect(screen.getByTestId('session-row-idle')).toHaveTextContent('Idle (keepalive only)')
++        expect(screen.getByTitle('Idle demo').className).toContain('text-[var(--app-hint)]')
++    })
++
++    it('keeps the idle marker next to the unread dot', () => {
++        // A session that went idle after its last activity is both unread and
++        // idle; the unread dot must not hide what the agent is (not) doing.
++        const session = idle({ id: 'unread-idle', updatedAt: 2_000 })
++        localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ [session.id]: 2_000 }))
++        const view = render(
++            <I18nProvider>
++                <SessionRowSummary session={session} showDetailedStatus={true} lastSeenVersion={0} />
++            </I18nProvider>
++        )
++        expect(screen.queryByRole('tooltip', { hidden: true })).not.toBeInTheDocument()
++
++        // The watermark moves behind the session's latest activity: unread.
++        localStorage.setItem('hapi.sessionLastSeen.v1', JSON.stringify({ [session.id]: 1_999 }))
++        view.rerender(
++            <I18nProvider>
++                <SessionRowSummary session={session} showDetailedStatus={true} lastSeenVersion={1} />
++            </I18nProvider>
++        )
++
++        expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('New activity')
++        expect(screen.getByTestId('session-row-idle')).toHaveTextContent('Idle (keepalive only)')
++    })
++
++    it('drops the label only inside the labelled idle bucket, not under a generic pinned heading', () => {
++        const view = render(
++            <I18nProvider>
++                <SessionRowSummary session={idle()} showDetailedStatus={false} inRunningSection />
++            </I18nProvider>
++        )
++        expect(screen.getByTestId('session-row-idle')).toHaveTextContent('Idle (keepalive only)')
++
++        view.rerender(
++            <I18nProvider>
++                <SessionRowSummary session={idle()} showDetailedStatus={false} inRunningSection inIdleBucket />
++            </I18nProvider>
++        )
++        expect(screen.getByTestId('session-row-idle')).toHaveTextContent('')
++        expect(screen.getByTestId('session-row-idle')).toHaveAttribute('title', 'Idle (keepalive only)')
++    })
++
++    it('reads as working again once the session is thinking, spinner and contrast alike', () => {
++        // The hub keeps the idle mark through ambient thinking churn
++        // (tiann/hapi#1553) and bucketRunningSessions files such a row under
++        // Working; the row must not spin inside a dimmed, idle-labelled line.
++        const { container } = render(
++            <I18nProvider>
++                <SessionRowSummary session={idle({ thinking: true })} showDetailedStatus={false} />
++            </I18nProvider>
++        )
++
++        expect(container.querySelector('.animate-spin-slow')).not.toBeNull()
++        expect(screen.queryByTestId('session-row-idle')).toBeNull()
++        const title = screen.getByTitle('Idle demo')
++        expect(title.className).toContain('text-[var(--app-fg)]')
++        expect(title.parentElement!.parentElement!.className).not.toContain('opacity-75')
++    })
++})
+diff --git a/web/src/components/SessionRowSummary.tsx b/web/src/components/SessionRowSummary.tsx
+index 2b000dfb4..0a79d4b33 100644
+--- a/web/src/components/SessionRowSummary.tsx
++++ b/web/src/components/SessionRowSummary.tsx
+@@ -12,6 +12,7 @@ import { getCodexImportedAt } from '@/lib/codexImportedSessions'
+ import { getSessionTitle } from '@/lib/sessionTitle'
+ import { useTranslation } from '@/lib/use-translation'
+ import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
++import { isKeepaliveIdle, isLiveSession } from '@/lib/sessionLiveness'
+ 
+ function BulbIcon(props: { className?: string }) {
+     return (
+@@ -100,6 +101,8 @@ export function SessionRowSummary(props: {
+     className?: string
+     /** Rows inside the pinned "in progress" section skip the text label (dot only). */
+     inRunningSection?: boolean
++    /** Rows inside the pinned idle bucket: its heading carries the idle label, so the row shows the dot alone. */
++    inIdleBucket?: boolean
+     /** Short project name shown under the title (pinned "in progress" rows). */
+     projectLabel?: string
+     /** Machine label shown next to the project name (pinned "in progress" rows). */
+@@ -116,6 +119,7 @@ export function SessionRowSummary(props: {
+         scheduleTooltipId: scheduleTooltipIdProp,
+         className,
+         inRunningSection = false,
++        inIdleBucket = false,
+         projectLabel,
+         machineLabel,
+     } = props
+@@ -150,11 +154,11 @@ export function SessionRowSummary(props: {
+ 
+     return (
+         <div className={`flex w-full min-w-0 flex-col gap-1 ${className ?? ''}`}>
+-            <div className={`grid grid-cols-[minmax(9rem,1fr)_minmax(0,max-content)] items-center gap-2 ${!s.active ? 'opacity-50' : ''}`}>
++            <div className={`grid grid-cols-[minmax(9rem,1fr)_minmax(0,max-content)] items-center gap-2 ${!s.active ? 'opacity-50' : isKeepaliveIdle(s) ? 'opacity-75' : ''}`}>
+                 <div className="flex min-w-0 items-center gap-2">
+                     <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0 -translate-y-px" />
+                     <div
+-                        className={`min-w-0 flex-1 truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
++                        className={`min-w-0 flex-1 truncate text-sm font-medium ${isLiveSession(s) ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
+                         title={sessionName}
+                     >
+                         {sessionName}
+@@ -220,6 +224,25 @@ export function SessionRowSummary(props: {
+                             aria-label={attentionLabel ?? undefined}
+                         />
+                     ) : null}
++                    {isKeepaliveIdle(s) && !s.thinking ? (
++                        // tiann/hapi#1820: connected, but keepalives only. Drawn
++                        // next to whatever attention the row carries (an unread
++                        // dot does not make the agent any less idle). The pinned
++                        // idle bucket's heading already carries the label, so
++                        // rows in there get the dot alone; a globally pinned
++                        // idle row sits under the generic Pinned heading and
++                        // keeps its label.
++                        <span
++                            className="inline-flex shrink-0 items-center gap-1 text-[var(--app-hint)]"
++                            title={t('session.item.idle')}
++                            data-testid="session-row-idle"
++                        >
++                            <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
++                            {!inIdleBucket ? (
++                                <span className="text-[11px] font-medium leading-none">{t('session.item.idle')}</span>
++                            ) : null}
++                        </span>
++                    ) : null}
+                     {hasScheduleTooltip && nestedTooltips && scheduleId ? (
+                         <HoverTooltip
+                             id={scheduleId}
+diff --git a/web/src/lib/sessionLiveness.test.ts b/web/src/lib/sessionLiveness.test.ts
+new file mode 100644
+index 000000000..8cad2b9fd
+--- /dev/null
++++ b/web/src/lib/sessionLiveness.test.ts
+@@ -0,0 +1,30 @@
++import { describe, expect, it } from 'vitest'
++import { hasLiveWork, isKeepaliveIdle, isLiveSession, sessionLivenessRank } from './sessionLiveness'
++
++const idle = { active: true, thinking: false, metadata: { lifecycleState: 'idle' } }
++
++describe('sessionLiveness', () => {
++    it('reads a keepalive-idle session as connected but not live', () => {
++        expect(isKeepaliveIdle(idle)).toBe(true)
++        expect(isLiveSession(idle)).toBe(false)
++        expect(sessionLivenessRank(idle)).toBe(1)
++
++        expect(isKeepaliveIdle({ ...idle, active: false })).toBe(false)
++        expect(sessionLivenessRank({ ...idle, active: false })).toBe(2)
++        expect(isLiveSession({ active: true, metadata: { lifecycleState: 'running' } })).toBe(true)
++    })
++
++    it('lets live work outrank the idle mark, like the pinned buckets do', () => {
++        // The hub does not lift an idle mark on `thinking` alone
++        // (tiann/hapi#1553), so idle + thinking is a real state. It has to
++        // read as working everywhere, not only in bucketRunningSessions.
++        for (const work of [{ thinking: true }, { backgroundTaskCount: 1 }, { pendingRequestsCount: 1 }]) {
++            const session = { ...idle, ...work }
++            expect(hasLiveWork(session)).toBe(true)
++            expect(isKeepaliveIdle(session)).toBe(false)
++            expect(isLiveSession(session)).toBe(true)
++            expect(sessionLivenessRank(session)).toBe(0)
++        }
++        expect(hasLiveWork(idle)).toBe(false)
++    })
++})
+diff --git a/web/src/lib/sessionLiveness.ts b/web/src/lib/sessionLiveness.ts
+new file mode 100644
+index 000000000..ff8368c13
+--- /dev/null
++++ b/web/src/lib/sessionLiveness.ts
+@@ -0,0 +1,46 @@
++import { SESSION_LIFECYCLE_IDLE } from '@hapi/protocol'
++
++type LivenessInput = {
++    active: boolean
++    thinking?: boolean
++    backgroundTaskCount?: number
++    pendingRequestsCount?: number
++    metadata?: { lifecycleState?: string } | null
++}
++
++/**
++ * Work the hub can see right now. Mirrors `hasLiveWork` in
++ * hub/src/sync/sessionIdle.ts: the hub never marks such a session idle, but
++ * it also does not lift an existing mark on `thinking` alone (Cursor ACP
++ * churn, tiann/hapi#1553), so `idle` + `thinking` is a state the sidebar has
++ * to expect. The pinned buckets (#1821) file it under Working; every other
++ * derivation must agree, or a row spins while drawn as idle.
++ */
++export function hasLiveWork(session: LivenessInput): boolean {
++    return session.thinking === true
++        || (session.backgroundTaskCount ?? 0) > 0
++        || (session.pendingRequestsCount ?? 0) > 0
++}
++
++/**
++ * Connected, but the hub has seen nothing except keepalives for the idle
++ * window (tiann/hapi#1820) and nothing is in flight now. `active` stays true
++ * on purpose — the socket is up — so anything that wants to read "the agent
++ * is alive" must ask here instead of `session.active`.
++ */
++export function isKeepaliveIdle(session: LivenessInput): boolean {
++    return session.active
++        && !hasLiveWork(session)
++        && session.metadata?.lifecycleState === SESSION_LIFECYCLE_IDLE
++}
++
++/** Connected and not idle-marked: the only sessions that should read as live. */
++export function isLiveSession(session: LivenessInput): boolean {
++    return session.active && !isKeepaliveIdle(session)
++}
++
++/** Sort key: live first, then keepalive-idle, then disconnected. */
++export function sessionLivenessRank(session: LivenessInput): number {
++    if (isLiveSession(session)) return 0
++    return session.active ? 1 : 2
++}

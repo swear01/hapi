@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 25 Oct 2026 18:05:18 +0000
+Subject: [PATCH 92/94] test(hub): use background-task snapshots in carried
+ #1942 tests
+
+Official main now ships the background_tasks_changed snapshot (#2102), so
+the replay and abort tests carried with #1942 must drive counts, not deltas.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../handlers/cli/sessionHandlers.test.ts      | 19 +++++++++----------
+ hub/src/sync/sessionIdleEngine.test.ts        |  2 +-
+ 2 files changed, 10 insertions(+), 11 deletions(-)
+
+diff --git a/hub/src/socket/handlers/cli/sessionHandlers.test.ts b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+index 4bf91028e..fe431e934 100644
+--- a/hub/src/socket/handlers/cli/sessionHandlers.test.ts
++++ b/hub/src/socket/handlers/cli/sessionHandlers.test.ts
+@@ -185,10 +185,10 @@ describe('cli session handlers', () => {
+         const store = new Store(':memory:')
+         const session = store.sessions.getOrCreateSession('replay', { flavor: 'claude' }, null, 'default')
+         const socket = new FakeSocket()
+-        const progress = mock(); const activity = mock(); const bgDelta = mock(); const events: SyncEvent[] = []
++        const progress = mock(); const activity = mock(); const bgCount = mock(); const events: SyncEvent[] = []
+         registerSessionHandlers(socket as unknown as CliSocketWithData, {
+             store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {},
+-            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskDelta: bgDelta,
++            onAgentProgress: progress, onSessionActivity: activity, onBackgroundTaskCount: bgCount,
+             onWebappEvent: event => { events.push(event) }
+         })
+         const message = { role: 'user', content: { type: 'text', text: 'hello' } }
+@@ -202,14 +202,13 @@ describe('cli session handlers', () => {
+         expect(socket.roomEvents.filter(e => e.event === 'update')).toHaveLength(1)
+         expect(events.filter(e => e.type === 'message-received')).toHaveLength(1)
+ 
+-        // A background task start replayed the same way must count once, or the
+-        // counter never returns to zero and the session never reconciles idle.
+-        const started = { role: 'agent', content: { type: 'output', data: { type: 'tool_result', content: 'Command running in background with ID: bg-1' } } }
+-        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
+-        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: started })
+-        expect(store.messages.getAllMessages(session.id)).toHaveLength(2)
+-        expect(bgDelta).toHaveBeenCalledTimes(1)
+-        expect(bgDelta).toHaveBeenCalledWith(session.id, { started: 1, completed: 0 })
++        // A replayed background-task snapshot is applied, never stored: it
++        // replaces the count, so applying it twice cannot drift.
++        const snapshot = { role: 'agent', content: { type: 'output', data: { type: 'system', subtype: 'background_tasks_changed', tasks: [{ id: 'bg-1' }] } } }
++        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: snapshot })
++        socket.trigger('message', { sid: session.id, localId: 'replayed-2', message: snapshot })
++        expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
++        expect(bgCount.mock.calls).toEqual([[session.id, 1], [session.id, 1]])
+         store.close()
+     })
+ 
+diff --git a/hub/src/sync/sessionIdleEngine.test.ts b/hub/src/sync/sessionIdleEngine.test.ts
+index d8654d1ea..01a386927 100644
+--- a/hub/src/sync/sessionIdleEngine.test.ts
++++ b/hub/src/sync/sessionIdleEngine.test.ts
+@@ -107,7 +107,7 @@ describe('SyncEngine keepalive-idle tick', () => {
+         try {
+             const session = engine.getOrCreateSession('abort', RUNNING, null, 'default')
+             engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: true })
+-            engine.handleBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
++            engine.handleBackgroundTaskCount(session.id, 1)
+             engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: false })
+             expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
+             const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache

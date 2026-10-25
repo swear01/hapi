@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 25 Oct 2026 18:30:07 +0000
+Subject: [PATCH 93/94] test(web): expand collapsed groups in carried sidebar
+ tests
+
+With #2165 a collapsed group no longer mounts its rows, so the carried
+#1418, #1944 and #2080 tests open the group before using a row in it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../SessionList.directory-action.test.tsx       |  1 +
+ .../SessionList.idle-lifecycle.test.tsx         | 17 +++++++++--------
+ .../SessionList.mark-all-read.test.tsx          |  1 +
+ 3 files changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/web/src/components/SessionList.directory-action.test.tsx b/web/src/components/SessionList.directory-action.test.tsx
+index 5b6810b47..1eda83050 100644
+--- a/web/src/components/SessionList.directory-action.test.tsx
++++ b/web/src/components/SessionList.directory-action.test.tsx
+@@ -86,6 +86,7 @@ describe('SessionList directory action', () => {
+             />
+         )
+ 
++        fireEvent.click(screen.getByTitle('/work'))
+         const rows = document.querySelectorAll<HTMLButtonElement>('.session-list-item')
+         expect(rows[0].draggable).toBe(true)
+         expect(rows[1].draggable).toBe(false)
+diff --git a/web/src/components/SessionList.idle-lifecycle.test.tsx b/web/src/components/SessionList.idle-lifecycle.test.tsx
+index 8b4fb4015..accee4cac 100644
+--- a/web/src/components/SessionList.idle-lifecycle.test.tsx
++++ b/web/src/components/SessionList.idle-lifecycle.test.tsx
+@@ -1,4 +1,4 @@
+-import { cleanup, render, screen, within } from '@testing-library/react'
++import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { ReactNode } from 'react'
+@@ -104,13 +104,6 @@ describe('SessionList keepalive-idle lifecycle', () => {
+     it('marks an idle row in the default view and ranks its group below a live one', () => {
+         renderSessionList([zombie, live])
+ 
+-        // Not pinned: both rows sit in their directory groups, and the idle
+-        // one is labelled rather than dressed up as ready.
+-        const idleRow = screen.getByTitle('Zombie task').closest('button')!
+-        expect(within(idleRow).getByTestId('session-row-idle').textContent).toContain('Idle (keepalive only)')
+-        const liveRow = screen.getByTitle('Live task').closest('button')!
+-        expect(within(liveRow).queryByTestId('session-row-idle')).toBeNull()
+-
+         // Group order follows liveness, not the newer updatedAt of the zombie.
+         const headers = screen.getAllByTitle(/^\/work\/(zombie|live)$/)
+         expect(headers.map((header) => header.getAttribute('title'))).toEqual(['/work/live', '/work/zombie'])
+@@ -118,6 +111,14 @@ describe('SessionList keepalive-idle lifecycle', () => {
+         const panelOf = (header: HTMLElement) => header.parentElement!.querySelector('.collapsible-panel')!
+         expect(panelOf(headers[0]).getAttribute('data-open')).toBe('true')
+         expect(panelOf(headers[1]).getAttribute('data-open')).toBeNull()
++
++        // Not pinned: both rows sit in their directory groups, and the idle
++        // one is labelled rather than dressed up as ready.
++        fireEvent.click(headers[1])
++        const idleRow = screen.getByTitle('Zombie task').closest('button')!
++        expect(within(idleRow).getByTestId('session-row-idle').textContent).toContain('Idle (keepalive only)')
++        const liveRow = screen.getByTitle('Live task').closest('button')!
++        expect(within(liveRow).queryByTestId('session-row-idle')).toBeNull()
+     })
+ 
+     it('reads an idle row that is thinking again as live, like the pinned buckets do', () => {
+diff --git a/web/src/components/SessionList.mark-all-read.test.tsx b/web/src/components/SessionList.mark-all-read.test.tsx
+index 82a0652dd..fad4fcf47 100644
+--- a/web/src/components/SessionList.mark-all-read.test.tsx
++++ b/web/src/components/SessionList.mark-all-read.test.tsx
+@@ -68,6 +68,7 @@ describe('SessionList mark all as read', () => {
+         configureSessionReadSync('pending-hub', vi.fn())
+         renderSessionList([makeSession({ id: 'loading', updatedAt: 1000, metadata: { path: '/work', name: 'Loading state' } })])
+         expect(screen.queryByRole('button', { name: 'Mark all as read (1)' })).toBeNull()
++        fireEvent.click(screen.getByTitle('/work'))
+         const row = screen.getByRole('button', { name: /Loading state/ })
+         fireEvent.contextMenu(row, { clientX: 100, clientY: 100 })
+         expect(screen.queryByRole('menuitem', { name: 'Mark as unread' })).toBeNull()

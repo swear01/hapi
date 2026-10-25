@@ -1,0 +1,590 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Sun, 25 Oct 2026 18:02:30 +0000
+Subject: [PATCH 83/94] carry(upstream): PR #2153 feat(claude): offer the four
+ current Claude models, drop the 1M presets
+
+Upstream-PR: https://github.com/tiann/hapi/pull/2153
+Upstream-Head: e5c6f0f5acb0aa2da0f730c80401fbb25e346187
+---
+ .../feature/newsession/NewSessionCatalogs.kt  |  6 +-
+ .../app/hapi/protocol/catalog/Models.kt       |  6 +-
+ cli/src/claude/claudeRemote.ts                |  8 ++
+ cli/src/claude/claudeRemoteLauncher.ts        |  1 +
+ cli/src/claude/sdk/query.ts                   | 16 ++++
+ .../claude/utils/sdkToLogConverter.test.ts    | 73 ++++++++++++++++++-
+ cli/src/claude/utils/sdkToLogConverter.ts     | 27 ++++++-
+ .../HapiProtocol/Catalog/ModelCatalog.swift   | 12 +--
+ .../HapiProtocolTests/CatalogTests.swift      |  6 +-
+ shared/src/models.test.ts                     |  6 +-
+ shared/src/models.ts                          |  8 +-
+ web/src/chat/modelConfig.test.ts              |  9 ++-
+ web/src/chat/modelConfig.ts                   | 19 ++---
+ .../AssistantChat/claudeModelOptions.test.ts  | 14 ++--
+ .../AssistantChat/modelOptions.test.ts        | 22 ++----
+ web/src/components/NewSession/types.test.ts   |  6 +-
+ web/src/components/ToolCard/ToolCard.test.ts  |  2 +-
+ 17 files changed, 171 insertions(+), 70 deletions(-)
+
+diff --git a/android/app/src/main/kotlin/app/hapi/companion/feature/newsession/NewSessionCatalogs.kt b/android/app/src/main/kotlin/app/hapi/companion/feature/newsession/NewSessionCatalogs.kt
+index a8d83829e..f02348fa8 100644
+--- a/android/app/src/main/kotlin/app/hapi/companion/feature/newsession/NewSessionCatalogs.kt
++++ b/android/app/src/main/kotlin/app/hapi/companion/feature/newsession/NewSessionCatalogs.kt
+@@ -16,12 +16,10 @@ object NewSessionCatalogs {
+     /** `'auto'` sentinel rows use the web's "Default" label. */
+     val CLAUDE_MODELS: List<OptionItem> = listOf(
+         OptionItem("auto", "Default"),
+-        OptionItem("sonnet", "Sonnet"),
+-        OptionItem("sonnet[1m]", "Sonnet 1M"),
+         OptionItem("opus", "Opus"),
+-        OptionItem("opus[1m]", "Opus 1M"),
+         OptionItem("fable", "Fable"),
+-        OptionItem("fable[1m]", "Fable 1M"),
++        OptionItem("sonnet", "Sonnet"),
++        OptionItem("haiku", "Haiku"),
+     )
+ 
+     val CLAUDE_EFFORTS: List<OptionItem> = listOf(
+diff --git a/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Models.kt b/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Models.kt
+index bd6073569..307c3c032 100644
+--- a/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Models.kt
++++ b/android/core/protocol/src/main/kotlin/app/hapi/protocol/catalog/Models.kt
+@@ -11,12 +11,10 @@ package app.hapi.protocol.catalog
+ object ClaudeModels {
+     /** `CLAUDE_MODEL_LABELS` — declaration order preserved (picker order). */
+     val LABELS: Map<String, String> = linkedMapOf(
+-        "sonnet" to "Sonnet",
+-        "sonnet[1m]" to "Sonnet 1M",
+         "opus" to "Opus",
+-        "opus[1m]" to "Opus 1M",
+         "fable" to "Fable",
+-        "fable[1m]" to "Fable 1M",
++        "sonnet" to "Sonnet",
++        "haiku" to "Haiku",
+     )
+ 
+     /** `CLAUDE_MODEL_PRESETS`. */
+diff --git a/cli/src/claude/claudeRemote.ts b/cli/src/claude/claudeRemote.ts
+index e4b972f07..8553b12fc 100644
+--- a/cli/src/claude/claudeRemote.ts
++++ b/cli/src/claude/claudeRemote.ts
+@@ -49,6 +49,7 @@ export async function claudeRemote(opts: {
+     onSessionFound: (id: string, extras?: { forkedFrom?: string }) => void,
+     onThinkingChange?: (thinking: boolean) => void,
+     onMessage: (message: SDKMessage) => void,
++    onContextUsage?: (usage: { model?: string, maxTokens?: number }) => void,
+     onFirstResult?: (initialMessage: string) => void,
+     onCompletionEvent?: (message: string) => void,
+     onSessionReset?: () => void,
+@@ -426,6 +427,13 @@ export async function claudeRemote(opts: {
+ 
+                 const systemInit = message as SDKSystemMessage;
+ 
++                if (opts.onContextUsage) {
++                    // Older CLIs may not support get_context_usage; the converter's seed stays.
++                    response.getContextUsage().then(opts.onContextUsage, (e) => {
++                        logger.debug('[claudeRemote] get_context_usage failed', e);
++                    });
++                }
++
+                 // Session id is still in memory, wait until session file is written to disk
+                 // Start a watcher for to detect the session id
+                 if (systemInit.session_id) {
+diff --git a/cli/src/claude/claudeRemoteLauncher.ts b/cli/src/claude/claudeRemoteLauncher.ts
+index 73bdee17b..c93acbe1a 100644
+--- a/cli/src/claude/claudeRemoteLauncher.ts
++++ b/cli/src/claude/claudeRemoteLauncher.ts
+@@ -558,6 +558,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
+                         peerToolsDisabled: session.peerToolsDisabled,
+                         claudeArgs: session.claudeArgs,
+                         onMessage,
++                        onContextUsage: (usage) => sdkToLogConverter.applyContextUsage(usage.model, usage.maxTokens),
+                         onFirstResult: (initialMessage) => {
+                             applySessionTitleFallback(session.client, initialMessage);
+                         },
+diff --git a/cli/src/claude/sdk/query.ts b/cli/src/claude/sdk/query.ts
+index 5777a1931..33be7d35c 100644
+--- a/cli/src/claude/sdk/query.ts
++++ b/cli/src/claude/sdk/query.ts
+@@ -183,6 +183,21 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
+         }, this.childStdin)
+     }
+ 
++    /**
++     * Ask Claude for the active model's effective context window (what /context shows:
++     * honors CLAUDE_CODE_DISABLE_1M_CONTEXT and settings autoCompactWindow).
++     */
++    async getContextUsage(): Promise<{ model?: string, maxTokens?: number }> {
++        if (!this.childStdin) {
++            throw new Error('getContextUsage requires --input-format stream-json')
++        }
++
++        const response = await this.request({
++            subtype: 'get_context_usage'
++        }, this.childStdin) as { response?: { model?: string, maxTokens?: number } }
++        return response.response ?? {}
++    }
++
+     /**
+      * Send control request to Claude process
+      */
+@@ -196,6 +211,7 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
+ 
+         return new Promise((resolve, reject) => {
+             this.pendingControlResponses.set(requestId, (response) => {
++                this.pendingControlResponses.delete(requestId)
+                 if (response.subtype === 'success') {
+                     resolve(response)
+                 } else {
+diff --git a/cli/src/claude/utils/sdkToLogConverter.test.ts b/cli/src/claude/utils/sdkToLogConverter.test.ts
+index 925dff725..190bbe957 100644
+--- a/cli/src/claude/utils/sdkToLogConverter.test.ts
++++ b/cli/src/claude/utils/sdkToLogConverter.test.ts
+@@ -594,6 +594,65 @@ describe('SDKToLogConverter', () => {
+             expect(turn1?.message?.usage?.context_window).toBe(1_000_000)
+         })
+ 
++        it('seeds a 1M turn-1 estimate for a bare preset alias, which resolves to a native 1M model', () => {
++            const seededConverter = new SDKToLogConverter({
++                ...context,
++                selectedModel: 'fable'
++            } as any)
++
++            seededConverter.convert({
++                type: 'system',
++                subtype: 'init',
++                session_id: 'session-7b',
++                model: 'claude-fable-5-1'
++            } as SDKSystemMessage)
++
++            const turn1 = seededConverter.convert({
++                type: 'assistant',
++                message: {
++                    role: 'assistant',
++                    model: 'claude-fable-5-1',
++                    content: [{ type: 'text', text: 'hi' }],
++                    usage: { input_tokens: 10, output_tokens: 20 }
++                }
++            } as any) as any
++
++            expect(turn1?.message?.usage?.context_window).toBe(1_000_000)
++        })
++
++        it('uses get_context_usage over the alias seed and over a later result (1M disabled / autoCompactWindow)', () => {
++            const seededConverter = new SDKToLogConverter({
++                ...context,
++                selectedModel: 'fable'
++            } as any)
++
++            seededConverter.convert({
++                type: 'system',
++                subtype: 'init',
++                session_id: 'session-7c',
++                model: 'claude-fable-5-1'
++            } as SDKSystemMessage)
++
++            seededConverter.applyContextUsage('claude-sonnet-5-5', 100_000)
++            expect((seededConverter.convert(makeAssistantMessage()) as any)?.message?.usage?.context_window).toBe(1_000_000)
++
++            seededConverter.applyContextUsage('claude-fable-5-1', 200_000)
++            expect((seededConverter.convert(makeAssistantMessage()) as any)?.message?.usage?.context_window).toBe(200_000)
++
++            seededConverter.convert({
++                type: 'result',
++                subtype: 'success',
++                num_turns: 1,
++                total_cost_usd: 0,
++                duration_ms: 1,
++                duration_api_ms: 1,
++                is_error: false,
++                session_id: 'session-7c',
++                modelUsage: { 'claude-fable-5-1': { contextWindow: 1_000_000 } }
++            } as SDKResultMessage)
++            expect((seededConverter.convert(makeAssistantMessage()) as any)?.message?.usage?.context_window).toBe(200_000)
++        })
++
+         it('seeds a conservative 200k when neither the bare init model nor a selectedModel hint indicates 1M, until result confirms it', () => {
+             // Bare init model + no selectedModel hint: neither signal says "1M", so we can't
+             // know the real window on turn 1 and seed 200k conservatively rather than
+@@ -696,18 +755,18 @@ describe('SDKToLogConverter', () => {
+             // selectedModel and none on the bare init model). Without a live update, the
+             // converter would still be seeding from the stale "fable[1m]" snapshot and
+             // would over-seed 1,000,000 for the newly-selected model's first turn.
+-            liveConverter.updateSelectedModel('sonnet')
++            liveConverter.updateSelectedModel('claude-sonnet-4-6')
+             liveConverter.convert({
+                 type: 'system',
+                 subtype: 'init',
+                 session_id: 'session-10',
+-                model: 'claude-sonnet-5'
++                model: 'claude-sonnet-4-6'
+             } as SDKSystemMessage)
+             const afterSwitch = liveConverter.convert({
+                 type: 'assistant',
+                 message: {
+                     role: 'assistant',
+-                    model: 'claude-sonnet-5',
++                    model: 'claude-sonnet-4-6',
+                     content: [{ type: 'text', text: 'hi' }],
+                     usage: { input_tokens: 10, output_tokens: 20 }
+                 }
+@@ -884,9 +943,15 @@ describe('SDKToLogConverter', () => {
+             } as any) as any
+             expect(t1?.message?.usage?.context_window).toBe(1_000_000)
+ 
+-            // Switch to plain fable (200k): must re-seed 200k, NOT keep the stale 1M.
++            // Switch to plain fable and let its result report a smaller window: the
++            // plain entry must take it without overwriting fable[1m]'s 1M.
+             conv.updateSelectedModel('fable')
+             conv.convert({ type: 'system', subtype: 'init', session_id: 's', model: 'claude-fable-5' } as SDKSystemMessage)
++            conv.convert({
++                type: 'result', subtype: 'success', num_turns: 1, total_cost_usd: 0,
++                duration_ms: 1, duration_api_ms: 1, is_error: false, session_id: 's',
++                modelUsage: { 'claude-fable-5': { contextWindow: 200_000 } }
++            } as SDKResultMessage)
+             const t2 = conv.convert({
+                 type: 'assistant',
+                 message: { role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: 'b' }], usage: { input_tokens: 10, output_tokens: 20 } }
+diff --git a/cli/src/claude/utils/sdkToLogConverter.ts b/cli/src/claude/utils/sdkToLogConverter.ts
+index 66a46bcfc..ec40552d2 100644
+--- a/cli/src/claude/utils/sdkToLogConverter.ts
++++ b/cli/src/claude/utils/sdkToLogConverter.ts
+@@ -13,6 +13,7 @@ import type {
+     SDKResultMessage
+ } from '@/claude/sdk'
+ import type { RawJSONLines } from '@/claude/types'
++import { isClaudeModelPreset } from '@hapi/protocol'
+ import type { ClaudePermissionMode } from '@hapi/protocol/types'
+ import { logger } from '@/lib'
+ 
+@@ -103,6 +104,10 @@ export class SDKToLogConverter {
+     // — rather than a single sticky number — means a mid-session model switch picks up the
+     // new model's own window immediately instead of inheriting the previous model's.
+     private modelContextWindows = new Map<string, number>()
++    // Keys whose window came from Claude's get_context_usage. That value is the effective
++    // window (capped by DISABLE_1M / autoCompactWindow), so a result's raw contextWindow
++    // must not overwrite it.
++    private contextUsageKeys = new Set<string>()
+ 
+     constructor(
+         context: Omit<ConversionContext, 'parentUuid'>,
+@@ -150,6 +155,21 @@ export class SDKToLogConverter {
+         this.context.selectedModel = model ?? null
+     }
+ 
++    /**
++     * Apply Claude's get_context_usage answer for the current session model.
++     */
++    applyContextUsage(model: string | undefined, maxTokens: number | undefined): void {
++        const key = this.resolvedContextWindowKey
++        if (!key || !this.resolvedModel || !model || typeof maxTokens !== 'number' || maxTokens <= 0) {
++            return
++        }
++        if (this.resolvedModel.replace(/\[1m\]$/, '') !== model.replace(/\[1m\]$/, '')) {
++            return
++        }
++        this.modelContextWindows.set(key, maxTokens)
++        this.contextUsageKeys.add(key)
++    }
++
+     /**
+      * Update session ID (for when session changes during resume)
+      */
+@@ -372,7 +392,10 @@ export class SDKToLogConverter {
+                         // first result lands. Guarding/seeding on resolvedContextWindowKey
+                         // (not the bare init id) is what forces a re-seed when switching
+                         // fable[1m] <-> fable, whose bare ids would otherwise be identical.
++                        // The bare preset aliases (opus/fable/sonnet/haiku) now resolve to models
++                        // with a native 1M window, so selecting one seeds 1M as well.
+                         const seedIs1m = (this.context.selectedModel?.endsWith('[1m]') ?? false)
++                            || isClaudeModelPreset(this.context.selectedModel)
+                             || systemMsg.model.endsWith('[1m]')
+                         this.modelContextWindows.set(this.resolvedContextWindowKey, seedIs1m ? 1_000_000 : 200_000)
+                     }
+@@ -410,7 +433,9 @@ export class SDKToLogConverter {
+                             const key = (this.resolvedModel && model === this.resolvedModel)
+                                 ? (this.resolvedContextWindowKey ?? model)
+                                 : model
+-                            this.modelContextWindows.set(key, cw)
++                            if (!this.contextUsageKeys.has(key)) {
++                                this.modelContextWindows.set(key, cw)
++                            }
+                         }
+                     }
+                 }
+diff --git a/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/ModelCatalog.swift b/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/ModelCatalog.swift
+index c9a34f767..c4b2d3e57 100644
+--- a/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/ModelCatalog.swift
++++ b/ios/Packages/HapiKit/Sources/HapiProtocol/Catalog/ModelCatalog.swift
+@@ -12,21 +12,17 @@ import Foundation
+ public enum ClaudeModels {
+     /// Preset ids in declaration (picker) order.
+     public static let presets: [String] = [
+-        "sonnet",
+-        "sonnet[1m]",
+         "opus",
+-        "opus[1m]",
+         "fable",
+-        "fable[1m]",
++        "sonnet",
++        "haiku",
+     ]
+ 
+     private static let labels: [String: String] = [
+-        "sonnet": "Sonnet",
+-        "sonnet[1m]": "Sonnet 1M",
+         "opus": "Opus",
+-        "opus[1m]": "Opus 1M",
+         "fable": "Fable",
+-        "fable[1m]": "Fable 1M",
++        "sonnet": "Sonnet",
++        "haiku": "Haiku",
+     ]
+ 
+     /// `getClaudeModelLabel`: trimmed lookup; unknown/blank → nil.
+diff --git a/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift b/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift
+index ea27d0803..b35a10cce 100644
+--- a/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift
++++ b/ios/Packages/HapiKit/Tests/HapiProtocolTests/CatalogTests.swift
+@@ -246,12 +246,10 @@ struct CatalogTests {
+     @Test func newSessionCatalogsMatchTheWebOptionLists() {
+         #expect(NewSessionCatalogs.claudeModels == [
+             NewSessionOption(value: "auto", label: "Default"),
+-            NewSessionOption(value: "sonnet", label: "Sonnet"),
+-            NewSessionOption(value: "sonnet[1m]", label: "Sonnet 1M"),
+             NewSessionOption(value: "opus", label: "Opus"),
+-            NewSessionOption(value: "opus[1m]", label: "Opus 1M"),
+             NewSessionOption(value: "fable", label: "Fable"),
+-            NewSessionOption(value: "fable[1m]", label: "Fable 1M"),
++            NewSessionOption(value: "sonnet", label: "Sonnet"),
++            NewSessionOption(value: "haiku", label: "Haiku"),
+         ])
+         #expect(NewSessionCatalogs.claudeEfforts == [
+             NewSessionOption(value: "auto", label: "Auto"),
+diff --git a/shared/src/models.test.ts b/shared/src/models.test.ts
+index 69d08be99..493c2c495 100644
+--- a/shared/src/models.test.ts
++++ b/shared/src/models.test.ts
+@@ -17,7 +17,7 @@ describe('isClaudeModelPreset', () => {
+     })
+ 
+     test('rejects unknown model string', () => {
+-        expect(isClaudeModelPreset('haiku')).toBe(false)
++        expect(isClaudeModelPreset('claude-haiku-4-5')).toBe(false)
+     })
+ 
+     test('rejects null and undefined', () => {
+@@ -30,7 +30,7 @@ describe('getClaudeModelLabel', () => {
+     test('returns label for known presets', () => {
+         expect(getClaudeModelLabel('sonnet')).toBe('Sonnet')
+         expect(getClaudeModelLabel('opus')).toBe('Opus')
+-        expect(getClaudeModelLabel('opus[1m]')).toBe('Opus 1M')
++        expect(getClaudeModelLabel('opus[1m]')).toBeNull()
+     })
+ 
+     test('trims whitespace before lookup', () => {
+@@ -38,7 +38,7 @@ describe('getClaudeModelLabel', () => {
+     })
+ 
+     test('returns null for unknown model', () => {
+-        expect(getClaudeModelLabel('haiku')).toBeNull()
++        expect(getClaudeModelLabel('claude-haiku-4-5')).toBeNull()
+     })
+ 
+     test('returns null for empty/whitespace-only string', () => {
+diff --git a/shared/src/models.ts b/shared/src/models.ts
+index 544fb5dde..24ef0f6ee 100644
+--- a/shared/src/models.ts
++++ b/shared/src/models.ts
+@@ -1,10 +1,10 @@
++// Claude Code's own aliases, in its /model order. Each resolves to the
++// newest model of its family; pinned older versions are not offered here.
+ export const CLAUDE_MODEL_LABELS = {
+-    sonnet: 'Sonnet',
+-    'sonnet[1m]': 'Sonnet 1M',
+     opus: 'Opus',
+-    'opus[1m]': 'Opus 1M',
+     fable: 'Fable',
+-    'fable[1m]': 'Fable 1M'
++    sonnet: 'Sonnet',
++    haiku: 'Haiku'
+ } as const
+ 
+ export type ClaudeModelPreset = keyof typeof CLAUDE_MODEL_LABELS
+diff --git a/web/src/chat/modelConfig.test.ts b/web/src/chat/modelConfig.test.ts
+index 03a057f37..fdbdfad3d 100644
+--- a/web/src/chat/modelConfig.test.ts
++++ b/web/src/chat/modelConfig.test.ts
+@@ -2,8 +2,15 @@ import { describe, expect, it } from 'vitest'
+ import { getContextBudgetTokens } from './modelConfig'
+ 
+ describe('getContextBudgetTokens', () => {
+-    it('uses the large budget only for explicit 1m Claude presets', () => {
++    it('keeps the large budget for sessions stored with a [1m] alias', () => {
+         expect(getContextBudgetTokens('sonnet[1m]', 'claude')).toBe(990_000)
++        expect(getContextBudgetTokens('opus[1m]', 'claude')).toBe(990_000)
++    })
++
++    it('uses the large budget for the aliases, which now resolve to native 1M models', () => {
++        expect(getContextBudgetTokens('opus', 'claude')).toBe(990_000)
++        expect(getContextBudgetTokens('sonnet', 'claude')).toBe(990_000)
++        expect(getContextBudgetTokens('haiku', 'claude')).toBe(990_000)
+     })
+ 
+     it('uses the default Claude budget for full Claude model names', () => {
+diff --git a/web/src/chat/modelConfig.ts b/web/src/chat/modelConfig.ts
+index 5cbecfda4..19b795eb2 100644
+--- a/web/src/chat/modelConfig.ts
++++ b/web/src/chat/modelConfig.ts
+@@ -74,16 +74,17 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
+         if (!trimmedModel) {
+             return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
+         }
+-        if (isClaudeModelPreset(trimmedModel) || trimmedModel.startsWith('claude-')) {
+-            // Fable ships with a 1M window even under its bare id: the SDK
+-            // result message reports modelUsage["claude-fable-5"].contextWindow
+-            // = 1,000,000, so the "[1m]" suffix check alone would undercount
+-            // local-mode sessions (their transcript usage carries no
+-            // context_window and falls through to this heuristic).
+-            const isFable = trimmedModel === 'fable'
+-                || trimmedModel === 'fable[1m]'
++        if (isClaudeModelPreset(trimmedModel) || trimmedModel.startsWith('claude-') || trimmedModel.endsWith('[1m]')) {
++            // The preset aliases (opus/fable/sonnet/haiku) resolve to models with a
++            // native 1M window, and Fable ships 1M even under its bare id (the
++            // SDK result reports modelUsage["claude-fable-5"].contextWindow =
++            // 1,000,000). Local-mode transcript usage carries no
++            // context_window and falls through to this heuristic, so the
++            // "[1m]" suffix check alone would undercount them.
++            const isLarge = isClaudeModelPreset(trimmedModel)
++                || trimmedModel.endsWith('[1m]')
+                 || trimmedModel.startsWith('claude-fable')
+-            return trimmedModel.endsWith('[1m]') || isFable
++            return isLarge
+                 ? LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
+                 : DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
+         }
+diff --git a/web/src/components/AssistantChat/claudeModelOptions.test.ts b/web/src/components/AssistantChat/claudeModelOptions.test.ts
+index 73f93a8b8..9e01f0cd6 100644
+--- a/web/src/components/AssistantChat/claudeModelOptions.test.ts
++++ b/web/src/components/AssistantChat/claudeModelOptions.test.ts
+@@ -6,30 +6,26 @@ describe('getClaudeComposerModelOptions', () => {
+         expect(getClaudeComposerModelOptions('claude-opus-4-1-20250805')).toEqual([
+             { value: null, label: 'Default' },
+             { value: 'claude-opus-4-1-20250805', label: 'claude-opus-4-1-20250805' },
+-            { value: 'sonnet', label: 'Sonnet' },
+-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
+             { value: 'opus', label: 'Opus' },
+-            { value: 'opus[1m]', label: 'Opus 1M' },
+             { value: 'fable', label: 'Fable' },
+-            { value: 'fable[1m]', label: 'Fable 1M' },
++            { value: 'sonnet', label: 'Sonnet' },
++            { value: 'haiku', label: 'Haiku' },
+         ])
+     })
+ 
+     it('does not duplicate preset Claude models', () => {
+         expect(getClaudeComposerModelOptions('opus')).toEqual([
+             { value: null, label: 'Default' },
+-            { value: 'sonnet', label: 'Sonnet' },
+-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
+             { value: 'opus', label: 'Opus' },
+-            { value: 'opus[1m]', label: 'Opus 1M' },
+             { value: 'fable', label: 'Fable' },
+-            { value: 'fable[1m]', label: 'Fable 1M' },
++            { value: 'sonnet', label: 'Sonnet' },
++            { value: 'haiku', label: 'Haiku' },
+         ])
+     })
+ })
+ 
+ describe('getNextClaudeComposerModel', () => {
+     it('cycles from a non-preset Claude model to the next selectable model instead of auto', () => {
+-        expect(getNextClaudeComposerModel('claude-opus-4-1-20250805')).toBe('sonnet')
++        expect(getNextClaudeComposerModel('claude-opus-4-1-20250805')).toBe('opus')
+     })
+ })
+diff --git a/web/src/components/AssistantChat/modelOptions.test.ts b/web/src/components/AssistantChat/modelOptions.test.ts
+index 1360f04ac..0982a598f 100644
+--- a/web/src/components/AssistantChat/modelOptions.test.ts
++++ b/web/src/components/AssistantChat/modelOptions.test.ts
+@@ -67,17 +67,14 @@ describe('getModelOptionsForFlavor', () => {
+     it('keeps Claude presets when explicit options only include Sonnet models', () => {
+         const options = getModelOptionsForFlavor('claude', null, [
+             { value: null, label: 'Default' },
+-            { value: 'sonnet', label: 'Sonnet' },
+-            { value: 'sonnet[1m]', label: 'Sonnet 1M' }
++            { value: 'sonnet', label: 'Sonnet' }
+         ])
+         expect(options).toEqual([
+             { value: null, label: 'Default' },
+-            { value: 'sonnet', label: 'Sonnet' },
+-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
+             { value: 'opus', label: 'Opus' },
+-            { value: 'opus[1m]', label: 'Opus 1M' },
+             { value: 'fable', label: 'Fable' },
+-            { value: 'fable[1m]', label: 'Fable 1M' }
++            { value: 'sonnet', label: 'Sonnet' },
++            { value: 'haiku', label: 'Haiku' }
+         ])
+     })
+ 
+@@ -88,12 +85,10 @@ describe('getModelOptionsForFlavor', () => {
+         expect(options).toEqual([
+             { value: null, label: 'Default' },
+             { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' },
+-            { value: 'sonnet', label: 'Sonnet' },
+-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
+             { value: 'opus', label: 'Opus' },
+-            { value: 'opus[1m]', label: 'Opus 1M' },
+             { value: 'fable', label: 'Fable' },
+-            { value: 'fable[1m]', label: 'Fable 1M' }
++            { value: 'sonnet', label: 'Sonnet' },
++            { value: 'haiku', label: 'Haiku' }
+         ])
+     })
+ 
+@@ -258,11 +253,10 @@ describe('getNextModelForFlavor', () => {
+     })
+ 
+     it('cycles through Claude presets when explicit options only include Sonnet models', () => {
+-        const next = getNextModelForFlavor('claude', 'sonnet[1m]', [
+-            { value: 'sonnet', label: 'Sonnet' },
+-            { value: 'sonnet[1m]', label: 'Sonnet 1M' }
++        const next = getNextModelForFlavor('claude', 'sonnet', [
++            { value: 'sonnet', label: 'Sonnet' }
+         ])
+-        expect(next).toBe('opus')
++        expect(next).toBe('haiku')
+     })
+ 
+     it('cycles explicit model options', () => {
+diff --git a/web/src/components/NewSession/types.test.ts b/web/src/components/NewSession/types.test.ts
+index f2f745104..32683f220 100644
+--- a/web/src/components/NewSession/types.test.ts
++++ b/web/src/components/NewSession/types.test.ts
+@@ -14,10 +14,8 @@ describe('Claude model options', () => {
+     })
+ 
+     it('exposes friendly labels for Claude model presets', () => {
+-        expect(CLAUDE_MODEL_PRESETS).toEqual(['sonnet', 'sonnet[1m]', 'opus', 'opus[1m]', 'fable', 'fable[1m]'])
+-        expect(getClaudeModelLabel('sonnet[1m]')).toBe('Sonnet 1M')
+-        expect(getClaudeModelLabel('opus[1m]')).toBe('Opus 1M')
+-        expect(getClaudeModelLabel('fable[1m]')).toBe('Fable 1M')
++        expect(CLAUDE_MODEL_PRESETS).toEqual(['opus', 'fable', 'sonnet', 'haiku'])
++        expect(getClaudeModelLabel('haiku')).toBe('Haiku')
+     })
+ })
+ 
+diff --git a/web/src/components/ToolCard/ToolCard.test.ts b/web/src/components/ToolCard/ToolCard.test.ts
+index 4d04c447d..bd6c8832d 100644
+--- a/web/src/components/ToolCard/ToolCard.test.ts
++++ b/web/src/components/ToolCard/ToolCard.test.ts
+@@ -148,7 +148,7 @@ describe('getToolTimingDetails', () => {
+ describe('formatSubagentModelLabel', () => {
+     it('uses getClaudeModelLabel for a preset alias', () => {
+         expect(formatSubagentModelLabel('opus')).toBe('Opus')
+-        expect(formatSubagentModelLabel('sonnet[1m]')).toBe('Sonnet 1M')
++        expect(formatSubagentModelLabel('fable')).toBe('Fable')
+     })
+ 
+     it('extracts name + version from a full SDK model id, dropping the date suffix', () => {

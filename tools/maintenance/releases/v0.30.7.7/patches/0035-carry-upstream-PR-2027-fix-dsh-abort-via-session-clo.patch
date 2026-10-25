@@ -1,0 +1,900 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:38:05 +0000
+Subject: [PATCH 35/94] carry(upstream): PR #2027 fix(dsh): abort via
+ session/close when the agent has no cancel capability
+
+Upstream-head: f937755904a22683518d5c2eba717e56062ab133
+---
+ .../backends/acp/AcpSdkBackend.cancel.test.ts | 159 ++++++++
+ cli/src/agent/backends/acp/AcpSdkBackend.ts   |  61 +++-
+ cli/src/dsh/dshRemoteLauncher.test.ts         | 340 +++++++++++++++++-
+ cli/src/dsh/dshRemoteLauncher.ts              | 120 ++++++-
+ cli/src/dsh/utils/dshBackend.ts               |   6 +-
+ .../common/permission/AcpPermissionHandler.ts |  15 +-
+ 6 files changed, 679 insertions(+), 22 deletions(-)
+ create mode 100644 cli/src/agent/backends/acp/AcpSdkBackend.cancel.test.ts
+
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.cancel.test.ts b/cli/src/agent/backends/acp/AcpSdkBackend.cancel.test.ts
+new file mode 100644
+index 000000000..49fd305f8
+--- /dev/null
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.cancel.test.ts
+@@ -0,0 +1,159 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++
++const transportState = vi.hoisted(() => ({
++    calls: [] as Array<{ method: string; params?: unknown; options?: unknown }>,
++    notifications: [] as Array<{ method: string; params?: unknown }>,
++    initializeResponse: {} as Record<string, unknown>,
++    failNextClose: false
++}));
++
++vi.mock('./AcpStdioTransport', () => {
++    class MockAcpStdioTransport {
++        static async create(_options: unknown) {
++            return new MockAcpStdioTransport();
++        }
++        onNotification = vi.fn();
++        onStderrError = vi.fn();
++        registerRequestHandler = vi.fn();
++        sendRequest = vi.fn(async (method: string, params?: unknown, options?: unknown) => {
++            transportState.calls.push({ method, params, options });
++            if (method === 'session/close' && transportState.failNextClose) {
++                transportState.failNextClose = false;
++                throw new Error('transport closed');
++            }
++            if (method === 'initialize') {
++                return transportState.initializeResponse;
++            }
++            return null;
++        });
++        sendNotification = vi.fn((method: string, params?: unknown) => {
++            transportState.notifications.push({ method, params });
++        });
++        close = vi.fn(async () => {});
++    }
++    return { AcpStdioTransport: MockAcpStdioTransport };
++});
++
++import { AcpSdkBackend } from './AcpSdkBackend';
++
++function sentMethods(state: typeof transportState): string[] {
++    return [...state.calls.map((call) => call.method), ...state.notifications.map((note) => note.method)];
++}
++
++const DSH_SESSION_CAPS = {
++    protocolVersion: 1,
++    agentCapabilities: {
++        sessionCapabilities: { close: {}, list: {}, resume: {} }
++    }
++};
++
++describe('AcpSdkBackend.cancel', () => {
++    beforeEach(() => {
++        transportState.calls = [];
++        transportState.notifications = [];
++        transportState.initializeResponse = { protocolVersion: 1, authMethods: [] };
++        transportState.failNextClose = false;
++    });
++
++    it('keeps the session/cancel baseline for standard adapters regardless of capabilities', async () => {
++        // ACP v1 defines no cancel capability field: session/cancel is
++        // unconditional baseline behavior. An agent advertising
++        // sessionCapabilities without a cancel key (e.g. {close, list,
++        // resume}) must still receive the standard notification.
++        transportState.initializeResponse = DSH_SESSION_CAPS;
++        const backend = new AcpSdkBackend({ command: 'agent', args: ['acp'] });
++        await backend.initialize();
++
++        expect(backend.supportsCancelNotification()).toBe(true);
++
++        await backend.cancelPrompt('session-1');
++
++        expect(transportState.notifications).toContainEqual({
++            method: 'session/cancel',
++            params: { sessionId: 'session-1' }
++        });
++        expect(sentMethods(transportState)).not.toContain('session/close');
++    });
++
++    it('keeps the session/cancel baseline for standard adapters that stay silent', async () => {
++        const backend = new AcpSdkBackend({ command: 'agent', args: ['acp'] });
++        await backend.initialize();
++
++        expect(backend.supportsCancelNotification()).toBe(true);
++
++        await backend.cancelPrompt('session-1');
++
++        expect(transportState.notifications).toContainEqual({
++            method: 'session/cancel',
++            params: { sessionId: 'session-1' }
++        });
++    });
++
++    it('cancels via session/close in close-fallback mode when close is advertised', async () => {
++        transportState.initializeResponse = DSH_SESSION_CAPS;
++        const backend = new AcpSdkBackend({ command: 'dsh', cancelMode: 'close-fallback' });
++        await backend.initialize();
++
++        expect(backend.supportsCancelNotification()).toBe(false);
++
++        await backend.cancelPrompt('session-1');
++
++        // dsh-style capability set: closing the session is the only safe
++        // abort — the session/cancel notification kills the whole process.
++        expect(transportState.calls).toContainEqual({
++            method: 'session/close',
++            params: { sessionId: 'session-1' },
++            options: expect.objectContaining({ timeoutMs: 5000 })
++        });
++        expect(sentMethods(transportState)).not.toContain('session/cancel');
++    });
++
++    it('falls back to the session/cancel baseline in close-fallback mode without close', async () => {
++        // No close advertised: there is nothing safer to try than the spec
++        // baseline, even in close-fallback mode.
++        transportState.initializeResponse = {
++            protocolVersion: 1,
++            agentCapabilities: {
++                sessionCapabilities: { list: {} }
++            }
++        };
++        const backend = new AcpSdkBackend({ command: 'dsh', cancelMode: 'close-fallback' });
++        await backend.initialize();
++
++        expect(backend.supportsCancelNotification()).toBe(true);
++
++        await backend.cancelPrompt('session-1');
++
++        expect(transportState.notifications).toContainEqual({
++            method: 'session/cancel',
++            params: { sessionId: 'session-1' }
++        });
++        expect(sentMethods(transportState)).not.toContain('session/close');
++    });
++
++    it('falls back to the session/cancel baseline in close-fallback mode when capabilities are silent', async () => {
++        const backend = new AcpSdkBackend({ command: 'dsh', cancelMode: 'close-fallback' });
++        await backend.initialize();
++
++        expect(backend.supportsCancelNotification()).toBe(true);
++
++        await backend.cancelPrompt('session-1');
++
++        expect(transportState.notifications).toContainEqual({
++            method: 'session/cancel',
++            params: { sessionId: 'session-1' }
++        });
++    });
++
++    it('swallows session/close failures in close-fallback mode', async () => {
++        transportState.initializeResponse = DSH_SESSION_CAPS;
++        const backend = new AcpSdkBackend({ command: 'dsh', cancelMode: 'close-fallback' });
++        await backend.initialize();
++
++        // Transport rejects (agent already gone, timeout, ...) — cancelPrompt
++        // must not surface the error to the abort path.
++        transportState.failNextClose = true;
++
++        await expect(backend.cancelPrompt('session-1')).resolves.toBeUndefined();
++    });
++});
+diff --git a/cli/src/agent/backends/acp/AcpSdkBackend.ts b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+index ccf5e326b..07d3e871e 100644
+--- a/cli/src/agent/backends/acp/AcpSdkBackend.ts
++++ b/cli/src/agent/backends/acp/AcpSdkBackend.ts
+@@ -33,6 +33,18 @@ export type AcpModelDescriptor = {
+     reasoningEfforts?: Array<{ value: string; name?: string; isDefault?: boolean }>;
+ };
+ 
++/**
++ * How {@link AcpSdkBackend.cancelPrompt} cancels an in-flight prompt.
++ *
++ * - `standard` (default): send the `session/cancel` notification. ACP v1
++ *   defines no capability field for cancel — it is unconditional baseline
++ *   behavior, so standard adapters never gate on advertised capabilities.
++ * - `close-fallback`: for agents known to mishandle `session/cancel`
++ *   (dsh 0.2.x exits its whole process on it). Cancel by closing the session
++ *   when the agent advertises `close`; otherwise fall back to the baseline.
++ */
++export type AcpCancelMode = 'standard' | 'close-fallback';
++
+ export type AcpSessionModelsMetadata = {
+     availableModels: AcpModelDescriptor[];
+     currentModelId: string | null;
+@@ -64,6 +76,7 @@ export class AcpSdkBackend implements AgentBackend {
+     private transport: AcpStdioTransport | null = null;
+     private permissionHandler: ((request: PermissionRequest) => void) | null = null;
+     private stderrErrorHandler: ((error: AcpStderrError) => void) | null = null;
++    private sessionClosedByCancelHandler: (() => void) | null = null;
+     private readonly pendingPermissions = new Map<string, PendingPermission>();
+     private readonly sessionModelsMetadata = new Map<string, AcpSessionModelsMetadata>();
+     private readonly sessionConfigOptions = new Map<string, AcpConfigOptionDescriptor[]>();
+@@ -160,6 +173,7 @@ export class AcpSdkBackend implements AgentBackend {
+         childSessionUpdates?: boolean;
+         textChunkMode?: AcpTextChunkMode;
+         flavor?: AgentFlavor;
++        cancelMode?: AcpCancelMode;
+     }) {}
+ 
+     async initialize(): Promise<void> {
+@@ -734,12 +748,46 @@ export class AcpSdkBackend implements AgentBackend {
+         }
+     }
+ 
++    /**
++     * Whether this backend will send the standard `session/cancel`
++     * notification from {@link cancelPrompt}.
++     *
++     * Always true for standard adapters (ACP v1 requires `session/cancel`
++     * baseline behavior unconditionally — there is no capability field to
++     * gate it on). For `close-fallback` adapters (dsh), false when the agent
++     * advertises `close`: the notification would exit its process, so
++     * cancellation goes through `session/close` instead.
++     */
++    supportsCancelNotification(): boolean {
++        if (this.options.cancelMode !== 'close-fallback') {
++            return true;
++        }
++        const sessionCapabilities = this.initializeResult?.agentCapabilities?.sessionCapabilities;
++        return !(isObject(sessionCapabilities) && 'close' in sessionCapabilities);
++    }
++
+     async cancelPrompt(sessionId: string): Promise<void> {
+         if (!this.transport) {
+             return;
+         }
+ 
+-        this.transport.sendNotification('session/cancel', { sessionId });
++        if (this.supportsCancelNotification()) {
++            this.transport.sendNotification('session/cancel', { sessionId });
++            return;
++        }
++
++        // close-fallback (dsh): verified against dsh 0.2.0-rc.2, session/close
++        // returns immediately, resolves the in-flight session/prompt with
++        // end_turn, cancels the underlying work, and leaves the process alive
++        // for future sessions — unlike session/cancel, which kills the process.
++        try {
++            await this.transport.sendRequest('session/close', { sessionId }, { timeoutMs: 5000 });
++        } catch (error) {
++            logger.debug('[ACP] session/close cancel failed', error);
++        }
++        // Fire even on close failure: callers must treat the session as ended
++        // rather than reusing one whose close outcome is unknown.
++        this.sessionClosedByCancelHandler?.();
+     }
+ 
+     /**
+@@ -853,6 +901,17 @@ export class AcpSdkBackend implements AgentBackend {
+         this.stderrErrorHandler = handler;
+     }
+ 
++    /**
++     * Registers a listener fired whenever {@link cancelPrompt} takes the
++     * `session/close` path — i.e. every close-path cancellation ends the ACP
++     * session, no matter which caller initiated it (user abort, permission
++     * `abort` decision, ...). Listeners run even when the close request fails:
++     * the session must then be treated as ended rather than reusable.
++     */
++    onSessionClosedByCancel(handler: () => void): void {
++        this.sessionClosedByCancelHandler = handler;
++    }
++
+     /**
+      * Runs `fn` with `session/update` notifications temporarily prevented
+      * from reaching whatever `messageHandler` is currently installed (i.e.
+diff --git a/cli/src/dsh/dshRemoteLauncher.test.ts b/cli/src/dsh/dshRemoteLauncher.test.ts
+index fb879c773..0577bf8ab 100644
+--- a/cli/src/dsh/dshRemoteLauncher.test.ts
++++ b/cli/src/dsh/dshRemoteLauncher.test.ts
+@@ -5,7 +5,24 @@ import type { DshMode } from './types'
+ const harness = vi.hoisted(() => ({
+     backend: null as Record<string, ReturnType<typeof vi.fn>> | null,
+     newSessionConfig: null as unknown,
+-    prompts: [] as unknown[][]
++    newSessionCalls: [] as unknown[],
++    promptSessionIds: [] as string[],
++    prompts: [] as unknown[][],
++    supportsCancel: true,
++    // Registered by onSessionClosedByCancel; fired by the cancelPrompt mock
++    // on the close path, mirroring the real backend.
++    sessionClosedHandler: null as (() => void) | null,
++    // Captured 4th constructor arg of AcpPermissionHandler: the synchronous
++    // pending-close handoff for permission 'abort' decisions.
++    permissionAbortClose: null as ((cancellation: Promise<void>) => void) | null,
++    // When set, prompt() parks on this promise — lets tests abort mid-turn.
++    promptBlocker: null as null | Promise<void>,
++    // When set, a close-path cancelPrompt parks on this promise — lets tests
++    // overlap prompt completion with a pending session/close response.
++    cancelBlocker: null as null | Promise<void>,
++    // When set, newSession() parks on this promise — lets tests abort inside
++    // the respawn window.
++    newSessionBlocker: null as null | Promise<void>
+ }))
+ 
+ vi.mock('./utils/dshBackend', () => ({
+@@ -14,14 +31,32 @@ vi.mock('./utils/dshBackend', () => ({
+             initialize: vi.fn(async () => {}),
+             newSession: vi.fn(async (config: unknown) => {
+                 harness.newSessionConfig = config
+-                return 'dsh-session-1'
++                harness.newSessionCalls.push(config)
++                if (harness.newSessionBlocker) {
++                    await harness.newSessionBlocker
++                }
++                return `dsh-session-${harness.newSessionCalls.length}`
+             }),
+-            prompt: vi.fn(async (_sessionId: string, content: unknown[], onUpdate: (message: unknown) => void) => {
++            prompt: vi.fn(async (sessionId: string, content: unknown[], onUpdate: (message: unknown) => void) => {
++                harness.promptSessionIds.push(sessionId)
+                 harness.prompts.push(content)
++                if (harness.promptBlocker) {
++                    await harness.promptBlocker
++                }
+                 onUpdate({ type: 'text', text: 'answer' })
+             }),
+-            cancelPrompt: vi.fn(async () => {}),
++            cancelPrompt: vi.fn(async () => {
++                if (harness.supportsCancel) return
++                if (harness.cancelBlocker) {
++                    await harness.cancelBlocker
++                }
++                harness.sessionClosedHandler?.()
++            }),
++            supportsCancelNotification: vi.fn(() => harness.supportsCancel),
+             onStderrError: vi.fn(),
++            onSessionClosedByCancel: vi.fn((handler: () => void) => {
++                harness.sessionClosedHandler = handler
++            }),
+             onPermissionRequest: vi.fn(),
+             disconnect: vi.fn(async () => {})
+         }
+@@ -32,6 +67,14 @@ vi.mock('./utils/dshBackend', () => ({
+ 
+ vi.mock('@/modules/common/permission/AcpPermissionHandler', () => ({
+     AcpPermissionHandler: class {
++        constructor(
++            _session: unknown,
++            _backend: unknown,
++            _getPermissionMode: unknown,
++            onAbortClose?: (cancellation: Promise<void>) => void
++        ) {
++            harness.permissionAbortClose = onAbortClose ?? null
++        }
+         async cancelAll(): Promise<void> {}
+     }
+ }))
+@@ -41,11 +84,12 @@ vi.mock('@/ui/logger', () => ({ logger: { debug: vi.fn(), warn: vi.fn() } }))
+ 
+ import { DshRemoteLauncher } from './dshRemoteLauncher'
+ 
+-function createSession() {
++function createQueue() {
+     const queue = new MessageQueue2<DshMode>((mode) => JSON.stringify(mode))
+-    queue.push('first', 'dsh')
+-    queue.close()
++    return queue
++}
+ 
++function createSession(queue = createQueue()) {
+     return {
+         path: '/tmp/dsh-test',
+         logPath: '/tmp/dsh-test/hapi.log',
+@@ -63,11 +107,22 @@ describe('DshRemoteLauncher', () => {
+     afterEach(() => {
+         harness.backend = null
+         harness.newSessionConfig = null
++        harness.newSessionCalls = []
++        harness.promptSessionIds = []
+         harness.prompts = []
++        harness.supportsCancel = true
++        harness.sessionClosedHandler = null
++        harness.permissionAbortClose = null
++        harness.promptBlocker = null
++        harness.cancelBlocker = null
++        harness.newSessionBlocker = null
+     })
+ 
+     it('creates a fresh ACP session without MCP injection and forwards text prompts', async () => {
+-        const session = createSession()
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        queue.close()
++        const session = createSession(queue)
+         const launcher = new DshRemoteLauncher(session as never)
+ 
+         await launcher.launch()
+@@ -84,4 +139,273 @@ describe('DshRemoteLauncher', () => {
+         expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' })
+         expect(harness.backend?.disconnect).toHaveBeenCalled()
+     })
++
++    it('respawns the ACP session for the next message after a close-based abort', async () => {
++        // dsh advertises close/list/resume without cancel: abort falls back to
++        // session/close, which ends the ACP session but leaves the process
++        // alive. The launcher must open a fresh session before the next prompt.
++        harness.supportsCancel = false
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        // Abort while the first turn is still in flight (the real-world path).
++        const killPromise = launcher.kill()
++        expect(harness.backend?.cancelPrompt).toHaveBeenCalledWith('dsh-session-1')
++        releaseFirstPrompt()
++        await killPromise
++
++        queue.push('second', 'dsh')
++        queue.close()
++        await done
++
++        expect(harness.newSessionCalls).toHaveLength(2)
++        expect(harness.newSessionCalls[1]).toEqual({ cwd: '/tmp/dsh-test', mcpServers: [] })
++        // The post-abort message must run on the respawned session id.
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1', 'dsh-session-2'])
++        expect(harness.prompts).toEqual([
++            [{ type: 'text', text: 'first' }],
++            [{ type: 'text', text: 'second' }]
++        ])
++    })
++
++    it('does not respawn the session after a cancel-notification abort', async () => {
++        harness.supportsCancel = true
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        const killPromise = launcher.kill()
++        releaseFirstPrompt()
++        await killPromise
++
++        queue.push('second', 'dsh')
++        queue.close()
++        await done
++
++        // session/cancel keeps the ACP session alive: same session for both turns.
++        expect(harness.newSessionCalls).toHaveLength(1)
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1', 'dsh-session-1'])
++    })
++
++    it('respawns the session after a permission abort cancels through the backend directly', async () => {
++        // A permission denied with decision 'abort' cancels through
++        // AcpPermissionHandler → backend.cancelPrompt, bypassing handleAbort.
++        // The backend's close-path event must still mark the session ended so
++        // the next message respawns instead of targeting the closed session.
++        harness.supportsCancel = false
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        // The permission handler's abort path: direct backend cancellation.
++        await (harness.backend?.cancelPrompt as unknown as (sessionId: string) => Promise<void>)('dsh-session-1')
++
++        releaseFirstPrompt()
++        queue.push('second', 'dsh')
++        queue.close()
++        await done
++
++        expect(harness.newSessionCalls).toHaveLength(2)
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1', 'dsh-session-2'])
++    })
++
++    it('discards a follow-up queued before the stop when the prompt finishes before the close', async () => {
++        // The in-flight prompt can complete while the session/close response
++        // is still on the wire; handleAbort clears the queue synchronously at
++        // the top, so a message queued before the stop is dropped before the
++        // loop can dequeue it — it must never run on the respawned session.
++        harness.supportsCancel = false
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        let releaseClose!: () => void
++        harness.cancelBlocker = new Promise((resolve) => { releaseClose = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        // A second message is queued before the abort starts.
++        queue.push('second', 'dsh')
++
++        // Abort: the close request parks on cancelBlocker.
++        const killPromise = launcher.kill()
++        await vi.waitFor(() => expect(harness.backend?.cancelPrompt).toHaveBeenCalled())
++
++        // The first turn completes while the close response is still pending.
++        releaseFirstPrompt()
++        await vi.waitFor(() => expect(harness.promptSessionIds).toHaveLength(1))
++        releaseClose()
++        await killPromise
++
++        queue.close()
++        await done
++
++        // 'second' was queued before the stop, so the synchronous queue.reset()
++        // in handleAbort discarded it: no respawn (it is lazy, on next message)
++        // and no second prompt.
++        expect(harness.newSessionCalls).toHaveLength(1)
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1'])
++        expect(harness.prompts).toEqual([[{ type: 'text', text: 'first' }]])
++    })
++
++    it('defers a queued message when a permission-abort close is still pending', async () => {
++        // A permission denied with decision 'abort' cancels through
++        // AcpPermissionHandler → backend.cancelPrompt and hands the pending
++        // close to the launcher synchronously. The loop must park on it even
++        // though handleAbort never ran, so the follow-up never targets the
++        // closing session.
++        harness.supportsCancel = false
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        let releaseClose!: () => void
++        harness.cancelBlocker = new Promise((resolve) => { releaseClose = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        queue.push('second', 'dsh')
++
++        // The permission handler's abort path: start the close (parks on
++        // cancelBlocker) and hand the pending promise to the launcher before
++        // awaiting it — exactly what the real handler does.
++        const cancellation = (harness.backend?.cancelPrompt as unknown as (sessionId: string) => Promise<void>)('dsh-session-1')
++        harness.permissionAbortClose?.(cancellation)
++
++        // The prompt completes while the close response is still on the wire.
++        releaseFirstPrompt()
++        await new Promise((resolve) => setTimeout(resolve, 20))
++        // The queued follow-up must NOT have been sent to the closing session.
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1'])
++
++        releaseClose()
++        await cancellation
++        queue.close()
++        await done
++
++        expect(harness.newSessionCalls).toHaveLength(2)
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1', 'dsh-session-2'])
++        expect(harness.prompts).toEqual([
++            [{ type: 'text', text: 'first' }],
++            [{ type: 'text', text: 'second' }]
++        ])
++    })
++
++    it('drops the dequeued message when an abort lands while the session is being recreated', async () => {
++        // During the respawn's session/new request, session.sessionId still
++        // names the closed session; an abort in that window must discard the
++        // already-dequeued batch instead of running it on the fresh session.
++        harness.supportsCancel = false
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        // Abort while the first turn is still in flight (the real-world path).
++        const killPromise = launcher.kill()
++        releaseFirstPrompt()
++        await killPromise
++
++        // The next message enters the respawn branch; park session/new.
++        let releaseNewSession!: () => void
++        harness.newSessionBlocker = new Promise((resolve) => { releaseNewSession = resolve })
++        queue.push('second', 'dsh')
++        await vi.waitFor(() => expect(harness.newSessionCalls).toHaveLength(2))
++
++        // Abort inside the recreation window, then let session/new resolve.
++        const secondKill = launcher.kill()
++        await secondKill
++        releaseNewSession()
++
++        // The aborted 'second' must be dropped, not executed.
++        queue.push('third', 'dsh')
++        queue.close()
++        await done
++
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1', 'dsh-session-3'])
++        expect(harness.prompts).toEqual([
++            [{ type: 'text', text: 'first' }],
++            [{ type: 'text', text: 'third' }]
++        ])
++    })
++
++    it('drops the dequeued message when a user stop lands while it waits for a pending close', async () => {
++        // A permission-abort close can still be on the wire when the loop
++        // dequeues the next message; a user stop during that wait resets the
++        // queue but cannot discard the already-dequeued batch. The generation
++        // snapshot taken before the wait must drop it.
++        harness.supportsCancel = false
++        let releaseFirstPrompt!: () => void
++        harness.promptBlocker = new Promise((resolve) => { releaseFirstPrompt = resolve })
++        let releaseClose!: () => void
++        harness.cancelBlocker = new Promise((resolve) => { releaseClose = resolve })
++        const queue = createQueue()
++        queue.push('first', 'dsh')
++        const session = createSession(queue)
++        const launcher = new DshRemoteLauncher(session as never)
++
++        const done = launcher.launch()
++        await vi.waitFor(() => expect(harness.prompts).toHaveLength(1))
++
++        // A follow-up is queued, then a permission abort starts a close that
++        // parks on cancelBlocker and hands the pending close to the launcher.
++        queue.push('second', 'dsh')
++        const cancellation = (harness.backend?.cancelPrompt as unknown as (sessionId: string) => Promise<void>)('dsh-session-1')
++        harness.permissionAbortClose?.(cancellation)
++
++        // The first turn completes; the loop dequeues 'second' and parks on
++        // the pending close.
++        releaseFirstPrompt()
++        await vi.waitFor(() => expect(harness.promptSessionIds).toHaveLength(1))
++        await new Promise((resolve) => setTimeout(resolve, 20))
++        expect(harness.newSessionCalls).toHaveLength(1)
++
++        // The user stops while 'second' waits for the close response.
++        const killPromise = launcher.kill()
++        releaseClose()
++        await killPromise
++
++        // The aborted 'second' must be dropped; 'third' runs on the
++        // respawned session.
++        queue.push('third', 'dsh')
++        queue.close()
++        await done
++
++        expect(harness.newSessionCalls).toHaveLength(2)
++        expect(harness.promptSessionIds).toEqual(['dsh-session-1', 'dsh-session-2'])
++        expect(harness.prompts).toEqual([
++            [{ type: 'text', text: 'first' }],
++            [{ type: 'text', text: 'third' }]
++        ])
++    })
+ })
+diff --git a/cli/src/dsh/dshRemoteLauncher.ts b/cli/src/dsh/dshRemoteLauncher.ts
+index 42f214a8e..961d334a4 100644
+--- a/cli/src/dsh/dshRemoteLauncher.ts
++++ b/cli/src/dsh/dshRemoteLauncher.ts
+@@ -16,6 +16,13 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
+     private backend: ReturnType<typeof createDshBackend> | null = null
+     private permissionHandler: AcpPermissionHandler | null = null
+     private abortController = new AbortController()
++    /** Set when abort closed the ACP session (dsh has no cancel capability). */
++    private acpSessionEnded = false
++    /** In-flight abort; queued prompts await it so none races the session close. */
++    private abortCompletion: Promise<void> | null = null
++    /** Bumped at the top of every handleAbort; lets the respawn branch detect
++     *  an abort that landed while the replacement session was being created. */
++    private abortGeneration = 0
+ 
+     constructor(private readonly session: DshSession) {
+         super(process.env.DEBUG ? session.logPath : undefined)
+@@ -47,7 +54,14 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
+         })
+ 
+         await backend.initialize()
+-        const acpSessionId = await backend.newSession({
++        // Any close-path cancellation ends the ACP session — including the
++        // permission handler's `abort` decision, which cancels through the
++        // backend directly and never enters handleAbort. Track it centrally
++        // so the next message always respawns the session.
++        backend.onSessionClosedByCancel(() => {
++            this.acpSessionEnded = true
++        })
++        let acpSessionId = await backend.newSession({
+             cwd: this.session.path,
+             // The official DSH ACP composition rejects non-empty MCP servers;
+             // its tools are configured by the DSH server itself.
+@@ -58,7 +72,14 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
+         this.permissionHandler = new AcpPermissionHandler(
+             this.session.client,
+             backend,
+-            () => undefined
++            () => undefined,
++            // Permission 'abort' decisions cancel through the backend directly
++            // and never enter handleAbort: record the pending close here so the
++            // main loop defers the next message until the session/close response
++            // lands, exactly like a handleAbort-initiated close.
++            (cancellation) => {
++                this.abortCompletion ??= cancellation
++            }
+         )
+         this.setupAbortHandlers(this.session.client.rpcHandlerManager, {
+             onAbort: () => this.handleAbort(),
+@@ -66,12 +87,68 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
+         })
+ 
+         while (!this.shouldExit) {
+-            const batch = await this.session.queue.waitForMessagesAndGetAsString(this.abortController.signal)
++            // Capture the signal per iteration: handleAbort swaps in a fresh
++            // AbortController right after aborting, so re-reading
++            // this.abortController.signal below would see the replacement
++            // (never aborted) and mistake an aborted wait for a closed queue,
++            // exiting the loop. The captured signal stays aborted forever.
++            const signal = this.abortController.signal
++            const batch = await this.session.queue.waitForMessagesAndGetAsString(signal)
+             if (!batch) {
+-                if (this.abortController.signal.aborted && !this.shouldExit) continue
++                if (signal.aborted && !this.shouldExit) continue
+                 break
+             }
+ 
++            // Snapshot before any await in this iteration: a user stop that
++            // lands while the dequeued batch waits for a pending close (or for
++            // the respawn) resets the queue, but a batch already removed by
++            // waitForMessagesAndGetAsString cannot be discarded that way — the
++            // generation mismatch is what drops it.
++            const generationAtDequeue = this.abortGeneration
++
++            if (this.abortCompletion) {
++                // An abort is closing (or just closed) the ACP session; let it
++                // finish before dequeuing, so this message never targets the
++                // session being closed nor skips the respawn branch.
++                const pending = this.abortCompletion
++                this.abortCompletion = null
++                await pending
++                if (generationAtDequeue !== this.abortGeneration) {
++                    // A user stop landed while this batch waited for the pending
++                    // close: the user saw 'Session aborted' and the queue was
++                    // reset, so this already-dequeued message must not run on
++                    // whatever session comes next.
++                    this.messageBuffer.addMessage('Aborted while waiting for the DSH session close; dropping the queued message', 'status')
++                    continue
++                }
++            }
++
++            if (this.acpSessionEnded) {
++                // Abort on dsh goes through session/close (no cancel capability),
++                // which ends the ACP session but leaves the process alive —
++                // start a fresh session so the next message keeps flowing.
++                // Snapshot the abort generation: an abort landing while the
++                // replacement session is being created targets the old session
++                // id and must also discard the already-dequeued batch (the user
++                // saw 'Session aborted').
++                const generationBeforeRespawn = this.abortGeneration
++                acpSessionId = await backend.newSession({
++                    cwd: this.session.path,
++                    mcpServers: []
++                })
++                this.session.sessionId = acpSessionId
++                if (generationBeforeRespawn !== this.abortGeneration) {
++                    // Aborted mid-recreation: drop the batch and treat the fresh
++                    // session as ended so the next loop respawns cleanly instead
++                    // of running a message the user aborted.
++                    this.acpSessionEnded = true
++                    this.messageBuffer.addMessage('Aborted while restarting the DSH session; dropping the queued message', 'status')
++                    continue
++                }
++                this.acpSessionEnded = false
++                this.messageBuffer.addMessage('DSH session restarted after abort', 'status')
++            }
++
+             this.session.onThinkingChange(true)
+             this.messageBuffer.addMessage(batch.message, 'user')
+             const prompt: PromptContent[] = [{ type: 'text', text: batch.message }]
+@@ -131,18 +208,41 @@ export class DshRemoteLauncher extends RemoteLauncherBase {
+     }
+ 
+     private async handleAbort(): Promise<void> {
+-        if (this.backend && this.session.sessionId) {
+-            await this.backend.cancelPrompt(this.session.sessionId)
+-        }
++        // Bump first, synchronously: the respawn branch compares generations
++        // around its `await backend.newSession(...)` to detect aborts that
++        // land inside that window.
++        this.abortGeneration += 1
++        // Tear the queue down synchronously, BEFORE awaiting the close: the
++        // in-flight prompt can complete while the close request is still on
++        // the wire, and the loop would then dequeue a follow-up queued before
++        // the stop with an already-incremented generation — the dequeue-site
++        // generation check cannot catch that ordering, and a reset scheduled
++        // after the await is too late. Aborting (and replacing) the controller
++        // first also unparks a waiting loop iteration via the captured signal
++        // so it re-waits on the fresh controller instead of spinning on the
++        // aborted one.
++        this.abortController.abort()
++        this.abortController = new AbortController()
++        this.session.queue.reset()
++        // Record the abort synchronously: the main loop awaits
++        // abortCompletion before dequeuing the next message.
++        this.abortCompletion ??= this.closeSessionForAbort()
++        await this.abortCompletion
+         await this.permissionHandler?.cancelAll('User aborted')
+         this.session.sendSessionEvent({ type: 'message', message: 'Session aborted' })
+-        this.session.queue.reset()
+         this.session.onThinkingChange(false)
+-        this.abortController.abort()
+-        this.abortController = new AbortController()
+         this.messageBuffer.addMessage('Turn aborted', 'status')
+     }
+ 
++    private async closeSessionForAbort(): Promise<void> {
++        if (this.backend && this.session.sessionId) {
++            await this.backend.cancelPrompt(this.session.sessionId)
++            // The onSessionClosedByCancel listener owns acpSessionEnded for
++            // every close-path cancellation; nothing to do here on the
++            // session/cancel path, which keeps the session alive.
++        }
++    }
++
+     private async handleExitFromUi(): Promise<void> {
+         await this.requestExit('exit', () => this.handleAbort())
+     }
+diff --git a/cli/src/dsh/utils/dshBackend.ts b/cli/src/dsh/utils/dshBackend.ts
+index 3cbcf589e..eeb06bf1c 100644
+--- a/cli/src/dsh/utils/dshBackend.ts
++++ b/cli/src/dsh/utils/dshBackend.ts
+@@ -39,6 +39,10 @@ export function createDshBackend(env: NodeJS.ProcessEnv = process.env): AcpSdkBa
+         command,
+         args,
+         env: filterEnv(env),
+-        flavor: 'dsh'
++        flavor: 'dsh',
++        // dsh 0.2.x exits its process on the standard session/cancel
++        // notification; cancel by closing the session instead (the launcher
++        // respawns the ACP session for the next message).
++        cancelMode: 'close-fallback'
+     })
+ }
+diff --git a/cli/src/modules/common/permission/AcpPermissionHandler.ts b/cli/src/modules/common/permission/AcpPermissionHandler.ts
+index 40d65725b..ea11f90af 100644
+--- a/cli/src/modules/common/permission/AcpPermissionHandler.ts
++++ b/cli/src/modules/common/permission/AcpPermissionHandler.ts
+@@ -49,7 +49,11 @@ export class AcpPermissionHandler extends BasePermissionHandler<PermissionRespon
+     constructor(
+         session: ApiSessionClient,
+         private readonly backend: AgentBackend,
+-        private readonly getPermissionMode: () => PermissionMode | undefined
++        private readonly getPermissionMode: () => PermissionMode | undefined,
++        /** Called synchronously with the pending close-based cancellation when
++         *  a permission decision aborts, before the handler awaits it — lets
++         *  the host serialize follow-up work against the close response. */
++        private readonly onAbortClose?: (cancellation: Promise<void>) => void
+     ) {
+         super(session)
+         this.backend.onPermissionRequest((request) => this.handlePermissionRequest(request))
+@@ -113,7 +117,14 @@ export class AcpPermissionHandler extends BasePermissionHandler<PermissionRespon
+         const decision = response.decision ?? (response.approved ? 'approved' : 'denied')
+ 
+         if (decision === 'abort' && request) {
+-            await this.backend.cancelPrompt(request.sessionId)
++            // Hand the pending cancellation to the host synchronously (before
++            // awaiting) so it can record it as an in-flight close immediately —
++            // the current prompt may complete while session/close is still on
++            // the wire, and the host must not send follow-up work to the
++            // closing session in that gap.
++            const cancellation = this.backend.cancelPrompt(request.sessionId)
++            this.onAbortClose?.(cancellation)
++            await cancellation
+         }
+         if (request) {
+             await this.backend.respondToPermission(request.sessionId, request, mapDecisionToOutcome(request, decision))

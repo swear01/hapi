@@ -1,0 +1,845 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: swear01 <stanley.yellow1@gmail.com>
+Date: Mon, 19 Oct 2026 15:37:20 +0000
+Subject: [PATCH 33/94] carry(upstream): PR #2012 feat(web): To agent control
+ for terminal scrollback or selection into composer
+
+Upstream-head: 3b8597cc7f0b1dfacf4dcdfa593f4e4f9321e1c8
+---
+ .../AssistantChat/ComposerButtons.test.tsx    |  69 +++++++++
+ .../AssistantChat/ComposerButtons.tsx         |  73 ++++++++--
+ web/src/lib/locales/en.ts                     |   4 +
+ web/src/lib/locales/ru.ts                     |   4 +
+ web/src/lib/locales/zh-CN.ts                  |   4 +
+ web/src/lib/terminal-composer.test.ts         | 132 ++++++++++++++++++
+ web/src/lib/terminal-composer.ts              | 104 ++++++++++++++
+ web/src/routes/sessions/terminal.test.tsx     | 132 +++++++++++++++++-
+ web/src/routes/sessions/terminal.tsx          |  94 +++++++++++--
+ 9 files changed, 593 insertions(+), 23 deletions(-)
+ create mode 100644 web/src/lib/terminal-composer.test.ts
+ create mode 100644 web/src/lib/terminal-composer.ts
+
+diff --git a/web/src/components/AssistantChat/ComposerButtons.test.tsx b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+index ddd4b99aa..020cf1ff2 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.test.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.test.tsx
+@@ -532,3 +532,72 @@ describe('ComposerButtons responsive toolbar', () => {
+         expect(getComposerToolbarJustifyContent('split')).toBe('flex-start')
+     })
+ })
++
++describe('ComposerButtons terminal To agent FUE', () => {
++    afterEach(() => {
++        cleanup()
++        window.localStorage.removeItem('hapi.fue.v1.composer-terminal-to-agent')
++    })
++
++    function renderTerminalToolbar(onTerminal: () => void) {
++        const noop = () => {}
++        return render(
++            <RuntimeProviders>
++                <ComposerButtons
++                    canSend
++                    controlsDisabled={false}
++                    showSettingsButton={false}
++                    onSettingsToggle={noop}
++                    expanded={false}
++                    onExpandedToggle={noop}
++                    showTerminalButton
++                    terminalDisabled={false}
++                    terminalLabel="Terminal"
++                    onTerminal={onTerminal}
++                    showAbortButton={false}
++                    abortDisabled
++                    isAborting={false}
++                    onAbort={noop}
++                    showSwitchButton={false}
++                    switchDisabled
++                    isSwitching={false}
++                    onSwitch={noop}
++                    voiceEnabled={false}
++                    dictationEnabled={false}
++                    voiceStatus="disconnected"
++                    onVoiceToggle={noop}
++                    onSend={noop}
++                />
++            </RuntimeProviders>,
++        )
++    }
++
++    it('shows a pulsing FUE dot until acknowledged', () => {
++        renderTerminalToolbar(() => {})
++        const terminal = screen.getByRole('button', { name: 'Terminal' })
++        expect(within(terminal).getByRole('status', { name: 'New feature available' })).toBeInTheDocument()
++    })
++
++    it('opens the To agent explainer on first click without navigating', () => {
++        const onTerminal = vi.fn()
++        renderTerminalToolbar(onTerminal)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Terminal' }))
++
++        expect(onTerminal).not.toHaveBeenCalled()
++        expect(screen.getByRole('dialog', { name: 'Send terminal to agent' })).toBeInTheDocument()
++        expect(screen.getByText(/Selection to agent/i)).toBeInTheDocument()
++    })
++
++    it('navigates after Got it and persists acknowledgement', () => {
++        const onTerminal = vi.fn()
++        renderTerminalToolbar(onTerminal)
++
++        fireEvent.click(screen.getByRole('button', { name: 'Terminal' }))
++        fireEvent.click(screen.getByRole('button', { name: 'Got it' }))
++
++        expect(onTerminal).toHaveBeenCalledOnce()
++        expect(window.localStorage.getItem('hapi.fue.v1.composer-terminal-to-agent')).toBe('1')
++        expect(screen.queryByRole('dialog', { name: 'Send terminal to agent' })).not.toBeInTheDocument()
++    })
++})
+diff --git a/web/src/components/AssistantChat/ComposerButtons.tsx b/web/src/components/AssistantChat/ComposerButtons.tsx
+index 2f8e88368..a18c70972 100644
+--- a/web/src/components/AssistantChat/ComposerButtons.tsx
++++ b/web/src/components/AssistantChat/ComposerButtons.tsx
+@@ -504,6 +504,66 @@ function ScratchlistToggleButton(props: {
+     )
+ }
+ 
++/**
++ * TerminalButton — just-in-time FUE for terminal → agent (#2011).
++ *
++ * The terminal icon is the only composer entry into the session PTY, so it
++ * carries the discovery tip for To agent / Selection to agent. First click
++ * shows the explainer only: navigating away would unmount this button (and
++ * the callout) before the operator could read it. Got it acknowledges and
++ * then performs the navigation they originally wanted.
++ */
++function TerminalButton(props: {
++    label: string
++    onTerminal: () => void
++    disabled: boolean
++}) {
++    const { t } = useTranslation()
++    const fue = useFue('composer-terminal-to-agent')
++    const buttonRef = useRef<HTMLButtonElement>(null)
++
++    return (
++        <>
++            <button
++                ref={buttonRef}
++                type="button"
++                aria-label={props.label}
++                title={props.label}
++                className="relative flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-fg)]/60 transition-colors hover:bg-[var(--app-bg)] hover:text-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
++                onClick={() => {
++                    if (fue.status !== 'acknowledged') {
++                        fue.engage()
++                        return
++                    }
++                    props.onTerminal()
++                }}
++                disabled={props.disabled}
++            >
++                <TerminalIcon />
++                {fue.status !== 'acknowledged' ? (
++                    <FueDot
++                        pulsing={fue.status === 'unseen'}
++                        ariaLabel={t('fue.newFeatureDot')}
++                    />
++                ) : null}
++            </button>
++            {fue.status === 'engaging' ? (
++                <FueCallout
++                    title={t('terminal.toAgent.fueTitle')}
++                    body={t('terminal.toAgent.fueBody')}
++                    onDismiss={() => {
++                        fue.dismiss()
++                        props.onTerminal()
++                    }}
++                    dismissLabel={t('fue.gotIt')}
++                    closeAriaLabel={t('fue.closeAriaLabel')}
++                    anchorRef={buttonRef}
++                />
++            ) : null}
++        </>
++    )
++}
++
+ function StopIcon() {
+     return (
+         <svg
+@@ -884,16 +944,11 @@ export function ComposerButtons(props: {
+ 
+                 <ToolbarItemSlot item="terminal">
+                 {props.showTerminalButton ? (
+-                    <button
+-                        type="button"
+-                        aria-label={props.terminalLabel}
+-                        title={props.terminalLabel}
+-                        className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-fg)]/60 transition-colors hover:bg-[var(--app-bg)] hover:text-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+-                        onClick={props.onTerminal}
++                    <TerminalButton
++                        label={props.terminalLabel}
++                        onTerminal={props.onTerminal}
+                         disabled={props.terminalDisabled}
+-                    >
+-                        <TerminalIcon />
+-                    </button>
++                    />
+                 ) : null}
+                 </ToolbarItemSlot>
+ 
+diff --git a/web/src/lib/locales/en.ts b/web/src/lib/locales/en.ts
+index 11763ef73..2e2380582 100644
+--- a/web/src/lib/locales/en.ts
++++ b/web/src/lib/locales/en.ts
+@@ -465,6 +465,10 @@ export default {
+   'terminal.paste.fallbackTitle': 'Paste input',
+   'terminal.paste.fallbackDescription': 'Clipboard read is unavailable. Paste your text below.',
+   'terminal.paste.placeholder': 'Paste terminal input here…',
++  'terminal.toAgent.buffer': 'To agent',
++  'terminal.toAgent.selection': 'Selection to agent',
++  'terminal.toAgent.fueTitle': 'Send terminal to agent',
++  'terminal.toAgent.fueBody': 'Open the session terminal, then tap To agent to put the full scrollback in your composer — or select text first and the button becomes Selection to agent. Add a note if you want, then Send.',
+ 
+   // Code block
+   'code.copy': 'Copy',
+diff --git a/web/src/lib/locales/ru.ts b/web/src/lib/locales/ru.ts
+index 127b2f13c..7a90aed8d 100644
+--- a/web/src/lib/locales/ru.ts
++++ b/web/src/lib/locales/ru.ts
+@@ -464,6 +464,10 @@ export default {
+   'terminal.paste.fallbackTitle': 'Вставить ввод',
+   'terminal.paste.fallbackDescription': 'Чтение из буфера обмена недоступно. Вставьте текст ниже.',
+   'terminal.paste.placeholder': 'Вставьте ввод терминала сюда…',
++  'terminal.toAgent.buffer': 'Агенту',
++  'terminal.toAgent.selection': 'Выделение агенту',
++  'terminal.toAgent.fueTitle': 'Отправить терминал агенту',
++  'terminal.toAgent.fueBody': 'Откройте терминал сессии и нажмите «Агенту», чтобы положить весь scrollback в поле ввода — или сначала выделите текст, и кнопка станет «Выделение агенту». При желании добавьте заметку и отправьте.',
+ 
+   // Блок кода
+   'code.copy': 'Копировать',
+diff --git a/web/src/lib/locales/zh-CN.ts b/web/src/lib/locales/zh-CN.ts
+index 0011ef6d3..1c865ebff 100644
+--- a/web/src/lib/locales/zh-CN.ts
++++ b/web/src/lib/locales/zh-CN.ts
+@@ -463,6 +463,10 @@ export default {
+   'terminal.paste.fallbackTitle': '粘贴输入',
+   'terminal.paste.fallbackDescription': '无法读取剪贴板，请在下方粘贴文本。',
+   'terminal.paste.placeholder': '在此粘贴终端输入…',
++  'terminal.toAgent.buffer': '发送给 Agent',
++  'terminal.toAgent.selection': '选区发送给 Agent',
++  'terminal.toAgent.fueTitle': '把终端发给 Agent',
++  'terminal.toAgent.fueBody': '打开会话终端后点「发送给 Agent」，即可把完整滚动缓冲放进输入框；若先选中文字，按钮会变成「选区发送给 Agent」。可先补一句说明再发送。',
+ 
+   // Code block
+   'code.copy': '复制',
+diff --git a/web/src/lib/terminal-composer.test.ts b/web/src/lib/terminal-composer.test.ts
+new file mode 100644
+index 000000000..1550d7ae6
+--- /dev/null
++++ b/web/src/lib/terminal-composer.test.ts
+@@ -0,0 +1,132 @@
++import { beforeEach, describe, expect, it } from 'vitest'
++import {
++    appendTerminalExcerptToComposerDraft,
++    chooseMarkdownFence,
++    extractActiveBufferText,
++    extractTerminalExcerpt,
++    formatTerminalExcerpt,
++    type TerminalTextSource,
++} from './terminal-composer'
++import { getDraft, saveDraft } from '@/lib/composer-drafts'
++
++function makeTerminal(options: {
++    selection?: string
++    lines?: Array<string | { text: string; isWrapped?: boolean }>
++}): TerminalTextSource {
++    const lines = (options.lines ?? []).map((entry) =>
++        typeof entry === 'string' ? { text: entry, isWrapped: false } : {
++            text: entry.text,
++            isWrapped: entry.isWrapped ?? false,
++        }
++    )
++    return {
++        hasSelection: () => Boolean(options.selection && options.selection.length > 0),
++        getSelection: () => options.selection ?? '',
++        buffer: {
++            active: {
++                length: lines.length,
++                getLine: (index: number) => {
++                    const value = lines[index]
++                    if (value === undefined) return undefined
++                    return {
++                        isWrapped: value.isWrapped,
++                        translateToString: (trimRight?: boolean) => {
++                            if (trimRight === false) return value.text
++                            return value.text.replace(/[ \t]+$/u, '')
++                        },
++                    }
++                },
++            },
++        },
++    }
++}
++
++describe('terminal-composer', () => {
++    beforeEach(() => {
++        window.sessionStorage.clear()
++    })
++
++    it('prefers a nonempty selection over the buffer', () => {
++        const excerpt = extractTerminalExcerpt(
++            makeTerminal({
++                selection: 'selected line',
++                lines: ['full', 'buffer'],
++            })
++        )
++        expect(excerpt).toEqual({ kind: 'selection', text: 'selected line' })
++    })
++
++    it('falls back to the buffer when selection is whitespace-only', () => {
++        const excerpt = extractTerminalExcerpt(
++            makeTerminal({
++                selection: '   \n',
++                lines: ['hello', 'world', ''],
++            })
++        )
++        expect(excerpt).toEqual({ kind: 'buffer', text: 'hello\nworld' })
++    })
++
++    it('returns null for an empty buffer', () => {
++        expect(extractTerminalExcerpt(makeTerminal({ lines: ['', '  '] }))).toBeNull()
++    })
++
++    it('joins wrapped visual rows into one logical line and keeps wrap-boundary spaces', () => {
++        const text = extractActiveBufferText(
++            makeTerminal({
++                lines: [
++                    { text: '/work/coding/hapi/worktrees/very-long-path-name-that-wraps ' },
++                    { text: 'across-columns', isWrapped: true },
++                    'next command',
++                ],
++            }).buffer.active
++        )
++        expect(text).toBe(
++            '/work/coding/hapi/worktrees/very-long-path-name-that-wraps across-columns\nnext command'
++        )
++    })
++
++    it('formats with a longer fence when the excerpt contains backticks', () => {
++        const excerpt = {
++            kind: 'buffer' as const,
++            text: 'cat README.md\n```md\n# hi\n```\ndone',
++        }
++        const fence = chooseMarkdownFence(excerpt.text)
++        expect(fence).toBe('````')
++        expect(formatTerminalExcerpt(excerpt)).toBe(
++            `### Terminal output\n\n${fence}text\n${excerpt.text}\n${fence}`
++        )
++        // Outer fence must not be closable by the inner ``` run.
++        expect(formatTerminalExcerpt(excerpt).includes(`\n${fence}\n`)).toBe(false)
++        expect(formatTerminalExcerpt(excerpt).endsWith(`\n${fence}`)).toBe(true)
++    })
++
++    it('keeps the default three-backtick fence for ordinary text', () => {
++        expect(formatTerminalExcerpt({ kind: 'selection', text: 'x' })).toBe(
++            '### Terminal selection\n\n```text\nx\n```'
++        )
++        expect(formatTerminalExcerpt({ kind: 'buffer', text: 'y' })).toBe(
++            '### Terminal output\n\n```text\ny\n```'
++        )
++    })
++
++    it('appends to an existing composer draft', () => {
++        saveDraft('term-composer-existing', 'please look')
++        appendTerminalExcerptToComposerDraft('term-composer-existing', {
++            kind: 'buffer',
++            text: 'ls\nfile.txt',
++        })
++        expect(getDraft('term-composer-existing')).toBe(
++            'please look\n\n### Terminal output\n\n```text\nls\nfile.txt\n```'
++        )
++    })
++
++    it('writes a new draft when none exists', () => {
++        appendTerminalExcerptToComposerDraft('term-composer-empty', {
++            kind: 'selection',
++            text: 'REFUSE: lane B',
++        })
++        expect(getDraft('term-composer-empty')).toBe(
++            '### Terminal selection\n\n```text\nREFUSE: lane B\n```'
++        )
++    })
++})
+diff --git a/web/src/lib/terminal-composer.ts b/web/src/lib/terminal-composer.ts
+new file mode 100644
+index 000000000..b7088bce4
+--- /dev/null
++++ b/web/src/lib/terminal-composer.ts
+@@ -0,0 +1,104 @@
++import { getDraft, saveDraft } from '@/lib/composer-drafts'
++
++/** Minimal xterm surface needed to extract plain text for the composer. */
++export type TerminalTextSource = {
++    hasSelection: () => boolean
++    getSelection: () => string
++    buffer: {
++        active: {
++            length: number
++            getLine: (index: number) => {
++                isWrapped: boolean
++                translateToString: (trimRight?: boolean) => string
++            } | undefined
++        }
++    }
++}
++
++export type TerminalExcerptKind = 'selection' | 'buffer'
++
++export type TerminalExcerpt = {
++    kind: TerminalExcerptKind
++    text: string
++}
++
++type BufferLine = {
++    isWrapped: boolean
++    translateToString: (trimRight?: boolean) => string
++}
++
++/**
++ * Collapse xterm visual rows into logical lines.
++ *
++ * When output wraps, continuation rows have `isWrapped`. Inserting a newline
++ * between those rows would split paths/commands/JSON. Trailing spaces at a
++ * wrap boundary are kept so identifiers are not glued together wrong.
++ */
++export function extractActiveBufferText(buffer: {
++    length: number
++    getLine: (index: number) => BufferLine | undefined
++}): string {
++    const logical: string[] = []
++    for (let i = 0; i < buffer.length; i++) {
++        const line = buffer.getLine(i)
++        if (!line) continue
++        const next = buffer.getLine(i + 1)
++        const nextContinues = Boolean(next?.isWrapped)
++        // Keep trailing spaces when the next visual row continues this line.
++        const text = line.translateToString(!nextContinues)
++        if (line.isWrapped && logical.length > 0) {
++            logical[logical.length - 1] += text
++        } else {
++            logical.push(text)
++        }
++    }
++
++    while (logical.length > 0 && logical[logical.length - 1]!.trim().length === 0) {
++        logical.pop()
++    }
++    return logical.join('\n')
++}
++
++/** Prefer a nonempty selection; otherwise the active buffer including scrollback. */
++export function extractTerminalExcerpt(terminal: TerminalTextSource): TerminalExcerpt | null {
++    if (terminal.hasSelection()) {
++        const selection = terminal.getSelection().replace(/\s+$/u, '')
++        if (selection.trim().length > 0) {
++            return { kind: 'selection', text: selection }
++        }
++    }
++
++    const text = extractActiveBufferText(terminal.buffer.active)
++    if (text.trim().length === 0) {
++        return null
++    }
++    return { kind: 'buffer', text }
++}
++
++/** Fence longer than any backtick run in the body so terminal Markdown cannot close it. */
++export function chooseMarkdownFence(text: string): string {
++    const runs = text.match(/`+/gu) ?? []
++    let longest = 0
++    for (const run of runs) {
++        longest = Math.max(longest, run.length)
++    }
++    return '`'.repeat(Math.max(3, longest + 1))
++}
++
++export function formatTerminalExcerpt(excerpt: TerminalExcerpt): string {
++    const label = excerpt.kind === 'selection' ? 'Terminal selection' : 'Terminal output'
++    const fence = chooseMarkdownFence(excerpt.text)
++    return `### ${label}\n\n${fence}text\n${excerpt.text}\n${fence}`
++}
++
++/**
++ * Append a terminal excerpt to a session's composer draft.
++ *
++ * The composer is unmounted on the terminal route, so callers persist here and
++ * navigate back to chat; `useComposerDraft` restores the draft on mount.
++ */
++export function appendTerminalExcerptToComposerDraft(sessionId: string, excerpt: TerminalExcerpt): void {
++    const block = formatTerminalExcerpt(excerpt)
++    const existing = getDraft(sessionId).replace(/[ \t\r\n]+$/u, '')
++    saveDraft(sessionId, existing.length > 0 ? `${existing}\n\n${block}` : block)
++}
+diff --git a/web/src/routes/sessions/terminal.test.tsx b/web/src/routes/sessions/terminal.test.tsx
+index c7bea5b24..38a45efe3 100644
+--- a/web/src/routes/sessions/terminal.test.tsx
++++ b/web/src/routes/sessions/terminal.test.tsx
+@@ -1,15 +1,36 @@
++import { useEffect } from 'react'
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+ import { I18nProvider } from '@/lib/i18n-context'
++import { clearDraft, getDraft } from '@/lib/composer-drafts'
+ import TerminalPage, { buildTerminalCommandSequence } from './terminal'
+ 
+ const writeMock = vi.fn()
+ const goBackMock = vi.fn()
++const navigateMock = vi.fn()
+ const connectMock = vi.fn()
+ const resizeMock = vi.fn()
+ const disconnectMock = vi.fn()
+ const onOutputMock = vi.fn()
+ let onExitHandler: ((code: number | null, signal: string | null) => void) | null = null
++type MountedTerminal = {
++    hasSelection: () => boolean
++    getSelection: () => string
++    focus: () => void
++    write: (data: string) => void
++    onData: (handler: (data: string) => void) => { dispose: () => void }
++    onSelectionChange: (handler: () => void) => { dispose: () => void }
++    buffer: {
++        active: {
++            length: number
++            getLine: (index: number) => { translateToString: (trimRight?: boolean) => string } | undefined
++        }
++    }
++    __setSelection: (value: string | null) => void
++    __fireSelectionChange: () => void
++}
++let mountedTerminal: MountedTerminal | null = null
++let selectionChangeHandler: (() => void) | null = null
+ 
+ const onExitRegister = (handler: (code: number | null, signal: string | null) => void) => {
+     onExitHandler = handler
+@@ -43,7 +64,8 @@ const terminalSocketState = {
+ }
+ 
+ vi.mock('@tanstack/react-router', () => ({
+-    useParams: () => ({ sessionId: 'session-1' })
++    useParams: () => ({ sessionId: 'session-1' }),
++    useNavigate: () => navigateMock,
+ }))
+ 
+ vi.mock('@/lib/app-context', () => ({
+@@ -78,7 +100,45 @@ vi.mock('@/hooks/useTerminalSocket', () => ({
+ }))
+ 
+ vi.mock('@/components/Terminal/TerminalView', () => ({
+-    TerminalView: () => <div data-testid="terminal-view" />
++    TerminalView: (props: { onMount?: (terminal: MountedTerminal) => void }) => {
++        useEffect(() => {
++            let selection: string | null = null
++            const terminal: MountedTerminal = {
++                hasSelection: () => selection !== null && selection.length > 0,
++                getSelection: () => selection ?? '',
++                focus: vi.fn(),
++                write: vi.fn(),
++                onData: () => ({ dispose: vi.fn() }),
++                onSelectionChange: (handler: () => void) => {
++                    selectionChangeHandler = handler
++                    return { dispose: vi.fn() }
++                },
++                buffer: {
++                    active: {
++                        length: 2,
++                        getLine: (index: number) => {
++                            const lines = [
++                                'REFUSE: lane B authorisation',
++                                'must be granted by an operator',
++                            ]
++                            const value = lines[index]
++                            if (value === undefined) return undefined
++                            return { isWrapped: false, translateToString: () => value }
++                        },
++                    },
++                },
++                __setSelection: (value: string | null) => {
++                    selection = value
++                },
++                __fireSelectionChange: () => {
++                    selectionChangeHandler?.()
++                },
++            }
++            mountedTerminal = terminal
++            props.onMount?.(terminal)
++        }, [props.onMount])
++        return <div data-testid="terminal-view" />
++    },
+ }))
+ 
+ function renderWithProviders() {
+@@ -94,6 +154,9 @@ describe('TerminalPage paste behavior', () => {
+         vi.clearAllMocks()
+         setCompactTerminalControls(false)
+         onExitHandler = null
++        mountedTerminal = null
++        selectionChangeHandler = null
++        clearDraft('session-1')
+     })
+ 
+     it('does not open manual paste dialog when clipboard text is empty', async () => {
+@@ -336,3 +399,68 @@ describe('buildTerminalCommandSequence', () => {
+         expect(buildTerminalCommandSequence('echo done\r')).toBe('echo done\r')
+     })
+ })
++
++describe('TerminalPage to agent', () => {
++    beforeEach(() => {
++        vi.clearAllMocks()
++        setCompactTerminalControls(false)
++        onExitHandler = null
++        mountedTerminal = null
++        selectionChangeHandler = null
++        clearDraft('session-1')
++    })
++
++    it('labels the control To agent until a selection exists', () => {
++        renderWithProviders()
++        expect(screen.getByTestId('terminal-to-agent')).toHaveTextContent('To agent')
++    })
++
++    it('flips the label when the terminal selection becomes nonempty', async () => {
++        renderWithProviders()
++        await waitFor(() => {
++            expect(mountedTerminal).not.toBeNull()
++        })
++
++        await act(async () => {
++            mountedTerminal?.__setSelection('lane B refuse')
++            mountedTerminal?.__fireSelectionChange()
++        })
++
++        expect(screen.getByTestId('terminal-to-agent')).toHaveTextContent('Selection to agent')
++    })
++
++    it('appends the buffer to the composer draft and navigates to chat', async () => {
++        renderWithProviders()
++        await waitFor(() => {
++            expect(mountedTerminal).not.toBeNull()
++        })
++        fireEvent.click(screen.getByTestId('terminal-to-agent'))
++
++        expect(getDraft('session-1')).toContain('### Terminal output')
++        expect(getDraft('session-1')).toContain('REFUSE: lane B authorisation')
++        expect(navigateMock).toHaveBeenCalledWith(
++            expect.objectContaining({
++                to: '/sessions/$sessionId',
++                params: { sessionId: 'session-1' },
++            })
++        )
++    })
++
++    it('appends the selection instead of the full buffer when selected', async () => {
++        renderWithProviders()
++        await waitFor(() => {
++            expect(mountedTerminal).not.toBeNull()
++        })
++
++        await act(async () => {
++            mountedTerminal?.__setSelection('selected refuse line')
++            mountedTerminal?.__fireSelectionChange()
++        })
++
++        fireEvent.click(screen.getByTestId('terminal-to-agent'))
++
++        expect(getDraft('session-1')).toContain('### Terminal selection')
++        expect(getDraft('session-1')).toContain('selected refuse line')
++        expect(getDraft('session-1')).not.toContain('must be granted by an operator')
++    })
++})
+diff --git a/web/src/routes/sessions/terminal.tsx b/web/src/routes/sessions/terminal.tsx
+index 29bb0dc7e..acc46844d 100644
+--- a/web/src/routes/sessions/terminal.tsx
++++ b/web/src/routes/sessions/terminal.tsx
+@@ -1,6 +1,6 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+-import { useParams } from '@tanstack/react-router'
++import { useNavigate, useParams } from '@tanstack/react-router'
+ import type { Terminal } from '@xterm/xterm'
+ import { useAppContext } from '@/lib/app-context'
+ import { useAppGoBack } from '@/hooks/useAppGoBack'
+@@ -14,6 +14,11 @@ import { TerminalView } from '@/components/Terminal/TerminalView'
+ import { LoadingState } from '@/components/LoadingState'
+ import { Button } from '@/components/ui/button'
+ import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
++import {
++    appendTerminalExcerptToComposerDraft,
++    extractTerminalExcerpt,
++} from '@/lib/terminal-composer'
++import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+ import {
+     Dialog,
+     DialogContent,
+@@ -257,6 +262,7 @@ export default function TerminalPage() {
+     const { t } = useTranslation()
+     const compactControls = useCompactTerminalControls()
+     const { sessionId } = useParams({ from: '/sessions/$sessionId/terminal' })
++    const navigate = useNavigate()
+     const { api, token, baseUrl } = useAppContext()
+     const goBack = useAppGoBack()
+     const { session } = useSession(api, sessionId)
+@@ -278,6 +284,7 @@ export default function TerminalPage() {
+     const terminalRef = useRef<Terminal | null>(null)
+     const commandInputRef = useRef<HTMLTextAreaElement | null>(null)
+     const inputDisposableRef = useRef<{ dispose: () => void } | null>(null)
++    const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null)
+     const connectOnceRef = useRef(false)
+     const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null)
+     const exitNavTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+@@ -290,6 +297,7 @@ export default function TerminalPage() {
+     const [commandDraft, setCommandDraft] = useState('')
+     const [pasteDialogOpen, setPasteDialogOpen] = useState(false)
+     const [manualPasteText, setManualPasteText] = useState('')
++    const [hasSelection, setHasSelection] = useState(false)
+ 
+     const {
+         state: terminalState,
+@@ -331,6 +339,10 @@ export default function TerminalPage() {
+     // code. onData is intentionally ungated; the buttons gate via `disabled`.
+     const { ctrlActive, altActive, dispatch, toggleModifier, resetModifiers } = useQuickKeyInput({ onSend: write })
+ 
++    const syncSelectionState = useCallback((terminal: Terminal) => {
++        setHasSelection(terminal.hasSelection() && terminal.getSelection().trim().length > 0)
++    }, [])
++
+     const handleTerminalMount = useCallback(
+         (terminal: Terminal) => {
+             terminalRef.current = terminal
+@@ -338,11 +350,16 @@ export default function TerminalPage() {
+             inputDisposableRef.current = terminal.onData((data) => {
+                 dispatch(data)
+             })
++            selectionDisposableRef.current?.dispose()
++            selectionDisposableRef.current = terminal.onSelectionChange(() => {
++                syncSelectionState(terminal)
++            })
++            syncSelectionState(terminal)
+             if (!compactControls || inputMode === 'direct') {
+                 terminal.focus()
+             }
+         },
+-        [compactControls, inputMode, dispatch]
++        [compactControls, inputMode, dispatch, syncSelectionState]
+     )
+ 
+     const handleResize = useCallback(
+@@ -382,6 +399,7 @@ export default function TerminalPage() {
+         setCommandDraft('')
+         setInputMode('command')
+         setDirectKeyPage('control')
++        setHasSelection(false)
+         if (exitNavTimerRef.current) {
+             clearTimeout(exitNavTimerRef.current)
+             exitNavTimerRef.current = null
+@@ -392,6 +410,7 @@ export default function TerminalPage() {
+     useEffect(() => {
+         return () => {
+             inputDisposableRef.current?.dispose()
++            selectionDisposableRef.current?.dispose()
+             connectOnceRef.current = false
+             if (exitNavTimerRef.current) {
+                 clearTimeout(exitNavTimerRef.current)
+@@ -401,6 +420,23 @@ export default function TerminalPage() {
+         }
+     }, [disconnect])
+ 
++    const handleSendToAgent = useCallback(() => {
++        const terminal = terminalRef.current
++        if (!terminal) {
++            return
++        }
++        const excerpt = extractTerminalExcerpt(terminal)
++        if (!excerpt) {
++            return
++        }
++        appendTerminalExcerptToComposerDraft(sessionId, excerpt)
++        void navigate({
++            to: '/sessions/$sessionId',
++            params: { sessionId },
++            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
++        })
++    }, [navigate, sessionId])
++
+     useEffect(() => {
+         if (session?.active === false || !terminalSupported) {
+             disconnect()
+@@ -637,6 +673,22 @@ export default function TerminalPage() {
+                 <div className="mx-auto w-full max-w-content px-3">
+                     {compactControls ? (
+                         <div className="flex flex-col gap-2 py-2">
++                            <button
++                                type="button"
++                                onClick={handleSendToAgent}
++                                disabled={!terminalSupported}
++                                data-testid="terminal-to-agent"
++                                aria-label={
++                                    hasSelection
++                                        ? t('terminal.toAgent.selection')
++                                        : t('terminal.toAgent.buffer')
++                                }
++                                className="w-full rounded-md border border-[var(--app-border)] bg-[var(--app-secondary-bg)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-button)] disabled:cursor-not-allowed disabled:opacity-50"
++                            >
++                                {hasSelection
++                                    ? t('terminal.toAgent.selection')
++                                    : t('terminal.toAgent.buffer')}
++                            </button>
+                             <div
+                                 className="grid grid-cols-2 rounded-md bg-[var(--app-secondary-bg)] p-0.5"
+                                 role="group"
+@@ -794,16 +846,34 @@ export default function TerminalPage() {
+                         </div>
+                     ) : (
+                         <div className="flex flex-col gap-2 py-2">
+-                            <button
+-                                type="button"
+-                                onClick={() => {
+-                                    void handlePasteAction()
+-                                }}
+-                                disabled={quickInputDisabled}
+-                                className="w-full rounded-md border border-[var(--app-border)] bg-[var(--app-secondary-bg)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-button)] disabled:cursor-not-allowed disabled:opacity-50"
+-                            >
+-                                {t('button.paste')}
+-                            </button>
++                            <div className="grid grid-cols-2 gap-2">
++                                <button
++                                    type="button"
++                                    onClick={() => {
++                                        void handlePasteAction()
++                                    }}
++                                    disabled={quickInputDisabled}
++                                    className="w-full rounded-md border border-[var(--app-border)] bg-[var(--app-secondary-bg)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-button)] disabled:cursor-not-allowed disabled:opacity-50"
++                                >
++                                    {t('button.paste')}
++                                </button>
++                                <button
++                                    type="button"
++                                    onClick={handleSendToAgent}
++                                    disabled={!terminalSupported}
++                                    data-testid="terminal-to-agent"
++                                    aria-label={
++                                        hasSelection
++                                            ? t('terminal.toAgent.selection')
++                                            : t('terminal.toAgent.buffer')
++                                    }
++                                    className="w-full rounded-md border border-[var(--app-border)] bg-[var(--app-secondary-bg)] px-3 py-2 text-sm font-medium text-[var(--app-fg)] transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-button)] disabled:cursor-not-allowed disabled:opacity-50"
++                                >
++                                    {hasSelection
++                                        ? t('terminal.toAgent.selection')
++                                        : t('terminal.toAgent.buffer')}
++                                </button>
++                            </div>
+                             <QuickKeyRows
+                                 ctrlActive={ctrlActive}
+                                 altActive={altActive}
