@@ -174,6 +174,17 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     expect(sessions).toEqual([]);
   });
 
+  it('preserves shared Codex support after a runner heartbeat', async () => {
+    const initial = await readRunnerState();
+    expect(initial?.sharedCodexRuntime).toBe(true);
+
+    await waitFor(async () => Boolean((await readRunnerState())?.lastHeartbeat), 35_000);
+
+    const afterHeartbeat = await readRunnerState();
+    expect(afterHeartbeat?.pid).toBe(initial?.pid);
+    expect(afterHeartbeat?.sharedCodexRuntime).toBe(true);
+  }, 40_000);
+
   it('should track session-started webhook from terminal session', async () => {
     // Simulate a terminal-started session reporting to runner
     const mockMetadata: Metadata = {
@@ -219,7 +230,10 @@ describe.skipIf(!await isServerHealthy())('Runner Integration Tests', { timeout:
     expect(spawnedSession.happySessionId).toBeDefined();
     expect(await stopRunnerSession(spawnedSession.happySessionId)).toBe('stopped');
     expect(await stopRunnerSession(spawnedSession.happySessionId)).toBe('already_gone');
-    expect(await stopRunnerSession('unknown-session-id')).toBe('still_alive');
+    // Distinct from 'still_alive': no PID matched this id and there is no
+    // verified-exit tombstone (and argv orphan scan found nothing), so the
+    // runner has no basis to call it either alive or dead.
+    expect(await stopRunnerSession('unknown-session-id')).toBe('unknown');
   });
 
   it.skipIf(process.env.HAPI_RUN_STRESS_TESTS !== 'true')(

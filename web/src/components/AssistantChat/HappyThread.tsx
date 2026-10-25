@@ -34,6 +34,7 @@ import { formatRelativeTime } from '@/lib/relativeTime'
 import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { getShareTurnReasoningLabel, selectShareTurnMetadata } from '@/lib/shareTurnMetadata'
 import { useMinuteTick } from '@/hooks/useMinuteTick'
+import { useTransientScrollbar } from '@/hooks/useTransientScrollbar'
 import { queryKeys } from '@/lib/query-keys'
 import { matchesSearchQuery } from '@hapi/protocol'
 
@@ -141,7 +142,6 @@ const TOP_PULL_TRIGGER_PX = 64
 // Trackpads emit a burst per swipe; one signal is enough to restart a paused
 // run after its bounded retry budget is exhausted.
 const WHEEL_GESTURE_GAP_MS = 250
-const KEYBOARD_SCROLL_INTENT_WINDOW_MS = 750
 const POINTER_CANCEL_INTENT_WINDOW_MS = 750
 const UPWARD_SCROLL_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
 
@@ -533,6 +533,7 @@ export function HappyThread(props: {
     metadata: SessionMetadataSummary | null
     disabled: boolean
     onRefresh: () => void
+    onContinuePlan?: () => void
     onRetryMessage?: (localId: string) => void
     historyActionPending?: boolean
     onForkConversation?: (messageLocalId?: string) => Promise<void>
@@ -624,6 +625,7 @@ export function HappyThread(props: {
     const appliedMessagesVersion = runtimeExtras?.messagesVersion ?? props.messagesVersion
     const appliedHistoryVersion = runtimeExtras?.historyVersion ?? props.historyVersion
     const viewportRef = useRef<HTMLDivElement | null>(null)
+    useTransientScrollbar(viewportRef, 'right')
     const contentRef = useRef<HTMLDivElement | null>(null)
     const [pullToLoadState, setPullToLoadState] = useState<PullToLoadState>('idle')
     const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -695,6 +697,9 @@ export function HappyThread(props: {
     useEffect(() => {
         isSyncingTailRef.current = props.isSyncingTail
     }, [props.isSyncingTail])
+    useLayoutEffect(() => {
+        isLoadingMoreRef.current = props.isLoadingMoreMessages
+    }, [props.isLoadingMoreMessages])
     useEffect(() => {
         onLoadMoreRef.current = props.onLoadMore
     }, [props.onLoadMore])
@@ -790,7 +795,7 @@ export function HappyThread(props: {
         let pointerResumeActive = false
         let pointerResumeUntil = 0
         let pointerResumeLatched = false
-        let keyboardResumeUntil = 0
+        let keyboardResumeActive = false
         let lastWheelAt = 0
         let wheelIntentUntil = 0
         let wheelLatched = false
@@ -799,7 +804,7 @@ export function HappyThread(props: {
             return intent.isScrollingUp && (
                 pointerResumeActive
                 || pointerResumeUntil >= Date.now()
-                || keyboardResumeUntil >= Date.now()
+                || keyboardResumeActive
                 || wheelIntentUntil >= Date.now()
             )
         }
@@ -812,8 +817,8 @@ export function HappyThread(props: {
                 pointerResumeLatched = true
                 return true
             }
-            if (keyboardResumeUntil >= Date.now()) {
-                keyboardResumeUntil = 0
+            if (keyboardResumeActive) {
+                keyboardResumeActive = false
                 return true
             }
             if (wheelIntentUntil >= Date.now() && !wheelLatched) {
@@ -824,6 +829,9 @@ export function HappyThread(props: {
         }
 
         const handleScroll = () => {
+            if (viewport.scrollTop > lastScrollTopRef.current) {
+                keyboardResumeActive = false
+            }
             const intent = getScrollIntent({
                 scrollTop: viewport.scrollTop,
                 scrollHeight: viewport.scrollHeight,
@@ -923,6 +931,9 @@ export function HappyThread(props: {
 
         const handleKeyDown = (event: KeyboardEvent) => {
             if (isNestedScrollEvent(event)) return
+            if (!UPWARD_SCROLL_KEYS.has(event.key)) {
+                keyboardResumeActive = false
+            }
             const target = event.target
             if (
                 event.defaultPrevented
@@ -937,14 +948,17 @@ export function HappyThread(props: {
             ) {
                 return
             }
-            keyboardResumeUntil = Date.now() + KEYBOARD_SCROLL_INTENT_WINDOW_MS
+            // Native keyboard scrolling can outlive a fixed intent timeout.
+            // Keep this gesture armed until consumed, completed, or cancelled.
+            keyboardResumeActive = true
             if (needsViewportCoverageRef.current()) {
-                keyboardResumeUntil = 0
+                keyboardResumeActive = false
                 void requestOlderRef.current('user')
             }
         }
 
         const armPointerIntent = () => {
+            keyboardResumeActive = false
             pointerResumeActive = true
             pointerResumeUntil = 0
             pointerResumeLatched = false
@@ -1005,6 +1019,7 @@ export function HappyThread(props: {
 
         const handleWheel = (event: WheelEvent) => {
             if (isNestedScrollEvent(event)) return
+            keyboardResumeActive = false
             if (event.deltaY >= 0) {
                 wheelIntentUntil = 0
                 return
@@ -1028,6 +1043,7 @@ export function HappyThread(props: {
 
         const handleTouchStart = (event: TouchEvent) => {
             if (isNestedScrollEvent(event)) return
+            keyboardResumeActive = false
             updatePullToLoadState('idle')
             pullStartY = (
                 viewport.scrollTop <= 0
@@ -1074,7 +1090,21 @@ export function HappyThread(props: {
             updatePullToLoadState('idle')
         }
 
+        const clearKeyboardIntent = () => {
+            keyboardResumeActive = false
+        }
+        const handleScrollEnd = (event: Event) => {
+            if (event.target !== viewport) return
+            // Recheck the final geometry before retiring unconsumed demand.
+            if (keyboardResumeActive && needsViewportCoverageRef.current()) {
+                void requestOlderRef.current('user')
+            }
+            clearKeyboardIntent()
+        }
+
         viewport.addEventListener('scroll', handleScroll, { passive: true })
+        viewport.addEventListener('scrollend', handleScrollEnd)
+        viewport.addEventListener('focusout', clearKeyboardIntent)
         viewport.addEventListener('keydown', handleKeyDown)
         viewport.addEventListener('pointerdown', handlePointerDown, { passive: true })
         viewport.addEventListener('wheel', handleWheel, { passive: true })
@@ -1088,8 +1118,11 @@ export function HappyThread(props: {
         window.addEventListener('mouseup', clearPointerIntent, { passive: true })
         window.addEventListener('pointercancel', handlePointerCancel, { passive: true })
         window.addEventListener('blur', clearPointerIntent)
+        window.addEventListener('blur', clearKeyboardIntent)
         return () => {
             viewport.removeEventListener('scroll', handleScroll)
+            viewport.removeEventListener('scrollend', handleScrollEnd)
+            viewport.removeEventListener('focusout', clearKeyboardIntent)
             viewport.removeEventListener('keydown', handleKeyDown)
             viewport.removeEventListener('pointerdown', handlePointerDown)
             viewport.removeEventListener('wheel', handleWheel)
@@ -1103,6 +1136,7 @@ export function HappyThread(props: {
             window.removeEventListener('mouseup', clearPointerIntent)
             window.removeEventListener('pointercancel', handlePointerCancel)
             window.removeEventListener('blur', clearPointerIntent)
+            window.removeEventListener('blur', clearKeyboardIntent)
         }
     }, []) // Stable: no dependencies, reads from refs
 
@@ -1626,10 +1660,6 @@ export function HappyThread(props: {
         clearFailureRetryTimer
     ])
 
-    useEffect(() => {
-        isLoadingMoreRef.current = props.isLoadingMoreMessages
-    }, [props.isLoadingMoreMessages])
-
     const showSkeleton = props.isSyncingTail && props.rawMessagesCount === 0
     const handleShareTurn = useCallback((
         messageTarget: HTMLElement | string | null,
@@ -1708,6 +1738,9 @@ export function HappyThread(props: {
             showSessionSummaryInChat,
             disabled: props.disabled,
             onRefresh: props.onRefresh,
+            codexPlanProposalId: props.session.active && props.session.metadata?.capabilities?.concurrentClients
+                ? props.session.agentState?.codexPlanProposalId : null,
+            onContinuePlan: props.onContinuePlan,
             onRetryMessage: props.onRetryMessage,
             historyActionPending: props.historyActionPending,
             onForkConversation: props.onForkConversation,
@@ -1750,7 +1783,7 @@ export function HappyThread(props: {
                 >
                     <div
                         ref={viewportRef}
-                        className="app-scroll-y chat-scroll-y min-h-0 flex-1 overflow-x-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--app-link)]"
+                        className="app-scroll-y chat-scroll-y scrollbar-auto-hide min-h-0 flex-1 overflow-x-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--app-link)]"
                         tabIndex={0}
                     >
                         <div ref={contentRef} className="chat-scroll-content mx-auto w-full max-w-content min-w-0 p-3">

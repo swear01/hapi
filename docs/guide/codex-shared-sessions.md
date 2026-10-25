@@ -51,6 +51,16 @@ replayed; resume restores durable history, not the old process's memory.
 
 ## Messages and questions
 
+Completed Plan-mode proposals remain visible in chat, including after terminal
+actions, refresh and resume. The current proposal offers **Implement plan** and
+**Continue planning** in Web. Implement switches the native thread to Default
+and queues `Implement the plan.`; Continue focuses the composer in Plan mode.
+These are client actions, not tool approvals. Codex's terminal-only "stay in Plan
+mode" selection does not broadcast a decision to other clients. A new native
+turn or mode change withdraws outdated Web controls while retaining the plan.
+Codex 0.154 can leave its local confirmation menu open after Web execution;
+press **Esc** before entering another terminal command.
+
 Ordinary HAPI messages enter **Codex's native queue**. There is no competing
 HAPI queue drainer. Settings are read when a submission executes, not frozen
 when it is enqueued. Explicit **Steer** targets the currently observed turn;
@@ -59,6 +69,13 @@ a stale turn ID is rejected, not redirected to the next turn.
 Native pending queue text is mirrored to HAPI. Native edits and acknowledged
 removals update it. Losing a queue entry during transport recovery is not proof
 that it was canceled or executed.
+
+During live context compaction, Web may show **Compacting context — waiting for
+message acceptance** for input just removed from the native queue. This is not
+an acceptance acknowledgement: only the native user-message event or history
+confirms consumption. Compaction completion, turn completion/interruption or a
+native disconnect withdraws this temporary status. Unconfirmed input retains
+the existing unknown-delivery recovery controls and is never automatically replayed.
 
 Codex arbitrates terminal/Web answers. A submitted Web answer is only a
 candidate. Native `serverRequest/resolved` closes the prompt with neutral

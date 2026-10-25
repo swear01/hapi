@@ -186,15 +186,38 @@ The CLI keep-alive makes the hub re-broadcast a patch roughly **every 10 s per a
 
 Reference list sort (web): `globalPinned` > `pinned` > `active` > `pendingRequestsCount` (among active) > `updatedAt` desc.
 
+### `active` is transport liveness, not agent health
+
+Two different signals travel on a `Session` and clients routinely conflate them (tiann/hapi#1820):
+
+| Signal | Means | Refreshed by |
+|---|---|---|
+| `active` / `activeAt` | the CLI socket is connected and reachable | the `session-alive` keep-alive, every ~2 s |
+| `metadata.lifecycleState` | what the agent behind that socket is actually doing | lifecycle transitions only |
+
+A session can keep `active: true` indefinitely on keep-alives alone, with no messages and no thinking, for days. That is a live socket in front of an idle agent, not a working session.
+
+`metadata.lifecycleState` is the health signal:
+
+- `running` — live working session (stamped by the CLI at session start)
+- `idle` — the hub has seen nothing but keep-alives for `HAPI_SESSION_IDLE_TIMEOUT_MS` (default 12 h). Reversible and non-destructive: `active` stays `true`, and the next message, queued prompt or background task flips it back to `running` within one hub tick
+- `archived` — session closed
+
+Client rules:
+
+- Treat both `running` and `idle` as "a CLI still owns this session". Comparing against the `'running'` literal makes an `idle` session read as a dead row.
+- Surface `idle` distinctly from `active`-and-recently-working, so an operator can tell a busy fleet from a pile of keep-alive zombies (web: the `idle` bucket in `SessionList`).
+- Sessions that are meant to sit quiet indefinitely can set `metadata.idleReconcileExempt: true` to opt out of reconciliation entirely.
+
 ---
 
 ## Visibility
 
 `POST /api/visibility` with body `{"subscriptionId": "<from connection-changed>", "visibility": "visible" | "hidden"}` → `{"ok": true}`. Errors: `400` invalid body, `404` unknown `subscriptionId` (or namespace mismatch), `503` hub not ready. Each new connection has a **new** `subscriptionId` — re-report after every reconnect (the web reference reports both of its connections on every foreground/background transition and retries a failed report after 2 s).
 
-Semantics (`hub/src/visibility/visibilityTracker.ts`, `hub/src/push/pushNotificationChannel.ts`): when **any** connection in the namespace is visible, the hub delivers notification events (ready / permission request / task result) as in-app **`toast` SSE frames to the visible connections** and suppresses Web Push for the namespace; Web Push fires only when no visible connection exists (or toast delivery reached zero connections). Native FCM devices (`POST /api/devices/register`) are independent of visibility and fire unconditionally — see [native-companion-contract](../native-companion-contract.md).
+Semantics (`hub/src/visibility/visibilityTracker.ts`, `hub/src/push/pushNotificationChannel.ts`): Android/iOS native delivery is independent of Web visibility. When a native provider accepts a notification for at least one device, the hub skips the Web Push/toast duplicate for that dispatch. Otherwise, if **any** connection in the namespace is visible, the hub first sends **`toast` SSE frames to visible connections**. Web Push is the fallback when no connection is visible or toast delivery reaches zero connections. Provider acceptance is not a handset delivery receipt — see the [native companion contract](../native-companion-contract.md).
 
-Native rule: report `visible` on foreground and `hidden` on background, every time. A native client that stays `visible` while backgrounded suppresses its own (and every PWA's) hub-side push for the namespace, and receives its notifications only as toast frames nobody is looking at.
+Native rule: report `visible` on foreground and `hidden` on background, every time. A stale `visible` report can divert the namespace's Web Push fallback into unseen toast frames; it does not disable native push. The native app separately suppresses its local notification when the corresponding chat is already open in the foreground.
 
 ---
 
