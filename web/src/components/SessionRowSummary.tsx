@@ -1,9 +1,9 @@
 import { useMemo } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
-import { LoaderIcon, ScheduleIcon } from '@/components/icons'
+import { ScheduleIcon } from '@/components/icons'
 import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS, useSessionRowTooltipIds } from '@/components/HoverTooltip'
-import { BACKGROUND_SPINNER_CLASS, getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
+import { getAttentionLabel, SessionAttentionIndicator, SessionSpinner } from '@/components/SessionAttentionIndicator'
 import { classifySessionAttention } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt, getSessionManualUnreadAt } from '@/lib/sessionLastSeen'
 import { formatRelativeTime } from '@/lib/relativeTime'
@@ -173,7 +173,7 @@ export function SessionRowSummary(props: {
                             aria-label={attentionLabel ?? undefined}
                         />
                     ) : s.active && s.thinking ? (
-                        <LoaderIcon className="h-3.5 w-3.5 shrink-0 animate-spin-slow text-[var(--app-badge-success-text)]" />
+                        <SessionSpinner />
                     ) : urgentAttention && nestedTooltips && attentionId ? (
                         <SessionAttentionIndicator
                             attention={attention}
@@ -194,20 +194,8 @@ export function SessionRowSummary(props: {
                             label={attentionLabel ?? ''}
                             tooltipId={attentionId}
                         />
-                    ) : showDetailedStatus && attention?.kind === 'background' ? (
-                        <span className="shrink-0" title={attentionLabel ?? undefined} aria-label={attentionLabel ?? undefined}>
-                            <LoaderIcon className={BACKGROUND_SPINNER_CLASS} />
-                        </span>
-                    ) : s.active && (s.backgroundTaskCount ?? 0) > 0 ? (
-                        <span
-                            className="inline-flex shrink-0 items-center gap-1 text-blue-400"
-                            title={t('session.item.background')}
-                        >
-                            <LoaderIcon className={BACKGROUND_SPINNER_CLASS} />
-                            {!inRunningSection ? (
-                                <span className="text-[11px] font-medium leading-none">{t('session.item.running')}</span>
-                            ) : null}
-                        </span>
+                    ) : (showDetailedStatus && attention?.kind === 'background') || (s.active && (s.backgroundTaskCount ?? 0) > 0) ? (
+                        <SessionSpinner background />
                     ) : s.active && (s.pendingRequestsCount ?? 0) > 0 ? (
                         <span
                             className="inline-flex shrink-0 items-center gap-1 text-[var(--app-badge-warning-text)]"

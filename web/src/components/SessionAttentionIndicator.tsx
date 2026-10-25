@@ -11,8 +11,11 @@ const ATTENTION_DOT_CLASS: Record<Exclude<SessionAttention['kind'], 'background'
     unread: 'bg-[var(--app-link)]'
 }
 
-/** Waiting on background work: spins like a running turn, in blue instead of green. */
-export const BACKGROUND_SPINNER_CLASS = 'h-3.5 w-3.5 shrink-0 animate-spin-slow text-blue-400'
+/** Row spinner: green while a turn runs, blue while only background work runs. */
+export function SessionSpinner(props: { background?: boolean }) {
+    const color = props.background ? 'text-blue-400' : 'text-[var(--app-badge-success-text)]'
+    return <LoaderIcon className={`h-3.5 w-3.5 shrink-0 animate-spin-slow ${color}`} />
+}
 
 /**
  * Visible attention dot + hover tooltip explaining the indicator.
@@ -29,7 +32,7 @@ export function SessionAttentionIndicator(props: {
 }) {
     const { t } = useTranslation()
     const dot = props.attention.kind === 'background' ? (
-        <LoaderIcon className={BACKGROUND_SPINNER_CLASS} />
+        <SessionSpinner background />
     ) : (
         <span
             className={`inline-flex h-2 w-2 shrink-0 rounded-full ${ATTENTION_DOT_CLASS[props.attention.kind]}`}
