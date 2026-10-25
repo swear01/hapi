@@ -49,6 +49,7 @@ export async function claudeRemote(opts: {
     onSessionFound: (id: string, extras?: { forkedFrom?: string }) => void,
     onThinkingChange?: (thinking: boolean) => void,
     onMessage: (message: SDKMessage) => void,
+    onContextUsage?: (usage: { model?: string, maxTokens?: number }) => void,
     onFirstResult?: (initialMessage: string) => void,
     onCompletionEvent?: (message: string) => void,
     onSessionReset?: () => void,
@@ -425,6 +426,13 @@ export async function claudeRemote(opts: {
                 updateThinking(true);
 
                 const systemInit = message as SDKSystemMessage;
+
+                if (opts.onContextUsage) {
+                    // Older CLIs may not support get_context_usage; the converter's seed stays.
+                    response.getContextUsage().then(opts.onContextUsage, (e) => {
+                        logger.debug('[claudeRemote] get_context_usage failed', e);
+                    });
+                }
 
                 // Session id is still in memory, wait until session file is written to disk
                 // Start a watcher for to detect the session id
