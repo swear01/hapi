@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { SessionListScrollAnchor } from './SessionListScrollAnchor'
 import type { SessionSummary } from '@/types/api'
@@ -102,7 +102,6 @@ import {
     useSessionReadReady
 } from '@/lib/sessionLastSeen'
 import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
-import { subscribeCodexImportedSessions } from '@/lib/codexImportedSessions'
 import { formatReopenError } from '@/lib/reopenError'
 import { resolveCursorReopenGate } from '@/lib/sessionResume'
 import { getSessionTitle, hasSessionTitleSignal } from '@/lib/sessionTitle'
@@ -1341,7 +1340,38 @@ export function SessionListSearch(props: {
     )
 }
 
-function SessionItem(props: {
+// A row with an open menu or dialog holds its collapsed panel mounted.
+const CollapsiblePanelHoldContext = createContext<((held: boolean) => void) | null>(null)
+
+// Collapsed rows unmount after the close transition; mounted-but-hidden rows
+// would otherwise re-render on every session or machine update.
+function CollapsiblePanel(props: { open: boolean; children: ReactNode }) {
+    const [settled, setSettled] = useState(!props.open)
+    const [holds, setHolds] = useState(0)
+    const hold = useCallback((held: boolean) => setHolds((count) => count + (held ? 1 : -1)), [])
+    if (props.open && settled) {
+        setSettled(false)
+    }
+    return (
+        <div
+            className="collapsible-panel"
+            data-open={props.open || undefined}
+            onTransitionEnd={(event) => {
+                if (!props.open && event.target === event.currentTarget) {
+                    setSettled(true)
+                }
+            }}
+        >
+            <div className="collapsible-inner">
+                <CollapsiblePanelHoldContext.Provider value={hold}>
+                    {!settled || holds > 0 ? props.children : null}
+                </CollapsiblePanelHoldContext.Provider>
+            </div>
+        </div>
+    )
+}
+
+const SessionItem = memo(function SessionItem(props: {
     session: SessionSummary
     onSelect: (sessionId: string) => void
     showPath?: boolean
@@ -1410,6 +1440,13 @@ function SessionItem(props: {
         s.metadata?.flavor ?? null
     )
     const [reopenError, setReopenError] = useState<string | null>(null)
+    const holdPanel = useContext(CollapsiblePanelHoldContext)
+    const overlayOpen = menuOpen || renameOpen || exportOpen || archiveOpen || deleteOpen || reopenError !== null
+    useEffect(() => {
+        if (!overlayOpen || !holdPanel) return
+        holdPanel(true)
+        return () => holdPanel(false)
+    }, [overlayOpen, holdPanel])
 
     const handleSetPinMode = async (mode: 'none' | 'project' | 'global') => {
         try {
@@ -1593,7 +1630,7 @@ function SessionItem(props: {
             ) : null}
         </>
     )
-}
+})
 
 type PullToRefreshState = 'idle' | 'pulling' | 'ready'
 
@@ -1671,7 +1708,6 @@ export function SessionList(props: {
     const [customStart, setCustomStart] = useState('')
     const [customEnd, setCustomEnd] = useState('')
     const [markAllReadOpen, setMarkAllReadOpen] = useState(false)
-    const [, setCodexImportedSessionsVersion] = useState(0)
     // Actions-box width is the real icon budget (#2039). Measuring the full
     // row and subtracting a guessed search reserve left empty space after More.
     const headerRowRef = useRef<HTMLDivElement>(null)
@@ -1729,13 +1765,6 @@ export function SessionList(props: {
     const normalizedQuery = normalizeSearch(searchQuery)
     const timeRange = getSessionTimeRange(customStart, customEnd)
     const isFiltering = normalizedQuery.length > 0 || timeRange !== null
-
-    useEffect(() => {
-        // 中文注释：监听导入标记变化，让列表在“导入完成”或“用户已在 Hapi 中继续会话”后立即刷新时间文案。
-        return subscribeCodexImportedSessions(() => {
-            setCodexImportedSessionsVersion((value) => value + 1)
-        })
-    }, [])
 
     const resolveMachineLabel = (machineId: string | null): string => {
         if (machineId && machineLabelsById[machineId]) {
@@ -2078,8 +2107,7 @@ export function SessionList(props: {
                         ({count})
                     </span>
                 </div>
-                <div className="collapsible-panel" data-open={(!collapsed || isFiltering) || undefined}>
-                    <div className="collapsible-inner">
+                <CollapsiblePanel open={!collapsed || isFiltering}>
                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
                         {bucketKeys.map((bucketKey) => {
                             const bucket = RUNNING_BUCKETS.find((b) => b.key === bucketKey)
@@ -2116,8 +2144,7 @@ export function SessionList(props: {
                             )
                         })}
                     </div>
-                    </div>
-                </div>
+                </CollapsiblePanel>
             </div>
         )
     }
@@ -2177,8 +2204,7 @@ export function SessionList(props: {
                 />
 
                 {/* Sessions */}
-                <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
-                    <div className="collapsible-inner">
+                <CollapsiblePanel open={!isCollapsed}>
                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
                         {visibleGroupSessions.map((s, index) => (
                             <div key={s.id} className="contents">
@@ -2226,8 +2252,7 @@ export function SessionList(props: {
                             </div>
                         ) : null}
                     </div>
-                    </div>
-                </div>
+                </CollapsiblePanel>
             </div>
         )
     }
@@ -2735,8 +2760,7 @@ export function SessionList(props: {
                                 ({globalPinnedSessions.length})
                             </span>
                         </div>
-                        <div className="collapsible-panel" data-open={(!pinnedSectionCollapsed || isFiltering) || undefined}>
-                            <div className="collapsible-inner">
+                        <CollapsiblePanel open={!pinnedSectionCollapsed || isFiltering}>
                                 <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
                                     {globalPinnedSessions.map((s) => (
                                         <SessionItem
@@ -2757,8 +2781,7 @@ export function SessionList(props: {
                                         />
                                     ))}
                                 </div>
-                            </div>
-                        </div>
+                        </CollapsiblePanel>
                     </div>
                 ) : null}
 
