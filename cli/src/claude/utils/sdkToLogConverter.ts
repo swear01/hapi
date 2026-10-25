@@ -13,6 +13,7 @@ import type {
     SDKResultMessage
 } from '@/claude/sdk'
 import type { RawJSONLines } from '@/claude/types'
+import { isClaudeModelPreset } from '@hapi/protocol'
 import type { ClaudePermissionMode } from '@hapi/protocol/types'
 import { logger } from '@/lib'
 
@@ -370,7 +371,10 @@ export class SDKToLogConverter {
                         // first result lands. Guarding/seeding on resolvedContextWindowKey
                         // (not the bare init id) is what forces a re-seed when switching
                         // fable[1m] <-> fable, whose bare ids would otherwise be identical.
+                        // The bare preset aliases (opus/sonnet/fable) now resolve to models
+                        // with a native 1M window, so selecting one seeds 1M as well.
                         const seedIs1m = (this.context.selectedModel?.endsWith('[1m]') ?? false)
+                            || isClaudeModelPreset(this.context.selectedModel)
                             || systemMsg.model.endsWith('[1m]')
                         this.modelContextWindows.set(this.resolvedContextWindowKey, seedIs1m ? 1_000_000 : 200_000)
                     }
