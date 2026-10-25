@@ -7,11 +7,8 @@ describe('getClaudeComposerModelOptions', () => {
             { value: null, label: 'Default' },
             { value: 'claude-opus-4-1-20250805', label: 'claude-opus-4-1-20250805' },
             { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
             { value: 'opus', label: 'Opus' },
-            { value: 'opus[1m]', label: 'Opus 1M' },
             { value: 'fable', label: 'Fable' },
-            { value: 'fable[1m]', label: 'Fable 1M' },
         ])
     })
 
@@ -19,11 +16,8 @@ describe('getClaudeComposerModelOptions', () => {
         expect(getClaudeComposerModelOptions('opus')).toEqual([
             { value: null, label: 'Default' },
             { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
             { value: 'opus', label: 'Opus' },
-            { value: 'opus[1m]', label: 'Opus 1M' },
             { value: 'fable', label: 'Fable' },
-            { value: 'fable[1m]', label: 'Fable 1M' },
         ])
     })
 })

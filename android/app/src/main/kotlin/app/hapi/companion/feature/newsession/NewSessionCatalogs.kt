@@ -17,11 +17,8 @@ object NewSessionCatalogs {
     val CLAUDE_MODELS: List<OptionItem> = listOf(
         OptionItem("auto", "Default"),
         OptionItem("sonnet", "Sonnet"),
-        OptionItem("sonnet[1m]", "Sonnet 1M"),
         OptionItem("opus", "Opus"),
-        OptionItem("opus[1m]", "Opus 1M"),
         OptionItem("fable", "Fable"),
-        OptionItem("fable[1m]", "Fable 1M"),
     )
 
     val CLAUDE_EFFORTS: List<OptionItem> = listOf(

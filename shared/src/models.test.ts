@@ -30,7 +30,7 @@ describe('getClaudeModelLabel', () => {
     test('returns label for known presets', () => {
         expect(getClaudeModelLabel('sonnet')).toBe('Sonnet')
         expect(getClaudeModelLabel('opus')).toBe('Opus')
-        expect(getClaudeModelLabel('opus[1m]')).toBe('Opus 1M')
+        expect(getClaudeModelLabel('opus[1m]')).toBeNull()
     })
 
     test('trims whitespace before lookup', () => {

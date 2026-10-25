@@ -67,17 +67,13 @@ describe('getModelOptionsForFlavor', () => {
     it('keeps Claude presets when explicit options only include Sonnet models', () => {
         const options = getModelOptionsForFlavor('claude', null, [
             { value: null, label: 'Default' },
-            { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' }
+            { value: 'sonnet', label: 'Sonnet' }
         ])
         expect(options).toEqual([
             { value: null, label: 'Default' },
             { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
             { value: 'opus', label: 'Opus' },
-            { value: 'opus[1m]', label: 'Opus 1M' },
-            { value: 'fable', label: 'Fable' },
-            { value: 'fable[1m]', label: 'Fable 1M' }
+            { value: 'fable', label: 'Fable' }
         ])
     })
 
@@ -89,11 +85,8 @@ describe('getModelOptionsForFlavor', () => {
             { value: null, label: 'Default' },
             { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' },
             { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
             { value: 'opus', label: 'Opus' },
-            { value: 'opus[1m]', label: 'Opus 1M' },
-            { value: 'fable', label: 'Fable' },
-            { value: 'fable[1m]', label: 'Fable 1M' }
+            { value: 'fable', label: 'Fable' }
         ])
     })
 
@@ -258,9 +251,8 @@ describe('getNextModelForFlavor', () => {
     })
 
     it('cycles through Claude presets when explicit options only include Sonnet models', () => {
-        const next = getNextModelForFlavor('claude', 'sonnet[1m]', [
-            { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' }
+        const next = getNextModelForFlavor('claude', 'sonnet', [
+            { value: 'sonnet', label: 'Sonnet' }
         ])
         expect(next).toBe('opus')
     })
