@@ -603,3 +603,63 @@ describe('claudeRemote live permission mode', () => {
         }
     });
 });
+
+describe('claudeRemote rejected permission mode', () => {
+    async function run(stream: (listener: (mode: 'default' | 'auto' | 'bypassPermissions') => void) => SDKMessage[], startMode: 'default' | 'auto', setPermissionMode: () => Promise<void>) {
+        const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
+        const { claudeRemote } = await import('./claudeRemote');
+        let listener: ((mode: 'default' | 'auto' | 'bypassPermissions') => void) | null = null;
+        const onPermissionModeRejected = vi.fn();
+        queryMock.mockReturnValueOnce({
+            setPermissionMode,
+            async *[Symbol.asyncIterator]() {
+                for (const message of stream((mode) => listener?.(mode))) {
+                    await new Promise((resolve) => setTimeout(resolve, 0));
+                    yield message;
+                }
+            }
+        });
+        let nextCallCount = 0;
+        try {
+            await claudeRemote({
+                sessionId: null,
+                path: process.cwd(),
+                allowedTools: [],
+                hookSettingsPath: '/tmp/hook.json',
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                setPermissionModeListener: (next) => { listener = next; },
+                onPermissionModeRejected,
+                nextMessage: async () => nextCallCount++ === 0
+                    ? { message: 'A', mode: { permissionMode: startMode } }
+                    : null,
+                onReady: () => {},
+                isAborted: () => false,
+                onSessionFound: () => {},
+                onMessage: () => {}
+            });
+        } finally {
+            queryMock.mockReset();
+            querySpy.mockRestore();
+        }
+        return onPermissionModeRejected;
+    }
+
+    it('reverts to the previous mode when Claude refuses a live switch', async () => {
+        const rejected = await run((set) => {
+            set('bypassPermissions');
+            set('auto');
+            return [{ type: 'result', subtype: 'success' } as unknown as SDKMessage];
+        }, 'default', async () => {
+            throw new Error('Cannot set permission mode to auto: auto mode disabled by settings');
+        });
+        expect(rejected.mock.calls).toEqual([['bypassPermissions', 'Cannot set permission mode to auto: auto mode disabled by settings']]);
+    });
+
+    it('reports when Claude starts in default instead of auto', async () => {
+        const rejected = await run(() => [
+            { type: 'system', subtype: 'init', permissionMode: 'default' } as unknown as SDKMessage,
+            { type: 'result', subtype: 'success' } as unknown as SDKMessage
+        ], 'auto', async () => {});
+        expect(rejected).toHaveBeenCalledWith('default', expect.stringContaining('auto'));
+    });
+});

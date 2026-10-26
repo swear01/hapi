@@ -61,6 +61,7 @@ export interface SDKSystemMessage extends SDKMessage {
     tools?: string[]
     skills?: string[]
     slash_commands?: string[]
+    permissionMode?: string
     /**
      * Present on `subtype: 'status'` messages that report a /compact outcome.
      * Claude emits a `status: 'compacting'` message first, then a second one

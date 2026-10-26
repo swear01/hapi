@@ -389,6 +389,12 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         hookSettingsPath: session.hookSettingsPath,
                         canCallTool: permissionHandler.handleToolCall,
                         setPermissionModeListener: session.setPermissionModeListener,
+                        onPermissionModeRejected: (mode, reason) => {
+                            session.setPermissionMode(mode);
+                            session.pushKeepAlive();
+                            session.client.sendSessionEvent({ type: 'permission-mode-changed', mode });
+                            session.client.sendSessionEvent({ type: 'message', message: reason });
+                        },
                         bootstrapMode: {
                             permissionMode: session.getPermissionMode() ?? 'default',
                             model: session.getModel() ?? undefined,
