@@ -388,6 +388,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                         mcpServers: session.mcpServers,
                         hookSettingsPath: session.hookSettingsPath,
                         canCallTool: permissionHandler.handleToolCall,
+                        setPermissionModeListener: session.setPermissionModeListener,
                         bootstrapMode: {
                             permissionMode: session.getPermissionMode() ?? 'default',
                             model: session.getModel() ?? undefined,

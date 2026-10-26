@@ -555,3 +555,51 @@ describe('claudeRemote native permission mode', () => {
         }
     });
 });
+
+describe('claudeRemote live permission mode', () => {
+    it('forwards native mode changes to the running process', async () => {
+        const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
+        const { claudeRemote } = await import('./claudeRemote');
+        const setPermissionMode = vi.fn(async () => {});
+        let listener: ((mode: 'default' | 'auto' | 'acceptEdits' | 'bypassPermissions') => void) | null = null;
+        const setPermissionModeListener = vi.fn((next: typeof listener) => {
+            listener = next;
+        });
+
+        queryMock.mockReturnValueOnce({
+            setPermissionMode,
+            async *[Symbol.asyncIterator]() {
+                listener?.('auto');
+                listener?.('auto');
+                listener?.('bypassPermissions');
+                listener?.('acceptEdits');
+                yield { type: 'result', subtype: 'success' } as unknown as SDKMessage;
+            }
+        });
+
+        let nextCallCount = 0;
+        try {
+            await claudeRemote({
+                sessionId: 'session-1',
+                path: process.cwd(),
+                allowedTools: [],
+                hookSettingsPath: '/tmp/hook.json',
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                setPermissionModeListener,
+                nextMessage: async () => nextCallCount++ === 0
+                    ? { message: 'A', mode: { permissionMode: 'default' } }
+                    : null,
+                onReady: () => {},
+                isAborted: () => false,
+                onSessionFound: () => {},
+                onMessage: () => {}
+            });
+
+            expect(setPermissionMode.mock.calls).toEqual([['auto'], ['default']]);
+            expect(setPermissionModeListener).toHaveBeenLastCalledWith(null);
+        } finally {
+            queryMock.mockReset();
+            querySpy.mockRestore();
+        }
+    });
+});

@@ -32,6 +32,8 @@ export async function claudeRemote(opts: {
     hookSettingsPath: string,
     signal?: AbortSignal,
     canCallTool: (toolName: string, input: unknown, mode: EnhancedMode, options: { signal: AbortSignal }) => Promise<PermissionResult>,
+    /** Receives mid-turn permission mode changes so Claude's native mode can follow them. */
+    setPermissionModeListener?: (listener: ((mode: PermissionMode) => void) | null) => void,
     /** Session modes used to spawn Claude before the first fork child prompt. */
     bootstrapMode?: EnhancedMode,
 
@@ -232,6 +234,20 @@ export async function claudeRemote(opts: {
         options: sdkOptions,
     });
 
+    // plan/auto are enforced by Claude itself, so a mid-turn switch into or out
+    // of them must reach the running process; otherwise it waits for a restart.
+    let nativeMode = sdkOptions.permissionMode ?? 'default';
+    opts.setPermissionModeListener?.((next) => {
+        const native = nativePermissionMode(next);
+        if (native === nativeMode) {
+            return;
+        }
+        nativeMode = native;
+        response.setPermissionMode(native).catch((e) => {
+            logger.debug(`[claudeRemote] set_permission_mode ${native} failed`, e);
+        });
+    });
+
     let nextMessageFetchInFlight = false;
     let inputEnded = false;
     let nextMessageFetchSeq = 0;
@@ -424,6 +440,7 @@ export async function claudeRemote(opts: {
             `${debugPrefix} finally ` +
             `(streamMessages=${streamMessageSeq}, results=${resultSeq}, nextFetches=${nextMessageFetchSeq}, inputEnded=${inputEnded})`
         );
+        opts.setPermissionModeListener?.(null);
         updateThinking(false);
     }
 }
