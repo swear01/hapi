@@ -144,7 +144,7 @@ struct CatalogTests {
 
     @Test func optionListsCarryLabelAndTone() {
         let options = permissionModeOptions(forFlavor: "codex")
-        #expect(options.count == 5)
+        #expect(options.count == 4)
         #expect(options.first == PermissionModeOption(mode: .default))
         #expect(options.first?.label == "Default")
         #expect(options.first?.tone == .neutral)
