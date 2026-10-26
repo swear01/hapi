@@ -241,8 +241,13 @@ export async function claudeRemote(opts: {
     let nativeMode = sdkOptions.permissionMode ?? 'default';
     let requestedMode = mode.permissionMode;
     let switchesInFlight = 0;
+    let modeChangeSeq = 0;
     opts.setPermissionModeListener?.((next) => {
         const previous = requestedMode;
+        if (next !== previous) {
+            modeChangeSeq += 1;
+        }
+        const seq = modeChangeSeq;
         requestedMode = next;
         const native = nativePermissionMode(next);
         if (native === nativeMode) {
@@ -253,7 +258,8 @@ export async function claudeRemote(opts: {
         switchesInFlight += 1;
         response.setPermissionMode(native).catch((e) => {
             logger.debug(`[claudeRemote] set_permission_mode ${native} failed`, e);
-            if (requestedMode !== next) {
+            // A later mode change supersedes this one, even if it returned to the same mode.
+            if (seq !== modeChangeSeq) {
                 return;
             }
             nativeMode = previousNative;
