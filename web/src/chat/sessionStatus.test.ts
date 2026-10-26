@@ -94,6 +94,15 @@ describe('buildSessionStatusData', () => {
                 toolBlock({
                     name: 'Bash',
                     tool: {
+                        id: 'bash-ls',
+                        state: 'completed',
+                        input: { command: 'ls tasks' },
+                        result: 'bg-2.output\nbg-3.output'
+                    }
+                }),
+                toolBlock({
+                    name: 'Bash',
+                    tool: {
                         id: 'bash-2',
                         state: 'completed',
                         input: { command: 'bun test --watch' },

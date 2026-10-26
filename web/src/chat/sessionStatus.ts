@@ -28,10 +28,16 @@ export type SessionStatusData = {
     terminals: SessionStatusTerminal[]
 }
 
-function containsText(value: unknown, text: string): boolean {
-    if (typeof value === 'string') return value.includes(text)
+function matchesText(value: unknown, pattern: RegExp): boolean {
+    if (typeof value === 'string') return pattern.test(value)
     const values = Array.isArray(value) ? value : isObject(value) ? Object.values(value) : []
-    return values.some((item) => containsText(item, text))
+    return values.some((item) => matchesText(item, pattern))
+}
+
+// Matches "running in background with ID: <id>" and "moved to the background (ID: <id>)".
+function backgroundLaunchPattern(taskId: string): RegExp {
+    const id = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`background[^\\n]*\\bID: ${id}(?![\\w-])`)
 }
 
 function commandFromInput(input: unknown): string | null {
@@ -58,8 +64,9 @@ function buildBackgroundTerminals(
     return tasks.map((task) => {
         // Claude's snapshot carries the Bash description, not the command;
         // the tool result that started the task names its exact ID.
-        const block = task.type === 'local_bash' && task.id
-            ? tools.find((tool) => tool.tool.name === 'Bash' && containsText(tool.tool.result, task.id))
+        const launch = task.type === 'local_bash' && task.id ? backgroundLaunchPattern(task.id) : null
+        const block = launch
+            ? tools.find((tool) => tool.tool.name === 'Bash' && matchesText(tool.tool.result, launch))
             : undefined
         return {
             id: task.id,
