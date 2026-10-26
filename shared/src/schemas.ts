@@ -332,6 +332,15 @@ export const DecryptedMessageSchema = z.object({
 
 export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
 
+// One entry of Claude's `system/background_tasks_changed` snapshot.
+export const BackgroundTaskSchema = z.object({
+    id: z.string(),
+    type: z.string(),
+    description: z.string()
+})
+
+export type BackgroundTask = z.infer<typeof BackgroundTaskSchema>
+
 export const SessionSchema = z.object({
     hasConversationContent: z.boolean().optional(),
     id: z.string(),
@@ -352,6 +361,7 @@ export const SessionSchema = z.object({
     thinkingAt: z.number(),
     activeTurnStartedAt: z.number().nullable().optional(),
     backgroundTaskCount: z.number().optional(),
+    backgroundTasks: z.array(BackgroundTaskSchema).optional(),
     todos: TodosSchema.optional(),
     teamState: TeamStateSchema.optional(),
     // Watermarks for structured SSE patches (PR #897). Dual EventSource
@@ -426,6 +436,7 @@ export const SessionPatchSchema = z.object({
     collaborationMode: CodexCollaborationModeSchema.optional(),
     copilotAgentMode: CopilotAgentModeSchema.optional(),
     backgroundTaskCount: z.number().optional(),
+    backgroundTasks: z.array(BackgroundTaskSchema).optional(),
     // tiann/hapi#893 (scratchlist v2). Bumped whenever any entry on the
     // session_scratchlist table mutates. Web client uses the change as a
     // trigger to refetch the entries query - the timestamp itself is the
