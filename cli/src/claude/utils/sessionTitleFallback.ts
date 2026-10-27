@@ -1,4 +1,7 @@
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { ApiSessionClient } from '@/api/apiSession'
+import { getProjectPath } from './path'
 
 const MAX_FALLBACK_TITLE_LENGTH = 80
 
@@ -29,4 +32,26 @@ export function applySessionTitleFallback(
         }
     })
     return true
+}
+
+/** Latest Claude Code ai-title from the session transcript, or null. */
+export async function readNativeSessionTitle(workingDirectory: string, sessionId: string): Promise<string | null> {
+    let content: string
+    try {
+        content = await readFile(join(getProjectPath(workingDirectory), `${sessionId}.jsonl`), 'utf8')
+    } catch {
+        return null
+    }
+
+    let title: string | null = null
+    for (const line of content.split('\n')) {
+        if (!line.includes('"ai-title"')) continue
+        try {
+            const entry = JSON.parse(line)
+            if (entry.type === 'ai-title' && typeof entry.aiTitle === 'string') title = entry.aiTitle
+        } catch {
+            // Partial trailing line while Claude is still writing.
+        }
+    }
+    return title
 }
