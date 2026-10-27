@@ -36,8 +36,10 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
         onMessage: (message) => {
             session.localPermissionBridge.onTranscript(message);
             // Esc-interrupted turns fire no Stop hook; Claude Code only
-            // writes this marker to the transcript.
-            if (session.thinking && isInterruptMarker(message)) {
+            // writes this marker to the transcript. The scanner can deliver it
+            // after the next prompt's hook, so skip markers older than that turn.
+            if (session.thinking && isInterruptMarker(message)
+                && !(Date.parse(message.timestamp ?? '') < session.localTurnStartedAt)) {
                 session.onThinkingChange(false);
             }
             // Preserve the AI-generated title emitted by Claude Code's native

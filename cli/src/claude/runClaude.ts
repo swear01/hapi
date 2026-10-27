@@ -190,6 +190,9 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             // PreToolUse also covers a turn HAPI attached to mid-flight.
             if (currentSession?.mode === 'local' && sessionId === currentSession.sessionId) {
                 const event = data.hook_event_name;
+                if (event === 'UserPromptSubmit') {
+                    currentSession.localTurnStartedAt = Date.now();
+                }
                 const thinking = event === 'UserPromptSubmit' || event === 'PreToolUse' ? true
                     : event === 'Stop' || event === 'StopFailure' || event === 'SessionEnd' ? false
                     : currentSession.thinking;
