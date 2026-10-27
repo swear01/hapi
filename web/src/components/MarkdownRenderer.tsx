@@ -30,6 +30,7 @@ interface MarkdownRendererProps {
     /** Standalone only: session file the content came from, for relative links/images. */
     sessionId?: string
     filePath?: string
+    workspacePath?: string | null
 }
 
 function StandaloneCode(props: ComponentPropsWithoutRef<'code'>) {
@@ -82,8 +83,10 @@ function StandaloneMarkdownContent(props: MarkdownRendererProps) {
     }), [componentsRest])
 
     const fileBase = useMemo(
-        () => props.sessionId && props.filePath ? { sessionId: props.sessionId, filePath: props.filePath } : null,
-        [props.sessionId, props.filePath]
+        () => props.sessionId && props.filePath
+            ? { sessionId: props.sessionId, filePath: props.filePath, workspacePath: props.workspacePath ?? null }
+            : null,
+        [props.sessionId, props.filePath, props.workspacePath]
     )
 
     return (

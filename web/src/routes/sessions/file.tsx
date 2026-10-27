@@ -24,6 +24,7 @@ import {
 } from '@/lib/file-markdown-preview'
 import { downloadBase64File } from '@/lib/file-download'
 import { useCodeWrap } from '@/hooks/useCodeWrap'
+import { useSession } from '@/hooks/queries/useSession'
 
 const MAX_COPYABLE_FILE_BYTES = 1_000_000
 const FILE_SCROLL_KEY_PREFIX = 'hapi-file-scroll-'
@@ -219,6 +220,7 @@ export default function FilePage() {
     const goBack = useAppGoBack()
     const { sessionId } = useParams({ from: '/sessions/$sessionId/file' })
     const search = useSearch({ from: '/sessions/$sessionId/file' })
+    const { session } = useSession(api, sessionId)
     const encodedPath = typeof search.path === 'string' ? search.path : ''
     const staged = search.staged
 
@@ -489,7 +491,13 @@ export default function FilePage() {
                                                 />
                                             </div>
                                         ) : null}
-                                        <MarkdownRenderer content={decodedContent} standalone sessionId={sessionId} filePath={filePath} />
+                                        <MarkdownRenderer
+                                            content={decodedContent}
+                                            standalone
+                                            sessionId={sessionId}
+                                            filePath={filePath}
+                                            workspacePath={session?.metadata?.path}
+                                        />
                                     </div>
                                 ) : (
                                     <div
