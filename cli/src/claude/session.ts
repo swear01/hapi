@@ -27,8 +27,6 @@ export class Session extends AgentSessionBase<EnhancedMode> {
     localLaunchFailure: LocalLaunchFailure | null = null;
     /** Model the local TUI runs, "[1m]" suffix intact: launch seed, then PostModelSwitch. */
     localContextModel: string | null = null;
-    /** First prompt as typed, without attachment @paths: remote title fallback. */
-    titleFallbackText: string | null = null;
     private nativeSkillNames = new Set<string>();
 
     constructor(opts: {

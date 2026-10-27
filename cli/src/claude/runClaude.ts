@@ -470,7 +470,6 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             }
 
             const planPrompt = formatMessageWithAttachments(specialCommand.prompt, message.content.attachments);
-            if (currentSessionRef.current) currentSessionRef.current.titleFallbackText ??= specialCommand.prompt;
             messageQueue.push(planPrompt, enhancedMode, localId);
             logger.debugLargeJson('[start] /plan command prompt pushed to queue:', message);
             return;
@@ -487,7 +486,6 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools
         };
-        if (currentSessionRef.current) currentSessionRef.current.titleFallbackText ??= message.content.text;
         messageQueue.push(formattedText, enhancedMode, localId);
         logger.debugLargeJson('User message pushed to queue:', message)
     };

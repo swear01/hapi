@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import type { ApiSessionClient } from '@/api/apiSession'
+import { getHapiBlobsDir } from '@/constants/uploadPaths'
 import { getProjectPath } from './path'
 
 const MAX_FALLBACK_TITLE_LENGTH = 80
@@ -11,6 +12,12 @@ export function createSessionTitleFallback(message: string): string | null {
     if (normalized.length <= MAX_FALLBACK_TITLE_LENGTH) return normalized
 
     return normalized.slice(0, MAX_FALLBACK_TITLE_LENGTH - 1).trimEnd() + '…'
+}
+
+/** Drop the @path references prepended for uploads; upload filenames contain no whitespace. */
+export function stripAttachmentReferences(message: string): string {
+    const prefix = `@${getHapiBlobsDir()}${sep}`
+    return message.split(/(\s+)/).filter((part) => !part.startsWith(prefix)).join('')
 }
 
 export function applySessionTitleFallback(
